@@ -24,7 +24,8 @@ The page is served on `127.0.0.1:8775` .
   - 12 px corner radius, with the window clipped to it;
   - niri's shadow (softness 30, spread 5, offset 0 5, `#0007`).
   The focus ring, presets and centring mode can be switched there too.
-- **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales it in from 0.5.
+- **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales it in from 0.5. Resizes animate too, as in niri: the tile's size eases to its new size, and the app is resized once and scaled to follow (FLIP). Its old frame, stretched, cross-fades into its frame at the new size (`WINDOW_SIZING.md`).
+- **The app's own maximize button** maximizes its column (Super+M), and unmaximize restores it.
 - **Launcher** (Super+D), in place of fuzzel. It searches the helper's desktop apps, with icons and recently used ones first. It can also run a command line, open a web address as a browser tab, or start Claude Code with Plutonium's MCP tools.
 - **The hotkey overlay** (Super+Shift+/) is shown at startup, as in niri.
 - **Browser tabs are tiles too.** Their page dialogs are drawn over the tile.

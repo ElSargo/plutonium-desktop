@@ -68,7 +68,7 @@
 
   .tile {
     position: absolute; left: 0; top: 0; z-index: 1;
-    transition: transform var(--anim), opacity 150ms;
+    transition: transform var(--anim), width var(--anim), height var(--anim), opacity 150ms;
     overflow: hidden; background: transparent;
   }
   .tile.floating { z-index: 2; }
@@ -77,6 +77,9 @@
   .tile > native-window, .tile > embed {
     display: block; position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
   }
+  /* A window is sized to where its tile ends up (the app resizes once) and
+     scaled to follow the tile as it animates, as niri does: see placeTile(). */
+  .tile > native-window { right: auto; bottom: auto; transform-origin: 0 0; }
   /* Above the window: takes the pointer in the overview and while Super is held. */
   .tile > .hit { position: absolute; inset: 0; pointer-events: none; }
   body.overview .tile > .hit, body.mod .tile > .hit { pointer-events: auto; cursor: grab; }
@@ -189,6 +192,12 @@ const params = new URLSearchParams(location.search);
 const helper = params.get("helper") ?? "http://127.0.0.1:3780";
 const $ = (id) => document.getElementById(id);
 const g = CONFIG.gaps;
+// The shell's animation (--anim), for animations run from script.
+const ANIM = (() => {
+  const v = getComputedStyle(document.documentElement).getPropertyValue("--anim").trim();
+  const m = /^(\d+(?:\.\d+)?)ms\s+(.*)$/.exec(v);
+  return m ? { ms: Number(m[1]), easing: m[2] } : { ms: 280, easing: "ease-out" };
+})();
 const MIN = 60;
 const W = () => innerWidth;
 const H = () => innerHeight;
@@ -412,7 +421,21 @@ function tileFor(key) {
   let content;
   if (kind === "w") {
     content = document.createElement("native-window");
+    // The frame from before a resize, stretched, fades into the app's frame
+    // at the new size.
+    content.crossfade = ANIM.ms;
     content.addEventListener("windowfocus", () => onItemFocused(key));
+    // The app's own maximize button: niri's maximize column.
+    content.addEventListener("windowrequest", (e) => {
+      if (e.request !== "maximize" && e.request !== "unmaximize") return;
+      const where = find(key);
+      if (!where || where.ci === undefined) return;
+      const col = layout.workspaces[where.wi].columns[where.ci];
+      col.full = e.request === "maximize";
+      focusItem(key);
+      ensureVisible();
+      commit();
+    });
     content.addEventListener("windowerror", () => notice("could not show a window"));
     shell.grantFor(id).then((grant) => {
       content.setAttribute("window", String(id));
@@ -431,10 +454,27 @@ function tileFor(key) {
   return tile;
 }
 
+// The tile animates its size (a CSS transition). A window inside is set to
+// the final size at once, so the app is asked to resize once, and a FLIP
+// animation scales it from the old size to follow the tile; its crossfade
+// covers the app catching up.
 function placeTile(tile, x, y, w, h) {
+  w = Math.max(1, Math.round(w));
+  h = Math.max(1, Math.round(h));
   tile.el.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
-  tile.el.style.width = `${Math.max(1, Math.round(w))}px`;
-  tile.el.style.height = `${Math.max(1, Math.round(h))}px`;
+  tile.el.style.width = `${w}px`;
+  tile.el.style.height = `${h}px`;
+  if (tile.kind !== "w") return;
+  const b = CONFIG.border.on ? CONFIG.border.width : 0;
+  const iw = Math.max(1, w - 2 * b), ih = Math.max(1, h - 2 * b);
+  const old = tile.inner;
+  tile.inner = { w: iw, h: ih };
+  tile.content.style.width = `${iw}px`;
+  tile.content.style.height = `${ih}px`;
+  if (!old || (old.w === iw && old.h === ih) || document.body.classList.contains("noanim") ||
+      tile.el.classList.contains("dragging")) return;
+  tile.content.animate([{ transform: `scale(${old.w / iw}, ${old.h / ih})` }, { transform: "none" }],
+    { duration: ANIM.ms, easing: ANIM.easing });
 }
 
 function styleTile(tile, active) {

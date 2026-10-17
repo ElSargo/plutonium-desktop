@@ -1,0 +1,677 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sun, 18 Oct 2026 11:08:49 +1300
+Subject: [PATCH 18/19] Plutonium: object-fit and a resize cross-fade for
+ <native-window>
+
+Where a window's frame and its element's content box differ in size (the
+app hasn't caught up with a resize, or won't take that size), object-fit
+and object-position now place the frame. The UA default is "none" at the
+top left, as before (a terminal snapping to whole cells isn't stretched);
+fullscreen centers it.
+
+crossfade="MS": a resize the page makes keeps showing the frame from before
+it, stretched to the new content box, until the app has drawn at the new
+size (or 500 ms passed), then fades it out over MS milliseconds. The old
+frame is the window's surface at the old size, embedded by its exact id so
+viz keeps it. With a FLIP transform animation on the element, the app is
+resized once and its picture follows, as a compositor animates a window.
+
+NativeWindowInfo carries the whole surface size, so a stretched surface
+lands with its geometry (not its client-side shadows) on the box.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014h4c1E1y66mTWH3DAr58sR
+---
+ chrome/browser/exo_embedder.cc                |   3 +-
+ components/exo/embedded_windows.cc            |   1 +
+ components/exo/embedded_windows.h             |   2 +
+ .../mojom/native_window/native_window.mojom   |   2 +
+ .../blink/renderer/core/css/fullscreen.css    |   7 +
+ .../core/html/html_attribute_names.json5      |   1 +
+ .../core/html/html_native_window_element.cc   | 190 +++++++++++++++++-
+ .../core/html/html_native_window_element.h    |  62 +++++-
+ .../core/html/html_native_window_element.idl  |   3 +
+ .../renderer/core/html/resources/html.css     |   8 +
+ .../core/layout/layout_native_window.cc       |  90 ++++++++-
+ 11 files changed, 352 insertions(+), 17 deletions(-)
+
+diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
+index fb94e6ccbe..9847efb6a5 100644
+--- a/chrome/browser/exo_embedder.cc
++++ b/chrome/browser/exo_embedder.cc
+@@ -134,7 +134,8 @@ blink::mojom::NativeWindowInfoPtr ToMojo(
+     int32_t window_id,
+     const exo::EmbeddedWindows::Info& info) {
+   return blink::mojom::NativeWindowInfo::New(
+-      window_id, info.surface_id, info.geometry, info.device_scale_factor,
++      window_id, info.surface_id, info.geometry, info.surface_size,
++      info.device_scale_factor,
+       base::UTF16ToUTF8(info.title), info.app_id, info.focused);
+ }
+ 
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index 742d825b57..d4136145ea 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -583,6 +583,7 @@ std::optional<EmbeddedWindows::Info> EmbeddedWindows::ComputeInfo(
+   Info info;
+   info.surface_id = surface_id;
+   info.geometry = shell_surface->GetEmbedGeometry();
++  info.surface_size = shell_surface->host_window()->bounds().size();
+   info.device_scale_factor =
+       shell_surface->host_window()->layer()->device_scale_factor();
+   info.app_id = shell_surface->GetEmbedName();
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index 46e48ab265..7c492cb099 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -70,6 +70,8 @@ class EmbeddedWindows : public aura::WindowObserver {
+     // The window geometry (what the user sees as the window, without client
+     // side shadows) in surface coordinates, DIPs.
+     gfx::Rect geometry;
++    // The whole surface (the geometry plus client-side shadows), DIPs.
++    gfx::Size surface_size;
+     float device_scale_factor = 1.f;
+     std::string app_id;
+     std::u16string title;
+diff --git a/third_party/blink/public/mojom/native_window/native_window.mojom b/third_party/blink/public/mojom/native_window/native_window.mojom
+index 31d7390536..b348dbaa38 100644
+--- a/third_party/blink/public/mojom/native_window/native_window.mojom
++++ b/third_party/blink/public/mojom/native_window/native_window.mojom
+@@ -27,6 +27,8 @@ struct NativeWindowInfo {
+   // The window geometry in surface coordinates (DIPs). The element shows
+   // this part of the surface, without client-side shadows.
+   gfx.mojom.Rect geometry;
++  // The whole surface: the geometry plus client-side shadows (DIPs).
++  gfx.mojom.Size surface_size;
+   // Scale of the window's surface (pixels per DIP).
+   float device_scale_factor;
+   string title;
+diff --git a/third_party/blink/renderer/core/css/fullscreen.css b/third_party/blink/renderer/core/css/fullscreen.css
+index f90620f4f8..179e8a74b2 100644
+--- a/third_party/blink/renderer/core/css/fullscreen.css
++++ b/third_party/blink/renderer/core/css/fullscreen.css
+@@ -23,6 +23,13 @@
+   interactivity: auto;
+ }
+ 
++/* EXO-EMBED: a fullscreen window that doesn't fill the screen (a game at a
++   fixed size) is shown centered, unscaled. */
++native-window:not(:root):fullscreen {
++  object-fit: none;
++  object-position: 50% 50%;
++}
++
+ iframe:fullscreen {
+   border: none !important;
+   padding: 0 !important;
+diff --git a/third_party/blink/renderer/core/html/html_attribute_names.json5 b/third_party/blink/renderer/core/html/html_attribute_names.json5
+index 8736ed7308..0812349a36 100644
+--- a/third_party/blink/renderer/core/html/html_attribute_names.json5
++++ b/third_party/blink/renderer/core/html/html_attribute_names.json5
+@@ -77,6 +77,7 @@
+     "controlslist",
+     "coords",
+     "credentialless",
++    "crossfade",
+     "crossorigin",
+     "csp",
+     "customelementregistry",
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
+index fde26d8a8f..88ada0b1bb 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.cc
++++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/html/html_native_window_element.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <utility>
+ 
+ #include "cc/layers/surface_layer.h"
+@@ -12,13 +14,17 @@
+ #include "components/viz/common/surfaces/surface_id.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
++#include "third_party/blink/renderer/core/dom/frame_request_callback_collection.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
+ #include "third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h"
+ #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
+ #include "third_party/blink/renderer/core/html_names.h"
+ #include "third_party/blink/renderer/core/layout/layout_native_window.h"
++#include "third_party/blink/renderer/platform/graphics/paint/effect_paint_property_node.h"
++#include "third_party/blink/renderer/platform/graphics/paint/property_tree_state.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/geometry/vector2d_conversions.h"
+@@ -32,8 +38,30 @@ namespace {
+ // page having to follow every new surface id.
+ constexpr uint32_t kSurfaceRangeSpan = 1u << 30;
+ 
++// EXO-CROSSFADE: how long the old frame waits for the app to draw at the new
++// size before fading anyway (the app may not take that size).
++constexpr base::TimeDelta kMaxFadeHold = base::Milliseconds(500);
++
++gfx::Size ToPixels(const gfx::Size& size, float scale) {
++  return gfx::ToRoundedSize(gfx::ScaleSize(gfx::SizeF(size), scale));
++}
++
+ }  // namespace
+ 
++class HTMLNativeWindowElement::FadeFrameCallback final : public FrameCallback {
++ public:
++  explicit FadeFrameCallback(HTMLNativeWindowElement* element)
++      : element_(element) {}
++  void Trace(Visitor* visitor) const override {
++    visitor->Trace(element_);
++    FrameCallback::Trace(visitor);
++  }
++  void Invoke(double) override { element_->OnFadeFrame(); }
++
++ private:
++  Member<HTMLNativeWindowElement> element_;
++};
++
+ HTMLNativeWindowElement::HTMLNativeWindowElement(Document& document)
+     : HTMLElement(html_names::kNativeWindowTag, document),
+       host_(document.GetExecutionContext()),
+@@ -90,7 +118,7 @@ void HTMLNativeWindowElement::blurWindow() {
+   }
+ }
+ 
+-cc::Layer* HTMLNativeWindowElement::ContentsCcLayer() const {
++cc::SurfaceLayer* HTMLNativeWindowElement::ContentsCcLayer() const {
+   return surface_layer_.get();
+ }
+ 
+@@ -98,8 +126,14 @@ gfx::Size HTMLNativeWindowElement::WindowSizeInPixels() const {
+   if (!info_) {
+     return gfx::Size();
+   }
+-  return gfx::ToRoundedSize(gfx::ScaleSize(gfx::SizeF(info_->geometry.size()),
+-                                           info_->device_scale_factor));
++  return ToPixels(info_->geometry.size(), info_->device_scale_factor);
++}
++
++gfx::Size HTMLNativeWindowElement::SurfaceSizeInPixels() const {
++  if (!info_) {
++    return gfx::Size();
++  }
++  return ToPixels(info_->surface_size, info_->device_scale_factor);
+ }
+ 
+ gfx::Vector2d HTMLNativeWindowElement::GeometryOffsetInPixels() const {
+@@ -120,9 +154,146 @@ void HTMLNativeWindowElement::ContentSizeChanged(
+     return;
+   }
+   last_sent_size_ = size_in_pixels;
++  HoldFadeFrame();
+   host_->SetSize(size_in_pixels);
+ }
+ 
++base::TimeDelta HTMLNativeWindowElement::CrossfadeDuration() const {
++  int value = 0;
++  if (!ParseHTMLInteger(FastGetAttribute(html_names::kCrossfadeAttr), value) ||
++      value <= 0) {
++    return base::TimeDelta();
++  }
++  return base::Milliseconds(std::min(value, 10000));
++}
++
++void HTMLNativeWindowElement::HoldFadeFrame() {
++  if (CrossfadeDuration().is_zero() || !info_ ||
++      !info_->surface_id.is_valid()) {
++    return;
++  }
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (fade_) {
++    // Resized again before the app caught up, or while fading: keep the
++    // frame from before the first resize, where its fade had got to.
++    fade_->from_opacity = FadeOpacity();
++    fade_->fade_start = base::TimeTicks();
++    fade_->hold_start = now;
++    InvalidateFadePaint();
++    return;
++  }
++  // The window's current surface: its last frame at the old size. Embedding
++  // that exact surface keeps it alive in viz after the app moves on to a
++  // surface of the new size.
++  auto layer = cc::SurfaceLayer::Create();
++  layer->SetSurfaceId(info_->surface_id,
++                      cc::DeadlinePolicy::UseSpecifiedDeadline(0));
++  layer->SetOldestAcceptableFallback(info_->surface_id);
++  layer->SetStretchContentToFillBounds(true);
++  layer->SetSurfaceHitTestable(false);
++  layer->SetIsDrawable(true);
++  fade_.emplace();
++  fade_->frame.layer = std::move(layer);
++  fade_->frame.geometry_size = WindowSizeInPixels();
++  fade_->frame.geometry_offset = GeometryOffsetInPixels();
++  fade_->frame.surface_size = SurfaceSizeInPixels();
++  fade_->hold_start = now;
++  InvalidateFadePaint();
++}
++
++void HTMLNativeWindowElement::StartFading() {
++  if (!fade_ || !fade_->fade_start.is_null()) {
++    return;
++  }
++  fade_->fade_start = base::TimeTicks::Now();
++  InvalidateFadePaint();
++}
++
++void HTMLNativeWindowElement::EndFade() {
++  if (!fade_) {
++    return;
++  }
++  fade_.reset();
++  fade_effect_ = nullptr;
++  if (auto* view = GetDocument().View()) {
++    view->SetPaintArtifactCompositorNeedsUpdate();
++  }
++  if (auto* layout_object = GetLayoutObject()) {
++    layout_object->SetShouldDoFullPaintInvalidation();
++  }
++}
++
++float HTMLNativeWindowElement::FadeOpacity() const {
++  if (!fade_) {
++    return 0.f;
++  }
++  if (fade_->fade_start.is_null()) {
++    return fade_->from_opacity;
++  }
++  const base::TimeDelta duration = CrossfadeDuration();
++  const double t =
++      duration.is_zero()
++          ? 1.0
++          : std::clamp((base::TimeTicks::Now() - fade_->fade_start) / duration,
++                       0.0, 1.0);
++  // Ease out (cubic).
++  const double eased = 1.0 - std::pow(1.0 - t, 3);
++  return fade_->from_opacity * static_cast<float>(1.0 - eased);
++}
++
++void HTMLNativeWindowElement::OnFadeFrame() {
++  fade_frame_requested_ = false;
++  if (!fade_) {
++    return;
++  }
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (fade_->fade_start.is_null() && now - fade_->hold_start >= kMaxFadeHold) {
++    fade_->fade_start = now;
++  }
++  if (!fade_->fade_start.is_null() &&
++      now - fade_->fade_start >= CrossfadeDuration()) {
++    EndFade();
++    return;
++  }
++  InvalidateFadePaint();
++}
++
++void HTMLNativeWindowElement::InvalidateFadePaint() {
++  if (auto* layout_object = GetLayoutObject()) {
++    layout_object->SetShouldDoFullPaintInvalidation();
++  }
++  if (!fade_ || fade_frame_requested_) {
++    return;
++  }
++  fade_frame_requested_ = true;
++  GetDocument().RequestAnimationFrame(
++      MakeGarbageCollected<FadeFrameCallback>(this),
++      FrameCallbackType::kInternal);
++}
++
++const EffectPaintPropertyNode& HTMLNativeWindowElement::UpdateFadeEffect(
++    const PropertyTreeState& parent) {
++  EffectPaintPropertyNode::State state;
++  state.local_transform_space = &parent.Transform();
++  state.opacity = FadeOpacity();
++  bool changed = true;
++  if (fade_effect_) {
++    changed = fade_effect_->Update(parent.Effect(), std::move(state)) !=
++              PaintPropertyChangeType::kUnchanged;
++  } else {
++    fade_effect_ =
++        EffectPaintPropertyNode::Create(parent.Effect(), std::move(state));
++  }
++  // A property change, not only new paint: the compositor's layers and
++  // property trees need updating (its fast path is for paint alone).
++  if (changed) {
++    if (auto* view = GetDocument().View()) {
++      view->SetPaintArtifactCompositorNeedsUpdate();
++    }
++  }
++  return *fade_effect_;
++}
++
+ viz::FrameSinkId HTMLNativeWindowElement::EmbeddedFrameSinkId() const {
+   return info_ ? info_->surface_id.frame_sink_id() : viz::FrameSinkId();
+ }
+@@ -154,6 +325,7 @@ void HTMLNativeWindowElement::SetFullscreen(bool fullscreen) {
+ void HTMLNativeWindowElement::Trace(Visitor* visitor) const {
+   visitor->Trace(host_);
+   visitor->Trace(client_receiver_);
++  visitor->Trace(fade_effect_);
+   HTMLElement::Trace(visitor);
+ }
+ 
+@@ -164,6 +336,12 @@ void HTMLNativeWindowElement::ParseAttribute(
+     UpdateAttachment();
+     return;
+   }
++  if (params.name == html_names::kCrossfadeAttr) {
++    if (CrossfadeDuration().is_zero()) {
++      EndFade();
++    }
++    return;
++  }
+   HTMLElement::ParseAttribute(params);
+ }
+ 
+@@ -193,6 +371,10 @@ void HTMLNativeWindowElement::OnInfoChanged(
+       info_ ? info_->focused != info->focused : info->focused;
+   const bool first_info = !info_;
+   info_ = std::move(info);
++  // EXO-CROSSFADE: the app drew at a new size; fade the old frame out.
++  if (fade_ && WindowSizeInPixels() != fade_->frame.geometry_size) {
++    StartFading();
++  }
+   UpdateSurfaceLayer();
+   // Attached while already fullscreen: tell the browser now.
+   if (first_info && !fullscreen_ && Fullscreen::IsFullscreenElement(*this)) {
+@@ -214,6 +396,7 @@ void HTMLNativeWindowElement::OnClosed() {
+   closed_ = true;
+   client_receiver_.reset();
+   info_.reset();
++  EndFade();
+   UpdateSurfaceLayer();
+   if (auto* layout_object = DynamicTo<LayoutNativeWindow>(GetLayoutObject())) {
+     layout_object->NaturalSizeChanged();
+@@ -293,6 +476,7 @@ void HTMLNativeWindowElement::DetachWindow() {
+   closed_ = false;
+   last_sent_size_ = gfx::Size();
+   fullscreen_ = false;
++  EndFade();
+   const bool had_info = !!info_;
+   info_.reset();
+   UpdateSurfaceLayer();
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.h b/third_party/blink/renderer/core/html/html_native_window_element.h
+index f66fc5d9c9..bae0c92ada 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.h
++++ b/third_party/blink/renderer/core/html/html_native_window_element.h
+@@ -8,6 +8,7 @@
+ #include <optional>
+ 
+ #include "base/memory/scoped_refptr.h"
++#include "base/time/time.h"
+ #include "base/unguessable_token.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
+ #include "third_party/blink/public/mojom/native_window/native_window.mojom-blink.h"
+@@ -26,6 +27,9 @@ class SurfaceLayer;
+ 
+ namespace blink {
+ 
++class EffectPaintPropertyNode;
++class PropertyTreeState;
++
+ // EXO-EMBED: <native-window grant="TOKEN" [window="ID"]> shows the native
+ // (Wayland) window that grant TOKEN is for as a replaced element. EXO-BROKER:
+ // the grant must have been issued by the browser's window broker to this
+@@ -35,7 +39,16 @@ namespace blink {
+ // the element; clicking it gives the window keyboard focus.
+ //
+ // Sizing: without a CSS size the element takes the window's size. With a CSS
+-// size the window is asked to resize to the element.
++// size the window is asked to resize to the element. Where the window's frame
++// and the content box differ in size (the app hasn't caught up, or won't take
++// that size), object-fit and object-position place the frame; the UA default
++// is "none" at the top left.
++//
++// EXO-CROSSFADE: with crossfade="MS", a resize the page makes shows the frame
++// from before it, stretched to the new content box, until the app has drawn
++// at the new size; that frame then fades out over MS milliseconds. With a
++// FLIP transform animation on the element, this is how a compositor animates
++// a window's size: the app is resized once, and its picture follows.
+ class CORE_EXPORT HTMLNativeWindowElement final
+     : public HTMLElement,
+       public mojom::blink::NativeWindowClient {
+@@ -61,11 +74,29 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   void blurWindow();
+ 
+   // For LayoutNativeWindow.
+-  cc::Layer* ContentsCcLayer() const;
++  cc::SurfaceLayer* ContentsCcLayer() const;
+   // The window's size in pixels; empty until the window is known.
+   gfx::Size WindowSizeInPixels() const;
+   // Where the window geometry starts inside the surface, in pixels.
+   gfx::Vector2d GeometryOffsetInPixels() const;
++  // The whole surface (geometry and client-side shadows), in pixels.
++  gfx::Size SurfaceSizeInPixels() const;
++
++  // EXO-CROSSFADE: the frame being faded out, while there is one. Its
++  // geometry is stretched to the content box.
++  struct FadeFrame {
++    scoped_refptr<cc::SurfaceLayer> layer;
++    gfx::Size geometry_size;
++    gfx::Vector2d geometry_offset;
++    gfx::Size surface_size;
++  };
++  const FadeFrame* GetFadeFrame() const {
++    return fade_ ? &fade_->frame : nullptr;
++  }
++  // The effect node the faded frame paints under (its opacity), child of
++  // |parent|'s effect.
++  const EffectPaintPropertyNode& UpdateFadeEffect(
++      const PropertyTreeState& parent);
+   // Called on paint with the element's content box size in pixels.
+   void ContentSizeChanged(const gfx::Size& size_in_pixels);
+ 
+@@ -98,6 +129,18 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   void UpdateSurfaceLayer();
+   void DispatchSimpleEvent(const char* type);
+ 
++  // EXO-CROSSFADE.
++  class FadeFrameCallback;
++  base::TimeDelta CrossfadeDuration() const;
++  // A resize to |target| (pixels) is about to be asked for.
++  void HoldFadeFrame();
++  // The app drew at a new size (or gave up): start fading.
++  void StartFading();
++  void EndFade();
++  void OnFadeFrame();
++  float FadeOpacity() const;
++  void InvalidateFadePaint();
++
+   HeapMojoRemote<mojom::blink::NativeWindowHost> host_;
+   HeapMojoReceiver<mojom::blink::NativeWindowClient, HTMLNativeWindowElement>
+       client_receiver_;
+@@ -114,6 +157,21 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   gfx::Size last_sent_size_;
+   // EXO-FULLSCREEN: what the browser was last told.
+   bool fullscreen_ = false;
++
++  // EXO-CROSSFADE: the old frame, from a resize until it has faded out.
++  struct Fade {
++    FadeFrame frame;
++    // When the resize was asked for; the frame fades out once the app has
++    // drawn at a new size, or after a while if it doesn't.
++    base::TimeTicks hold_start;
++    // When fading started (null while holding), and from what opacity (a
++    // resize during a fade holds the frame where the fade had got to).
++    base::TimeTicks fade_start;
++    float from_opacity = 1.f;
++  };
++  std::optional<Fade> fade_;
++  Member<EffectPaintPropertyNode> fade_effect_;
++  bool fade_frame_requested_ = false;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.idl b/third_party/blink/renderer/core/html/html_native_window_element.idl
+index ff4149ccd1..7f82a8cdbb 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.idl
++++ b/third_party/blink/renderer/core/html/html_native_window_element.idl
+@@ -18,6 +18,9 @@
+     [CEReactions, Reflect] attribute DOMString grant;
+     // Optional: the window id the grant must be for.
+     [CEReactions, Reflect] attribute DOMString window;
++    // EXO-CROSSFADE: milliseconds over which the frame from before a resize
++    // fades into the app's frame at the new size; 0 (default) for none.
++    [CEReactions, Reflect] attribute unsigned long crossfade;
+     // The attached window's id, or 0.
+     readonly attribute long windowId;
+     // "none", "attaching", "attached", "failed" or "closed".
+diff --git a/third_party/blink/renderer/core/html/resources/html.css b/third_party/blink/renderer/core/html/resources/html.css
+index 82fba07547..9522642b14 100644
+--- a/third_party/blink/renderer/core/html/resources/html.css
++++ b/third_party/blink/renderer/core/html/resources/html.css
+@@ -177,6 +177,14 @@ video, canvas, img, native-window {
+   overflow-clip-margin: content-box;
+ }
+ 
++/* EXO-EMBED: a window's frame that isn't the content box's size (the app
++   hasn't caught up with a resize, or snaps to whole cells) is shown as the
++   app drew it, at the top left. */
++native-window {
++  object-fit: none;
++  object-position: 0 0;
++}
++
+ iframe, embed, object, fencedframe {
+    overflow: clip !important;
+    overflow-clip-margin: content-box !important;
+diff --git a/third_party/blink/renderer/core/layout/layout_native_window.cc b/third_party/blink/renderer/core/layout/layout_native_window.cc
+index 1e43e7adad..7123bbe970 100644
+--- a/third_party/blink/renderer/core/layout/layout_native_window.cc
++++ b/third_party/blink/renderer/core/layout/layout_native_window.cc
+@@ -4,13 +4,42 @@
+ 
+ #include "third_party/blink/renderer/core/layout/layout_native_window.h"
+ 
+-#include "cc/layers/layer.h"
++#include "cc/layers/surface_layer.h"
+ #include "third_party/blink/renderer/core/paint/paint_info.h"
+ #include "third_party/blink/renderer/platform/geometry/layout_unit.h"
+ #include "third_party/blink/renderer/platform/graphics/paint/foreign_layer_display_item.h"
++#include "third_party/blink/renderer/platform/graphics/paint/paint_controller.h"
++#include "third_party/blink/renderer/platform/graphics/paint/property_tree_state.h"
++#include "ui/gfx/geometry/size_conversions.h"
++#include "ui/gfx/geometry/vector2d_conversions.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++// Where to put a surface layer so that the window geometry (|geometry_size|,
++// starting |geometry_offset| into a surface of |surface_size|) lands on
++// |target|, the surface stretched to fit.
++gfx::Rect StretchedSurfaceRect(const gfx::Rect& target,
++                               const gfx::Size& geometry_size,
++                               const gfx::Vector2d& geometry_offset,
++                               const gfx::Size& surface_size) {
++  const float sx = static_cast<float>(target.width()) / geometry_size.width();
++  const float sy =
++      static_cast<float>(target.height()) / geometry_size.height();
++  gfx::Size surface = surface_size;
++  if (surface.IsEmpty()) {
++    surface = geometry_size + gfx::Size(geometry_offset.x(), geometry_offset.y());
++  }
++  const gfx::Vector2d offset =
++      gfx::ToRoundedVector2d(gfx::ScaleVector2d(geometry_offset, sx, sy));
++  return gfx::Rect(target.origin() - offset,
++                   gfx::ToRoundedSize(gfx::ScaleSize(gfx::SizeF(surface), sx,
++                                                     sy)));
++}
++
++}  // namespace
++
+ LayoutNativeWindow::LayoutNativeWindow(HTMLNativeWindowElement* element)
+     : LayoutReplaced(element) {}
+ 
+@@ -33,31 +62,70 @@ void LayoutNativeWindow::PaintReplaced(
+     const PhysicalOffset& paint_offset) const {
+   NOT_DESTROYED();
+   auto* element = To<HTMLNativeWindowElement>(GetNode());
+-  // The window is resized to the element's content box, so it is shown
+-  // there whatever object-fit says (the fullscreen UA style asks for
+-  // "contain", which would keep the window's old aspect ratio).
++  // The window is resized to the element's content box. Until its frame is
++  // that size (or if it won't be), object-fit and object-position place the
++  // frame in the box.
+   PhysicalRect content_rect = PhysicalContentBoxRect();
++  const gfx::Size window_size = element->WindowSizeInPixels();
++  PhysicalRect window_rect = content_rect;
++  if (!window_size.IsEmpty()) {
++    window_rect = ComputeReplacedContentRect(
++        content_rect,
++        PhysicalNaturalSizingInfo::MakeFixed(PhysicalSize(window_size)));
++  }
+   content_rect.Move(paint_offset);
+-  gfx::Rect snapped = ToPixelSnappedRect(content_rect);
++  window_rect.Move(paint_offset);
++  const gfx::Rect snapped = ToPixelSnappedRect(content_rect);
+   element->ContentSizeChanged(snapped.size());
+ 
+-  cc::Layer* layer = element->ContentsCcLayer();
++  cc::SurfaceLayer* layer = element->ContentsCcLayer();
+   if (!layer || paint_info.ShouldOmitCompositingInfo()) {
+     return;
+   }
+   // The surface includes client-side decorations (e.g. shadows) around the
+-  // window geometry; shift them out of the content box, where the element's
++  // window geometry; they fall outside the content box, where the element's
+   // overflow clip hides them.
+-  gfx::Vector2d offset = element->GeometryOffsetInPixels();
+-  gfx::Rect layer_rect(snapped.origin() - offset,
+-                       gfx::Size(snapped.width() + offset.x(),
+-                                 snapped.height() + offset.y()));
++  const gfx::Vector2d offset = element->GeometryOffsetInPixels();
++  const gfx::Rect placed = ToPixelSnappedRect(window_rect);
++  gfx::Rect layer_rect;
++  if (window_size.IsEmpty() || placed.size() == window_size) {
++    // 1:1. The layer reaches the content box's far edges, where viz shows
++    // what's behind the window if the frame is smaller.
++    const gfx::Point origin = placed.origin() - offset;
++    layer_rect = gfx::Rect(origin, gfx::Size(std::max(snapped.right() - origin.x(), 0),
++                                             std::max(snapped.bottom() - origin.y(), 0)));
++    layer->SetStretchContentToFillBounds(false);
++  } else {
++    layer_rect = StretchedSurfaceRect(placed, window_size, offset,
++                                      element->SurfaceSizeInPixels());
++    layer->SetStretchContentToFillBounds(true);
++  }
+   layer->SetBounds(layer_rect.size());
+   layer->SetIsDrawable(true);
+   layer->SetHitTestable(true);
+   RecordForeignLayer(paint_info.context, *this,
+                      DisplayItem::kForeignLayerPlugin, layer,
+                      layer_rect.origin());
++
++  // EXO-CROSSFADE: the frame from before a resize, stretched to the content
++  // box, over the live window while it fades out.
++  const HTMLNativeWindowElement::FadeFrame* fade = element->GetFadeFrame();
++  if (!fade || fade->geometry_size.IsEmpty() || snapped.IsEmpty()) {
++    return;
++  }
++  const gfx::Rect fade_rect =
++      StretchedSurfaceRect(snapped, fade->geometry_size, fade->geometry_offset,
++                           fade->surface_size);
++  fade->layer->SetBounds(fade_rect.size());
++  fade->layer->SetIsDrawable(true);
++  PropertyTreeState properties =
++      paint_info.context.GetPaintController()
++          .CurrentPaintChunkProperties()
++          .Unalias();
++  properties.SetEffect(element->UpdateFadeEffect(properties));
++  RecordForeignLayer(paint_info.context, *this,
++                     DisplayItem::kForeignLayerCanvas, fade->layer,
++                     fade_rect.origin(), &properties);
+ }
+ 
+ }  // namespace blink

@@ -34,6 +34,7 @@ The server keeps its data in `$DATA_DIR/t3` (default `~/.local/share/plutonium/t
 | 0006 | Panel keys (Alt+1…9, Ctrl+Tab, Ctrl+T), a new browser tab, and an app launcher (Super+Space) |
 | 0007–0008 | Thread tags and groups, and an "Elsewhere" list for importing windows and tabs from other shells |
 | 0009 | Links and Ctrl+click open in the thread's browser panel |
+| 0010 | Panel apps cross-fade when the panel resizes; an app's maximize button maximizes the panel |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

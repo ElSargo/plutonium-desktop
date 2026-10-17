@@ -32,7 +32,7 @@
 
 **`<native-window>`** (patch 0001) is an element that shows an Exo window inside the page.
 - **Drawing:** the window is a surface layer, composited by viz with the rest of the page. It gets no CPU copy, and a fullscreen one goes on a display plane.
-- **Size:** the element's size is sent to the app (`xdg_toplevel.configure`). The page alone sizes a window it shows: the app's own maximize, minimize and move/resize requests are answered with the state unchanged, and anything in Ash that changes its state or size is undone.
+- **Size:** the element's size is sent to the app (`xdg_toplevel.configure`). The page alone sizes a window it shows: the app's own maximize, minimize and move/resize requests reach the page as `windowrequest` events instead, and anything in Ash that changes the window's state or size is undone. `object-fit` places a frame that isn't the box's size, and `crossfade` animates resizes (`features/WINDOW_SIZING.md`).
 - **Input:** pointer and keyboard input over the element is routed to the app, through the same hit testing that routes input into iframes. So are touchpad scrolling, drag and drop (`features/DRAG_AND_DROP.md`), pointer lock and fullscreen (`features/CONTROLS.md`).
 
 **The window broker** (`navigator.windowBroker`) is how the shell finds and controls windows.
@@ -79,6 +79,7 @@
 | Several shells, tags, the overlay | [features/SHELLS.md](features/SHELLS.md) |
 | The niri shell; keyboard, touchpad and scrolling fixes | [features/NIRI_SHELL.md](features/NIRI_SHELL.md) |
 | Drag and drop | [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md) |
+| Window sizing, `object-fit`, cross-fade, `windowrequest` | [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md) |
 | Links as tabs in their thread | [features/OPENING_LINKS.md](features/OPENING_LINKS.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |

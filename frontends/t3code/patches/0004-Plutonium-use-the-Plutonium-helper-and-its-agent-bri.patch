@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 10:11:22 +1300
-Subject: [PATCH 4/9] Plutonium: use the Plutonium helper and its agent bridge
+Subject: [PATCH 04/10] Plutonium: use the Plutonium helper and its agent
+ bridge
 
 The thread environment, per-thread X display and pid-to-thread resolver
 moved to Plutonium's helper (plutoniumd). The server now asks it for each

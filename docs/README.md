@@ -13,6 +13,7 @@
 - [features/SHELLS.md](features/SHELLS.md): several shells, tags and groups, the Super+Tab overlay
 - [features/NIRI_SHELL.md](features/NIRI_SHELL.md): the niri shell; keyboard, touchpad and scrolling fixes
 - [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md): drag and drop between apps, tabs and pages
+- [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md): who sizes a window, object-fit, the resize cross-fade, windowrequest
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread
 - [features/GPU_X11.md](features/GPU_X11.md): the GPU path for apps
 

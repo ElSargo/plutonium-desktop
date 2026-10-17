@@ -124,10 +124,18 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   (`features/TABS.md`). Tested in the plain shell on Xvfb and on DRM.
 - [x] **Tabs in T3 Code.** T3's Browser panel and agent automation run on
   Plutonium's tabs (`features/TABS.md`, "In T3 Code"), on Xvfb and DRM.
-- [ ] **Pass an embedded app's maximize/minimize requests to the shell.** S ·
-  While a page shows a window, Exo refuses them (the page alone sizes it), so
-  the app's own buttons do nothing. Like fullscreen requests, the shell could
-  get an event and act (e.g. niri's maximize column).
+- [x] **Pass an embedded app's maximize/minimize requests to the shell.**
+  Done (`WINDOW_SIZING.md`): `windowrequest`; niri and T3 map maximize.
+- [ ] **Window sizing on real input.** S · Verify on DRM: the "last pressed"
+  rule for several elements on one window, pointer input on a scaled
+  (`object-fit: contain`) window, and the niri/T3 animations at full speed.
+- [ ] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
+  or edge resize could become niri's interactive move or column resize. The
+  page would need the pointer for the rest of the drag.
+- [ ] **Cross-fade on the compositor thread.** S · The old frame's opacity is
+  stepped from the main thread each frame; a busy shell page makes it stutter.
+  A cc opacity animation on its effect node (as LinkHighlightImpl does) would
+  not.
 - [ ] **T3 browser features still missing.** M · Zoom, color scheme, mute,
   element picker, screenshots to file, recording, PiP windows, DevTools
   window, console/network entries in snapshots.
