@@ -19,6 +19,9 @@ Setup (INSTALL.md walks through these in order):
   t3 fetch                   clone T3 Code at frontends/t3code/BASE and apply its patches
   t3 build                   install its dependencies and build its web app
   image pull                 PREBUILT=1: download the prebuilt Chromium instead of building it
+  host build                 HOST=1: the release build (prebuilt image, or out/Release) for the
+                             host, with nixpkgs libraries (nix/chrome.nix), and the tools a
+                             session uses (nix/host-tools.nix): no container to run it
   killswitch find            show the key codes of buttons as you press them
   killswitch install         a user service that kills Ash on a button press (DRM safety)
 
@@ -31,7 +34,7 @@ Sessions:
 
 Development:
   helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
-  cdp <args>                 DevTools from the container: tools/cdp.py --help
+  cdp <args>                 DevTools, where Ash runs: tools/cdp.py --help
   chromium export            rewrite chromium/patches from the checkout's commits since BASE
   t3 export                  rewrite frontends/t3code/patches the same way
   image build|push|login|tag the prebuilt image, from the release build (chromium build --release)
@@ -111,6 +114,26 @@ container_cmd() {
 }
 
 # --- Prebuilt image ----------------------------------------------------------
+# Copy what a release build runs with from out dir $1 into $2/chrome.
+stage_release() {
+  local out=$1 stage=$2 f
+  rm -rf "$stage/chrome"
+  mkdir -p "$stage/chrome"
+  # What Chrome's Linux installer ships (chrome/installer/linux), plus
+  # every top-level resource file, since the ChromeOS build has more.
+  for f in chrome chrome_crashpad_handler icudtl.dat vk_swiftshader_icd.json \
+           libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1 \
+           "$out"/*.pak "$out"/*.bin "$out"/*.dat; do
+    f=${f##*/}
+    [[ -e $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
+  done
+  [[ -e $out/chrome_sandbox ]] && cp -a "$out/chrome_sandbox" "$stage/chrome/chrome-sandbox"
+  for f in locales MEIPreload PrivacySandboxAttestationsPreloaded resources; do
+    [[ -d $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
+  done
+  true
+}
+
 image_cmd() {
   local ref=$PREBUILT_REPO:$PREBUILT_TAG
   case "${1:-}" in
@@ -118,22 +141,7 @@ image_cmd() {
       need_container
       local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT stage=$DATA_DIR/image-stage
       [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
-      mkdir -p "$stage"
-      rm -rf "$stage/chrome"
-      mkdir -p "$stage/chrome"
-      # What Chrome's Linux installer ships (chrome/installer/linux), plus
-      # every top-level resource file, since the ChromeOS build has more.
-      local f
-      for f in chrome chrome_crashpad_handler icudtl.dat vk_swiftshader_icd.json \
-               libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1 \
-               "$out"/*.pak "$out"/*.bin "$out"/*.dat; do
-        f=${f##*/}
-        [[ -e $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
-      done
-      [[ -e $out/chrome_sandbox ]] && cp -a "$out/chrome_sandbox" "$stage/chrome/chrome-sandbox"
-      for f in locales MEIPreload PrivacySandboxAttestationsPreloaded resources; do
-        [[ -d $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
-      done
+      stage_release "$out" "$stage"
       in_container sh -c "strip --strip-unneeded '$stage/chrome/chrome' '$stage/chrome/chrome_crashpad_handler' '$stage'/chrome/*.so*"
       # Chromium's license notices, which redistributing it requires.
       in_container sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir $CHROMIUM_RELEASE_OUT '$stage/chrome/LICENSES.chromium.html'" ||
@@ -151,6 +159,36 @@ image_cmd() {
       # A token with write:packages (gh auth refresh -s write:packages).
       gh auth token | pm login ghcr.io -u "$(gh api user --jq .login)" --password-stdin ;;
     tag) echo "$ref" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- On the host --------------------------------------------------------------
+host_cmd() {
+  case "${1:-}" in
+    build)
+      command -v nix > /dev/null || die "host build needs Nix"
+      local stage=$DATA_DIR/host-stage
+      rm -rf "$stage"
+      mkdir -p "$stage"
+      if [[ -n ${PREBUILT:-} ]]; then
+        pm image exists "$IMAGE" || die "no image $IMAGE (plutonium image pull)"
+        local c
+        c=$(pm create "$IMAGE" true)
+        pm cp "$c:/opt/plutonium/chrome" "$stage/" || { pm rm "$c" > /dev/null; die "could not copy chrome out of $IMAGE"; }
+        pm rm "$c" > /dev/null
+      else
+        local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT
+        [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
+        stage_release "$out" "$stage"
+      fi
+      # Against the system's nixpkgs, so libgbm and libEGL match its Mesa.
+      nix build --impure --out-link "$HOST_CHROME" --expr \
+        "(import <nixpkgs> {}).callPackage $ROOT/nix/chrome.nix { src = /. + \"$stage/chrome\"; }"
+      nix build --impure --out-link "$HOST_TOOLS" --expr \
+        "(import <nixpkgs> {}).callPackage $ROOT/nix/host-tools.nix {}"
+      rm -rf "$stage"
+      echo "chrome for the host: $HOST_CHROME/bin/chrome. Set HOST=1 in plutonium.env to run sessions with it" ;;
     *) usage; exit 2 ;;
   esac
 }
@@ -333,7 +371,7 @@ stop_cmd() {
   local which=${1:---all} mode
   for mode in drm x11; do
     [[ $which == --all || $which == "--$mode" ]] || continue
-    in_container pkill -TERM -f "^$CHROME_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" 2>/dev/null &&
+    on_ash pkill -TERM -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" 2>/dev/null &&
       echo "stopped the $mode session" || true
     local socket=wayland-plutonium pidfile
     [[ $mode == x11 ]] && socket=wayland-plutonium-x11
@@ -343,11 +381,15 @@ stop_cmd() {
 }
 
 status_cmd() {
-  container_running && echo "container $CONTAINER: running" || echo "container $CONTAINER: not running"
-  chrome_built && echo "chrome: $CHROME_BIN${PREBUILT:+ (prebuilt, $IMAGE)}" || echo "chrome: missing ($CHROME_BIN)"
+  if [[ -n ${HOST:-} ]]; then echo "Ash runs on the host (HOST=1)"
+  elif container_running; then echo "container $CONTAINER: running"
+  else echo "container $CONTAINER: not running"; fi
+  local from=
+  [[ -z ${HOST:-} && -n ${PREBUILT:-} ]] && from=" (prebuilt, $IMAGE)"
+  chrome_built && echo "chrome: $CHROME_BIN$from" || echo "chrome: missing ($CHROME_BIN)"
   local mode
   for mode in drm x11; do
-    pgrep -f "^$CHROME_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" > /dev/null &&
+    pgrep -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" > /dev/null &&
       echo "$mode session: running" || echo "$mode session: not running"
   done
   local sock
@@ -404,17 +446,25 @@ doctor() {
   check "systemd-socket-activate (X11 apps)" "command -v systemd-socket-activate" "optional"
   check "foot (the shells' terminal)" "command -v foot" "optional"
   check "in the 'input' group (kill switch)" "id -nG | grep -qw input" "optional, for the kill switch"
-  echo "Container:"
-  [[ -n ${PREBUILT:-} ]] || check "image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
-  check "container $CONTAINER running" "container_running" "plutonium container create / start"
-  echo "Chromium:"
-  if [[ -n ${PREBUILT:-} ]]; then
-    check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"
-    check "chrome in the container" "chrome_built" "plutonium container create (with PREBUILT=1)"
+  if [[ -n ${HOST:-} ]]; then
+    echo "Ash on the host (HOST=1):"
+    check "nix" "command -v nix" "for plutonium host build"
+    check "chrome ($CHROME_BIN)" "chrome_built" "plutonium host build"
+    check "Xvfb (--x11 without a display)" "on_ash sh -c 'command -v Xvfb'" "plutonium host build"
+    check "python3 websockets (plutonium cdp)" "on_ash python3 -c 'import websockets'" "plutonium host build"
   else
-    check "checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1"
-    check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
-    check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
+    echo "Container:"
+    [[ -n ${PREBUILT:-} ]] || check "image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
+    check "container $CONTAINER running" "container_running" "plutonium container create / start"
+    echo "Chromium:"
+    if [[ -n ${PREBUILT:-} ]]; then
+      check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"
+      check "chrome in the container" "chrome_built" "plutonium container create (with PREBUILT=1)"
+    else
+      check "checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1"
+      check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
+      check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
+    fi
   fi
   echo "T3 Code (optional):"
   check "checkout at $T3CODE_DIR" "[ -d $T3CODE_DIR/.git ]" "plutonium t3 fetch"
@@ -431,13 +481,14 @@ case "$cmd" in
   container) container_cmd "$@" ;;
   chromium) chromium_cmd "$@" ;;
   image) image_cmd "$@" ;;
+  host) host_cmd "$@" ;;
   t3) t3_cmd "$@" ;;
   run) run_cmd "$@" ;;
   stop) stop_cmd "$@" ;;
   status) status_cmd ;;
   killswitch) killswitch_cmd "$@" ;;
   helper) PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-wayland-plutonium} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
-  cdp) need_container; exec $PODMAN exec -e "CDP=${CDP:-localhost:9224}" "$CONTAINER" python3 "$ROOT/tools/cdp.py" "$@" ;;
+  cdp) need_ash_runtime; on_ash -e "CDP=${CDP:-localhost:9224}" python3 "$ROOT/tools/cdp.py" "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac

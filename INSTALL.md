@@ -73,6 +73,15 @@ There are two ways to get Plutonium's Chromium:
 
   The image is private while the repository is. Log in with a GitHub token that can read packages:
   `gh auth refresh -s read:packages && gh auth token | podman login ghcr.io -u <you> --password-stdin`.
+- **On the host, without the container** (Nix only for now, `HOST=1`): a release build, from the prebuilt image or your own `out/Release`, with its libraries from your system's nixpkgs (`nix/chrome.nix`). Ash then runs as a normal host process, with no user namespace in between. Podman is only needed to copy the binary out of the prebuilt image:
+
+  ```
+  plutonium image pull          # with PREBUILT=1; or: plutonium chromium build --release
+  plutonium host build          # → ~/.local/share/plutonium/host-chrome/bin/chrome
+  echo HOST=1 >> plutonium.env
+  ```
+
+  It also builds the tools the container would otherwise provide (Xvfb, Python with websockets for `plutonium cdp`) into `host-tools`. Run `plutonium host build` again after pulling a new image or rebuilding. Development builds (`out/Plutonium`) still run in the container.
 - **Built yourself:** steps 3 and 4. You need this to change Chromium. It is also a development build: faster to rebuild, and it stops on internal assertion failures.
 
 ## 3. The container

@@ -36,6 +36,17 @@ PODMAN=${PODMAN:-podman}
 [[ $PODMAN == */* && $PODMAN != /* ]] && PODMAN=$ROOT/$PODMAN
 
 CHROME_BIN=${CHROME_BIN:-$CHROMIUM_DIR/src/$CHROMIUM_OUT/chrome}
+# HOST=1: run Ash on the host, with no container: the release build (from the
+# prebuilt image with PREBUILT=1, or out/Release), with its libraries from
+# nixpkgs (plutonium host build, nix/chrome.nix).
+HOST_CHROME=${HOST_CHROME:-$DATA_DIR/host-chrome}
+HOST_TOOLS=${HOST_TOOLS:-$DATA_DIR/host-tools}     # Xvfb, python3 with websockets
+[[ -n ${HOST:-} ]] && CHROME_BIN=$HOST_CHROME/bin/chrome
+# How Ash's command line starts, for pgrep and pkill. Chromium sets its process
+# title from its own executable: on the host, that's the wrapped binary in the
+# store, of whichever build of nix/chrome.nix started it.
+ASH_BIN=$CHROME_BIN
+[[ -n ${HOST:-} ]] && ASH_BIN='/nix/store/[^/ ]*-plutonium-chrome-[^/ ]*/libexec/plutonium/chrome/chrome'
 
 # Every Ash a Plutonium launcher starts has this on its command line; the kill
 # switch and the launchers find Ash by it.
@@ -56,9 +67,23 @@ in_container() {
   [[ -n ${PREBUILT:-} ]] && dir=$ROOT
   pm exec "${env[@]}" -w "$dir" "$CONTAINER" "$@"
 }
-# chrome is in the container (prebuilt) or in the mounted checkout.
-chrome_built() { if [[ -n ${PREBUILT:-} ]]; then container_running && in_container test -x "$CHROME_BIN"; else [[ -x $CHROME_BIN ]]; fi; }
+# Run a command where Ash runs: on the host with HOST=1 (with the host tools
+# first on PATH), else in the container. -e VAR=value pairs may come first.
+on_ash() {
+  [[ -z ${HOST:-} ]] && { in_container "$@"; return; }
+  local env=("PATH=$HOST_TOOLS/bin:$PATH")
+  while [[ $1 == -e ]]; do env+=("$2"); shift 2; done
+  env "${env[@]}" "$@"
+}
+# chrome is on the host (HOST=1), in the container (prebuilt) or in the
+# mounted checkout.
+chrome_built() {
+  if [[ -z ${HOST:-} && -n ${PREBUILT:-} ]]; then container_running && in_container test -x "$CHROME_BIN"
+  else [[ -x $CHROME_BIN ]]; fi
+}
 container_running() { [[ $(pm container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null) == true ]]; }
 need_container() {
   container_running || die "the container '$CONTAINER' is not running (plutonium container create / start)"
 }
+# What a session needs before it starts Ash: the container, unless HOST=1.
+need_ash_runtime() { [[ -n ${HOST:-} ]] || need_container; }

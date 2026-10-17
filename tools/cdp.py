@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """DevTools (CDP) for a running session: pages, shells and browser tabs.
 
-Runs where python3-websockets is installed (the container: `plutonium cdp ...`).
+Runs where python3-websockets is installed: `plutonium cdp ...` runs it where Ash
+runs (the container, or the host tools with HOST=1).
 CDP=host:port picks the session (DRM 9224, X11 9223).
 
   cdp.py list                              targets: type, url

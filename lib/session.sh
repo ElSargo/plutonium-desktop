@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One Plutonium session: the helper (plutoniumd, on the host) and Ash (in the
-# container) with the given shells. `plutonium run` sets the variables below
-# and execs this; see `plutonium run --help`.
+# container, or on the host with HOST=1) with the given shells. `plutonium run`
+# sets the variables below and execs this; see `plutonium run --help`.
 #
 #   MODE         drm (Ash owns the display and input on a VT) or x11 (Ash in an
 #                X11 window, or on a private Xvfb)
@@ -28,9 +28,9 @@ log() { echo "$(date +%T) $*" | tee -a "$LOG"; }
 # flag, so it matches neither Ash's children (zygote, renderers: killing them
 # along with the browser makes its shutdown abort) nor the pkill/pgrep (or
 # podman) command line that carries the pattern.
-ash_pattern="^$CHROME_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)"
+ash_pattern="^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)"
 ash_running() { pgrep -f "$ash_pattern" > /dev/null; }
-stop_ash() { in_container pkill "-${1:-TERM}" -f "$ash_pattern" 2>/dev/null; }
+stop_ash() { on_ash pkill "-${1:-TERM}" -f "$ash_pattern" 2>/dev/null; }
 
 start_helper() {
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
@@ -60,7 +60,7 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
 [[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS")
 
 : > "$LOG"
-need_container
+need_ash_runtime
 chrome_built || { log "ABORT: no Chromium at $CHROME_BIN (plutonium chromium build, or PREBUILT=1 and plutonium image pull)"; exit 1; }
 ash_running && { log "ABORT: an Ash with profile $PROFILE is already running (plutonium stop)"; exit 1; }
 mkdir -p "$PROFILE"
@@ -78,17 +78,21 @@ if [[ $MODE == x11 ]]; then
   # shellcheck disable=SC2206
   FLAGS+=(${EXTRA_FLAGS:-})
   if [[ $XDISP == :99 ]]; then
-    in_container sh -c '[ -S /tmp/.X11-unix/X99 ] || (setsid Xvfb :99 -screen 0 1600x1000x24 +extension XInputExtension </dev/null >/dev/null 2>&1 &)'
+    on_ash sh -c '[ -S /tmp/.X11-unix/X99 ] || (setsid Xvfb :99 -screen 0 1600x1000x24 +extension XInputExtension </dev/null >/dev/null 2>&1 &)'
   fi
   # The container sees the runtime dir, not the rest of $HOME.
-  if [[ -n ${XAUTHORITY:-} && $XAUTHORITY != "$RUN_DIR"/* && -f $XAUTHORITY ]]; then
+  if [[ -z ${HOST:-} && -n ${XAUTHORITY:-} && $XAUTHORITY != "$RUN_DIR"/* && -f $XAUTHORITY ]]; then
     mkdir -p "$RUN_DIR/plutonium"
     cp "$XAUTHORITY" "$RUN_DIR/plutonium/xauthority"
     XAUTHORITY=$RUN_DIR/plutonium/xauthority
   fi
   start_helper
-  setsid $PODMAN exec -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "$CONTAINER" \
-    "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+  if [[ -n ${HOST:-} ]]; then
+    setsid env DISPLAY="$XDISP" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+  else
+    setsid $PODMAN exec -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "$CONTAINER" \
+      "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+  fi
   for _ in $(seq 1 40); do
     [[ -S $RUN_DIR/$SOCKET ]] && curl -s "localhost:$CDP_PORT/json/version" > /dev/null && break
     sleep 1
@@ -145,7 +149,7 @@ FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
 # shellcheck disable=SC2206
 FLAGS+=(${EXTRA_FLAGS:-})
 log "starting Ash (log $ASH_LOG)"
-$PODMAN exec "$CONTAINER" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+on_ash "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
 ash=$!
 ( for _ in $(seq 1 40); do [[ -S $RUN_DIR/$SOCKET ]] && break; sleep 1; done; sleep 3; report_gpu ) &
 if [[ -n ${HOLD_S:-} ]]; then

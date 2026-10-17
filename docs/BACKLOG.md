@@ -153,6 +153,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Accessibility, multi-monitor, HiDPI polish.** L · Phase 5
 - [ ] **Packaging:** reproducible build that runs on NixOS outside the dev
   container. L · Phase 5
+  Running is done for release builds: `HOST=1`, `plutonium host build`
+  (`nix/chrome.nix`, the release binary autoPatchelf'd against nixpkgs).
+  Verified on X11 (Xvfb :99, GPU, embedded foot); DRM not yet. Still to do:
+  building Chromium itself as a Nix derivation, and dev builds on the host.
 
 ## Several shells (`SHELLS.md`)
 
