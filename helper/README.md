@@ -1,0 +1,138 @@
+# Plutonium helper (`plutoniumd`)
+
+The frontend-neutral part of a Plutonium shell. A frontend (T3 Code, the plain shell in `shells/plain/`, anything else) only adds UI on top of it. Node 24+, no dependencies; run the `.ts` files directly.
+
+What it does:
+- **Thread environment.** Gives each thread's processes the variables that bind their windows to it: `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, toolkit backends, `PLUTONIUM_HELPER` (this socket), and `DISPLAY` for a per-thread rootless Xwayland (xwayland-satellite, started on the first X client).
+- **pid → thread.** Reads `/proc/<pid>/environ`, walking up parent pids, to say which thread a window's client belongs to.
+- **Launching apps** into a thread, optionally waiting for the app's window.
+- **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
+- **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
+
+## Running
+
+```
+node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3774[,<origin>…] \
+  [--wayland-display wayland-plutonium] [--port 3780]
+```
+
+A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
+
+`plutonium run` starts it with Ash (DRM sessions on port 3782, X11 ones on 3781). X11 apps need `xwayland-satellite` on `PATH` or in `PLUTONIUM_XWAYLAND_SATELLITE`, plus `systemd-socket-activate`.
+
+Other commands:
+
+| Command | What |
+|---|---|
+| `plutonium.ts thread-setup <thread>` | JSON `{env, mcpServer}` for a thread's processes |
+| `plutonium.ts launch <thread> <program> [args…]` | start an app in a thread, wait for its window |
+| `plutonium.ts mcp` | the agent bridge as an MCP server (reads `PLUTONIUM_THREAD_ID` and `PLUTONIUM_HELPER`) |
+| `plutonium.ts open <url\|file>…` | `xdg-open` for a thread's processes: web links become tabs in `$PLUTONIUM_THREAD_ID`, anything else goes to the real `xdg-open` |
+
+Clients find the socket in `$PLUTONIUM_HELPER`, else `$XDG_RUNTIME_DIR/plutonium/<wayland-display>.sock`.
+
+## Listeners and access
+
+- **Unix socket** (`$XDG_RUNTIME_DIR/plutonium/<wayland-display>.sock`, mode 0600) for local processes: the frontend's server and agents.
+- **`127.0.0.1:<port>`** for the shell page. Apart from `GET /v1/shell.js`, a request is only served if both hold:
+  - its `Origin` is one of the shell origins, which blocks other pages in the browser;
+  - the connecting socket belongs to this user (checked in `/proc/net/tcp`), which blocks other users on the machine.
+
+An agent's thread is whatever `PLUTONIUM_THREAD_ID` its MCP server process has. Agents only reach windows and tabs tagged with that thread (see Tags below). That's as strong as the thread tagging itself: a process can copy the variable.
+
+## Tags
+
+Every window and tab carries a list of tags (`docs/features/SHELLS.md`). The first is its origin, and never changes:
+- for a window, the `PLUTONIUM_THREAD_ID` of its client, or of the nearest ancestor that has one; the browser reads it from `/proc`;
+- for a tab, the thread it was created for, which tabs its page opens inherit.
+
+Shells add and remove the others, for example to bring an item from another shell into a thread. When the browser can't read a client's environment (Ash in a container with its own user namespace), the library names the origin once from `GET /v1/window-threads`. The helper can't change tags, and neither can agents. A thread's id is its tag, and an agent reaches every item that carries it. Shells describe their tags as groups (label, owning shell), and the helper sends a thread's requests to the shell that owns its group.
+
+## HTTP API
+
+Shared (socket and shell):
+
+| Request | Answer |
+|---|---|
+| `GET /v1/status` | Wayland display, shell origins, the connected shells (`shells`: origin, shell id, visible), and `gpu`: `{dmabufVersion, renderNode, accelerated}`, what Exo tells GL/Vulkan apps (null until Exo is up). Not `accelerated` means apps render in software; the helper also logs a warning |
+| `GET /v1/thread-setup?thread=<id>` | `{env, mcpServer: {command, args}}` |
+| `GET /v1/window-threads?pids=1,2` | `{"<pid>": "<thread>"}`, untagged pids left out (for browsers without tags) |
+| `POST /v1/launch {thread, argv, cwd?, waitMs?}` | `{pid, windows}`; `windows` are the thread's new windows, if any appeared within `waitMs` |
+| `GET /v1/apps` | launchable desktop apps (`.desktop` entries from the XDG data dirs): `{id, name, genericName, comment, keywords, categories, hasIcon, terminal}`, by name |
+| `GET /v1/apps/<id>/icon` | the app's icon (SVG or PNG; themes `PLUTONIUM_ICON_THEME`, breeze, hicolor, Adwaita) |
+| `POST /v1/apps/launch {thread, id, waitMs?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot) |
+
+Socket only (the agent bridge; `<thread>` is the caller's thread):
+
+| Request | Answer |
+|---|---|
+| `GET /v1/threads/<thread>/windows` | the thread's windows: `{id, title, appId, width, height, shown, focused}` |
+| `GET /v1/threads/<thread>/windows/<id>/snapshot` | `image/png` of the window, even while hidden |
+| `POST /v1/threads/<thread>/windows/<id>/focus` | `{how}`: shown in the shell (the frontend's `onFocus`), or popped out to the desktop |
+| `POST /v1/threads/<thread>/windows/<id>/close` | `{closed}` after asking the app to close (waits up to 3 s) |
+| `GET /v1/threads/<thread>/tabs` | the thread's browser tabs: `{id, url, title, loading, canGoBack, canGoForward, shown, focused, openerId, dialog?}` |
+| `POST /v1/threads/<thread>/tabs {url, focus?, waitMs?}` | opens a tab for the thread (shown unless `focus: false`), waits for it to load |
+| `POST /v1/threads/<thread>/tabs/<id>/navigate {url, waitMs?}` | loads a URL in the tab |
+| `POST /v1/threads/<thread>/tabs/<id>/{back,forward,reload,stop} {waitMs?}` | |
+| `POST /v1/threads/<thread>/tabs/<id>/dialog {accept, text?}` | answers the page's pending dialog |
+| `POST /v1/threads/<thread>/tabs/<id>/{focus,close}` | shows the tab in the shell (the frontend's `onFocusTab`) / closes it |
+| `GET /v1/threads/<thread>/tabs/<id>/snapshot` | `image/png` of the page, even while hidden |
+
+Shell only: `GET /v1/shell.js` (the library), `GET /v1/shell/requests?page=<id>&shell=<shell id>&visible=<0|1>` (EventSource of bridge requests), `POST /v1/shell/replies/<id>`, `POST /v1/shell/pages/<id>/visibility {visible}`, `POST /v1/shell/origins {origins}` (the browser's shell origins, which shell pages report so that shells added at runtime get in).
+
+With several shells connected, each page has its own stream (`page` is an id the library picks; a reconnect with the same id replaces it). A thread's requests go to the shell that owns the thread's group, if it's connected. Anything else goes to the visible page, else the one visible most recently. When the owner shows what an agent asked for, the library makes that shell the visible one.
+
+## Shell library (`web/plutonium-shell.js`)
+
+Load it from the helper in the shell page:
+
+```js
+const { connect } = await import("http://127.0.0.1:3780/v1/shell.js");
+const shell = connect({
+  // An agent asked to show one of its windows. Return true if the UI did.
+  onFocus: (window) => { openTab(window.threadId, window.id); return true; },
+});
+shell.addEventListener("change", render);
+shell.windowsOf(threadId);   // windows tagged threadId: { …NativeWindowEntry, tag, tags, threadId }
+shell.untaggedWindows();
+await shell.grantFor(id);    // for <native-window grant=…>
+shell.showOnDesktop(id); shell.close(id); await shell.snapshot(id);
+await shell.launch(threadId, ["foot"], { waitMs: 8000 });
+await shell.apps();                      // desktop apps; shell.appIcon(id) → object URL
+await shell.launchApp(threadId, "foot.desktop");
+shell.setShellShortcuts(["Alt+Digit1", "Ctrl+KeyT"]);  // keys this page keeps while an app or tab has focus
+
+// Browser tabs (Chromium with the tab broker; shell.tabsAvailable):
+const tab = await shell.createTab(threadId, "example.com");
+stage.append(shell.tabElement(tab.id));   // <embed type="application/x-chromium-surface-embed">
+shell.tabsOf(threadId);                  // { id, url, title, loading, dialogType, … }
+shell.navigateTab(id, url); shell.tabCommand(id, "back"); shell.answerTabDialog(id, true);
+await shell.snapshotTab(id);
+// connect({ onFocusTab: (tab) => { showTab(tab); return true; } }) for agents' focus_tab.
+// connect({ onOpenTab: (tab) => currentThreadId }): a link this page opened in a new tab or
+// window (Ctrl+click, target=_blank, window.open) arrives untagged; return its thread, and it is
+// tagged and shown with onFocusTab.
+
+// Tags and groups (shell.tagsAvailable):
+shell.setGroups([{ tag: "plain:thread/abc", label: "Fix the build" }]);  // this shell's
+shell.groups;                            // Map tag → { tag, label, shellId }, every shell's
+shell.labelOf(tag);
+shell.elsewhere(myTags);                 // { windows, tabs } that carry none of myTags
+await shell.tagWindow(id, ["plain:thread/abc"]);   // brings it into the thread
+await shell.tagTab(id, [], ["plain:thread/abc"]);  // takes it out (not its origin tag)
+shell.shellId; shell.showShell();
+```
+
+It keeps the window, tab and group lists from `navigator.windowBroker` events and answers the helper's bridge requests with the broker. With an older browser that has no tags, it asks the helper for each window's thread instead.
+
+## MCP tools
+
+`list_windows`, `launch_app {argv, cwd?, wait_seconds?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`.
+
+For example, Claude Code:
+
+```
+claude --mcp-config '{"mcpServers":{"plutonium":{"type":"stdio","command":"node","args":["…/helper/plutonium.ts","mcp"]}}}'
+```
+
+It must run as one of the thread's processes, i.e. with the thread environment.

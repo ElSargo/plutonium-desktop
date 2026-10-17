@@ -1,0 +1,8 @@
+# Local settings
+/plutonium.env
+# Run logs
+/logs/
+# T3 Code checkout (plutonium t3 fetch)
+/frontends/t3code/checkout/
+__pycache__/
+*.pyc

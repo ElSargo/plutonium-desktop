@@ -1,0 +1,1764 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 17 Oct 2026 11:57:29 +1300
+Subject: [PATCH 11/16] Plutonium: native fullscreen for embedded apps and
+ tabs, Super+F, shell shortcuts
+
+EXO-FULLSCREEN: the browser can make a <native-window> or a tab's <embed>
+its document's fullscreen element (Blink's Fullscreen API, so the app or
+page is resized to the screen). Super+F toggles it for the focused embedded
+window or tab; an embedded app's own xdg_toplevel.set_fullscreen and a tab
+page's requestFullscreen() go the same way. The app is told it is
+fullscreen while its element is. No Esc bubble for the shell's elements.
+
+EXO-KEYS: windowBroker.setShellShortcuts() reserves key combinations the
+shell handles itself; they reach the shell page while an embedded window or
+tab has the keyboard.
+
+Parked windows drop their frame and are sized directly (not fitted to the
+work area); <native-window> sizes the window to its content box, ignoring
+object-fit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TNhRAcr4c5t15KWH3mHxTk
+---
+ chrome/browser/BUILD.gn                       |   3 +
+ .../browser/chrome_content_browser_client.cc  |  17 ++
+ .../browser/chrome_content_browser_client.h   |   2 +
+ chrome/browser/exo_embedder.cc                | 101 +++++++++
+ chrome/browser/exo_embedder.h                 |   7 +
+ chrome/browser/exo_parts.cc                   |   3 +
+ chrome/browser/exo_parts.h                    |   6 +
+ chrome/browser/plutonium_keys.cc              | 191 ++++++++++++++++++
+ chrome/browser/plutonium_keys.h               |  53 +++++
+ chrome/browser/plutonium_shell.cc             |   7 +
+ chrome/browser/plutonium_tabs.cc              | 141 ++++++++++++-
+ chrome/browser/plutonium_tabs.h               |  15 ++
+ .../exclusive_access_manager.cc               |  10 +-
+ components/exo/embedded_windows.cc            |  21 ++
+ components/exo/embedded_windows.h             |  16 ++
+ components/exo/keyboard.cc                    |   6 +
+ components/exo/shell_surface.cc               |  10 +-
+ components/exo/shell_surface_base.cc          |  78 ++++++-
+ components/exo/shell_surface_base.h           |  16 ++
+ .../browser/surface_embed_host.cc             |  27 +++
+ .../browser/surface_embed_host.h              |   9 +
+ .../surface_embed/common/surface_embed.mojom  |  10 +
+ .../renderer/surface_embed_web_plugin.cc      |  19 ++
+ .../renderer/surface_embed_web_plugin.h       |   2 +
+ .../browser/web_contents/web_contents_impl.cc |   6 +
+ .../public/browser/content_browser_client.cc  |   5 +
+ .../public/browser/content_browser_client.h   |   6 +
+ .../public/browser/surface_embed_connector.h  |   4 +
+ .../mojom/native_window/native_window.mojom   |   7 +
+ .../mojom/native_window/window_broker.mojom   |   9 +
+ third_party/blink/public/web/web_plugin.h     |   4 +
+ .../blink/public/web/web_plugin_container.h   |   3 +
+ .../exported/web_plugin_container_impl.cc     |   6 +
+ .../core/exported/web_plugin_container_impl.h |   1 +
+ .../renderer/core/fullscreen/fullscreen.cc    |  27 +++
+ .../core/fullscreen/scoped_allow_fullscreen.h |   5 +-
+ .../core/html/html_native_window_element.cc   |  32 +++
+ .../core/html/html_native_window_element.h    |   7 +
+ .../core/html/native_window_broker.cc         |   7 +
+ .../renderer/core/html/native_window_broker.h |   1 +
+ .../core/html/native_window_broker.idl        |   7 +
+ .../core/layout/layout_native_window.cc       |   5 +-
+ 42 files changed, 898 insertions(+), 14 deletions(-)
+ create mode 100644 chrome/browser/plutonium_keys.cc
+ create mode 100644 chrome/browser/plutonium_keys.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index e30a6df5f8..0fed366e96 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -777,6 +777,7 @@ if (is_chromeos) {
+       "exo_embedder.h",
+       "exo_parts.h",
+       "exo_window_broker.h",
++      "plutonium_keys.h",
+       "plutonium_shell.h",
+       "plutonium_tabs.h",
+     ]
+@@ -784,6 +785,7 @@ if (is_chromeos) {
+       "exo_embedder.cc",
+       "exo_parts.cc",
+       "exo_window_broker.cc",
++      "plutonium_keys.cc",
+       "plutonium_shell.cc",
+       "plutonium_tabs.cc",
+     ]
+@@ -816,6 +818,7 @@ if (is_chromeos) {
+       "//ui/aura",
+       "//ui/base/ime",
+       "//ui/compositor",
++      "//ui/events",
+       "//ui/events/blink",
+     ]
+   }
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 53496dab37..c0ae80b6e0 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -512,6 +512,7 @@
+ #include "ash/webui/shortcut_customization_ui/url_constants.h"
+ #include "chrome/app/chrome_crash_reporter_client.h"
+ #include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/ash/arc/fileapi/arc_content_file_system_backend_delegate.h"
+ #include "chrome/browser/ash/arc/fileapi/arc_documents_provider_backend_delegate.h"
+ #include "chrome/browser/ash/drive/fileapi/drivefs_file_system_backend_delegate.h"
+@@ -10003,8 +10004,24 @@ void ChromeContentBrowserClient::UpdateCorsExemptHeaderForPrefetch(
+   glic::UpdateCorsExemptHeaders(params);
+ }
+ 
++bool ChromeContentBrowserClient::IsFullscreenAllowedWithoutUserActivation(
++    content::RenderFrameHost* requesting_frame) {
++  // EXO-FULLSCREEN: the Plutonium shell is the desktop; the browser asks it
++  // to make an element fullscreen on Super+F or for an app (see
++  // plutonium_keys.h). Its page script still needs activation (Blink checks).
++  return plutonium_shell::IsShellDocument(requesting_frame);
++}
++
+ bool ChromeContentBrowserClient::IsFullscreenAllowedForUnfocusedWebContents(
+     content::WebContents* unfocused_web_contents) {
++  // EXO-FULLSCREEN: keyboard focus may be in an embedded window or tab while
++  // the shell's element goes fullscreen, and a tab may be asked to by its
++  // embed.
++  if (plutonium_shell::IsShellDocument(
++          unfocused_web_contents->GetPrimaryMainFrame()) ||
++      PlutoniumTabs::Get()->IsTab(unfocused_web_contents)) {
++    return true;
++  }
+   guest_view::GuestViewBase* guest =
+       guest_view::GuestViewBase::FromWebContents(unfocused_web_contents);
+   if (!guest) {
+diff --git a/chrome/browser/chrome_content_browser_client.h b/chrome/browser/chrome_content_browser_client.h
+index bffda08bf2..eb58ac4d6e 100644
+--- a/chrome/browser/chrome_content_browser_client.h
++++ b/chrome/browser/chrome_content_browser_client.h
+@@ -308,6 +308,8 @@ class ChromeContentBrowserClient : public content::ContentBrowserClient {
+   void WillComputeSiteForNavigation(content::BrowserContext* browser_context,
+                                     const GURL& url) override;
+   bool IsAndroidAdvancedProtectionEnabled() override;
++  bool IsFullscreenAllowedWithoutUserActivation(
++      content::RenderFrameHost* requesting_frame) override;
+   bool IsFullscreenAllowedForUnfocusedWebContents(
+       content::WebContents* unfocused_web_contents) override;
+   bool ShouldEnableStrictSiteIsolation() override;
+diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
+index 70bfe6f0ba..8be5e61028 100644
+--- a/chrome/browser/exo_embedder.cc
++++ b/chrome/browser/exo_embedder.cc
+@@ -7,9 +7,12 @@
+ #include <memory>
+ #include <optional>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/functional/bind.h"
++#include "base/containers/adapters.h"
+ #include "base/logging.h"
++#include "base/no_destructor.h"
+ #include "base/unguessable_token.h"
+ #include "chrome/browser/exo_window_broker.h"
+ #include "chrome/browser/plutonium_shell.h"
+@@ -106,6 +109,14 @@ blink::mojom::NativeWindowInfoPtr ToMojo(
+ // The host only ever acts on the window its grant names, re-checks the grant
+ // before acting, and detaches (and tells the element the window is gone) as
+ // soon as the grant is revoked.
++class NativeWindowHostImpl;
++
++// Every host, newest last (EXO-FULLSCREEN picks among them).
++std::vector<NativeWindowHostImpl*>& Hosts() {
++  static base::NoDestructor<std::vector<NativeWindowHostImpl*>> hosts;
++  return *hosts;
++}
++
+ class NativeWindowHostImpl
+     : public content::DocumentService<blink::mojom::NativeWindowHost>,
+       public exo::EmbeddedWindows::Observer,
+@@ -115,6 +126,7 @@ class NativeWindowHostImpl
+       content::RenderFrameHost& render_frame_host,
+       mojo::PendingReceiver<blink::mojom::NativeWindowHost> receiver)
+       : DocumentService(render_frame_host, std::move(receiver)) {
++    Hosts().push_back(this);
+     exo::EmbeddedWindows::Get()->AddObserver(this);
+     // Outlives every host: ExoEmbedder (and so BindNativeWindowHost) only
+     // exists while the broker does, and DocumentServices go away with their
+@@ -123,6 +135,7 @@ class NativeWindowHostImpl
+   }
+ 
+   ~NativeWindowHostImpl() override {
++    std::erase(Hosts(), this);
+     DoDetach();
+     if (ExoWindowBroker* broker = ExoWindowBroker::Get()) {
+       broker->RemoveObserver(this);
+@@ -187,6 +200,11 @@ class NativeWindowHostImpl
+     std::move(callback).Run(true);
+     focused_ = info->focused;
+     client_->OnInfoChanged(ToMojo(window_id_, *info));
++    // EXO-FULLSCREEN: the app wants fullscreen (e.g. a game that started
++    // fullscreen): shown means shown fullscreen.
++    if (windows->IsFullscreenRequested(window_id_)) {
++      client_->SetFullscreen(true);
++    }
+   }
+ 
+   void Detach() override { DoDetach(); }
+@@ -220,6 +238,25 @@ class NativeWindowHostImpl
+     }
+   }
+ 
++  void OnFullscreenChanged(bool fullscreen) override {
++    if (!HasValidGrant() || fullscreen == fullscreen_) {
++      return;
++    }
++    VLOG(1) << "EXO-FULLSCREEN window #" << window_id_ << "'s element "
++            << (fullscreen ? "entered" : "left") << " fullscreen";
++    fullscreen_ = fullscreen;
++    exo::EmbeddedWindows::Get()->SetFullscreen(window_id_, fullscreen);
++  }
++
++  // EXO-FULLSCREEN: asks the element to enter or leave fullscreen.
++  void SetElementFullscreen(bool fullscreen) {
++    if (client_ && HasValidGrant()) {
++      client_->SetFullscreen(fullscreen);
++    }
++  }
++  int32_t window_id() const { return window_id_; }
++  bool fullscreen() const { return fullscreen_; }
++
+   // exo::EmbeddedWindows::Observer:
+   void OnEmbeddedWindowChanged(int32_t window_id) override {
+     if (window_id != window_id_ || !client_) {
+@@ -235,6 +272,31 @@ class NativeWindowHostImpl
+     }
+   }
+ 
++  void OnEmbeddedWindowFullscreenRequested(int32_t window_id,
++                                           bool fullscreen) override {
++    // One element acts: the fullscreen one, else the newest showing it.
++    if (window_id != window_id_ || !client_) {
++      return;
++    }
++    for (NativeWindowHostImpl* host : base::Reversed(Hosts())) {
++      if (host->window_id() == window_id && host->fullscreen() &&
++          host != this) {
++        return;
++      }
++    }
++    if (!fullscreen_) {
++      for (NativeWindowHostImpl* host : base::Reversed(Hosts())) {
++        if (host->window_id() == window_id) {
++          if (host != this) {
++            return;
++          }
++          break;
++        }
++      }
++    }
++    SetElementFullscreen(fullscreen);
++  }
++
+   // The broker revokes the window's grants when it is destroyed, which
+   // closes this host through OnGrantRevoked(). Both the broker and this host
+   // observe exo::EmbeddedWindows, in no particular order, so handle the
+@@ -303,6 +365,10 @@ class NativeWindowHostImpl
+     if (!window_id_) {
+       return;
+     }
++    if (fullscreen_) {
++      fullscreen_ = false;
++      exo::EmbeddedWindows::Get()->SetFullscreen(window_id_, false);
++    }
+     exo::EmbeddedWindows::Get()->Detach(window_id_);
+     if (ExoEmbedder* embedder = ExoEmbedder::Get()) {
+       embedder->UnlinkFrameSinks(parent_frame_sink_id_, frame_sink_id_);
+@@ -318,6 +384,9 @@ class NativeWindowHostImpl
+   base::UnguessableToken grant_;
+   int32_t window_id_ = 0;
+   bool focused_ = false;
++  // EXO-FULLSCREEN: whether the element is its document's fullscreen
++  // element.
++  bool fullscreen_ = false;
+   viz::FrameSinkId parent_frame_sink_id_;
+   viz::FrameSinkId frame_sink_id_;
+   mojo::Remote<blink::mojom::NativeWindowClient> client_;
+@@ -361,6 +430,38 @@ void ExoEmbedder::BindNativeWindowHost(
+   new NativeWindowHostImpl(*render_frame_host, std::move(receiver));
+ }
+ 
++bool ExoEmbedder::ToggleFullscreen(int32_t window_id) {
++  NativeWindowHostImpl* target = nullptr;
++  for (NativeWindowHostImpl* host : base::Reversed(Hosts())) {
++    if (host->window_id() != window_id) {
++      continue;
++    }
++    if (host->fullscreen()) {
++      host->SetElementFullscreen(false);
++      return true;
++    }
++    if (!target) {
++      target = host;
++    }
++  }
++  if (!target) {
++    return false;
++  }
++  target->SetElementFullscreen(true);
++  return true;
++}
++
++bool ExoEmbedder::ExitFullscreen() {
++  bool any = false;
++  for (NativeWindowHostImpl* host : Hosts()) {
++    if (host->fullscreen()) {
++      host->SetElementFullscreen(false);
++      any = true;
++    }
++  }
++  return any;
++}
++
+ bool ExoEmbedder::LinkFrameSinks(const viz::FrameSinkId& parent,
+                                  const viz::FrameSinkId& child) {
+   auto link = std::make_pair(parent, child);
+diff --git a/chrome/browser/exo_embedder.h b/chrome/browser/exo_embedder.h
+index 73af2c439a..246348d24f 100644
+--- a/chrome/browser/exo_embedder.h
++++ b/chrome/browser/exo_embedder.h
+@@ -41,6 +41,13 @@ class ExoEmbedder : public input::ForeignFrameSinkDelegate {
+       content::RenderFrameHost* render_frame_host,
+       mojo::PendingReceiver<blink::mojom::NativeWindowHost> receiver);
+ 
++  // EXO-FULLSCREEN: toggles fullscreen for the element showing |window_id|
++  // (see plutonium_keys.h). False if no element shows it.
++  bool ToggleFullscreen(int32_t window_id);
++  // Takes every element showing a window out of fullscreen; false if none
++  // was fullscreen.
++  bool ExitFullscreen();
++
+   // Counted: viz needs each parent/child link registered once.
+   bool LinkFrameSinks(const viz::FrameSinkId& parent,
+                       const viz::FrameSinkId& child);
+diff --git a/chrome/browser/exo_parts.cc b/chrome/browser/exo_parts.cc
+index c0c480d473..25e2c1bf60 100644
+--- a/chrome/browser/exo_parts.cc
++++ b/chrome/browser/exo_parts.cc
+@@ -15,6 +15,7 @@
+ #include "chrome/browser/ash/exo/chrome_security_delegate.h"
+ #include "chrome/browser/exo_embedder.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_keys.h"
+ #include "chromeos/ash/experiences/arc/keyboard/arc_input_method_surface_manager.h"
+ #include "chromeos/ash/experiences/arc/message_center/arc_notification_surface_manager_impl.h"
+ #include "chromeos/ash/experiences/arc/overlay/arc_overlay_manager.h"
+@@ -32,6 +33,7 @@ std::unique_ptr<ExoParts> ExoParts::CreateIfNecessary() {
+ }
+ 
+ ExoParts::~ExoParts() {
++  keys_.reset();
+   embedder_.reset();
+   window_broker_.reset();
+   ash::Shell::Get()->UntrackTrackInputMethodBounds(
+@@ -51,4 +53,5 @@ ExoParts::ExoParts()
+       ash::ArcInputMethodBoundsTracker::Get());
+   window_broker_ = std::make_unique<ExoWindowBroker>();
+   embedder_ = std::make_unique<ExoEmbedder>();
++  keys_ = plutonium_keys::Install();
+ }
+diff --git a/chrome/browser/exo_parts.h b/chrome/browser/exo_parts.h
+index 57004c1bb0..02bda366f1 100644
+--- a/chrome/browser/exo_parts.h
++++ b/chrome/browser/exo_parts.h
+@@ -18,6 +18,10 @@ namespace exo {
+ class WaylandServerController;
+ }
+ 
++namespace plutonium_keys {
++class Handler;
++}
++
+ class ExoParts {
+  public:
+   // Creates ExoParts. Returns null if exo should not be created.
+@@ -37,6 +41,8 @@ class ExoParts {
+   std::unique_ptr<ExoWindowBroker> window_broker_;
+   // EXO-EMBED: <native-window> support.
+   std::unique_ptr<ExoEmbedder> embedder_;
++  // EXO-KEYS: Super+F and the shell's shortcuts.
++  std::unique_ptr<plutonium_keys::Handler> keys_;
+ };
+ 
+ #endif  // CHROME_BROWSER_EXO_PARTS_H_
+diff --git a/chrome/browser/plutonium_keys.cc b/chrome/browser/plutonium_keys.cc
+new file mode 100644
+index 0000000000..8d501c45b5
+--- /dev/null
++++ b/chrome/browser/plutonium_keys.cc
+@@ -0,0 +1,191 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_keys.h"
++
++#include <set>
++#include <utility>
++
++#include "ash/shell.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_split.h"
++#include "chrome/browser/exo_embedder.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/exo/embedded_windows.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "ui/events/event.h"
++#include "ui/events/event_handler.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++
++namespace plutonium_keys {
++
++namespace {
++
++// The modifiers shortcuts are made of, as ui::EventFlags.
++constexpr int kModifiers = ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN |
++                           ui::EF_SHIFT_DOWN | ui::EF_COMMAND_DOWN;
++
++struct Shortcut {
++  ui::DomCode code;
++  int modifiers;
++  auto operator<=>(const Shortcut&) const = default;
++};
++
++std::set<Shortcut>& ShellShortcuts() {
++  static base::NoDestructor<std::set<Shortcut>> shortcuts;
++  return *shortcuts;
++}
++
++std::optional<Shortcut> ParseShortcut(const std::string& text) {
++  std::vector<std::string> parts = base::SplitString(
++      text, "+", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  if (parts.empty()) {
++    return std::nullopt;
++  }
++  Shortcut shortcut{ui::DomCode::NONE, 0};
++  for (size_t i = 0; i + 1 < parts.size(); ++i) {
++    const std::string& part = parts[i];
++    if (part == "Ctrl" || part == "Control") {
++      shortcut.modifiers |= ui::EF_CONTROL_DOWN;
++    } else if (part == "Alt") {
++      shortcut.modifiers |= ui::EF_ALT_DOWN;
++    } else if (part == "Shift") {
++      shortcut.modifiers |= ui::EF_SHIFT_DOWN;
++    } else if (part == "Super" || part == "Meta") {
++      shortcut.modifiers |= ui::EF_COMMAND_DOWN;
++    } else {
++      return std::nullopt;
++    }
++  }
++  shortcut.code = ui::KeycodeConverter::CodeStringToDomCode(parts.back());
++  if (shortcut.code == ui::DomCode::NONE) {
++    return std::nullopt;
++  }
++  return shortcut;
++}
++
++bool IsShellShortcut(ui::DomCode code, int flags) {
++  return ShellShortcuts().contains(Shortcut{code, flags & kModifiers});
++}
++
++bool IsToggleFullscreen(const ui::KeyEvent& event) {
++  return event.key_code() == ui::VKEY_F &&
++         (event.flags() & kModifiers) == ui::EF_COMMAND_DOWN;
++}
++
++class HandlerImpl : public Handler, public ui::EventHandler {
++ public:
++  HandlerImpl() {
++    ash::Shell::Get()->AddPreTargetHandler(this,
++                                           ui::EventTarget::Priority::kSystem);
++  }
++  ~HandlerImpl() override {
++    if (ash::Shell::HasInstance()) {
++      ash::Shell::Get()->RemovePreTargetHandler(this);
++    }
++  }
++
++  // ui::EventHandler:
++  void OnKeyEvent(ui::KeyEvent* event) override {
++    const ui::DomCode code = event->code();
++    const bool pressed = event->type() == ui::EventType::kKeyPressed;
++    if (!pressed) {
++      // A release goes where its press went.
++      if (consumed_.erase(code)) {
++        event->StopPropagation();
++      } else if (to_shell_.erase(code)) {
++        MarkForShell(event);
++      }
++      return;
++    }
++    if (IsToggleFullscreen(*event)) {
++      consumed_.insert(code);
++      event->StopPropagation();
++      if (!event->is_repeat()) {
++        ToggleFullscreen();
++      }
++      return;
++    }
++    // Keys for an embedded window: its keyboard sends them to the app
++    // unless they are the shell's. (Keys for a tab go through
++    // PlutoniumTabs.)
++    if (exo::EmbeddedWindows::Get()->focused_window_id() &&
++        IsShellShortcut(code, event->flags())) {
++      to_shell_.insert(code);
++      MarkForShell(event);
++    }
++  }
++
++ private:
++  static void MarkForShell(ui::KeyEvent* event) {
++    ui::Event::Properties properties =
++        event->properties() ? *event->properties() : ui::Event::Properties();
++    properties.emplace(exo::kShellKeyEventKey, std::vector<uint8_t>());
++    event->SetProperties(properties);
++  }
++
++  // Keys whose press was taken here, or sent to the shell.
++  std::set<ui::DomCode> consumed_;
++  std::set<ui::DomCode> to_shell_;
++};
++
++}  // namespace
++
++std::unique_ptr<Handler> Install() {
++  return std::make_unique<HandlerImpl>();
++}
++
++void SetShellShortcuts(const std::vector<std::string>& shortcuts) {
++  std::set<Shortcut>& set = ShellShortcuts();
++  set.clear();
++  for (const std::string& text : shortcuts) {
++    if (std::optional<Shortcut> shortcut = ParseShortcut(text)) {
++      set.insert(*shortcut);
++    } else {
++      VLOG(1) << "EXO-KEYS ignoring shell shortcut \"" << text << "\"";
++    }
++  }
++  VLOG(1) << "EXO-KEYS the shell handles " << set.size() << " shortcuts";
++}
++
++bool IsShellShortcut(const input::NativeWebKeyboardEvent& event) {
++  int flags = 0;
++  const int modifiers = event.GetModifiers();
++  if (modifiers & blink::WebInputEvent::kControlKey) {
++    flags |= ui::EF_CONTROL_DOWN;
++  }
++  if (modifiers & blink::WebInputEvent::kAltKey) {
++    flags |= ui::EF_ALT_DOWN;
++  }
++  if (modifiers & blink::WebInputEvent::kShiftKey) {
++    flags |= ui::EF_SHIFT_DOWN;
++  }
++  if (modifiers & blink::WebInputEvent::kMetaKey) {
++    flags |= ui::EF_COMMAND_DOWN;
++  }
++  return IsShellShortcut(static_cast<ui::DomCode>(event.dom_code), flags);
++}
++
++void ToggleFullscreen() {
++  ExoEmbedder* embedder = ExoEmbedder::Get();
++  if (int32_t window_id = exo::EmbeddedWindows::Get()->focused_window_id();
++      window_id && embedder && embedder->ToggleFullscreen(window_id)) {
++    VLOG(1) << "EXO-FULLSCREEN toggled window #" << window_id;
++    return;
++  }
++  if (PlutoniumTabs::Get()->ToggleFocusedTabFullscreen()) {
++    return;
++  }
++  // Neither has focus (e.g. the shell page has): only leaving fullscreen
++  // makes sense.
++  if (!(embedder && embedder->ExitFullscreen())) {
++    PlutoniumTabs::Get()->ExitFullscreen();
++  }
++}
++
++}  // namespace plutonium_keys
+diff --git a/chrome/browser/plutonium_keys.h b/chrome/browser/plutonium_keys.h
+new file mode 100644
+index 0000000000..5a2521ec42
+--- /dev/null
++++ b/chrome/browser/plutonium_keys.h
+@@ -0,0 +1,53 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_KEYS_H_
++#define CHROME_BROWSER_PLUTONIUM_KEYS_H_
++
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace input {
++struct NativeWebKeyboardEvent;
++}
++
++// EXO-KEYS: keys the Plutonium browser handles, whatever has keyboard focus
++// (the shell page, an embedded window or a tab).
++//
++//   Super+F  toggles fullscreen for the focused embedded window or tab
++//            (EXO-FULLSCREEN): the element showing it becomes the shell
++//            document's fullscreen element, so the app or page is resized
++//            to the whole screen. With neither focused, it leaves
++//            fullscreen if an element is fullscreen.
++//
++// And the shell's own shortcuts (WindowBroker.SetShellShortcuts): while an
++// embedded window or a tab has keyboard focus, a matching key press goes to
++// the shell page as an ordinary key event instead of the app or page. For
++// windows that happens in the handler installed here (the keyboard then
++// leaves the event to the page, see exo::kShellKeyEventKey); for tabs, in
++// the tab's WebContentsDelegate (PlutoniumTabs), which gets their keys
++// first.
++namespace plutonium_keys {
++
++// Installs the key handler on Ash's shell (ExoParts owns the result).
++class Handler {
++ public:
++  virtual ~Handler() = default;
++};
++std::unique_ptr<Handler> Install();
++
++// Replaces the shell's shortcuts. Each is "[Ctrl+][Alt+][Shift+][Super+]
++// <code>", <code> a KeyboardEvent.code value; invalid entries are dropped.
++void SetShellShortcuts(const std::vector<std::string>& shortcuts);
++
++// Whether |event| (a key press or release) is one of the shell's shortcuts.
++bool IsShellShortcut(const input::NativeWebKeyboardEvent& event);
++
++// What Super+F does.
++void ToggleFullscreen();
++
++}  // namespace plutonium_keys
++
++#endif  // CHROME_BROWSER_PLUTONIUM_KEYS_H_
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index d7dbdd0651..c418d02382 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -16,6 +16,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ #include "content/public/browser/document_service.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -351,6 +352,12 @@ class WindowBrokerImpl
+                                               std::move(callback));
+   }
+ 
++  void SetShellShortcuts(const std::vector<std::string>& shortcuts) override {
++    if (StillShell()) {
++      plutonium_keys::SetShellShortcuts(shortcuts);
++    }
++  }
++
+   // PlutoniumTabs::Observer:
+   void OnTabAdded(const PlutoniumTabs::TabInfo& tab) override {
+     if (!StillShell()) {
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index c2db1f45d9..b890839bb7 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -24,7 +24,14 @@
+ #include "base/json/json_writer.h"
+ #include "base/values.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/plutonium_keys.h"
++#include "components/input/native_web_keyboard_event.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
++#include "components/surface_embed/browser/surface_embed_host.h"
++#include "content/public/browser/keyboard_event_processing_result.h"
++#include "content/public/browser/render_frame_host.h"
++#include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
++#include "ui/events/keycodes/keyboard_codes.h"
+ #include "components/viz/common/frame_sinks/copy_output_result.h"
+ #include "components/viz/host/client_frame_sink_video_capturer.h"
+ #include "components/url_formatter/url_fixer.h"
+@@ -449,6 +456,87 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     return false;
+   }
+ 
++  // EXO-KEYS: the shell's shortcuts go to the shell page, and Escape leaves
++  // the page's own fullscreen, as in a browser window.
++  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override {
++    if (plutonium_keys::IsShellShortcut(event)) {
++      if (content::WebContents* shell = tabs_->shell()) {
++        if (content::RenderWidgetHost* widget =
++                shell->GetPrimaryMainFrame()->GetRenderWidgetHost()) {
++          widget->ForwardKeyboardEvent(event);
++          return content::KeyboardEventProcessingResult::HANDLED;
++        }
++      }
++    }
++    if (page_fullscreen_ &&
++        event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
++        event.windows_key_code == ui::VKEY_ESCAPE) {
++      contents_->ExitFullscreen(/*will_cause_resize=*/true);
++      return content::KeyboardEventProcessingResult::HANDLED;
++    }
++    return content::KeyboardEventProcessingResult::NOT_HANDLED;
++  }
++
++  // EXO-FULLSCREEN: the page's own fullscreen (e.g. a video's) makes the
++  // <embed> fullscreen, so the page gets the whole screen.
++  bool CanEnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame) override {
++    return !!contents_->GetSurfaceEmbedConnector();
++  }
++
++  void EnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame,
++      const blink::mojom::FullscreenOptions& options) override {
++    page_fullscreen_ = true;
++    if (!embed_fullscreen_) {
++      embed_fullscreen_for_page_ = true;
++      SetEmbedFullscreen(true);
++    }
++  }
++
++  void ExitFullscreenModeForTab(content::WebContents* source) override {
++    page_fullscreen_ = false;
++    if (embed_fullscreen_for_page_) {
++      embed_fullscreen_for_page_ = false;
++      SetEmbedFullscreen(false);
++    }
++  }
++
++  bool IsFullscreenForTabOrPending(
++      const content::WebContents* source) override {
++    return page_fullscreen_;
++  }
++
++  // Asks the <embed> showing the tab to enter or leave fullscreen; false if
++  // no <embed> shows it.
++  bool SetEmbedFullscreen(bool fullscreen) {
++    content::SurfaceEmbedConnector* connector =
++        contents_->GetSurfaceEmbedConnector();
++    if (!connector || !connector->GetDelegate()) {
++      return false;
++    }
++    connector->GetDelegate()->SetEmbedElementFullscreen(fullscreen);
++    return true;
++  }
++
++  bool embed_fullscreen() const { return embed_fullscreen_; }
++
++  void OnEmbedFullscreenChanged(bool fullscreen) {
++    VLOG(1) << "EXO-FULLSCREEN tab #" << info_.id << "'s <embed> "
++            << (fullscreen ? "entered" : "left") << " fullscreen";
++    embed_fullscreen_ = fullscreen;
++    if (!fullscreen) {
++      embed_fullscreen_for_page_ = false;
++      // Leaving the <embed>'s fullscreen (Super+F, the shell) ends the
++      // page's too.
++      if (page_fullscreen_) {
++        contents_->ExitFullscreen(/*will_cause_resize=*/true);
++      }
++    }
++  }
++
+   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+       content::WebContents* source) override {
+     return this;
+@@ -587,6 +675,12 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   std::u16string dialog_message_;
+   std::u16string dialog_default_prompt_;
+   DialogClosedCallback dialog_callback_;
++  // EXO-FULLSCREEN: whether the <embed> showing the tab is fullscreen,
++  // whether the page asked to be, and whether the <embed> went fullscreen
++  // for the page (so leaves it with the page).
++  bool embed_fullscreen_ = false;
++  bool page_fullscreen_ = false;
++  bool embed_fullscreen_for_page_ = false;
+   // Destroyed before |contents_|.
+   std::unique_ptr<TabDevTools> devtools_;
+   base::WeakPtrFactory<Tab> weak_factory_{this};
+@@ -620,7 +714,11 @@ PlutoniumTabs::TabInfo& PlutoniumTabs::TabInfo::operator=(const TabInfo&) =
+ PlutoniumTabs::TabInfo::~TabInfo() = default;
+ bool PlutoniumTabs::TabInfo::operator==(const TabInfo&) const = default;
+ 
+-PlutoniumTabs::PlutoniumTabs() = default;
++PlutoniumTabs::PlutoniumTabs() {
++  surface_embed::SurfaceEmbedHost::SetFullscreenChangedCallback(
++      base::BindRepeating(&PlutoniumTabs::OnEmbedFullscreenChanged,
++                          base::Unretained(this)));
++}
+ PlutoniumTabs::~PlutoniumTabs() = default;
+ 
+ // static
+@@ -876,6 +974,47 @@ aura::Window* PlutoniumTabs::parking() const {
+   return parking_.windows().empty() ? nullptr : parking_.windows().front();
+ }
+ 
++bool PlutoniumTabs::ToggleFocusedTabFullscreen() {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->info().focused) {
++      VLOG(1) << "EXO-FULLSCREEN toggling tab #" << id;
++      return tab->SetEmbedFullscreen(!tab->embed_fullscreen());
++    }
++  }
++  return false;
++}
++
++bool PlutoniumTabs::ExitFullscreen() {
++  bool any = false;
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->embed_fullscreen()) {
++      any |= tab->SetEmbedFullscreen(false);
++    }
++  }
++  return any;
++}
++
++content::WebContents* PlutoniumTabs::shell() const {
++  return shell_observer_ ? shell_observer_->web_contents() : nullptr;
++}
++
++void PlutoniumTabs::OnEmbedFullscreenChanged(content::WebContents* contents,
++                                             bool fullscreen) {
++  if (Tab* tab = FindTab(contents)) {
++    tab->OnEmbedFullscreenChanged(fullscreen);
++  }
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::FindTab(
++    const content::WebContents* contents) const {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->contents() == contents) {
++      return tab.get();
++    }
++  }
++  return nullptr;
++}
++
+ PlutoniumTabs::Tab* PlutoniumTabs::FindTab(int32_t tab_id) const {
+   auto it = tabs_.find(tab_id);
+   return it == tabs_.end() ? nullptr : it->second.get();
+diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
+index 42e8f58845..dfd9609357 100644
+--- a/chrome/browser/plutonium_tabs.h
++++ b/chrome/browser/plutonium_tabs.h
+@@ -129,6 +129,16 @@ class PlutoniumTabs : public ProfileObserver {
+   void Snapshot(int32_t tab_id,
+                 base::OnceCallback<void(const SkBitmap&)> callback);
+ 
++  // EXO-FULLSCREEN: toggles fullscreen for the <embed> showing the focused
++  // tab (see plutonium_keys.h). False if no shown tab has focus.
++  bool ToggleFocusedTabFullscreen();
++  // Takes every tab's <embed> out of fullscreen; false if none was.
++  bool ExitFullscreen();
++
++  // The shell page tabs were last created from (where EXO-KEYS sends the
++  // shell's shortcuts), or null.
++  content::WebContents* shell() const;
++
+   // ProfileObserver:
+   void OnProfileWillBeDestroyed(Profile* profile) override;
+ 
+@@ -151,6 +161,11 @@ class PlutoniumTabs : public ProfileObserver {
+   void TabChanged(Tab* tab);
+   void RefreshAll();
+   Tab* FindTab(int32_t tab_id) const;
++  Tab* FindTab(const content::WebContents* contents) const;
++  // EXO-FULLSCREEN: an <embed> showing |contents| entered or left
++  // fullscreen.
++  void OnEmbedFullscreenChanged(content::WebContents* contents,
++                                bool fullscreen);
+ 
+   // Where tabs that no <embed> shows keep their (hidden) view: the shell's
+   // top-level window. A view outside any window tree has no compositor, so
+diff --git a/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc b/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
+index 7bcd2160c9..c9c7894528 100644
+--- a/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
++++ b/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
+@@ -146,9 +146,15 @@ ExclusiveAccessManager::GetExclusiveAccessExitBubbleType() const {
+ void ExclusiveAccessManager::UpdateBubble(
+     ExclusiveAccessBubbleHideCallback first_hide_callback,
+     bool force_update) {
++  // EXO-FULLSCREEN: the Plutonium shell's elements (apps, tabs) leave
++  // fullscreen with Super+F; Escape belongs to the app or page.
++  const url::Origin origin = GetExclusiveAccessBubbleOrigin();
++  const std::optional<url::Origin>& shell = plutonium_shell::GetShellOrigin();
++  const bool shell_fullscreen = shell && origin == *shell;
+   exclusive_access_context_->UpdateExclusiveAccessBubble(
+-      {.origin = GetExclusiveAccessBubbleOrigin(),
+-       .type = GetExclusiveAccessExitBubbleType(),
++      {.origin = origin,
++       .type = shell_fullscreen ? EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE
++                                : GetExclusiveAccessExitBubbleType(),
+        .force_update = force_update},
+       std::move(first_hide_callback));
+ }
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index 406adc5490..6bf4651a37 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -437,6 +437,27 @@ void EmbeddedWindows::OnToplevelDestroying(ShellSurfaceBase* shell_surface) {
+   }
+ }
+ 
++void EmbeddedWindows::OnToplevelFullscreenRequested(
++    ShellSurfaceBase* shell_surface,
++    bool fullscreen) {
++  if (int32_t window_id = FindWindowId(shell_surface)) {
++    for (Observer& observer : observers_) {
++      observer.OnEmbeddedWindowFullscreenRequested(window_id, fullscreen);
++    }
++  }
++}
++
++void EmbeddedWindows::SetFullscreen(int32_t window_id, bool fullscreen) {
++  if (ShellSurfaceBase* shell_surface = FindShellSurface(window_id)) {
++    shell_surface->SetEmbedFullscreen(fullscreen);
++  }
++}
++
++bool EmbeddedWindows::IsFullscreenRequested(int32_t window_id) const {
++  ShellSurfaceBase* shell_surface = FindShellSurface(window_id);
++  return shell_surface && shell_surface->embed_fullscreen_requested();
++}
++
+ void EmbeddedWindows::AddSeat(Seat* seat) {
+   seats_.push_back(seat);
+ }
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index d7dc441553..4359101386 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -38,6 +38,10 @@ class Surface;
+ // window, and additionally on the synthetic exit sent when the pointer leaves.
+ inline constexpr char kEmbeddedEventKey[] = "exo-embedded";
+ inline constexpr char kEmbeddedLeaveEventKey[] = "exo-embedded-leave";
++// EXO-KEYS: event property set on key events for an embedded window's page
++// that the page handles itself (shell shortcuts): the keyboard leaves them
++// to the page instead of sending them to the app.
++inline constexpr char kShellKeyEventKey[] = "exo-shell-key";
+ 
+ // EXO-BROKER: keep windows off the desktop (parked) unless a page element
+ // shows them or ShowOnDesktop() popped them out.
+@@ -85,6 +89,10 @@ class EmbeddedWindows : public aura::WindowObserver {
+     // embeddable (it has a surface).
+     virtual void OnEmbeddedWindowChanged(int32_t window_id) {}
+     virtual void OnEmbeddedWindowDestroyed(int32_t window_id) {}
++    // EXO-FULLSCREEN: the app asked to enter or leave fullscreen while its
++    // window is parked (its elements decide).
++    virtual void OnEmbeddedWindowFullscreenRequested(int32_t window_id,
++                                                     bool fullscreen) {}
+   };
+ 
+   // Receives the app's cursor while the pointer is over its embedded surface.
+@@ -119,6 +127,12 @@ class EmbeddedWindows : public aura::WindowObserver {
+   static bool HideWindows();
+   // Asks the app to resize its window geometry to |size| (DIPs).
+   void SetSize(int32_t window_id, const gfx::Size& size);
++  // EXO-FULLSCREEN: whether an element showing the window is fullscreen;
++  // the app is told it is fullscreen while one is.
++  void SetFullscreen(int32_t window_id, bool fullscreen);
++  // Whether the app wants to be fullscreen (asked while parked, or was
++  // fullscreen when parked).
++  bool IsFullscreenRequested(int32_t window_id) const;
+ 
+   // EXO-BRIDGE: asks the app to close the window, as the window's close
+   // button would (xdg_toplevel.close). The app may refuse or ask first.
+@@ -156,6 +170,8 @@ class EmbeddedWindows : public aura::WindowObserver {
+   void OnToplevelCreated(ShellSurfaceBase* shell_surface);
+   void OnToplevelChanged(ShellSurfaceBase* shell_surface);
+   void OnToplevelDestroying(ShellSurfaceBase* shell_surface);
++  void OnToplevelFullscreenRequested(ShellSurfaceBase* shell_surface,
++                                     bool fullscreen);
+   void AddSeat(Seat* seat);
+   void RemoveSeat(Seat* seat);
+   // Called by Pointer when the app sets a cursor while |surface| has embedded
+diff --git a/components/exo/keyboard.cc b/components/exo/keyboard.cc
+index b595f27160..4986124149 100644
+--- a/components/exo/keyboard.cc
++++ b/components/exo/keyboard.cc
+@@ -31,6 +31,7 @@
+ #include "components/exo/keyboard_modifiers.h"
+ #include "components/exo/seat.h"
+ #include "components/exo/shell_surface.h"
++#include "components/exo/embedded_windows.h"
+ #include "components/exo/shell_surface_util.h"
+ #include "components/exo/surface.h"
+ #include "components/exo/xkb_tracker.h"
+@@ -239,6 +240,11 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+   DCHECK(embedded_owner_ ||
+          GetShellRootSurface(static_cast<aura::Window*>(event->target())) ||
+          Surface::AsSurface(static_cast<aura::Window*>(event->target())));
++  // EXO-KEYS: a shell shortcut goes on to the page embedding the window.
++  if (embedded_owner_ && event->properties() &&
++      event->properties()->contains(kShellKeyEventKey)) {
++    return;
++  }
+   // EXO-EMBED: keys for an embedded window go only to the app, not also to
+   // the page whose view they were aimed at.
+   absl::Cleanup stop_embedded_propagation = [this, event] {
+diff --git a/components/exo/shell_surface.cc b/components/exo/shell_surface.cc
+index 9516d95c41..a363d6bed5 100644
+--- a/components/exo/shell_surface.cc
++++ b/components/exo/shell_surface.cc
+@@ -313,6 +313,12 @@ void ShellSurface::SetFullscreen(bool fullscreen, int64_t display_id) {
+     return;
+   }
+ 
++  // EXO-FULLSCREEN: a parked window's fullscreen is its element's.
++  if (embed_parked()) {
++    RequestEmbedFullscreen(fullscreen);
++    return;
++  }
++
+   // Note: This will ask client to configure its surface even if fullscreen
+   // state doesn't change.
+   ScopedConfigure scoped_configure(this, true);
+@@ -1050,7 +1056,9 @@ void ShellSurface::Configure(bool ends_drag) {
+       auto restore_state_type = std::optional<chromeos::WindowStateType>{
+           window_state->GetRestoreWindowState()};
+       serial = configure_callback_.Run(
+-          GetClientBoundsInScreen(widget_), window_state->GetStateType(),
++          GetClientBoundsInScreen(widget_),
++          embed_fullscreen() ? chromeos::WindowStateType::kFullscreen
++                             : window_state->GetStateType(),
+           IsResizing(), widget_->IsActive() || embed_focused(), origin_offset,
+           /*raster_scale=*/1.0, occlusion_state, restore_state_type);
+     } else {
+diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
+index 06453b9285..9ecd622a9e 100644
+--- a/components/exo/shell_surface_base.cc
++++ b/components/exo/shell_surface_base.cc
+@@ -1228,6 +1228,13 @@ bool ShellSurfaceBase::IsInputEnabled(Surface*) const {
+ }
+ 
+ void ShellSurfaceBase::OnSetFrame(SurfaceFrameType frame_type) {
++  // EXO-EMBED: a parked window has no frame (the page frames it, and a
++  // caption would take its height from the element); the client's choice
++  // applies once it is back on the desktop.
++  if (embed_parked_ && frame_type != SurfaceFrameType::NONE) {
++    embed_saved_frame_type_ = frame_type;
++    return;
++  }
+   if (!IsFrameDecorationSupported(frame_type)) {
+     DLOG(WARNING)
+         << "popup does not support frame decoration other than NONE/SHADOW.";
+@@ -2665,12 +2672,27 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     }
+     SetCanActivate(false);
+     auto* window_state = ash::WindowState::Get(window);
++    // EXO-FULLSCREEN: a fullscreen window goes on asking for it; its element
++    // is made fullscreen once it shows the window.
++    if (window_state && window_state->IsFullscreen()) {
++      embed_fullscreen_requested_ = true;
++    }
+     if (window_state && (window_state->IsMaximizedOrFullscreenOrPinned() ||
+                          window_state->IsSnapped() ||
+                          window_state->IsMinimized())) {
+       window_state->Restore();
+     }
++    // The page places and sizes a parked window (its element may fill the
++    // screen): Ash must not fit it to the work area.
++    if (window_state) {
++      embed_saved_bounds_direct_ = window_state->allow_set_bounds_direct();
++      window_state->set_allow_set_bounds_direct(true);
++    }
+     embed_saved_origin_ = widget_->GetWindowBoundsInScreen().origin();
++    embed_saved_frame_type_ = frame_type_;
++    if (frame_type_ != SurfaceFrameType::NONE) {
++      OnSetFrame(SurfaceFrameType::NONE);
++    }
+     // Popups go into their parent's container, so park above normal windows
+     // for them to show above the page.
+     embed_saved_z_order_ = widget_->GetZOrderLevel();
+@@ -2690,13 +2712,46 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     window->layer()->SetOpacity(1.f);
+     window->SetEventTargetingPolicy(
+         aura::EventTargetingPolicy::kTargetAndDescendants);
++    if (auto* window_state = ash::WindowState::Get(window)) {
++      window_state->set_allow_set_bounds_direct(embed_saved_bounds_direct_);
++    }
++    if (embed_saved_frame_type_ != frame_type_) {
++      OnSetFrame(embed_saved_frame_type_);
++    }
+     widget_->SetZOrderLevel(embed_saved_z_order_);
+     SetCanActivate(embed_saved_can_activate_);
+     widget_->SetBounds(bounds);
+     UpdateEmbedCoversDisplay(gfx::Size());
+     UpdateHostWindowOpaqueRegion();
+     UpdateShadow();
++    embed_fullscreen_ = false;
++    // EXO-FULLSCREEN: on the desktop, a window that wants fullscreen gets
++    // the real thing.
++    if (embed_fullscreen_requested_) {
++      embed_fullscreen_requested_ = false;
++      widget_->SetFullscreen(true);
++    }
++  }
++  OnEmbedStateChanged();
++}
++
++void ShellSurfaceBase::SetEmbedFullscreen(bool fullscreen) {
++  // The element's state is the latest word on what the user wants.
++  embed_fullscreen_requested_ = fullscreen;
++  if (embed_fullscreen_ == fullscreen) {
++    return;
+   }
++  embed_fullscreen_ = fullscreen;
++  if (embed_parked_) {
++    OnEmbedStateChanged();
++  }
++}
++
++void ShellSurfaceBase::RequestEmbedFullscreen(bool fullscreen) {
++  embed_fullscreen_requested_ = fullscreen;
++  EmbeddedWindows::Get()->OnToplevelFullscreenRequested(this, fullscreen);
++  // Answer the request with the state as it is now; the element's change,
++  // if any, follows with another configure.
+   OnEmbedStateChanged();
+ }
+ 
+@@ -2713,15 +2768,22 @@ void ShellSurfaceBase::SetEmbedSize(const gfx::Size& size) {
+     return;
+   }
+   UpdateEmbedCoversDisplay(size);
+-  gfx::Rect bounds = widget_->GetWindowBoundsInScreen();
+-  gfx::Rect client = GetClientViewBounds();
+-  gfx::Size widget_size(
+-      size.width() + bounds.width() - client.width(),
+-      size.height() + bounds.height() - client.height());
+-  if (widget_size == bounds.size()) {
+-    return;
++  // The frame around the client view can change with the size (e.g. a
++  // caption appears once the window is as big as the display): resize, and
++  // once more if the client view didn't end up at |size|. A parked window
++  // may extend past the display (its bounds are set directly); only its
++  // client view's position matters, see MoveEmbedOrigin().
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    gfx::Rect bounds = widget_->GetWindowBoundsInScreen();
++    gfx::Rect client = GetClientViewBounds();
++    gfx::Size widget_size(
++        size.width() + bounds.width() - client.width(),
++        size.height() + bounds.height() - client.height());
++    if (widget_size == bounds.size()) {
++      return;
++    }
++    widget_->SetBounds(gfx::Rect(bounds.origin(), widget_size));
+   }
+-  widget_->SetBounds(gfx::Rect(bounds.origin(), widget_size));
+ }
+ 
+ void ShellSurfaceBase::UpdateEmbedCoversDisplay(const gfx::Size& size) {
+diff --git a/components/exo/shell_surface_base.h b/components/exo/shell_surface_base.h
+index 56d913ecc8..bf44060e7b 100644
+--- a/components/exo/shell_surface_base.h
++++ b/components/exo/shell_surface_base.h
+@@ -276,6 +276,17 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   bool embed_focused() const { return embed_focused_; }
+   // Asks the client to resize the window geometry to |size|.
+   void SetEmbedSize(const gfx::Size& size);
++  // EXO-FULLSCREEN: whether the element showing the parked window is
++  // fullscreen. The client is told it is fullscreen while it is.
++  void SetEmbedFullscreen(bool fullscreen);
++  bool embed_fullscreen() const { return embed_parked_ && embed_fullscreen_; }
++  // Whether the client wants to be fullscreen while parked: it asked (or was
++  // fullscreen when parked), and its element hasn't left fullscreen since.
++  bool embed_fullscreen_requested() const {
++    return embed_fullscreen_requested_;
++  }
++  // The client asked to enter or leave fullscreen while parked.
++  void RequestEmbedFullscreen(bool fullscreen);
+   // Moves the parked window so its host window's origin is at
+   // |host_origin_in_screen|, where the page shows it.
+   void MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen);
+@@ -611,6 +622,11 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   bool activatable_ = true;
+   // EXO-EMBED: see SetEmbedParked().
+   bool embed_parked_ = false;
++  // EXO-FULLSCREEN: see SetEmbedFullscreen().
++  bool embed_fullscreen_ = false;
++  bool embed_fullscreen_requested_ = false;
++  bool embed_saved_bounds_direct_ = false;
++  SurfaceFrameType embed_saved_frame_type_ = SurfaceFrameType::NONE;
+   bool embed_focused_ = false;
+   bool embed_saved_can_activate_ = true;
+   ui::ZOrderLevel embed_saved_z_order_ = ui::ZOrderLevel::kNormal;
+diff --git a/components/surface_embed/browser/surface_embed_host.cc b/components/surface_embed/browser/surface_embed_host.cc
+index 036eaf20f4..f3acfa1191 100644
+--- a/components/surface_embed/browser/surface_embed_host.cc
++++ b/components/surface_embed/browser/surface_embed_host.cc
+@@ -10,6 +10,7 @@
+ #include "base/check.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
++#include "base/no_destructor.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
+ #include "content/public/browser/document_user_data.h"
+@@ -334,6 +335,32 @@ void SurfaceEmbedHost::OnRequestFocusOnEmbedElementCompleted() {
+   pending_request_focus_on_embed_element_ = false;
+ }
+ 
++namespace {
++SurfaceEmbedHost::FullscreenChangedCallback& FullscreenChanged() {
++  static base::NoDestructor<SurfaceEmbedHost::FullscreenChangedCallback>
++      callback;
++  return *callback;
++}
++}  // namespace
++
++// static
++void SurfaceEmbedHost::SetFullscreenChangedCallback(
++    FullscreenChangedCallback callback) {
++  FullscreenChanged() = std::move(callback);
++}
++
++void SurfaceEmbedHost::OnEmbedElementFullscreenChanged(bool fullscreen) {
++  if (child_contents_ && FullscreenChanged()) {
++    FullscreenChanged().Run(child_contents_.get(), fullscreen);
++  }
++}
++
++void SurfaceEmbedHost::SetEmbedElementFullscreen(bool fullscreen) {
++  if (surface_embed_) {
++    surface_embed_->SetFullscreen(fullscreen);
++  }
++}
++
+ void SurfaceEmbedHost::AdvanceFocusFromEmbedElement(bool reverse) {
+   if (surface_embed_) {
+     surface_embed_->AdvanceFocusFromEmbedElement(reverse);
+diff --git a/components/surface_embed/browser/surface_embed_host.h b/components/surface_embed/browser/surface_embed_host.h
+index cee4472f6e..1ba46833ee 100644
+--- a/components/surface_embed/browser/surface_embed_host.h
++++ b/components/surface_embed/browser/surface_embed_host.h
+@@ -65,6 +65,7 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+   void OnEmbedElementThrottlingStatusChanged(
+       mojom::RenderThrottlingStatusPtr status) override;
+   void SetParentAccessibilityInfo(ui::AXNodeID ax_node_id) override;
++  void OnEmbedElementFullscreenChanged(bool fullscreen) override;
+ 
+   // content::SurfaceEmbedConnector::Delegate implementation:
+   void SetFrameSinkId(const viz::FrameSinkId& frame_sink_id,
+@@ -75,8 +76,16 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+   void DetachedByHost() override;
+   void RequestFocusOnEmbedElement() override;
+   void AdvanceFocusFromEmbedElement(bool reverse) override;
++  void SetEmbedElementFullscreen(bool fullscreen) override;
+   bool IsAttachedForTesting() const override;
+ 
++  // EXO-FULLSCREEN (Plutonium): told whenever an <embed> showing |child|
++  // enters or leaves fullscreen.
++  using FullscreenChangedCallback =
++      base::RepeatingCallback<void(content::WebContents* child,
++                                   bool fullscreen)>;
++  static void SetFullscreenChangedCallback(FullscreenChangedCallback callback);
++
+   void SetDestructionCallbackForTesting(base::OnceClosure callback);
+ 
+   bool HasReceivedParentAccessibilityInfoForTesting() const {
+diff --git a/components/surface_embed/common/surface_embed.mojom b/components/surface_embed/common/surface_embed.mojom
+index a2c72d6adc..3220746063 100644
+--- a/components/surface_embed/common/surface_embed.mojom
++++ b/components/surface_embed/common/surface_embed.mojom
+@@ -46,6 +46,12 @@ interface SurfaceEmbed {
+   // When `reverse` is true, advances backward (e.g. Shift+Tab), otherwise
+   // advances forward (e.g. Tab).
+   AdvanceFocusFromEmbedElement(bool reverse);
++
++  // EXO-FULLSCREEN (Plutonium): makes the <embed> element its document's
++  // fullscreen element, or leaves fullscreen if it is. Entering needs no
++  // user activation: the browser decided (the user pressed Super+F, or the
++  // embedded page asked to be fullscreen).
++  SetFullscreen(bool fullscreen);
+ };
+ 
+ // Represents the render throttling status of an embedded frame.
+@@ -110,4 +116,8 @@ interface SurfaceEmbedHost {
+   // browser process. This may happen during creation or later
+   // if accessibility is not yet enabled.
+   SetParentAccessibilityInfo(int32 ax_node_id);
++
++  // EXO-FULLSCREEN (Plutonium): the <embed> element became, or stopped
++  // being, its document's fullscreen element.
++  OnEmbedElementFullscreenChanged(bool fullscreen);
+ };
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.cc b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+index 1c5bdfcef6..eb6a0c54ef 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.cc
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+@@ -625,4 +625,23 @@ void SurfaceEmbedWebPlugin::ReleaseCrashedLayer() {
+   }
+ }
+ 
++void SurfaceEmbedWebPlugin::SetFullscreen(bool fullscreen) {
++  if (!container_) {
++    return;
++  }
++  if (fullscreen) {
++    if (!container_->IsFullscreenElement()) {
++      container_->RequestFullscreenForBrowser();
++    }
++  } else if (container_->IsFullscreenElement()) {
++    container_->CancelFullscreen();
++  }
++}
++
++void SurfaceEmbedWebPlugin::DidChangeFullscreen(bool fullscreen) {
++  if (host_) {
++    host_->OnEmbedElementFullscreenChanged(fullscreen);
++  }
++}
++
+ }  // namespace surface_embed
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.h b/components/surface_embed/renderer/surface_embed_web_plugin.h
+index d1d14cdb5a..b341ebda59 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.h
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.h
+@@ -64,6 +64,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+                       bool is_visible) override;
+   void UpdateFocus(bool focused, blink::mojom::FocusType focus_type) override;
+   void UpdateVisibility(bool visible) override;
++  void DidChangeFullscreen(bool fullscreen) override;
+   void UpdateRenderThrottlingStatus(bool is_throttled,
+                                     bool subtree_throttled,
+                                     bool display_locked) override;
+@@ -110,6 +111,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+   void RequestFocusOnEmbedElement(
+       RequestFocusOnEmbedElementCallback callback) override;
+   void AdvanceFocusFromEmbedElement(bool reverse) override;
++  void SetFullscreen(bool fullscreen) override;
+ 
+   // cc::ContentLayerClient, used only if we're painting a sad plugin.
+   scoped_refptr<cc::DisplayItemList> PaintContentsToDisplayList() override;
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index 38f29c21b7..f755d558a0 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -12692,6 +12692,12 @@ bool WebContentsImpl::IsTransientActivationRequiredForHtmlFullscreen(
+   RenderFrameHostImpl* primary_main_frame = GetPrimaryMainFrame();
+   RenderFrameHostImpl* host =
+       requesting_frame ? requesting_frame : primary_main_frame;
++
++  // EXO-FULLSCREEN: the embedder vouches for this frame.
++  if (GetContentClient()->browser()->IsFullscreenAllowedWithoutUserActivation(
++          host)) {
++    return false;
++  }
+   auto* last_exits = GetFullscreenUserData(GetBrowserContext())->last_exits();
+   auto last_exit =
+       last_exits->find(primary_main_frame->GetLastCommittedOrigin());
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 6a07f32cb6..a14ad3c20a 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -2094,6 +2094,11 @@ bool ContentBrowserClient::IsFullscreenAllowedForUnfocusedWebContents(
+   return false;
+ }
+ 
++bool ContentBrowserClient::IsFullscreenAllowedWithoutUserActivation(
++    RenderFrameHost* requesting_frame) {
++  return false;
++}
++
+ #if BUILDFLAG(IS_ANDROID)
+ bool ContentBrowserClient::ShouldAllowSystemUiPopups(
+     content::WebContents* web_contents) {
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 42a04c54b6..3b814f58db 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -468,6 +468,12 @@ class CONTENT_EXPORT ContentBrowserClient {
+   virtual bool IsFullscreenAllowedForUnfocusedWebContents(
+       content::WebContents* unfocused_web_contents);
+ 
++  // EXO-FULLSCREEN (Plutonium): whether |requesting_frame| may enter
++  // fullscreen without transient user activation (the browser itself asks
++  // the frame to, e.g. on a key the browser handles). By default, false.
++  virtual bool IsFullscreenAllowedWithoutUserActivation(
++      RenderFrameHost* requesting_frame);
++
+   // Returns whether SiteInstances matching the specified |security_principal|
+   // should share a single renderer process, rather than each getting its own
+   // process (the default process-per-site-instance mode).
+diff --git a/content/public/browser/surface_embed_connector.h b/content/public/browser/surface_embed_connector.h
+index 95b2b18de7..fe7f4aaf61 100644
+--- a/content/public/browser/surface_embed_connector.h
++++ b/content/public/browser/surface_embed_connector.h
+@@ -79,6 +79,10 @@ class CONTENT_EXPORT SurfaceEmbedConnector {
+ 
+     // Advances focus from the embedding element in the parent.
+     virtual void AdvanceFocusFromEmbedElement(bool reverse) = 0;
++
++    // EXO-FULLSCREEN (Plutonium): makes the embedding element fullscreen in
++    // the parent, or leaves fullscreen.
++    virtual void SetEmbedElementFullscreen(bool fullscreen) {}
+   };
+ 
+   // Attach a child WebContents to a parent WebContents. This creates a
+diff --git a/third_party/blink/public/mojom/native_window/native_window.mojom b/third_party/blink/public/mojom/native_window/native_window.mojom
+index 4917d48f71..31d7390536 100644
+--- a/third_party/blink/public/mojom/native_window/native_window.mojom
++++ b/third_party/blink/public/mojom/native_window/native_window.mojom
+@@ -40,6 +40,10 @@ interface NativeWindowClient {
+   OnInfoChanged(NativeWindowInfo info);
+   // The window was closed; no more messages follow.
+   OnClosed();
++  // EXO-FULLSCREEN: the browser asks the element to enter or leave
++  // fullscreen (the user pressed Super+F, or the app asked to be
++  // fullscreen). Entering needs no user activation: the browser decided.
++  SetFullscreen(bool fullscreen);
+ };
+ 
+ // One per element. Bound through the frame's BrowserInterfaceBroker.
+@@ -58,4 +62,7 @@ interface NativeWindowHost {
+   // Gives the window keyboard focus, or takes it back.
+   Focus();
+   Blur();
++  // EXO-FULLSCREEN: the element became, or stopped being, the document's
++  // fullscreen element. The app is told it is fullscreen while it is.
++  OnFullscreenChanged(bool fullscreen);
+ };
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 1b954318f7..776dba9659 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -155,4 +155,13 @@ interface WindowBroker {
+   // |result| is the command's result as JSON, or the error message.
+   SendTabDevToolsCommand(int32 tab_id, string method, string params_json)
+       => (bool ok, string result);
++
++  // EXO-KEYS: key combinations the shell handles itself. While an embedded
++  // window or a tab has keyboard focus, a key press matching one of these
++  // goes to the shell document (as an ordinary key event) instead of the
++  // app or page. Each is "[Ctrl+][Alt+][Shift+][Super+]<code>", <code> being
++  // a KeyboardEvent.code value ("KeyT", "Digit1", "Tab", "Space"); invalid
++  // entries are ignored. Replaces the previous list. Browser-wide keys
++  // (Super+F, which toggles fullscreen) come first.
++  SetShellShortcuts(array<string> shortcuts);
+ };
+diff --git a/third_party/blink/public/web/web_plugin.h b/third_party/blink/public/web/web_plugin.h
+index 7c3b65d5ae..f625124939 100644
+--- a/third_party/blink/public/web/web_plugin.h
++++ b/third_party/blink/public/web/web_plugin.h
+@@ -133,6 +133,10 @@ class WebPlugin {
+ 
+   virtual void UpdateVisibility(bool) = 0;
+ 
++  // EXO-FULLSCREEN: the plugin's element became, or stopped being, its
++  // document's fullscreen element.
++  virtual void DidChangeFullscreen(bool fullscreen) {}
++
+   virtual void UpdateRenderThrottlingStatus(bool is_throttled,
+                                             bool subtree_throttled,
+                                             bool display_locked) {}
+diff --git a/third_party/blink/public/web/web_plugin_container.h b/third_party/blink/public/web/web_plugin_container.h
+index 1e1315fdfd..4926e59c90 100644
+--- a/third_party/blink/public/web/web_plugin_container.h
++++ b/third_party/blink/public/web/web_plugin_container.h
+@@ -148,6 +148,9 @@ class WebPluginContainer {
+   virtual void SetCcLayer(cc::Layer*) = 0;
+ 
+   virtual void RequestFullscreen() = 0;
++  // EXO-FULLSCREEN: as RequestFullscreen(), for a request the browser made
++  // (no user activation needed; the browser checks it).
++  virtual void RequestFullscreenForBrowser() { RequestFullscreen(); }
+   virtual bool IsFullscreenElement() const = 0;
+   virtual void CancelFullscreen() = 0;
+ 
+diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
+index ba20189f25..50481b8ff3 100644
+--- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
+@@ -79,6 +79,7 @@
+ #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+ #include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
++#include "third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h"
+ #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+ #include "third_party/blink/renderer/core/html/html_plugin_element.h"
+ #include "third_party/blink/renderer/core/html_names.h"
+@@ -441,6 +442,11 @@ void WebPluginContainerImpl::RequestFullscreen() {
+   Fullscreen::RequestFullscreen(*element_);
+ }
+ 
++void WebPluginContainerImpl::RequestFullscreenForBrowser() {
++  ScopedAllowFullscreen allow(ScopedAllowFullscreen::kBrowserRequest);
++  Fullscreen::RequestFullscreen(*element_);
++}
++
+ bool WebPluginContainerImpl::IsFullscreenElement() const {
+   return Fullscreen::IsFullscreenElement(*element_);
+ }
+diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
+index eef6c76f8f..3ce134e011 100644
+--- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
++++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
+@@ -149,6 +149,7 @@ class CORE_EXPORT WebPluginContainerImpl final
+   float LayoutZoomFactor() override;
+   void SetCcLayer(cc::Layer*) override;
+   void RequestFullscreen() override;
++  void RequestFullscreenForBrowser() override;
+   bool IsFullscreenElement() const override;
+   void CancelFullscreen() override;
+   bool IsMouseLocked() override;
+diff --git a/third_party/blink/renderer/core/fullscreen/fullscreen.cc b/third_party/blink/renderer/core/fullscreen/fullscreen.cc
+index e8c11b5d28..95dacff82a 100644
+--- a/third_party/blink/renderer/core/fullscreen/fullscreen.cc
++++ b/third_party/blink/renderer/core/fullscreen/fullscreen.cc
+@@ -32,6 +32,7 @@
+ #include <ranges>
+ 
+ #include "base/time/time.h"
++#include "third_party/blink/public/web/web_plugin.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/public/mojom/permissions/permission.mojom-blink.h"
+ #include "third_party/blink/public/mojom/permissions/permission_status.mojom-blink.h"
+@@ -44,6 +45,7 @@
+ #include "third_party/blink/renderer/core/dom/element_traversal.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/dom/shadow_root.h"
++#include "third_party/blink/renderer/core/exported/web_plugin_container_impl.h"
+ #include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -55,6 +57,8 @@
+ #include "third_party/blink/renderer/core/html/html_body_element.h"
+ #include "third_party/blink/renderer/core/html/html_dialog_element.h"
+ #include "third_party/blink/renderer/core/html/html_iframe_element.h"
++#include "third_party/blink/renderer/core/html/html_native_window_element.h"
++#include "third_party/blink/renderer/core/html/html_plugin_element.h"
+ #include "third_party/blink/renderer/core/html_element_type_helpers.h"
+ #include "third_party/blink/renderer/core/input/event_handler.h"
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+@@ -114,6 +118,21 @@ void FullscreenElementChanged(Document& document,
+         true);
+   }
+ 
++  // EXO-FULLSCREEN: elements that show content from outside the page tell
++  // the browser, which tells the app or tab it is fullscreen.
++  for (auto [element, fullscreen] :
++       {std::pair(old_element, false), std::pair(new_element, true)}) {
++    if (auto* native_window = DynamicTo<HTMLNativeWindowElement>(element)) {
++      native_window->FullscreenChanged(fullscreen);
++    } else if (auto* plugin_element = DynamicTo<HTMLPlugInElement>(element)) {
++      if (WebPluginContainerImpl* container = plugin_element->OwnedPlugin()) {
++        if (WebPlugin* plugin = container->Plugin()) {
++          plugin->DidChangeFullscreen(fullscreen);
++        }
++      }
++    }
++  }
++
+   // Update IsInert() flags.
+   const StyleChangeReasonForTracing& reason =
+       StyleChangeReasonForTracing::Create(style_change_reason::kFullscreen);
+@@ -771,6 +790,14 @@ void Fullscreen::EnforceRequestFullscreenConditions(
+     return;
+   }
+ 
++  // EXO-FULLSCREEN: requested by the browser for an element it embeds
++  // content in; the browser enforces who may do this.
++  if (ScopedAllowFullscreen::FullscreenAllowedReason() ==
++      ScopedAllowFullscreen::kBrowserRequest) {
++    std::move(callback).Run(RequestFullscreenError::kNone);
++    return;
++  }
++
+   // The WebXR API doesn't support changing elements during the session if the
+   // dom-overlay feature is in use (indicated by the IsXrOverlay property). To
+   // avoid inconsistencies between implementations we need to block changes via
+diff --git a/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h b/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h
+index 5ce32e2271..659282106a 100644
+--- a/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h
++++ b/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h
+@@ -16,7 +16,10 @@ class CORE_EXPORT ScopedAllowFullscreen {
+   STACK_ALLOCATED();
+ 
+  public:
+-  enum Reason { kOrientationChange, kXrOverlay, kXrSession };
++  // kBrowserRequest: the browser asked for it (Plutonium's EXO-FULLSCREEN:
++  // the shell's <native-window> or tab <embed> on Super+F or the app's own
++  // request), and checks it browser-side.
++  enum Reason { kOrientationChange, kXrOverlay, kXrSession, kBrowserRequest };
+ 
+   static std::optional<Reason> FullscreenAllowedReason();
+   explicit ScopedAllowFullscreen(Reason);
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
+index 83c90cc075..fde26d8a8f 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.cc
++++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
+@@ -14,6 +14,8 @@
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
++#include "third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h"
+ #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
+ #include "third_party/blink/renderer/core/html_names.h"
+ #include "third_party/blink/renderer/core/layout/layout_native_window.h"
+@@ -125,6 +127,30 @@ viz::FrameSinkId HTMLNativeWindowElement::EmbeddedFrameSinkId() const {
+   return info_ ? info_->surface_id.frame_sink_id() : viz::FrameSinkId();
+ }
+ 
++void HTMLNativeWindowElement::FullscreenChanged(bool fullscreen) {
++  if (fullscreen == fullscreen_) {
++    return;
++  }
++  fullscreen_ = fullscreen;
++  if (host_.is_bound() && client_receiver_.is_bound()) {
++    host_->OnFullscreenChanged(fullscreen);
++  }
++}
++
++void HTMLNativeWindowElement::SetFullscreen(bool fullscreen) {
++  if (!isConnected()) {
++    return;
++  }
++  if (fullscreen) {
++    if (!Fullscreen::IsFullscreenElement(*this)) {
++      ScopedAllowFullscreen allow(ScopedAllowFullscreen::kBrowserRequest);
++      Fullscreen::RequestFullscreen(*this);
++    }
++  } else if (Fullscreen::IsFullscreenElement(*this)) {
++    Fullscreen::FullyExitFullscreen(GetDocument());
++  }
++}
++
+ void HTMLNativeWindowElement::Trace(Visitor* visitor) const {
+   visitor->Trace(host_);
+   visitor->Trace(client_receiver_);
+@@ -165,8 +191,13 @@ void HTMLNativeWindowElement::OnInfoChanged(
+       info_->device_scale_factor != info->device_scale_factor;
+   const bool focus_changed =
+       info_ ? info_->focused != info->focused : info->focused;
++  const bool first_info = !info_;
+   info_ = std::move(info);
+   UpdateSurfaceLayer();
++  // Attached while already fullscreen: tell the browser now.
++  if (first_info && !fullscreen_ && Fullscreen::IsFullscreenElement(*this)) {
++    FullscreenChanged(true);
++  }
+   if (auto* layout_object = DynamicTo<LayoutNativeWindow>(GetLayoutObject())) {
+     if (size_changed) {
+       layout_object->NaturalSizeChanged();
+@@ -261,6 +292,7 @@ void HTMLNativeWindowElement::DetachWindow() {
+   window_id_ = 0;
+   closed_ = false;
+   last_sent_size_ = gfx::Size();
++  fullscreen_ = false;
+   const bool had_info = !!info_;
+   info_.reset();
+   UpdateSurfaceLayer();
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.h b/third_party/blink/renderer/core/html/html_native_window_element.h
+index c2254e1c58..f66fc5d9c9 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.h
++++ b/third_party/blink/renderer/core/html/html_native_window_element.h
+@@ -72,6 +72,10 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   // For hit testing (WebFrameWidgetImpl): the embedded window's frame sink.
+   viz::FrameSinkId EmbeddedFrameSinkId() const;
+ 
++  // EXO-FULLSCREEN: called by Fullscreen when the element becomes, or stops
++  // being, its document's fullscreen element.
++  void FullscreenChanged(bool fullscreen);
++
+   void Trace(Visitor*) const override;
+ 
+  private:
+@@ -84,6 +88,7 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   // mojom::blink::NativeWindowClient:
+   void OnInfoChanged(mojom::blink::NativeWindowInfoPtr info) override;
+   void OnClosed() override;
++  void SetFullscreen(bool fullscreen) override;
+ 
+   // Attaches with the "grant" (and "window") attributes while connected.
+   void UpdateAttachment();
+@@ -107,6 +112,8 @@ class CORE_EXPORT HTMLNativeWindowElement final
+   mojom::blink::NativeWindowInfoPtr info_;
+   scoped_refptr<cc::SurfaceLayer> surface_layer_;
+   gfx::Size last_sent_size_;
++  // EXO-FULLSCREEN: what the browser was last told.
++  bool fullscreen_ = false;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 70f3224902..441c2dba06 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -276,6 +276,13 @@ void NativeWindowBroker::showOnDesktop(int32_t window_id) {
+   remote_->ShowOnDesktop(window_id);
+ }
+ 
++void NativeWindowBroker::setShellShortcuts(const Vector<String>& shortcuts) {
++  if (!BindRemote()) {
++    return;
++  }
++  remote_->SetShellShortcuts(shortcuts);
++}
++
+ void NativeWindowBroker::close(int32_t window_id) {
+   if (!BindRemote()) {
+     return;
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index a090e5c55a..78691b09e2 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -55,6 +55,7 @@ class CORE_EXPORT NativeWindowBroker final
+   ScriptPromise<IDLString> requestGrant(ScriptState*, int32_t window_id);
+   void revokeGrant(const String& grant);
+   void showOnDesktop(int32_t window_id);
++  void setShellShortcuts(const Vector<String>& shortcuts);
+   void close(int32_t window_id);
+   ScriptPromise<Blob> snapshot(ScriptState*, int32_t window_id);
+ 
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index 463fc9409e..2dac1bb0cf 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -64,6 +64,13 @@
+     [CallWith=ScriptState] Promise<DOMString> sendTabDevToolsCommand(
+         long tabId, DOMString method, optional DOMString paramsJson = "");
+ 
++    // EXO-KEYS: key combinations this document handles itself, such as
++    // "Ctrl+KeyT", "Alt+Digit1" or "Ctrl+Shift+Tab" (modifiers Ctrl, Alt,
++    // Shift and Super, then a KeyboardEvent.code). While an embedded window
++    // or a tab has keyboard focus, pressing one sends the key event to this
++    // document instead. Replaces the previous list.
++    undefined setShellShortcuts(sequence<DOMString> shortcuts);
++
+     // BrowserTabEvents. Adding the first listener for any of these
+     // subscribes; the current tabs then arrive as "tabadded" events.
+     attribute EventHandler ontabadded;
+diff --git a/third_party/blink/renderer/core/layout/layout_native_window.cc b/third_party/blink/renderer/core/layout/layout_native_window.cc
+index 3153608cba..1e43e7adad 100644
+--- a/third_party/blink/renderer/core/layout/layout_native_window.cc
++++ b/third_party/blink/renderer/core/layout/layout_native_window.cc
+@@ -33,7 +33,10 @@ void LayoutNativeWindow::PaintReplaced(
+     const PhysicalOffset& paint_offset) const {
+   NOT_DESTROYED();
+   auto* element = To<HTMLNativeWindowElement>(GetNode());
+-  PhysicalRect content_rect = ReplacedContentRect();
++  // The window is resized to the element's content box, so it is shown
++  // there whatever object-fit says (the fullscreen UA style asks for
++  // "contain", which would keep the window's old aspect ratio).
++  PhysicalRect content_rect = PhysicalContentBoxRect();
+   content_rect.Move(paint_offset);
+   gfx::Rect snapped = ToPixelSnappedRect(content_rect);
+   element->ContentSizeChanged(snapped.size());

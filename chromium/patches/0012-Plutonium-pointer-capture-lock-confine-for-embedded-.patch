@@ -1,0 +1,588 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 17 Oct 2026 13:01:19 +1300
+Subject: [PATCH 12/16] Plutonium: pointer capture (lock, confine) for embedded
+ apps, Super+Escape
+
+EXO-CAPTURE: embedded Wayland apps can lock the pointer (relative motion,
+cursor hidden) or confine it to their input region:
+- Chrome's security delegate allows pointer locks in the Plutonium shell.
+- A capture accepts a parked window with embedded keyboard focus (it is
+  never the active window); embedded focus changes end or resume it,
+  observed through the seat and handled in a posted task.
+- zwp_confined_pointer_v1 is implemented: the pointer is kept inside the
+  surface's input region from the root pre-target handler, warping back a
+  few pixels inside (never again for synthesized moves).
+- Super+Escape breaks any constraint until the next click on the app.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TNhRAcr4c5t15KWH3mHxTk
+---
+ .../ash/exo/chrome_security_delegate.cc       |   6 +-
+ chrome/browser/plutonium_keys.cc              |  14 ++
+ chrome/browser/plutonium_keys.h               |   3 +
+ components/exo/pointer.cc                     | 201 +++++++++++++++++-
+ components/exo/pointer.h                      |  34 ++-
+ components/exo/pointer_constraint_delegate.h  |   4 +
+ .../exo/wayland/zwp_pointer_constraints.cc    |  33 ++-
+ 7 files changed, 281 insertions(+), 14 deletions(-)
+
+diff --git a/chrome/browser/ash/exo/chrome_security_delegate.cc b/chrome/browser/ash/exo/chrome_security_delegate.cc
+index ff2020575c..0556d8477e 100644
+--- a/chrome/browser/ash/exo/chrome_security_delegate.cc
++++ b/chrome/browser/ash/exo/chrome_security_delegate.cc
+@@ -27,6 +27,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chromeos/ash/experiences/arc/arc_util.h"
++#include "components/exo/embedded_windows.h"
+ #include "components/exo/shell_surface_util.h"
+ #include "content/public/common/content_switches.h"
+ #include "content/public/common/drop_data.h"
+@@ -303,7 +304,10 @@ bool ChromeSecurityDelegate::CanSelfActivate(aura::Window* window) const {
+ bool ChromeSecurityDelegate::CanLockPointer(aura::Window* window) const {
+   // TODO(b/200896773): Move this out from exo's default security delegate
+   // define in client's security delegates.
+-  return ash::IsArcWindow(window);
++  // EXO-CAPTURE: in the Plutonium shell, the user's own Wayland apps (games)
++  // may capture the pointer. Super+Escape or moving keyboard focus away
++  // breaks the capture (see plutonium_keys.h).
++  return ash::IsArcWindow(window) || exo::EmbeddedWindows::HideWindows();
+ }
+ 
+ ChromeSecurityDelegate::SetBoundsPolicy ChromeSecurityDelegate::CanSetBounds(
+diff --git a/chrome/browser/plutonium_keys.cc b/chrome/browser/plutonium_keys.cc
+index 8d501c45b5..43d53d4eb4 100644
+--- a/chrome/browser/plutonium_keys.cc
++++ b/chrome/browser/plutonium_keys.cc
+@@ -14,6 +14,7 @@
+ #include "chrome/browser/exo_embedder.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ #include "components/exo/embedded_windows.h"
++#include "components/exo/pointer.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "ui/events/event.h"
+@@ -73,6 +74,11 @@ bool IsShellShortcut(ui::DomCode code, int flags) {
+   return ShellShortcuts().contains(Shortcut{code, flags & kModifiers});
+ }
+ 
++bool IsReleasePointer(const ui::KeyEvent& event) {
++  return event.key_code() == ui::VKEY_ESCAPE &&
++         (event.flags() & kModifiers) == ui::EF_COMMAND_DOWN;
++}
++
+ bool IsToggleFullscreen(const ui::KeyEvent& event) {
+   return event.key_code() == ui::VKEY_F &&
+          (event.flags() & kModifiers) == ui::EF_COMMAND_DOWN;
+@@ -111,6 +117,14 @@ class HandlerImpl : public Handler, public ui::EventHandler {
+       }
+       return;
+     }
++    if (IsReleasePointer(*event)) {
++      consumed_.insert(code);
++      event->StopPropagation();
++      if (!event->is_repeat() && exo::Pointer::UnconstrainAllByUserAction()) {
++        VLOG(1) << "EXO-CAPTURE released the pointer";
++      }
++      return;
++    }
+     // Keys for an embedded window: its keyboard sends them to the app
+     // unless they are the shell's. (Keys for a tab go through
+     // PlutoniumTabs.)
+diff --git a/chrome/browser/plutonium_keys.h b/chrome/browser/plutonium_keys.h
+index 5a2521ec42..46c8047439 100644
+--- a/chrome/browser/plutonium_keys.h
++++ b/chrome/browser/plutonium_keys.h
+@@ -16,6 +16,9 @@ struct NativeWebKeyboardEvent;
+ // EXO-KEYS: keys the Plutonium browser handles, whatever has keyboard focus
+ // (the shell page, an embedded window or a tab).
+ //
++//   Super+Escape  releases a captured pointer (EXO-CAPTURE: an app's
++//            pointer lock or confinement); the app may capture it again
++//            after the next click on it.
+ //   Super+F  toggles fullscreen for the focused embedded window or tab
+ //            (EXO-FULLSCREEN): the element showing it becomes the shell
+ //            document's fullscreen element, so the app or page is resized
+diff --git a/components/exo/pointer.cc b/components/exo/pointer.cc
+index 93c0504f6d..a93a6fa1ec 100644
+--- a/components/exo/pointer.cc
++++ b/components/exo/pointer.cc
+@@ -4,7 +4,10 @@
+ 
+ #include "components/exo/pointer.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <optional>
++#include <set>
+ #include <utility>
+ 
+ #include "ash/drag_drop/drag_drop_controller.h"
+@@ -12,6 +15,7 @@
+ #include "ash/wm/window_util.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
++#include "base/no_destructor.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/trace_event/trace_event.h"
+ #include "components/exo/buffer.h"
+@@ -127,6 +131,46 @@ class Pointer::ScopedCursorLocker {
+ ////////////////////////////////////////////////////////////////////////////////
+ // Pointer, public:
+ 
++namespace {
++
++constexpr int kPointerSeatObserverPriority = 1;
++static_assert(Seat::IsValidObserverPriority(kPointerSeatObserverPriority),
++              "kPointerSeatObserverPriority is not in the valid range.");
++
++std::set<Pointer*>& AllPointers() {
++  static base::NoDestructor<std::set<Pointer*>> pointers;
++  return *pointers;
++}
++
++// The shell surface whose toplevel |window| (e.g. a surface's) is in.
++ShellSurfaceBase* ShellSurfaceFor(aura::Window* window) {
++  return window && window->GetToplevelWindow()
++             ? GetShellSurfaceBaseForWindow(window->GetToplevelWindow())
++             : nullptr;
++}
++
++// EXO-CAPTURE: the parked (embedded) window |window| is in, if any.
++ShellSurfaceBase* EmbeddedShellSurface(aura::Window* window) {
++  ShellSurfaceBase* shell_surface = ShellSurfaceFor(window);
++  return shell_surface && shell_surface->embed_parked() ? shell_surface
++                                                        : nullptr;
++}
++
++}  // namespace
++
++bool PointerConstraintDelegate::IsConfinement() {
++  return false;
++}
++
++// static
++bool Pointer::UnconstrainAllByUserAction() {
++  bool any = false;
++  for (Pointer* pointer : AllPointers()) {
++    any |= pointer->UnconstrainPointerByUserAction();
++  }
++  return any;
++}
++
+ Pointer::Pointer(PointerDelegate* delegate,
+                  Seat* seat,
+                  std::unique_ptr<aura::Window> host_window)
+@@ -153,9 +197,13 @@ Pointer::Pointer(PointerDelegate* delegate,
+   }
+ 
+   ash::DesksController::Get()->AddObserver(this);
++  seat_->AddObserver(this, kPointerSeatObserverPriority);
++  AllPointers().insert(this);
+ }
+ 
+ Pointer::~Pointer() {
++  AllPointers().erase(this);
++  seat_->RemoveObserver(this);
+   ash::DesksController::Get()->RemoveObserver(this);
+ 
+   ash::Shell::Get()->RemoveShellObserver(this);
+@@ -327,7 +375,9 @@ bool Pointer::ConstrainPointer(PointerConstraintDelegate* delegate) {
+   if (!constrained_surface->HasSurfaceObserver(this))
+     constrained_surface->AddSurfaceObserver(this);
+ 
+-  bool success = EnablePointerCapture(constrained_surface);
++  bool success = delegate->IsConfinement()
++                     ? EnablePointerConfinement(constrained_surface)
++                     : EnablePointerCapture(constrained_surface);
+   if (success) {
+     pointer_constraint_delegate_ = delegate;
+     delegate->OnConstraintActivated();
+@@ -342,7 +392,7 @@ bool Pointer::UnconstrainPointerByUserAction() {
+   capture_permitted_ = false;
+   UpdateCursor();  // forces the cursor to be visible in case the app hid it
+ 
+-  if (pointer_constraint_delegate_ && capture_window_) {
++  if (pointer_constraint_delegate_ && (capture_window_ || confine_window_)) {
+     VLOG(1) << "Pointer constraint broken by user action";
+     UnconstrainPointer();
+     return true;
+@@ -371,6 +421,7 @@ void Pointer::UnconstrainPointer() {
+     }
+     pointer_constraint_delegate_ = nullptr;
+     DisablePointerCapture();
++    DisablePointerConfinement();
+   }
+ }
+ 
+@@ -386,6 +437,7 @@ void Pointer::OnPointerConstraintDelegateDestroying(
+     PointerConstraintDelegate* delegate) {
+   if (pointer_constraint_delegate_ == delegate) {
+     DisablePointerCapture();
++    DisablePointerConfinement();
+     pointer_constraint_delegate_ = nullptr;
+   }
+   RemoveConstraintDelegate(delegate);
+@@ -398,8 +450,7 @@ bool Pointer::EnablePointerCapture(Surface* capture_surface) {
+   }
+ 
+   aura::Window* window = capture_surface->window();
+-  aura::Window* active_window = WMHelper::GetInstance()->GetActiveWindow();
+-  if (!active_window || !active_window->Contains(window)) {
++  if (!CanConstrainTo(window)) {
+     VLOG(1) << "Cannot enable pointer capture on an inactive window.";
+     return false;
+   }
+@@ -432,6 +483,96 @@ bool Pointer::EnablePointerCapture(Surface* capture_surface) {
+   return true;
+ }
+ 
++bool Pointer::CanConstrainTo(aura::Window* window) const {
++  // EXO-CAPTURE: an embedded window is never active; it has the keyboard
++  // through the page instead.
++  if (ShellSurfaceBase* embedded = EmbeddedShellSurface(window)) {
++    return embedded->embed_focused();
++  }
++  aura::Window* active_window = WMHelper::GetInstance()->GetActiveWindow();
++  return active_window && active_window->Contains(window);
++}
++
++bool Pointer::EnablePointerConfinement(Surface* surface) {
++  if (!capture_permitted_) {
++    VLOG(1) << "Unable to confine the pointer due to previous user action.";
++    return false;
++  }
++  aura::Window* window = surface->window();
++  if (!CanConstrainTo(window)) {
++    VLOG(1) << "Cannot confine the pointer to an inactive window.";
++    return false;
++  }
++  // Mouse events reach this (a pre-target handler on every root window)
++  // before the page or any window: OnMouseEvent() keeps them inside.
++  confine_window_ = window;
++  return true;
++}
++
++void Pointer::DisablePointerConfinement() {
++  if (!confine_window_) {
++    return;
++  }
++  confine_window_ = nullptr;
++}
++
++bool Pointer::ConfineEvent(ui::MouseEvent* event) {
++  // Events the browser routes into an embedded window are already inside;
++  // synthesized moves (e.g. from a warp below) are never warped again. A
++  // lock (capture) takes all events anyway.
++  if (!confine_window_ || capture_window_ || IsEmbeddedEvent(*event) ||
++      event->IsSynthesized()) {
++    return false;
++  }
++  aura::Window* root = confine_window_->GetRootWindow();
++  if (!root) {
++    return false;
++  }
++  Surface* surface = Surface::AsSurface(confine_window_);
++  const gfx::RectF bounds(confine_window_->GetBoundsInRootWindow());
++  if (!surface || bounds.width() < 4.f || bounds.height() < 4.f) {
++    return false;
++  }
++  // Inside means where the surface takes input (its input region leaves out
++  // client-side shadows and borders, where the page would get the pointer).
++  const gfx::Vector2dF origin = bounds.OffsetFromOrigin();
++  // The outermost pixels don't count: the page may round them to itself.
++  gfx::RectF inner = bounds;
++  inner.Inset(2.f);
++  auto takes_input = [&](const gfx::PointF& point_in_root) {
++    return inner.Contains(point_in_root) &&
++           surface->HitTest(gfx::ToFlooredPoint(point_in_root - origin));
++  };
++  const gfx::PointF location = event->root_location_f();
++  if (takes_input(location)) {
++    return false;
++  }
++  // Back a few whole pixels in from the edge: the synthetic move the warp
++  // makes is rounded through device pixels, and must land well inside the
++  // element for the page to route it here, or it would leave (and be
++  // warped again). Then on towards the middle until the surface takes input.
++  constexpr float kMargin = 4.f;
++  gfx::PointF inside(
++      std::clamp(std::floor(location.x()), std::ceil(bounds.x()) + kMargin,
++                 std::floor(bounds.right()) - kMargin - 1.f),
++      std::clamp(std::floor(location.y()), std::ceil(bounds.y()) + kMargin,
++                 std::floor(bounds.bottom()) - kMargin - 1.f));
++  const gfx::PointF center = bounds.CenterPoint();
++  for (int step = 0; step < 32 && !takes_input(inside); ++step) {
++    gfx::Vector2dF to_center = center - inside;
++    if (to_center.Length() < 4.f) {
++      break;
++    }
++    to_center.Scale(4.f / to_center.Length());
++    inside = gfx::PointF(std::round(inside.x() + to_center.x()),
++                         std::round(inside.y() + to_center.y()));
++  }
++  root->MoveCursorTo(gfx::ToFlooredPoint(inside));
++  event->SetHandled();
++  event->StopPropagation();
++  return true;
++}
++
+ void Pointer::DisablePointerCapture() {
+   // Early out if pointer capture is not enabled.
+   if (!capture_window_)
+@@ -496,6 +637,9 @@ void Pointer::OnSurfaceDestroying(Surface* surface) {
+     UnconstrainPointer();
+     was_correctly_subscribed = true;
+   }
++  if (surface && surface->window() == confine_window_) {
++    DisablePointerConfinement();
++  }
+   if (surface && surface->window() == capture_window_) {
+     DisablePointerCapture();
+     was_correctly_subscribed = true;
+@@ -526,6 +670,9 @@ void Pointer::OnSurfaceDestroying(Surface* surface) {
+ void Pointer::OnMouseEvent(ui::MouseEvent* event) {
+   if (seat_->was_shutdown() || event->handled())
+     return;
++  if (ConfineEvent(event)) {
++    return;
++  }
+   // Ask seat instead of ash's DragDropController because it ends
+   // asynchronously.
+   if (seat_->IsDragDropOperationInProgress()) {
+@@ -886,7 +1033,14 @@ void Pointer::OnCursorDisplayChanged(const display::Display& display) {
+ 
+ void Pointer::OnWindowFocused(aura::Window* gained_focus,
+                               aura::Window* lost_focus) {
+-  if (capture_window_ && capture_window_ != gained_focus) {
++  // EXO-CAPTURE: an embedded window's constraint follows its embedded
++  // keyboard focus instead (OnSurfaceFocused()).
++  if (confine_window_ && !EmbeddedShellSurface(confine_window_) &&
++      confine_window_ != gained_focus) {
++    UnconstrainPointer();
++  }
++  if (capture_window_ && capture_window_ != gained_focus &&
++      !EmbeddedShellSurface(capture_window_)) {
+     if (pointer_constraint_delegate_) {
+       VLOG(1) << "Pointer constraint broken by focus change";
+       UnconstrainPointer();
+@@ -898,6 +1052,43 @@ void Pointer::OnWindowFocused(aura::Window* gained_focus,
+     MaybeReactivatePointerConstraint(Surface::AsSurface(gained_focus));
+ }
+ 
++void Pointer::OnSurfaceFocused(Surface* gained_focus,
++                               Surface* lost_focus,
++                               bool has_focused_client) {
++  // The seat is notifying its observers, and changing the capture notifies
++  // them again: look once it's done.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&Pointer::UpdateEmbeddedConstraint,
++                                embedded_weak_ptr_factory_.GetWeakPtr()));
++}
++
++void Pointer::UpdateEmbeddedConstraint() {
++  if (seat_->was_shutdown()) {
++    return;
++  }
++  // EXO-CAPTURE: keyboard focus leaving an embedded window ends its
++  // constraint (as aura focus does for other windows), and coming back
++  // resumes it.
++  Surface* focused = seat_->GetFocusedSurface();
++  if (aura::Window* constrained =
++          capture_window_ ? capture_window_.get() : confine_window_.get()) {
++    ShellSurfaceBase* embedded = EmbeddedShellSurface(constrained);
++    if (embedded &&
++        (!focused || ShellSurfaceFor(focused->window()) != embedded)) {
++      if (pointer_constraint_delegate_) {
++        VLOG(1) << "Pointer constraint broken by embedded focus change";
++        UnconstrainPointer();
++      } else {
++        DisablePointerCapture();
++        DisablePointerConfinement();
++      }
++    }
++  }
++  if (focused && EmbeddedShellSurface(focused->window())) {
++    MaybeReactivatePointerConstraint(focused);
++  }
++}
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // ash::ShellObserver:
+ void Pointer::OnRootWindowAdded(aura::Window* root_window) {
+diff --git a/components/exo/pointer.h b/components/exo/pointer.h
+index 08a38ce9a8..dafedd7f7e 100644
+--- a/components/exo/pointer.h
++++ b/components/exo/pointer.h
+@@ -13,6 +13,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/unguessable_token.h"
++#include "components/exo/seat_observer.h"
+ #include "components/exo/surface_observer.h"
+ #include "components/exo/surface_tree_host.h"
+ #include "components/exo/wm_helper.h"
+@@ -56,8 +57,14 @@ class Pointer : public SurfaceTreeHost,
+                 public aura::client::CursorClientObserver,
+                 public aura::client::FocusChangeObserver,
+                 public ash::ShellObserver,
+-                public ash::DesksController::Observer {
++                public ash::DesksController::Observer,
++                public SeatObserver {
+  public:
++  // EXO-CAPTURE: breaks every pointer's constraint, as the user asked
++  // (Super+Escape in the Plutonium shell); the app may capture again after
++  // the next click on it. True if one was active.
++  static bool UnconstrainAllByUserAction();
++
+   Pointer(PointerDelegate* delegate,
+           Seat* seat,
+           std::unique_ptr<aura::Window> host_window = nullptr);
+@@ -106,6 +113,12 @@ class Pointer : public SurfaceTreeHost,
+   void OnWindowFocused(aura::Window* gained_focus,
+                        aura::Window* lost_focus) override;
+ 
++  // SeatObserver (EXO-CAPTURE: embedded windows get keyboard focus from the
++  // page without aura focus changing):
++  void OnSurfaceFocused(Surface* gained_focus,
++                        Surface* lost_focus,
++                        bool has_focused_client) override;
++
+   // ash::ShellObserver:
+   void OnRootWindowAdded(aura::Window* root_window) override;
+   void OnRootWindowWillShutdown(aura::Window* root_window) override;
+@@ -171,6 +184,19 @@ class Pointer : public SurfaceTreeHost,
+ 
+   // Capture the pointer for the given surface. Returns true iff the capture
+   // succeeded.
++  // EXO-CAPTURE: confinement (see |confine_window_|).
++  bool EnablePointerConfinement(Surface* surface);
++  void DisablePointerConfinement();
++  // Whether |window| may take the pointer: it is in the active window, or
++  // it is an embedded window with the keyboard.
++  // Ends or resumes a constraint on an embedded window as its keyboard focus
++  // moves (posted from OnSurfaceFocused()).
++  void UpdateEmbeddedConstraint();
++  bool CanConstrainTo(aura::Window* window) const;
++  // Keeps a confined pointer inside its window; true if |event| was outside
++  // (the cursor is moved back and the event consumed).
++  bool ConfineEvent(ui::MouseEvent* event);
++
+   bool EnablePointerCapture(Surface* capture_surface);
+ 
+   // Remove the currently active pointer capture (if there is one).
+@@ -288,6 +314,10 @@ class Pointer : public SurfaceTreeHost,
+   // this is not null.
+   raw_ptr<aura::Window> capture_window_ = nullptr;
+ 
++  // EXO-CAPTURE: the window the pointer is confined to (a confinement keeps
++  // the pointer inside it, events go on as usual), or null.
++  raw_ptr<aura::Window> confine_window_ = nullptr;
++
+   // True iff `this` is currently registered as a pre-target handler on
+   // aura::Env. Tracked explicitly because EnablePointerCapture() can be called
+   // for multiple surfaces without an intervening DisablePointerCapture(), and
+@@ -334,6 +364,8 @@ class Pointer : public SurfaceTreeHost,
+ 
+   // Weak pointer factory used for cursor capture callbacks.
+   base::WeakPtrFactory<Pointer> cursor_capture_weak_ptr_factory_{this};
++  // EXO-CAPTURE: for UpdateEmbeddedConstraint().
++  base::WeakPtrFactory<Pointer> embedded_weak_ptr_factory_{this};
+ };
+ 
+ }  // namespace exo
+diff --git a/components/exo/pointer_constraint_delegate.h b/components/exo/pointer_constraint_delegate.h
+index 9e0ee8da1e..7917d3ff08 100644
+--- a/components/exo/pointer_constraint_delegate.h
++++ b/components/exo/pointer_constraint_delegate.h
+@@ -43,6 +43,10 @@ class PointerConstraintDelegate {
+   // Notifies the delegate that it's defunct and must not call
+   // Pointer::OnPointerConstraintDelegateDestroying().
+   virtual void OnDefunct() = 0;
++
++  // EXO-CAPTURE: whether this confines the pointer to the surface
++  // (zwp_confined_pointer_v1) rather than locking it in place.
++  virtual bool IsConfinement();
+ };
+ 
+ }  // namespace exo
+diff --git a/components/exo/wayland/zwp_pointer_constraints.cc b/components/exo/wayland/zwp_pointer_constraints.cc
+index 7a70926ca9..35865d30ec 100644
+--- a/components/exo/wayland/zwp_pointer_constraints.cc
++++ b/components/exo/wayland/zwp_pointer_constraints.cc
+@@ -36,12 +36,14 @@ class WaylandPointerConstraintDelegate : public PointerConstraintDelegate {
+                                    Surface* surface,
+                                    Pointer* pointer,
+                                    SkRegion* region,
+-                                   uint32_t lifetime)
++                                   uint32_t lifetime,
++                                   bool confine = false)
+       : constraint_resource_(constraint_resource),
+         pointer_(pointer),
+         surface_(surface),
+         is_persistent_(lifetime ==
+-                       ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT) {
++                       ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT),
++        confine_(confine) {
+     pointer->ConstrainPointer(this);
+   }
+ 
+@@ -65,23 +67,34 @@ class WaylandPointerConstraintDelegate : public PointerConstraintDelegate {
+   bool IsPersistent() override { return is_persistent_; }
+   Surface* GetConstrainedSurface() override { return surface_; }
+   void OnDefunct() override { pointer_ = nullptr; }
++  bool IsConfinement() override { return confine_; }
+ 
+  private:
+   // Inform the client of the state of the lock.
+   void SendLocked() {
+     VLOG(1) << "send_locked(" << constraint_resource_ << ")";
+-    zwp_locked_pointer_v1_send_locked(constraint_resource_);
++    if (confine_) {
++      zwp_confined_pointer_v1_send_confined(constraint_resource_);
++    } else {
++      zwp_locked_pointer_v1_send_locked(constraint_resource_);
++    }
+   }
+ 
+   void SendUnlocked() {
+     VLOG(1) << "send_unlocked(" << constraint_resource_ << ")";
+-    zwp_locked_pointer_v1_send_unlocked(constraint_resource_);
++    if (confine_) {
++      zwp_confined_pointer_v1_send_unconfined(constraint_resource_);
++    } else {
++      zwp_locked_pointer_v1_send_unlocked(constraint_resource_);
++    }
+   }
+ 
+   const raw_ptr<wl_resource> constraint_resource_;
+   raw_ptr<Pointer> pointer_;
+   const raw_ptr<Surface> surface_;
+   bool is_persistent_;
++  // EXO-CAPTURE: a zwp_confined_pointer_v1 rather than a locked pointer.
++  const bool confine_;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -170,11 +183,17 @@ void pointer_constraints_confine_pointer(wl_client* client,
+                                          wl_resource* pointer_resource,
+                                          wl_resource* region_resource,
+                                          uint32_t lifetime) {
+-  // Confined pointer is not currently supported.
++  // EXO-CAPTURE: confined to the whole surface (regions aren't supported).
++  Surface* surface = GetUserDataAs<Surface>(surface_resource);
++  Pointer* pointer = GetUserDataAs<Pointer>(pointer_resource);
++  SkRegion* region =
++      region_resource ? GetUserDataAs<SkRegion>(region_resource) : nullptr;
+   wl_resource* confined_pointer_resource =
+       wl_resource_create(client, &zwp_confined_pointer_v1_interface, 1, id);
+-  SetImplementation<int>(confined_pointer_resource,
+-                         &confined_pointer_implementation, nullptr);
++  SetImplementation(confined_pointer_resource, &confined_pointer_implementation,
++                    std::make_unique<WaylandPointerConstraintDelegate>(
++                        confined_pointer_resource, surface, pointer, region,
++                        lifetime, /*confine=*/true));
+ }
+ 
+ const struct zwp_pointer_constraints_v1_interface

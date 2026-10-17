@@ -1,0 +1,1002 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 16 Oct 2026 08:38:42 +1300
+Subject: [PATCH 2/9] Plutonium: apps in the right panel, terminal tagging, pop
+ out
+
+Thread terminals are tagged like agents, so GUI apps started there belong to the thread. Native windows move from the sidebar into the right panel: an Apps surface lists them and each opens as a tab, with a button that pops it out to the desktop.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/terminal/Manager.ts           |   7 +-
+ apps/web/src/components/AppSidebarLayout.tsx  |   4 +-
+ apps/web/src/components/ChatView.tsx          |  29 +++
+ .../src/components/RightPanelTabs.test.tsx    |   2 +
+ apps/web/src/components/RightPanelTabs.tsx    |  48 ++++-
+ apps/web/src/components/Sidebar.tsx           | 190 +++++++++---------
+ apps/web/src/plutonium/PlutoniumWindows.tsx   | 170 +++++++++++-----
+ apps/web/src/plutonium/windowStore.ts         |  57 ++++--
+ apps/web/src/rightPanelStore.ts               |  58 +++++-
+ apps/web/src/routes/_chat.pull-requests.tsx   |   2 +
+ 10 files changed, 392 insertions(+), 175 deletions(-)
+
+diff --git a/apps/server/src/terminal/Manager.ts b/apps/server/src/terminal/Manager.ts
+index 43d6a0750e..49e9f514f5 100644
+--- a/apps/server/src/terminal/Manager.ts
++++ b/apps/server/src/terminal/Manager.ts
+@@ -71,6 +71,7 @@ import {
+ } from "../observability/Metrics.ts";
+ import { expandHomePath } from "../pathExpansion.ts";
+ import * as ProcessRunner from "../processRunner.ts";
++import { plutoniumAgentEnvironment } from "../plutonium.ts";
+ import * as PortScanner from "../preview/PortScanner.ts";
+ import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
+ import * as PtyAdapter from "./PtyAdapter.ts";
+@@ -2237,7 +2238,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
+         Effect.andThen(
+           Effect.gen(function* () {
+             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
++            const terminalEnv = {
++              ...createTerminalSpawnEnv(baseEnv, session.runtimeEnv),
++              // Plutonium: GUI apps started from the terminal belong to its thread.
++              ...plutoniumAgentEnvironment(session.threadId),
++            };
+             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+             ptyProcess = spawnResult.process;
+             startedShell = spawnResult.shellLabel;
+diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
+index dfe6f8d982..b94d474a0d 100644
+--- a/apps/web/src/components/AppSidebarLayout.tsx
++++ b/apps/web/src/components/AppSidebarLayout.tsx
+@@ -32,7 +32,7 @@ import {
+   usePanelNavigationSuppression,
+ } from "../panelAnimations";
+ import LegacyThreadSidebar from "./LegacySidebar";
+-import { PlutoniumAppPane } from "../plutonium/PlutoniumWindows";
++import { PlutoniumWindowsStarter } from "../plutonium/PlutoniumWindows";
+ import ThreadSidebar from "./Sidebar";
+ import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+ import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
+@@ -333,7 +333,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+         <SidebarControl />
+         <NavigationHistoryShortcuts />
+         <MainAppLocationTracker />
+-        <PlutoniumAppPane />
++        <PlutoniumWindowsStarter />
+       </SidebarProvider>
+     </PanelAnimationSuppressionProvider>
+   );
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index a32c1473cd..9d544eb389 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -217,6 +217,8 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
+ import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
+ import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
+ import { RightPanelTabs } from "./RightPanelTabs";
++import { PlutoniumAppSurface, PlutoniumAppsPanel } from "../plutonium/PlutoniumWindows";
++import { usePlutoniumWindowStore } from "../plutonium/windowStore";
+ import { AgentsPanel } from "./AgentsPanel";
+ import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
+ import { ThreadPullRequestsPanel } from "./pullRequest/ThreadPullRequestsPanel";
+@@ -4566,6 +4568,12 @@ export default function ChatView(props: ChatViewProps) {
+     if (!activeThreadRef) return;
+     useRightPanelStore.getState().open(activeThreadRef, "agents");
+   }, [activeThreadRef]);
++  // Plutonium: native windows, only when this page is the shell.
++  const appsSurfaceAvailable = usePlutoniumWindowStore((state) => state.available);
++  const addAppsSurface = useCallback(() => {
++    if (!activeThreadRef) return;
++    useRightPanelStore.getState().open(activeThreadRef, "apps");
++  }, [activeThreadRef]);
+   const supportsThreadPullRequests =
+     serverConfig?.environment.capabilities.threadPullRequests === true;
+   const visiblePullRequests = visibleThreadPullRequests(
+@@ -9636,6 +9644,23 @@ export default function ChatView(props: ChatViewProps) {
+         environmentId={activeThreadRef?.environmentId ?? null}
+         threadId={activeThreadRef?.threadId ?? null}
+       />
++    ) : renderedRightPanelSurface?.kind === "apps" ? (
++      <PlutoniumAppsPanel
++        threadId={activeThreadRef?.threadId ?? null}
++        onOpen={(entry) => {
++          if (activeThreadRef)
++            useRightPanelStore
++              .getState()
++              .openApp(activeThreadRef, { windowId: entry.id, appId: entry.appId });
++        }}
++      />
++    ) : renderedRightPanelSurface?.kind === "app" ? (
++      <PlutoniumAppSurface
++        key={renderedRightPanelSurface.id}
++        windowId={renderedRightPanelSurface.windowId}
++        appId={renderedRightPanelSurface.appId}
++        onPopOut={() => closeRightPanelSurface(renderedRightPanelSurface)}
++      />
+     ) : renderedRightPanelSurface?.kind === "device" ? (
+       <Suspense fallback={null}>
+         <DevicePanel
+@@ -10293,6 +10318,7 @@ export default function ChatView(props: ChatViewProps) {
+           onAddPullRequests={addPullRequestsSurface}
+           onAddAgents={addAgentsSurface}
+           onAddDevice={addDeviceSurface}
++          onAddApps={addAppsSurface}
+           browserAvailable={isPreviewSupportedInRuntime()}
+           terminalAvailable={activeProject !== null}
+           diffAvailable={isServerThread && isGitRepo}
+@@ -10301,6 +10327,7 @@ export default function ChatView(props: ChatViewProps) {
+           pullRequestsAvailable={pullRequestsSurfaceAvailable}
+           agentsAvailable
+           deviceAvailable={activeThreadRef !== null}
++          appsAvailable={appsSurfaceAvailable}
+           liveAgentCount={agentPanelModel.liveCount}
+         >
+           {rightPanelContent}
+@@ -10350,6 +10377,7 @@ export default function ChatView(props: ChatViewProps) {
+             onAddPullRequests={addPullRequestsSurface}
+             onAddAgents={addAgentsSurface}
+             onAddDevice={addDeviceSurface}
++            onAddApps={addAppsSurface}
+             browserAvailable={isPreviewSupportedInRuntime()}
+             terminalAvailable={activeProject !== null}
+             diffAvailable={isServerThread && isGitRepo}
+@@ -10358,6 +10386,7 @@ export default function ChatView(props: ChatViewProps) {
+             pullRequestsAvailable={pullRequestsSurfaceAvailable}
+             agentsAvailable
+             deviceAvailable={activeThreadRef !== null}
++            appsAvailable={appsSurfaceAvailable}
+             liveAgentCount={agentPanelModel.liveCount}
+           >
+             {rightPanelContent}
+diff --git a/apps/web/src/components/RightPanelTabs.test.tsx b/apps/web/src/components/RightPanelTabs.test.tsx
+index dfaaf171c4..6f5969d53c 100644
+--- a/apps/web/src/components/RightPanelTabs.test.tsx
++++ b/apps/web/src/components/RightPanelTabs.test.tsx
+@@ -124,6 +124,8 @@ function renderTabs(
+       onAddFiles={() => undefined}
+       onAddAgents={() => undefined}
+       onAddDevice={() => undefined}
++      onAddApps={() => undefined}
++      appsAvailable={false}
+       liveAgentCount={0}
+       browserAvailable
+       terminalAvailable={false}
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index 001342e482..dd3cce3017 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -14,7 +14,9 @@ import type {
+ } from "@t3tools/contracts";
+ import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
+ import {
++  AppWindow,
+   Bot,
++  LayoutGrid,
+   Smartphone,
+   ChevronDown,
+   ChevronLeft,
+@@ -78,6 +80,8 @@ import { previewBridge } from "./preview/previewBridge";
+ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
+ import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
+ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
++import { windowLabel } from "~/plutonium/PlutoniumWindows";
++import { type NativeWindowEntry, usePlutoniumWindowStore } from "~/plutonium/windowStore";
+ 
+ interface RightPanelTabsProps {
+   mode: PreviewPanelMode;
+@@ -123,6 +127,7 @@ interface RightPanelTabsProps {
+   onAddPullRequests: () => void;
+   onAddAgents: () => void;
+   onAddDevice: () => void;
++  onAddApps: () => void;
+   browserAvailable: boolean;
+   terminalAvailable: boolean;
+   diffAvailable: boolean;
+@@ -131,6 +136,7 @@ interface RightPanelTabsProps {
+   pullRequestsAvailable: boolean;
+   agentsAvailable: boolean;
+   deviceAvailable: boolean;
++  appsAvailable: boolean;
+   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
+   /** Running + waiting subagents; badges the Agents card in the empty state. */
+   liveAgentCount: number;
+@@ -162,6 +168,7 @@ const SURFACE_DISABLED_REASONS = {
+   pullRequests: "No linked pull requests are available for this thread.",
+   agents: "Agents are only available from a thread.",
+   device: "Devices are only available from a thread.",
++  apps: "Apps are only available in the Plutonium shell.",
+ } as const;
+ 
+ /** Overlays that must win over the launcher's letter shortcuts. */
+@@ -186,6 +193,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
+   pullRequests: "No linked pull requests available.",
+   agents: "Available from a thread.",
+   device: "Available from a thread.",
++  apps: "Only available in the Plutonium shell.",
+ } as const;
+ 
+ type TabContextMenuAction =
+@@ -326,6 +334,7 @@ function RightPanelEmptyState(props: {
+   onAddPullRequests: () => void;
+   onAddAgents: () => void;
+   onAddDevice: () => void;
++  onAddApps: () => void;
+   browserAvailable: boolean;
+   terminalAvailable: boolean;
+   diffAvailable: boolean;
+@@ -334,6 +343,7 @@ function RightPanelEmptyState(props: {
+   pullRequestsAvailable: boolean;
+   agentsAvailable: boolean;
+   deviceAvailable: boolean;
++  appsAvailable: boolean;
+   liveAgentCount: number;
+ }) {
+   // -1 means no highlight: it only appears on hover or arrow use.
+@@ -413,6 +423,15 @@ function RightPanelEmptyState(props: {
+       onClick: props.onAddDevice,
+       badgeCount: 0,
+     },
++    {
++      label: "Apps",
++      icon: LayoutGrid,
++      shortcut: "W",
++      available: props.appsAvailable,
++      disabledReason: SURFACE_UNAVAILABLE_HINTS.apps,
++      onClick: props.onAddApps,
++      badgeCount: 0,
++    },
+   ] as const;
+ 
+   type SurfaceAction = (typeof actions)[number];
+@@ -609,6 +628,7 @@ function surfaceTitle(
+   surface: RightPanelSurface,
+   sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
+   terminalLabelsById: ReadonlyMap<string, string>,
++  nativeWindows: Readonly<Record<number, NativeWindowEntry>>,
+ ): string {
+   switch (surface.kind) {
+     case "diff":
+@@ -632,6 +652,12 @@ function surfaceTitle(
+       return "Agents";
+     case "device":
+       return surface.title ?? surface.target?.name ?? "Device";
++    case "apps":
++      return "Apps";
++    case "app": {
++      const entry = nativeWindows[surface.windowId];
++      return entry ? windowLabel(entry) : surface.appId || "App";
++    }
+     case "preview": {
+       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
+       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
+@@ -715,6 +741,10 @@ function SurfaceIcon({
+       return <PullRequestGlyph.link className="size-3 shrink-0" />;
+     case "agents":
+       return <Bot className="size-3 shrink-0" />;
++    case "apps":
++      return <LayoutGrid className="size-3 shrink-0" />;
++    case "app":
++      return <AppWindow className="size-3 shrink-0" />;
+     case "device":
+       return surface.target?.platform === "ios" ? (
+         <AppleIcon className="size-3 shrink-0" />
+@@ -828,6 +858,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
+   const browserProfiles = useBrowserDefaults().profiles;
+   const { resolvedTheme } = useTheme();
++  const nativeWindows = usePlutoniumWindowStore((state) => state.windows);
+   const tabListRef = useRef<HTMLDivElement>(null);
+   const [renamingDevice, setRenamingDevice] = useState<string | null>(null);
+   const [addSurfaceMenuOpen, setAddSurfaceMenuOpen] = useState(false);
+@@ -933,6 +964,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       disabledReason: SURFACE_DISABLED_REASONS.device,
+       onClick: props.onAddDevice,
+     },
++    {
++      label: "Apps",
++      icon: LayoutGrid,
++      shortcut: "W",
++      available: props.appsAvailable,
++      disabledReason: SURFACE_DISABLED_REASONS.apps,
++      onClick: props.onAddApps,
++    },
+   ] as const;
+ 
+   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+@@ -1131,7 +1170,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             {props.surfaces.map((surface) => {
+               const active = surface.id === props.activeSurfaceId;
+               const pending = props.pendingSurfaceIds.has(surface.id);
+-              const title = surfaceTitle(surface, props.previewSessions, props.terminalLabelsById);
++              const title = surfaceTitle(
++                surface,
++                props.previewSessions,
++                props.terminalLabelsById,
++                nativeWindows,
++              );
+               const previewTabId = previewTabIdOf(surface, props.previewSessions);
+               // Desktop state is keyed by the session id, but desktop actions
+               // must be addressed with the runtime id.
+@@ -1416,6 +1460,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             onAddPullRequests={props.onAddPullRequests}
+             onAddAgents={props.onAddAgents}
+             onAddDevice={props.onAddDevice}
++            onAddApps={props.onAddApps}
+             browserAvailable={props.browserAvailable}
+             terminalAvailable={props.terminalAvailable}
+             diffAvailable={props.diffAvailable}
+@@ -1424,6 +1469,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             pullRequestsAvailable={props.pullRequestsAvailable}
+             agentsAvailable={props.agentsAvailable}
+             deviceAvailable={props.deviceAvailable}
++            appsAvailable={props.appsAvailable}
+             liveAgentCount={props.liveAgentCount}
+           />
+         ) : (
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index a86a8fd212..29849561ef 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -68,7 +68,6 @@ import {
+   XIcon,
+ } from "lucide-react";
+ import {
+-  Fragment,
+   memo,
+   useCallback,
+   useEffect,
+@@ -81,7 +80,6 @@ import {
+   type MouseEvent as ReactMouseEvent,
+   type ReactNode,
+ } from "react";
+-import { PlutoniumThreadWindows } from "../plutonium/PlutoniumWindows";
+ import { useParams, useRouter } from "@tanstack/react-router";
+ 
+ import { useRightPanelStore } from "../rightPanelStore";
+@@ -4858,103 +4856,97 @@ export default function Sidebar() {
+                           section === "active" || section === "pinned" || section === "working";
+                         const rowVariant = isCard ? "card" : "slim";
+                         return (
+-                          // Plutonium: the thread's native windows sit under its row.
+-                          <Fragment key={`${threadKey}:${rowVariant}`}>
+-                            <SidebarThreadRow
+-                              // Fade between card and compact rows while the outer
+-                              // sortable wrapper keeps its identity during a drag.
+-                              thread={thread}
+-                              variant={rowVariant}
+-                              // Snoozed rows wake, settled rows un-settle, and cards settle.
+-                              variantAction={
+-                                section === "snoozed"
+-                                  ? "unsnooze"
+-                                  : section === "settled"
+-                                    ? "unsettle"
+-                                    : "settle"
+-                              }
+-                              settlementSupported={
+-                                serverConfigs.get(thread.environmentId)?.environment.capabilities
+-                                  .threadSettlement === true
+-                              }
+-                              snoozeSupported={
+-                                serverConfigs.get(thread.environmentId)?.environment.capabilities
+-                                  .threadSnooze === true
+-                              }
+-                              pinningSupported={
+-                                serverConfigs.get(thread.environmentId)?.environment.capabilities
+-                                  .threadPinning === true
+-                              }
+-                              isPinned={thread.pinnedAt != null}
+-                              sortable={sortable}
+-                              dropVerb={
+-                                dragState?.activeKey === threadKey
+-                                  ? resolveSidebarDropVerb(
+-                                      dragState.activeSection,
+-                                      dragTargetSection,
+-                                    )
+-                                  : null
+-                              }
+-                              dragOverPinned={
+-                                dragState?.activeKey === threadKey && dragTargetSection === "pinned"
+-                              }
+-                              snoozeWakeLabelText={
+-                                section === "snoozed" && thread.snoozedUntil != null
+-                                  ? snoozeWakeLabel(thread.snoozedUntil, {
+-                                      now: new Date().toISOString(),
+-                                    })
+-                                  : null
+-                              }
+-                              // All sections: a woken thread can classify straight
+-                              // into the settled tail (PR merged while snoozed), and
+-                              // the wake signal must survive the trip. Still-snoozed
+-                              // rows resolve to null on their own.
+-                              wokeAt={threadWokeAt(thread, { now: snoozeNow })}
+-                              isActive={routeThreadKey === threadKey}
+-                              openPullRequestsInRightPanel={routeThreadRef !== null}
+-                              jumpLabel={
+-                                showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
+-                              }
+-                              currentEnvironmentId={primaryEnvironmentId}
+-                              environmentLabel={
+-                                environmentLabelById.get(thread.environmentId) ?? null
+-                              }
+-                              environmentMachine={
+-                                environmentMachineById.get(thread.environmentId) ?? "server"
+-                              }
+-                              project={
+-                                projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+-                                null
+-                              }
+-                              projectDisplayName={
+-                                projectDisplayNameByKey.get(
+-                                  `${thread.environmentId}:${thread.projectId}`,
+-                                ) ?? null
+-                              }
+-                              providerEntryByInstanceId={
+-                                providerEntriesByEnvironment.get(thread.environmentId) ??
+-                                EMPTY_PROVIDER_ENTRIES
+-                              }
+-                              timestampFormat={timestampFormat}
+-                              onThreadClick={handleThreadClick}
+-                              onThreadActivate={navigateToThread}
+-                              onStartRename={startThreadRename}
+-                              onRenameTitleChange={setRenamingTitle}
+-                              onCommitRename={commitThreadRename}
+-                              onCancelRename={cancelThreadRename}
+-                              isRenaming={renamingThreadKey === threadKey}
+-                              renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
+-                              onContextMenu={handleThreadContextMenu}
+-                              onSettle={attemptSettle}
+-                              onUnsettle={attemptUnsettle}
+-                              onSnooze={attemptSnooze}
+-                              onUnsnooze={attemptUnsnooze}
+-                              onUnpin={attemptUnpin}
+-                              onAcknowledgeWoke={acknowledgeWoke}
+-                              onFileDropThreads={handleThreadFileDrop}
+-                            />
+-                            <PlutoniumThreadWindows threadId={thread.id} />
+-                          </Fragment>
++                          <SidebarThreadRow
++                            // Fade between card and compact rows while the outer
++                            // sortable wrapper keeps its identity during a drag.
++                            key={`${threadKey}:${rowVariant}`}
++                            thread={thread}
++                            variant={rowVariant}
++                            // Snoozed rows wake, settled rows un-settle, and cards settle.
++                            variantAction={
++                              section === "snoozed"
++                                ? "unsnooze"
++                                : section === "settled"
++                                  ? "unsettle"
++                                  : "settle"
++                            }
++                            settlementSupported={
++                              serverConfigs.get(thread.environmentId)?.environment.capabilities
++                                .threadSettlement === true
++                            }
++                            snoozeSupported={
++                              serverConfigs.get(thread.environmentId)?.environment.capabilities
++                                .threadSnooze === true
++                            }
++                            pinningSupported={
++                              serverConfigs.get(thread.environmentId)?.environment.capabilities
++                                .threadPinning === true
++                            }
++                            isPinned={thread.pinnedAt != null}
++                            sortable={sortable}
++                            dropVerb={
++                              dragState?.activeKey === threadKey
++                                ? resolveSidebarDropVerb(dragState.activeSection, dragTargetSection)
++                                : null
++                            }
++                            dragOverPinned={
++                              dragState?.activeKey === threadKey && dragTargetSection === "pinned"
++                            }
++                            snoozeWakeLabelText={
++                              section === "snoozed" && thread.snoozedUntil != null
++                                ? snoozeWakeLabel(thread.snoozedUntil, {
++                                    now: new Date().toISOString(),
++                                  })
++                                : null
++                            }
++                            // All sections: a woken thread can classify straight
++                            // into the settled tail (PR merged while snoozed), and
++                            // the wake signal must survive the trip. Still-snoozed
++                            // rows resolve to null on their own.
++                            wokeAt={threadWokeAt(thread, { now: snoozeNow })}
++                            isActive={routeThreadKey === threadKey}
++                            openPullRequestsInRightPanel={routeThreadRef !== null}
++                            jumpLabel={
++                              showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
++                            }
++                            currentEnvironmentId={primaryEnvironmentId}
++                            environmentLabel={
++                              environmentLabelById.get(thread.environmentId) ?? null
++                            }
++                            environmentMachine={
++                              environmentMachineById.get(thread.environmentId) ?? "server"
++                            }
++                            project={
++                              projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
++                              null
++                            }
++                            projectDisplayName={
++                              projectDisplayNameByKey.get(
++                                `${thread.environmentId}:${thread.projectId}`,
++                              ) ?? null
++                            }
++                            providerEntryByInstanceId={
++                              providerEntriesByEnvironment.get(thread.environmentId) ??
++                              EMPTY_PROVIDER_ENTRIES
++                            }
++                            timestampFormat={timestampFormat}
++                            onThreadClick={handleThreadClick}
++                            onThreadActivate={navigateToThread}
++                            onStartRename={startThreadRename}
++                            onRenameTitleChange={setRenamingTitle}
++                            onCommitRename={commitThreadRename}
++                            onCancelRename={cancelThreadRename}
++                            isRenaming={renamingThreadKey === threadKey}
++                            renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
++                            onContextMenu={handleThreadContextMenu}
++                            onSettle={attemptSettle}
++                            onUnsettle={attemptUnsettle}
++                            onSnooze={attemptSnooze}
++                            onUnsnooze={attemptUnsnooze}
++                            onUnpin={attemptUnpin}
++                            onAcknowledgeWoke={acknowledgeWoke}
++                            onFileDropThreads={handleThreadFileDrop}
++                          />
+                         );
+                       };
+                       const renderThreadRow = (
+diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
+index bea426eb14..0975606fff 100644
+--- a/apps/web/src/plutonium/PlutoniumWindows.tsx
++++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
+@@ -1,42 +1,86 @@
+-// Plutonium: a thread's native windows in the sidebar, and the pane that
+-// shows one of them live as a <native-window> element.
+-import { AppWindowIcon, XIcon } from "lucide-react";
++// Plutonium: native windows in the right panel. The "Apps" surface lists the
++// windows a thread started, and each one opens as its own tab, shown live as a
++// <native-window> element.
++import { AppWindowIcon, SquareArrowOutUpRightIcon } from "lucide-react";
+ import { createElement, useEffect, useRef, useState } from "react";
+ 
+-import { cn } from "~/lib/utils";
++import { Button } from "~/components/ui/button";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+ 
+ import {
+   grantFor,
++  showOnDesktop,
+   startPlutoniumWindows,
++  type NativeWindowEntry,
+   usePlutoniumWindowStore,
+   useThreadWindows,
++  useUntaggedWindows,
+ } from "./windowStore";
+ 
+-/** The windows a thread's agent started, listed under its sidebar row. */
+-export function PlutoniumThreadWindows({ threadId }: { threadId: string }) {
+-  const windows = useThreadWindows(threadId);
+-  const openWindowId = usePlutoniumWindowStore((state) => state.openWindowId);
+-  const openWindow = usePlutoniumWindowStore((state) => state.openWindow);
+-  if (windows.length === 0) return null;
++/** Subscribes to the window broker for the whole app. Renders nothing. */
++export function PlutoniumWindowsStarter() {
++  useEffect(startPlutoniumWindows, []);
++  return null;
++}
++
++export function windowLabel(entry: Pick<NativeWindowEntry, "id" | "title" | "appId">): string {
++  return entry.title || entry.appId || `Window ${entry.id}`;
++}
++
++function AppRow({ entry, onOpen }: { entry: NativeWindowEntry; onOpen: () => void }) {
+   return (
+-    <ul className="mb-1 ml-6 flex flex-col gap-0.5" data-plutonium-thread-windows={threadId}>
+-      {windows.map((entry) => (
+-        <li key={entry.id}>
+-          <button
+-            type="button"
+-            className={cn(
+-              "flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground",
+-              openWindowId === entry.id && "bg-accent text-foreground",
+-            )}
+-            title={`${entry.appId || "app"} (window ${entry.id})`}
+-            onClick={() => openWindow(openWindowId === entry.id ? null : entry.id)}
+-          >
+-            <AppWindowIcon className="size-3.5 shrink-0" />
+-            <span className="truncate">{entry.title || entry.appId || `Window ${entry.id}`}</span>
+-          </button>
+-        </li>
+-      ))}
+-    </ul>
++    <button
++      type="button"
++      onClick={onOpen}
++      className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-2.5 text-left text-sm transition-colors hover:bg-accent/60"
++      data-plutonium-window={entry.id}
++    >
++      <AppWindowIcon className="size-4 shrink-0" />
++      <span className="min-w-0 flex-1 truncate">{windowLabel(entry)}</span>
++      <span className="shrink-0 text-muted-foreground text-xs">
++        {entry.embedded ? "In panel" : entry.appId}
++      </span>
++    </button>
++  );
++}
++
++/** The thread's windows, then windows nobody's thread started. */
++export function PlutoniumAppsPanel({
++  threadId,
++  onOpen,
++}: {
++  threadId: string | null;
++  onOpen: (entry: NativeWindowEntry) => void;
++}) {
++  const threadWindows = useThreadWindows(threadId);
++  const untaggedWindows = useUntaggedWindows();
++  return (
++    <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
++      <div className="w-full max-w-sm py-6">
++        <h3 className="mb-3 text-center font-medium text-foreground text-sm">Apps</h3>
++        {threadWindows.length === 0 ? (
++          <p className="px-2.5 py-1.5 text-center text-muted-foreground text-xs">
++            Apps that this thread's agent or terminals start show up here.
++          </p>
++        ) : (
++          <div className="flex flex-col gap-0.5">
++            {threadWindows.map((entry) => (
++              <AppRow key={entry.id} entry={entry} onOpen={() => onOpen(entry)} />
++            ))}
++          </div>
++        )}
++        {untaggedWindows.length > 0 ? (
++          <>
++            <h4 className="mt-5 mb-1.5 px-2.5 text-muted-foreground text-xs">Other windows</h4>
++            <div className="flex flex-col gap-0.5">
++              {untaggedWindows.map((entry) => (
++                <AppRow key={entry.id} entry={entry} onOpen={() => onOpen(entry)} />
++              ))}
++            </div>
++          </>
++        ) : null}
++      </div>
++    </div>
+   );
+ }
+ 
+@@ -80,34 +124,52 @@ function NativeWindowView({ windowId }: { windowId: number }) {
+   );
+ }
+ 
+-/** The open window, over the right part of the app. Renders nothing outside the shell. */
+-export function PlutoniumAppPane() {
+-  useEffect(startPlutoniumWindows, []);
+-  const openWindowId = usePlutoniumWindowStore((state) => state.openWindowId);
+-  const entry = usePlutoniumWindowStore((state) =>
+-    openWindowId === null ? undefined : state.windows[openWindowId],
+-  );
+-  const openWindow = usePlutoniumWindowStore((state) => state.openWindow);
+-  if (openWindowId === null || !entry) return null;
++/** One window as a panel tab. Popping out closes the tab and raises the window on the desktop. */
++export function PlutoniumAppSurface({
++  windowId,
++  appId,
++  onPopOut,
++}: {
++  windowId: number;
++  appId: string;
++  onPopOut: () => void;
++}) {
++  const entry = usePlutoniumWindowStore((state) => state.windows[windowId]);
++  // A tab restored from storage may name a window id that a new Ash session
++  // gave to a different app.
++  if (!entry || entry.appId !== appId) {
++    return (
++      <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
++        This app is no longer running.
++      </p>
++    );
++  }
+   return (
+-    <div
+-      className="fixed top-14 bottom-3 right-3 z-40 flex w-[min(56vw,960px)] flex-col overflow-hidden rounded-xl border bg-background shadow-2xl"
+-      data-plutonium-app-pane={openWindowId}
+-    >
+-      <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3 text-sm">
+-        <AppWindowIcon className="size-4 text-muted-foreground" />
+-        <span className="truncate font-medium">{entry.title || entry.appId}</span>
+-        <span className="truncate text-xs text-muted-foreground">{entry.appId}</span>
+-        <button
+-          type="button"
+-          className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+-          aria-label="Close app pane"
+-          onClick={() => openWindow(null)}
+-        >
+-          <XIcon className="size-4" />
+-        </button>
++    <div className="flex min-h-0 flex-1 flex-col" data-plutonium-app-surface={windowId}>
++      <div className="flex h-8 shrink-0 items-center gap-2 border-b px-3 text-xs">
++        <span className="truncate font-medium text-foreground">{windowLabel(entry)}</span>
++        <span className="truncate text-muted-foreground">{entry.appId}</span>
++        <Tooltip>
++          <TooltipTrigger
++            render={
++              <Button
++                aria-label="Pop out to desktop"
++                className="ml-auto"
++                size="icon-xs"
++                variant="ghost-muted"
++                onClick={() => {
++                  showOnDesktop(windowId);
++                  onPopOut();
++                }}
++              />
++            }
++          >
++            <SquareArrowOutUpRightIcon className="size-3.5" />
++          </TooltipTrigger>
++          <TooltipPopup>Pop out to desktop</TooltipPopup>
++        </Tooltip>
+       </div>
+-      <NativeWindowView windowId={openWindowId} />
++      <NativeWindowView windowId={windowId} />
+     </div>
+   );
+ }
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 7ebeca7f69..7259602fb4 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -7,6 +7,8 @@
+ // apps/server/src/plutonium.ts).
+ import { create } from "zustand";
+ 
++import { useRightPanelStore } from "~/rightPanelStore";
++
+ export interface NativeWindowEntry {
+   readonly id: number;
+   readonly appId: string;
+@@ -25,8 +27,10 @@ interface NativeWindowEvent extends Event {
+ }
+ 
+ interface NativeWindowBroker extends EventTarget {
++  getWindows(): Promise<NativeWindowEntry[]>;
+   requestGrant(windowId: number): Promise<string>;
+   revokeGrant(grant: string): void;
++  showOnDesktop(windowId: number): void;
+ }
+ 
+ const WINDOW_THREADS_PATH = "/api/plutonium/window-threads";
+@@ -36,17 +40,15 @@ interface PlutoniumWindowState {
+   readonly windows: Readonly<Record<number, NativeWindowEntry>>;
+   /** Client pid → thread id, as resolved by the server. */
+   readonly threadByPid: Readonly<Record<number, string>>;
+-  /** The window shown in the app pane, if any. */
+-  readonly openWindowId: number | null;
+-  readonly openWindow: (windowId: number | null) => void;
++  /** Pids the server has answered for, tagged or not. */
++  readonly resolvedPids: Readonly<Record<number, true>>;
+ }
+ 
+-export const usePlutoniumWindowStore = create<PlutoniumWindowState>((set) => ({
++export const usePlutoniumWindowStore = create<PlutoniumWindowState>(() => ({
+   available: false,
+   windows: {},
+   threadByPid: {},
+-  openWindowId: null,
+-  openWindow: (windowId) => set({ openWindowId: windowId }),
++  resolvedPids: {},
+ }));
+ 
+ function broker(): NativeWindowBroker | null {
+@@ -84,9 +86,12 @@ function resolvePid(pid: number): void {
+       .then((response) => (response.ok ? response.json() : {}))
+       .then((resolved: Record<string, string>) => {
+         const entries = Object.entries(resolved).map(([pid, threadId]) => [Number(pid), threadId]);
+-        if (entries.length === 0) return;
+         usePlutoniumWindowStore.setState((state) => ({
+           threadByPid: { ...state.threadByPid, ...Object.fromEntries(entries) },
++          resolvedPids: {
++            ...state.resolvedPids,
++            ...Object.fromEntries(pids.map((pid) => [pid, true] as const)),
++          },
+         }));
+       })
+       .catch(() => undefined);
+@@ -107,11 +112,14 @@ function onWindowRemoved(event: Event): void {
+   grants.delete(windowId);
+   usePlutoniumWindowStore.setState((state) => {
+     const { [windowId]: _removed, ...windows } = state.windows;
+-    return {
+-      windows,
+-      openWindowId: state.openWindowId === windowId ? null : state.openWindowId,
+-    };
++    return { windows };
+   });
++  useRightPanelStore.getState().reconcileAppSurfaces((id) => id !== windowId);
++}
++
++/** Raises `windowId` on the Ash desktop once no element shows it any more. */
++export function showOnDesktop(windowId: number): void {
++  broker()?.showOnDesktop(windowId);
+ }
+ 
+ let started = false;
+@@ -121,18 +129,39 @@ export function startPlutoniumWindows(): void {
+   if (started) return;
+   started = true;
+   const windowBroker = broker();
+-  if (!windowBroker) return;
++  if (!windowBroker) {
++    // App tabs restored from storage have nothing to show outside the shell.
++    useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++    return;
++  }
+   usePlutoniumWindowStore.setState({ available: true });
++  // Window ids only hold within one Ash session: drop restored tabs whose
++  // window is gone or is now some other app.
++  void windowBroker.getWindows().then((windows) => {
++    const appIds = new Map(windows.map((entry) => [entry.id, entry.appId]));
++    useRightPanelStore.getState().reconcileAppSurfaces((id, appId) => appIds.get(id) === appId);
++  });
+   windowBroker.addEventListener("windowadded", onWindow);
+   windowBroker.addEventListener("windowchanged", onWindow);
+   windowBroker.addEventListener("windowremoved", onWindowRemoved);
+ }
+ 
+-/** Windows started by `threadId`'s agent, oldest first. */
+-export function useThreadWindows(threadId: string): readonly NativeWindowEntry[] {
++/** Windows started by `threadId`'s agent or terminals, oldest first. */
++export function useThreadWindows(threadId: string | null): readonly NativeWindowEntry[] {
+   const windows = usePlutoniumWindowStore((state) => state.windows);
+   const threadByPid = usePlutoniumWindowStore((state) => state.threadByPid);
++  if (threadId === null) return [];
+   return Object.values(windows)
+     .filter((entry) => threadByPid[entry.pid] === threadId)
+     .toSorted((a, b) => a.id - b.id);
+ }
++
++/** Windows that no thread started (once the server has said so), oldest first. */
++export function useUntaggedWindows(): readonly NativeWindowEntry[] {
++  const windows = usePlutoniumWindowStore((state) => state.windows);
++  const threadByPid = usePlutoniumWindowStore((state) => state.threadByPid);
++  const resolvedPids = usePlutoniumWindowStore((state) => state.resolvedPids);
++  return Object.values(windows)
++    .filter((entry) => !(entry.pid in threadByPid) && (entry.pid <= 0 || entry.pid in resolvedPids))
++    .toSorted((a, b) => a.id - b.id);
++}
+diff --git a/apps/web/src/rightPanelStore.ts b/apps/web/src/rightPanelStore.ts
+index 75f6d2ffe2..9bb354b64d 100644
+--- a/apps/web/src/rightPanelStore.ts
++++ b/apps/web/src/rightPanelStore.ts
+@@ -29,6 +29,8 @@ const RIGHT_PANEL_KINDS = [
+   "pull-request",
+   "pull-requests",
+   "agents",
++  "apps",
++  "app",
+ ] as const;
+ export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
+ 
+@@ -85,7 +87,17 @@ export type RightPanelSurface =
+     }
+   /** The thread's linked pull requests, one singleton tab beside any number of `pull-request` tabs. */
+   | { id: "pull-requests"; kind: "pull-requests" }
+-  | { id: "agents"; kind: "agents" };
++  | { id: "agents"; kind: "agents" }
++  /** Plutonium: the native windows this thread started, and one tab per window shown. */
++  | { id: "apps"; kind: "apps" }
++  | {
++      id: `app:${number}`;
++      kind: "app";
++      /** The browser window broker's id; only valid for the Ash session it came from. */
++      windowId: number;
++      /** Checked against the live window on restore, so a reused id is not taken for this one. */
++      appId: string;
++    };
+ 
+ const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
+ // v9 removed the "plan" surface kind (plans render inline in the transcript).
+@@ -129,7 +141,7 @@ interface RightPanelStoreState {
+   ) => boolean;
+   open: (
+     ref: ScopedThreadRef,
+-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
++    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "app">,
+   ) => void;
+   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
+   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
+@@ -148,6 +160,9 @@ interface RightPanelStoreState {
+     },
+   ) => void;
+   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
++  openApp: (ref: ScopedThreadRef, window: { windowId: number; appId: string }) => void;
++  /** Drops app tabs whose window is gone, in every thread. */
++  reconcileAppSurfaces: (isLive: (windowId: number, appId: string) => boolean) => void;
+   splitTerminal: (
+     ref: ScopedThreadRef,
+     surfaceId: string,
+@@ -168,7 +183,7 @@ interface RightPanelStoreState {
+   toggleVisibility: (ref: ScopedThreadRef) => void;
+   toggle: (
+     ref: ScopedThreadRef,
+-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
++    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "app">,
+   ) => void;
+   removeThread: (ref: ScopedThreadRef) => void;
+ }
+@@ -180,7 +195,7 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
+ };
+ 
+ const singletonSurface = (
+-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request">,
++  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request" | "app">,
+ ): RightPanelSurface => {
+   switch (kind) {
+     case "diff":
+@@ -191,6 +206,8 @@ const singletonSurface = (
+       return { id: "pull-requests", kind };
+     case "agents":
+       return { id: "agents", kind };
++    case "apps":
++      return { id: "apps", kind };
+     case "device":
+       return { id: "device", kind };
+   }
+@@ -627,6 +644,39 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+             upsertSurface(current, terminalSurface(terminalId)),
+           ),
+         ),
++      openApp: (ref, { windowId, appId }) =>
++        set((state) =>
++          userAction(state, scopedThreadKey(ref), (current) =>
++            upsertSurface(current, { id: `app:${windowId}`, kind: "app", windowId, appId }),
++          ),
++        ),
++      reconcileAppSurfaces: (isLive) =>
++        set((state) => {
++          let byThreadKey = state.byThreadKey;
++          for (const threadKey of Object.keys(state.byThreadKey)) {
++            byThreadKey = updateThread(byThreadKey, threadKey, (current) => {
++              const surfaces = current.surfaces.filter(
++                (surface) => surface.kind !== "app" || isLive(surface.windowId, surface.appId),
++              );
++              if (surfaces.length === current.surfaces.length) return current;
++              const index = current.surfaces.findIndex(
++                (surface) => surface.id === current.activeSurfaceId,
++              );
++              const activeStillExists = surfaces.some(
++                (surface) => surface.id === current.activeSurfaceId,
++              );
++              return {
++                ...current,
++                isOpen: surfaces.length > 0 && current.isOpen,
++                surfaces,
++                activeSurfaceId: activeStillExists
++                  ? current.activeSurfaceId
++                  : (surfaces[Math.min(Math.max(index, 0), surfaces.length - 1)]?.id ?? null),
++              };
++            });
++          }
++          return byThreadKey === state.byThreadKey ? state : { byThreadKey };
++        }),
+       splitTerminal: (ref, surfaceId, terminalId, direction = "horizontal") =>
+         set((state) =>
+           userAction(state, scopedThreadKey(ref), (current) => ({
+diff --git a/apps/web/src/routes/_chat.pull-requests.tsx b/apps/web/src/routes/_chat.pull-requests.tsx
+index 1b7239a0be..b20d35d288 100644
+--- a/apps/web/src/routes/_chat.pull-requests.tsx
++++ b/apps/web/src/routes/_chat.pull-requests.tsx
+@@ -2115,6 +2115,8 @@ function PullRequestsRouteView() {
+             onAddPullRequests={() => undefined}
+             onAddAgents={() => undefined}
+             onAddDevice={() => undefined}
++            onAddApps={() => undefined}
++            appsAvailable={false}
+             browserAvailable={false}
+             terminalAvailable={false}
+             diffAvailable={false}

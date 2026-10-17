@@ -1,0 +1,11 @@
+# Release build: one self-contained chrome binary, for the prebuilt image.
+# Same features as args.gn; no component libraries, DCHECKs or symbols.
+target_os = "chromeos"
+is_debug = false
+is_component_build = false
+dcheck_always_on = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+use_system_minigbm = true
+use_libinput = true

@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 17 Oct 2026 09:51:03 +1300
+Subject: [PATCH 10/16] Plutonium: parked windows don't occlude the page
+
+A window parked for embedding is invisible (opacity 0), but opaque regions
+for occlusion count regardless of opacity. A hidden fullscreen opaque
+client (e.g. a game) marked the shell's WebContents occluded: the page went
+hidden, stopped painting and handling input. Parked windows now report no
+opaque regions (SurfaceTreeHost::CanOccludeOtherWindows), restored when
+unparked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TNhRAcr4c5t15KWH3mHxTk
+---
+ components/exo/shell_surface_base.cc | 12 +++++++++++-
+ components/exo/shell_surface_base.h  |  3 +++
+ components/exo/surface_tree_host.cc  |  6 +++++-
+ components/exo/surface_tree_host.h   |  5 +++++
+ 4 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
+index 11f1b75a6e..06453b9285 100644
+--- a/components/exo/shell_surface_base.cc
++++ b/components/exo/shell_surface_base.cc
+@@ -2199,7 +2199,7 @@ void ShellSurfaceBase::UpdateShadow() {
+     // configure_ack + commit.
+     bool window_is_opaque = widget_->IsFullscreen() || widget_->IsMaximized();
+     window->SetTransparent(!window_is_opaque);
+-    if (root_surface()->FillsBoundsOpaquely()) {
++    if (CanOccludeOtherWindows() && root_surface()->FillsBoundsOpaquely()) {
+       // Manually control occlusion, but do not make the window
+       // opaque as the host window may not be at the same size unless the
+       // window state is either in fullscreen or maximized.
+@@ -2648,6 +2648,10 @@ gfx::Rect ShellSurfaceBase::GetEmbedGeometry() const {
+                    GetVisibleBounds().size());
+ }
+ 
++bool ShellSurfaceBase::CanOccludeOtherWindows() const {
++  return !embed_parked_;
++}
++
+ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+   if (embed_parked_ == parked || !widget_) {
+     return;
+@@ -2673,6 +2677,10 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     widget_->SetZOrderLevel(ui::ZOrderLevel::kFloatingWindow);
+     window->layer()->SetOpacity(0.f);
+     window->SetEventTargetingPolicy(aura::EventTargetingPolicy::kNone);
++    // An invisible window must not hide the page (e.g. a fullscreen game
++    // marking the shell's WebContents occluded, which stops its input).
++    window->SetOpaqueRegionsForOcclusion({});
++    UpdateHostWindowOpaqueRegion();
+   } else {
+     // Keep the size the page gave it (the size from before parking may
+     // predate the client's first full-size commit), read before the
+@@ -2686,6 +2694,8 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     SetCanActivate(embed_saved_can_activate_);
+     widget_->SetBounds(bounds);
+     UpdateEmbedCoversDisplay(gfx::Size());
++    UpdateHostWindowOpaqueRegion();
++    UpdateShadow();
+   }
+   OnEmbedStateChanged();
+ }
+diff --git a/components/exo/shell_surface_base.h b/components/exo/shell_surface_base.h
+index 7fc76155b6..56d913ecc8 100644
+--- a/components/exo/shell_surface_base.h
++++ b/components/exo/shell_surface_base.h
+@@ -268,6 +268,9 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   // takes no real input; a web page presents it instead.
+   void SetEmbedParked(bool parked);
+   bool embed_parked() const { return embed_parked_; }
++
++  // SurfaceTreeHost:
++  bool CanOccludeOtherWindows() const override;
+   // Whether the window has keyboard focus through the page embedding it.
+   void SetEmbedFocused(bool focused);
+   bool embed_focused() const { return embed_focused_; }
+diff --git a/components/exo/surface_tree_host.cc b/components/exo/surface_tree_host.cc
+index 2f6be9ea9c..49a73b32b3 100644
+--- a/components/exo/surface_tree_host.cc
++++ b/components/exo/surface_tree_host.cc
+@@ -481,8 +481,12 @@ void SurfaceTreeHost::UpdateSurfaceLayerSizeAndRootSurfaceOrigin() {
+   }
+ }
+ 
++bool SurfaceTreeHost::CanOccludeOtherWindows() const {
++  return true;
++}
++
+ void SurfaceTreeHost::UpdateHostWindowOpaqueRegion() {
+-  if (ContentsFillsHostWindowOpaquely()) {
++  if (CanOccludeOtherWindows() && ContentsFillsHostWindowOpaquely()) {
+     host_window_->SetOpaqueRegionsForOcclusion(
+         {gfx::Rect(host_window_->bounds().size())});
+   } else {
+diff --git a/components/exo/surface_tree_host.h b/components/exo/surface_tree_host.h
+index 7a981c1498..efce19b755 100644
+--- a/components/exo/surface_tree_host.h
++++ b/components/exo/surface_tree_host.h
+@@ -203,6 +203,11 @@ class SurfaceTreeHost : public SurfaceDelegate,
+ 
+   void UpdateHostWindowOpaqueRegion();
+ 
++  // Plutonium: whether the host window's opaque contents may occlude other
++  // windows. Not for a window parked off the desktop for embedding: it is
++  // invisible, but opaque regions occlude regardless of layer opacity.
++  virtual bool CanOccludeOtherWindows() const;
++
+   bool client_submits_surfaces_in_pixel_coordinates() const {
+     return client_submits_surfaces_in_pixel_coordinates_;
+   }

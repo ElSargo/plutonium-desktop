@@ -1,0 +1,105 @@
+# The niri shell
+
+A third frontend: a near 1:1 clone of the [niri](https://github.com/YaLTeR/niri) scrollable-tiling Wayland compositor, written as a Plutonium shell page (`shells/niri/index.html`). Like the plain shell, it is built only on the substrate: `navigator.windowBroker`, `<native-window>`, browser tabs and the helper's shell library. Tested on DRM (tty2) on 2026-10-17, Chromium patch `chromium/patches/0016-*.patch`.
+
+```
+plutonium run niri plain          # DRM, niri at startup, the plain shell second (Super+Tab)
+plutonium run --x11 niri          # a private Xvfb (:99)
+```
+
+The page is served on `127.0.0.1:8775` .
+
+## What it does
+
+- **Scrollable tiling.** Each workspace is an endless horizontal strip of columns. A column holds one or more windows stacked vertically, or tabbed (Super+W, with niri's tab indicator in the gap). New windows open as a column right of the focused one, at half the screen width. The view scrolls just enough to keep the focused column on screen (`center-focused-column "never"`).
+- **Workspaces.** These are dynamic and stacked vertically. There is always one empty workspace at the bottom, and an empty workspace goes away once you leave it. Switching slides vertically.
+- **Overview** ([screenshot](../images/niri-overview.png); Super+O, or the top-left hot corner). It zooms out to 0.5 and shows every workspace as a card with the wallpaper, rounded corners and a shadow, on niri's `#262626` backdrop.
+  - Click a window to go to it, or click a workspace to switch.
+  - Drag a window to put it in another workspace, at the column where you drop it.
+  - The wheel switches workspaces, and Escape or Enter closes the overview.
+- **Floating windows** (Super+V, Super+Shift+V): above the tiles, centred at their tiled size. Super+drag moves them, and Super+right-drag resizes them.
+- **The look.** niri's knobs are at the top of the script (`CONFIG`):
+  - gaps 16;
+  - a 4 px border, `#7fc8ff` on the active window and `#505050` on the others;
+  - 12 px corner radius, with the window clipped to it;
+  - niri's shadow (softness 30, spread 5, offset 0 5, `#0007`).
+  The focus ring, presets and centring mode can be switched there too.
+- **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales it in from 0.5.
+- **Launcher** (Super+D), in place of fuzzel. It searches the helper's desktop apps, with icons and recently used ones first. It can also run a command line, open a web address as a browser tab, or start Claude Code with Plutonium's MCP tools.
+- **The hotkey overlay** (Super+Shift+/) is shown at startup, as in niri.
+- **Browser tabs are tiles too.** Their page dialogs are drawn over the tile.
+- **Which windows it shows:**
+  - everything tagged `niri:desktop`. That's the thread it launches apps in, so it also covers apps started from its terminals;
+  - windows nobody claims (no tag), which it tags.
+  Another shell's windows come in through the Super+Tab overlay ("show in its shell"). The layout is kept in the page's storage and survives a reload of the page (not an Ash restart: window ids restart).
+
+## Binds
+
+These are niri's default `config.kdl` binds, with Mod = Super:
+
+| Keys | Action |
+|---|---|
+| Super+T / Super+D / Super+Q | terminal (foot) / launcher / close window |
+| Super+←→↑↓, Super+H J K L | focus column left/right, window down/up |
+| Super+Ctrl+the same | move column left/right, window down/up |
+| Super+Home/End, +Ctrl | focus / move to the first or last column |
+| Super+PageDown/PageUp, Super+U/I | workspace down/up; +Ctrl moves the column, +Shift moves the workspace |
+| Super+1…9, Super+Ctrl+1…9 | focus workspace N, move the column there |
+| Super+[ / ] | consume or expel window left/right |
+| Super+, / . | consume window into column / expel it |
+| Super+R, Super+Shift+R, Super+Ctrl+R | preset column widths (1/3, 1/2, 2/3), preset window heights, reset heights |
+| Super+- / =, +Shift | column width ∓10%, window height ∓10% |
+| Super+M | maximize column (niri's Super+F, which the browser keeps for fullscreen) |
+| Super+Shift+F | fullscreen window |
+| Super+Ctrl+F | expand column to the available width |
+| Super+C, Super+Ctrl+C | center column, center the visible columns |
+| Super+V, Super+Shift+V | floating, switch focus between floating and tiling |
+| Super+W | tabbed column |
+| Super+O | overview |
+| Super+wheel, +Shift / sideways, +Ctrl | workspace, column, move the column |
+| Super+drag, Super+right-drag | move window (onto another column position, or a floating one), resize column |
+
+All of them are registered as shell shortcuts, so they work while an app or tab has the keyboard. Super itself is registered too. While it's held, a layer over the windows takes the pointer, so Super+drag and Super+wheel reach the page.
+
+**Left out:** Super+Tab (the browser's shells overlay; niri uses it for the previous workspace), Super+Escape (the browser's pointer release), screenshots (Print), lock (Super+Alt+L), quit (Super+Shift+E), power off monitors, and multi-monitor binds.
+
+## Chromium changes (`chromium/patches/0016-*.patch`)
+
+- **Shell shortcuts beat Ash's accelerators.** Super+D opened ChromeOS's "Turn on Dictation?" dialog instead of the launcher, and Search+V would open clipboard history. `plutonium_keys.cc` now marks any press that is one of the visible shell's shortcuts, and its release, with `wm::kShellShortcutEventKey`. `wm::AcceleratorFilter` leaves marked events alone, so they reach the page as ordinary keys. This applies to every frontend.
+- **No Search+arrow rewriting in shell mode.** ChromeOS's event rewriter turns Search+←→↑↓ into Home/End/PageUp/PageDown ("six-pack" keys), and Alt+↑↓ into PageUp/Down. Super+Left never reached the page. Desktop keyboards have real Home/End/Page keys, so `EventRewriterAsh` skips that remapping when `--plutonium-shell-url` is set.
+- **No white strip under windows.** When an element is bigger than its window's surface, viz fills the gap (the gutter) with the client frame's `root_background_color`. Exo never set it, so the default, white, was used: a white strip under foot, which snaps to whole cells. It was in the plain shell too (`shots/phase4-drm-foot.png`). Exo now sends transparent, so what's behind the window shows.
+
+- **Touchpads work.** This is a Linux-built ChromeOS (`is_chromeos_device` is false), so it has no ChromeOS gestures library. Touchpads fell through to the plain evdev converter, which ignores multitouch: the touchpad did nothing. `out/Cros/args.gn` now sets `use_libinput = true`, and `launch-drm-shell.sh` passes `--enable-features=LibinputHandleTouchpad`, so every touchpad goes through Chromium's libinput converter (pointer, buttons, two-finger scroll, tap-to-click). The converter had bit-rotted (raw pointers, `StringPrintV`), and its `USE_LIBINPUT` define is now private to `//ui/events/ozone/evdev`, so turning it on doesn't rebuild half of Chrome.
+
+- **Scrolling in apps.** Wheel and touchpad scrolling reach an embedded window from the browser, as Blink wheel events (`chrome/browser/exo_embedder.cc`). These were turned back into aura `MouseWheelEvent`s built from the pixel delta, which went wrong in three ways. Each fix is now in place:
+  - **Wheel speed.** A notch is 120 there, but `MouseWheelEvent::kWheelDelta` is 53 on ChromeOS, so each notch became 120/53 ≈ 2.26 ticks. GTK3 clients such as Firefox collapse discrete counts, so the result was wrong speeds. The embedder now passes the notches as `tick_120ths` and the offset in `kWheelDelta` units.
+  - **Wheel units.** Exo sent 10 axis units per notch (Weston's convention). It now sends 15, as libinput, KWin and niri do. High-resolution wheels count whole notches across events for `axis_discrete`.
+  - **Touchpad.** Each scroll step was truncated to a whole pixel twice: in the libinput converter, and when turned into wheel ticks. It was then divided by 12 as if it were a wheel. Precise-pixel scrolling is now a `ui::ScrollEvent`, and Exo sends it as finger axis events in pixels. The end of the gesture (libinput's zero axis, or the wheel's ended phase) becomes `axis_stop`, so clients can do kinetic scrolling.
+  - **Only the first event of a scroll reached the app.** This was the main bug. Over niri's tiles (rounded and clipped), viz's hit test says "ask", so a wheel sequence's first event goes through the async targeter, which then routes it to the native window. The targeter sends the rest of a sequence (changed/ended phases) to `wheel_target_`, a view, and a native window has none, so they were dropped. Fast scrolling or a touchpad gesture is one sequence, so almost nothing arrived. `RenderWidgetHostInputEventRouter` now latches a sequence that starts on a native window (`foreign_wheel_sink_`) and routes the rest of it there.
+  Measured with `WAYLAND_DEBUG` on foot and the uinput mouse: one notch is `axis_discrete 1`, `axis 15`. Before, it was `axis_discrete 2`, `axis 33.96`.
+
+## Verified on DRM (tty2, uinput keyboard and mouse)
+
+| | |
+|---|---|
+| Startup hotkey overlay; Escape closes it (`shots/niri-drm-hotkeys.png`) | ✓ |
+| Super+T ×3: three half-width columns, the view scrolled to the newest, rounded corners, border on the focused one | ✓ |
+| Super+Left ×2 moves focus (after the rewriter change), and typing reaches the focused foot (`echo niri $((6*7))` → `niri 42`) | ✓ |
+| Super+H, Super+PageDown | ✓ |
+| Super+, consumes the next column; Super+R goes to 2/3; Super+W tabbed, with the indicator | ✓ |
+| Super+O overview; Super+Ctrl+U in the overview moves the column up a workspace, and a new empty one stays at the bottom; Escape closes it | ✓ |
+| Super+D (after the accelerator change): the launcher with icons, "foot" + Enter opens a new column next to the focused one | ✓ |
+| Hot corner opens the overview; a click on a window closes it and focuses that window | ✓ |
+| No white gutter under foot | ✓ |
+
+These were tested on Xvfb only: consume-or-expel, floating (Super+V), overview click across workspaces, the page reload restoring the layout.
+
+## Not done
+
+- **Not tried yet:** Super+drag and Super+right-drag (uinput can't hold Super during a mouse drag), dragging in the overview, browser tabs as tiles, the Claude Code launcher entry.
+- **Resizes aren't animated.** Sizes change at once, and only positions animate. Animating the element's size would reconfigure the app every frame.
+- **No close animation.** The element disappears with its window.
+- **No interactive tiling move.** Super+drag of a tiled window drops it as a new column (niri can also insert it into a column).
+- **One output only.**
+- **Dialogs (transient windows) are tiled.** niri floats them, but the broker doesn't report a window's parent.
+- **Shell-wide Super.** While niri is visible, apps never see Super (it is a shell shortcut), so app shortcuts with Super don't work.

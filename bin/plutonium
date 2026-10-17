@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+# plutonium: set up, build and run Plutonium. `plutonium help` lists commands.
+set -euo pipefail
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+usage() {
+  cat <<EOF
+Usage: plutonium <command> [args]
+
+Setup (INSTALL.md walks through these in order):
+  doctor                     check the host and the build
+  container build            build the image ($IMAGE)
+  container create           create the container ($CONTAINER) and start it
+  container start|stop       start or stop it
+  container shell            a shell inside it
+  chromium fetch             depot_tools and a Chromium checkout at chromium/BASE (~100 GB, hours)
+  chromium patch             apply chromium/patches on a branch 'plutonium'
+  chromium build [--release] gn gen with chromium/args.gn (or args.release.gn), then build chrome
+  t3 fetch                   clone T3 Code at frontends/t3code/BASE and apply its patches
+  t3 build                   install its dependencies and build its web app
+  image pull                 PREBUILT=1: download the prebuilt Chromium instead of building it
+  killswitch find            show the key codes of buttons as you press them
+  killswitch install         a user service that kills Ash on a button press (DRM safety)
+
+Sessions:
+  run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
+                             The first is the desktop, Super+Tab switches. Default: niri plain.
+  stop [--drm|--x11]         stop a session's Ash (both if neither is given)
+  t3 server                  start the T3 Code server for a session (before 'run t3')
+  status                     what is running
+
+Development:
+  helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
+  cdp <args>                 DevTools from the container: tools/cdp.py --help
+  chromium export            rewrite chromium/patches from the checkout's commits since BASE
+  t3 export                  rewrite frontends/t3code/patches the same way
+  image build|push|login|tag the prebuilt image, from the release build (chromium build --release)
+
+Settings: plutonium.env (see plutonium.env.example).
+EOF
+}
+
+run_usage() {
+  cat <<EOF
+Usage: plutonium run [options] [shell...]
+
+Shells: niri (scrollable tiling), plain (the minimal shell), t3 (T3 Code: run
+'plutonium t3 server' first), or <name>=<url> for any page. The first one is the
+desktop; the others run behind it (Super+Tab).
+
+Where:
+  --x11 [display]   Ash in a window on an X11 display (default :99, a private Xvfb)
+  --drm             Ash on KMS/DRM. Run it from a text VT (Ctrl+Alt+F2, log in)
+                    while your desktop session is inactive. This is the default.
+  --vt ttyN         DRM against ttyN from any other shell (needs passwordless sudo
+                    and someone logged in on ttyN)
+  --hold SECONDS    DRM: stop Ash after SECONDS (unattended tests); with --vt, first
+                    wait up to 120 s for the graphical session to go inactive
+  --no-killswitch   DRM without the kill switch (see INSTALL.md before using it)
+  --flags "..."     more Chromium flags
+EOF
+}
+
+# --- Container ---------------------------------------------------------------
+container_cmd() {
+  case "${1:-}" in
+    build)
+      pm build --build-arg "CHROMIUM_BASE=$(cat "$ROOT/chromium/BASE")" -t "$IMAGE" \
+        -f "$ROOT/container/Containerfile" "$ROOT/container" ;;
+    create)
+      pm container exists "$CONTAINER" && die "a container '$CONTAINER' already exists"
+      mkdir -p "$DATA_DIR" "$RUN_DIR"
+      [[ -n ${PREBUILT:-} ]] || mkdir -p "$CHROMIUM_DIR" "$DEPOT_TOOLS"
+      local mounts=() dir
+      # Same path inside as outside, so paths need no translation.
+      # The container's own home (depot_tools' settings and caches), under
+      # the data dir; the directories above are mounted into it.
+      mkdir -p "$DATA_DIR/container-home"
+      mounts+=(-v "$DATA_DIR/container-home:$HOME")
+      local dirs=("$ROOT" "$DATA_DIR" "$RUN_DIR")
+      [[ -n ${PREBUILT:-} ]] || dirs+=("$CHROMIUM_DIR" "$DEPOT_TOOLS")
+      for dir in "${dirs[@]}"; do
+        mounts+=(-v "$dir:$dir")
+      done
+      [[ -d /tmp/.X11-unix ]] && mounts+=(-v /tmp/.X11-unix:/tmp/.X11-unix)
+      # - host pid namespace: Exo reports real client pids, which the helper
+      #   maps to threads;
+      # - /dev/dri, /dev/input and udev: Ash on DRM with evdev input;
+      # - keep-id: files in the checkout stay yours.
+      pm create --name "$CONTAINER" --hostname "$CONTAINER" --pid=host --network=host --ipc=host \
+        --userns=keep-id --group-add keep-groups --security-opt label=disable \
+        --device /dev/dri -v /dev/input:/dev/input -v /run/udev:/run/udev:ro "${mounts[@]}" \
+        -e HOME="$HOME" -e XDG_RUNTIME_DIR="$RUN_DIR" \
+        -e PATH="$DEPOT_TOOLS:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        -w "$([[ -n ${PREBUILT:-} ]] && echo "$ROOT" || echo "$CHROMIUM_DIR")" "$IMAGE" sleep infinity > /dev/null
+      container_cmd start ;;
+    start)
+      # From a systemd user unit that stays, so the container's monitor
+      # (conmon) outlives the shell, or podman wrapper, that started it.
+      systemctl --user reset-failed "plutonium-container-$CONTAINER" 2>/dev/null || true
+      systemctl --user stop "plutonium-container-$CONTAINER" 2>/dev/null || true
+      systemd-run --user --quiet --unit="plutonium-container-$CONTAINER" -p Type=oneshot -p RemainAfterExit=yes \
+        --setenv=PATH="$PATH" "$(command -v podman)" start "$CONTAINER" > /dev/null
+      sleep 1
+      container_running || die "$CONTAINER did not start (podman logs $CONTAINER)"
+      echo "started $CONTAINER" ;;
+    stop) pm stop -t 5 "$CONTAINER" > /dev/null; systemctl --user stop "plutonium-container-$CONTAINER" 2>/dev/null || true ;;
+    shell) need_container; pm exec -it "$CONTAINER" bash ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- Prebuilt image ----------------------------------------------------------
+image_cmd() {
+  local ref=$PREBUILT_REPO:$PREBUILT_TAG
+  case "${1:-}" in
+    build)
+      need_container
+      local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT stage=$DATA_DIR/image-stage
+      [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
+      mkdir -p "$stage"
+      rm -rf "$stage/chrome"
+      mkdir -p "$stage/chrome"
+      # What Chrome's Linux installer ships (chrome/installer/linux), plus
+      # every top-level resource file, since the ChromeOS build has more.
+      local f
+      for f in chrome chrome_crashpad_handler icudtl.dat vk_swiftshader_icd.json \
+               libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1 \
+               "$out"/*.pak "$out"/*.bin "$out"/*.dat; do
+        f=${f##*/}
+        [[ -e $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
+      done
+      [[ -e $out/chrome_sandbox ]] && cp -a "$out/chrome_sandbox" "$stage/chrome/chrome-sandbox"
+      for f in locales MEIPreload PrivacySandboxAttestationsPreloaded resources; do
+        [[ -d $out/$f ]] && cp -a "$out/$f" "$stage/chrome/"
+      done
+      in_container sh -c "strip --strip-unneeded '$stage/chrome/chrome' '$stage/chrome/chrome_crashpad_handler' '$stage'/chrome/*.so*"
+      # Chromium's license notices, which redistributing it requires.
+      in_container sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir $CHROMIUM_RELEASE_OUT '$stage/chrome/LICENSES.chromium.html'" ||
+        echo "warning: could not generate LICENSES.chromium.html" >&2
+      cp "$ROOT/container/Containerfile.runtime" "$stage/Containerfile"
+      du -sh "$stage/chrome"
+      pm build -t "$ref" -f "$stage/Containerfile" "$stage"
+      pm tag "$ref" "$PREBUILT_REPO:latest"
+      echo "built $ref" ;;
+    push)
+      pm push "$ref" && pm push "$PREBUILT_REPO:latest" ;;
+    pull)
+      pm pull "$ref" ;;
+    login)
+      # A token with write:packages (gh auth refresh -s write:packages).
+      gh auth token | pm login ghcr.io -u "$(gh api user --jq .login)" --password-stdin ;;
+    tag) echo "$ref" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- Chromium ----------------------------------------------------------------
+chromium_cmd() {
+  local base src=$CHROMIUM_DIR/src
+  base=$(cat "$ROOT/chromium/BASE")
+  case "${1:-}" in
+    fetch)
+      need_container
+      [[ -d $DEPOT_TOOLS/.git ]] ||
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS"
+      # What `fetch chromium` writes, plus the ChromeOS target; then one sync
+      # straight to BASE (fetch would first sync to the newest revision).
+      [[ -f $CHROMIUM_DIR/.gclient ]] || cat > "$CHROMIUM_DIR/.gclient" <<'EOF'
+solutions = [
+  {
+    "name": "src",
+    "url": "https://chromium.googlesource.com/chromium/src.git",
+    "custom_deps": {},
+    "custom_vars": {},
+  },
+]
+target_os = ['chromeos']
+EOF
+      # googlesource rate-limits gclient's default parallelism (HTTP 429).
+      in_container gclient sync --revision "src@$base" --nohooks --no-history -D -j 4
+      in_container gclient runhooks
+      echo "Chromium is at $base. Next: plutonium chromium patch" ;;
+    patch)
+      [[ -d $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
+      if git -C "$src" rev-parse -q --verify refs/heads/plutonium > /dev/null &&
+         [[ ${2:-} != --force ]]; then
+        die "branch 'plutonium' exists in $src; --force resets it to BASE and re-applies the patches"
+      fi
+      [[ -z $(git -C "$src" status --porcelain --untracked-files=no) ]] || die "$src has uncommitted changes"
+      git -C "$src" checkout -q -B plutonium "$base"
+      committer git -C "$src" am -q --3way "$ROOT"/chromium/patches/*.patch
+      echo "$(git -C "$src" rev-list --count "$base"..HEAD) patches applied on branch plutonium" ;;
+    build)
+      need_container
+      local outdir=$CHROMIUM_OUT args=$ROOT/chromium/args.gn
+      if [[ ${2:-} == --release ]]; then outdir=$CHROMIUM_RELEASE_OUT; args=$ROOT/chromium/args.release.gn; fi
+      mkdir -p "$src/$outdir"
+      cmp -s "$args" "$src/$outdir/args.gn" || cp "$args" "$src/$outdir/args.gn"
+      in_container sh -c "cd src && gn gen $outdir && autoninja -C $outdir chrome" ;;
+    export)
+      [[ -d $src/.git ]] || die "no checkout at $src"
+      [[ -z $(git -C "$src" status --porcelain --untracked-files=no) ]] || die "commit your changes in $src first"
+      rm -f "$ROOT"/chromium/patches/*.patch
+      git -C "$src" format-patch -q --zero-commit --no-signature -o "$ROOT/chromium/patches" "$base"..HEAD
+      ls "$ROOT/chromium/patches" | wc -l | xargs echo "patches written to chromium/patches:" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# git am needs a committer; use a neutral one if git has none configured.
+committer() {
+  if git config user.email > /dev/null; then "$@"
+  else GIT_COMMITTER_NAME=Plutonium GIT_COMMITTER_EMAIL=plutonium@localhost "$@"; fi
+}
+
+# --- T3 Code -----------------------------------------------------------------
+t3_pnpm() { if command -v pnpm > /dev/null; then pnpm "$@"; else corepack pnpm "$@"; fi; }
+t3_cmd() {
+  local base
+  base=$(cat "$ROOT/frontends/t3code/BASE")
+  case "${1:-}" in
+    fetch)
+      [[ -d $T3CODE_DIR/.git ]] || git clone https://github.com/pingdotgg/t3code.git "$T3CODE_DIR"
+      git -C "$T3CODE_DIR" rev-parse -q --verify "$base^{commit}" > /dev/null || git -C "$T3CODE_DIR" fetch origin
+      [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "$T3CODE_DIR has uncommitted changes"
+      git -C "$T3CODE_DIR" checkout -q -B plutonium "$base"
+      committer git -C "$T3CODE_DIR" am -q --3way "$ROOT"/frontends/t3code/patches/*.patch
+      echo "T3 Code is on branch plutonium in $T3CODE_DIR. Next: plutonium t3 build" ;;
+    build)
+      [[ -d $T3CODE_DIR ]] || die "no T3 Code checkout at $T3CODE_DIR (plutonium t3 fetch)"
+      (cd "$T3CODE_DIR" && t3_pnpm install && cd apps/web && t3_pnpm exec vp build) ;;
+    server)
+      [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
+      local socket=wayland-plutonium port=${T3_PORT:-3774} satellite
+      [[ ${2:-} == --x11 ]] && socket=wayland-plutonium-x11
+      satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
+      # Any T3 server on this port, from whichever checkout.
+      pkill -f "^node .*/apps/server/src/bin.ts --port $port( |\$)" 2>/dev/null && sleep 2 || true
+      mkdir -p "$T3_HOME"
+      (cd "$T3CODE_DIR" && setsid env PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+        ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
+        node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host 127.0.0.1 --no-browser \
+        > "$LOGS/t3-server.log" 2>&1 < /dev/null &)
+      local up=
+      for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$port/" && up=1 && break; sleep 1; done
+      [[ -n $up ]] || die "the T3 Code server didn't start (logs/t3-server.log)"
+      sleep 1
+      echo "T3 Code server on http://127.0.0.1:$port for $socket (log logs/t3-server.log)"
+      local pair
+      pair=$(grep -o 'http://[^ ]*/pair#token=[^ ]*' "$LOGS/t3-server.log" | tail -1 || true)
+      [[ -n $pair ]] && echo "Not paired yet: the first time, start the session with  plutonium run 't3=$pair'"
+      true ;;
+    export)
+      [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "commit your changes in $T3CODE_DIR first"
+      rm -f "$ROOT"/frontends/t3code/patches/*.patch
+      git -C "$T3CODE_DIR" format-patch -q --zero-commit --no-signature -o "$ROOT/frontends/t3code/patches" "$base"..HEAD
+      ls "$ROOT/frontends/t3code/patches" | wc -l | xargs echo "patches written to frontends/t3code/patches:" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- Sessions ----------------------------------------------------------------
+# Serve a shell directory on a local port, unless something already answers.
+serve_shell() {
+  local dir=$1 port=$2 pidfile=$RUN_DIR/plutonium/serve-$2.pid
+  mkdir -p "$RUN_DIR/plutonium"
+  if curl -s -o /dev/null "http://127.0.0.1:$port/"; then
+    # Ours (this checkout's directory), or something else on the port.
+    [[ -f $pidfile ]] && grep -qF -- "$dir" "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null && return
+    die "port $port is taken by another server; stop it (e.g. an older checkout's shell server) and retry"
+  fi
+  setsid python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" > /dev/null 2>&1 < /dev/null &
+  echo $! > "$pidfile"
+  for _ in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$port/" && return; sleep 0.2; done
+}
+# A shell name → "<label>=<url>", the page told where the helper is.
+shell_entry() {
+  local helper=http://127.0.0.1:$HELPER_PORT
+  case "$1" in
+    niri) serve_shell "$ROOT/shells/niri" 8775; echo "niri=http://127.0.0.1:8775/?helper=$helper" ;;
+    plain) serve_shell "$ROOT/shells/plain" 8770; echo "Plain=http://127.0.0.1:8770/?helper=$helper" ;;
+    t3|t3=*)
+      local url=${1#t3}; url=${url#=}; url=${url:-http://127.0.0.1:${T3_PORT:-3774}/}
+      curl -s -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url (plutonium t3 server)"
+      local base=${url%%#*} fragment=
+      [[ $url == *#* ]] && fragment="#${url#*#}"
+      [[ $base == *\?* ]] && base+="&" || base+="?"
+      echo "T3=${base}plutoniumHelper=$helper$fragment" ;;
+    *=*) echo "$1" ;;
+    *) die "unknown shell '$1' (niri, plain, t3 or <name>=<url>)" ;;
+  esac
+}
+origin_of() { sed -E 's#^(https?://[^/?\#]+).*#\1#' <<< "$1"; }
+
+run_cmd() {
+  local mode=drm shells=()
+  export VT= HOLD_S= WAIT_S= NO_KILLSWITCH= XDISP= EXTRA_FLAGS=
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --x11) mode=x11; if [[ ${2:-} == :* ]]; then XDISP=$2; shift; fi ;;
+      --drm) mode=drm ;;
+      --vt) VT=$2; shift ;;
+      --hold) HOLD_S=$2; shift ;;
+      --no-killswitch) NO_KILLSWITCH=1 ;;
+      --flags) EXTRA_FLAGS=$2; shift ;;
+      -h|--help) run_usage; exit 0 ;;
+      -*) run_usage; exit 2 ;;
+      *) shells+=("$1") ;;
+    esac
+    shift
+  done
+  [[ ${#shells[@]} -gt 0 ]] || shells=(niri plain)
+  [[ -n $VT && -n $HOLD_S ]] && WAIT_S=120
+  # DRM and X11 sessions have their own socket and ports, so both can run.
+  if [[ $mode == drm ]]; then
+    export SOCKET=wayland-plutonium CDP_PORT=9224 HELPER_PORT=3782
+  else
+    export SOCKET=wayland-plutonium-x11 CDP_PORT=9223 HELPER_PORT=3781 XDISP=${XDISP:-:99}
+  fi
+  export MODE=$mode PROFILE=$DATA_DIR/profile-$mode
+  local entries=() entry origins=() rest=()
+  for entry in "${shells[@]}"; do entries+=("$(shell_entry "$entry")"); done
+  for entry in "${entries[@]}"; do origins+=("$(origin_of "${entry#*=}")"); done
+  export SHELL_URL=${entries[0]#*=}
+  export ORIGINS=$(IFS=,; echo "${origins[*]}")
+  rest=("${entries[@]:1}")
+  export SHELLS=$(IFS='|'; echo "${rest[*]}")
+  exec "$ROOT/lib/session.sh"
+}
+
+stop_cmd() {
+  local which=${1:---all} mode
+  for mode in drm x11; do
+    [[ $which == --all || $which == "--$mode" ]] || continue
+    in_container pkill -TERM -f "^$CHROME_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" 2>/dev/null &&
+      echo "stopped the $mode session" || true
+    local socket=wayland-plutonium pidfile
+    [[ $mode == x11 ]] && socket=wayland-plutonium-x11
+    pidfile=$RUN_DIR/plutonium/helper-$socket.pid
+    [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" || true
+  done
+}
+
+status_cmd() {
+  container_running && echo "container $CONTAINER: running" || echo "container $CONTAINER: not running"
+  chrome_built && echo "chrome: $CHROME_BIN${PREBUILT:+ (prebuilt, $IMAGE)}" || echo "chrome: missing ($CHROME_BIN)"
+  local mode
+  for mode in drm x11; do
+    pgrep -f "^$CHROME_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" > /dev/null &&
+      echo "$mode session: running" || echo "$mode session: not running"
+  done
+  local sock
+  for sock in "$RUN_DIR"/plutonium/*.sock; do
+    [[ -S $sock ]] && curl -s --max-time 2 --unix-socket "$sock" http://helper/v1/status > /dev/null &&
+      echo "helper: $sock"
+  done
+  [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
+    echo "kill switch: active" || echo "kill switch: not installed or not running"
+}
+
+# --- Kill switch -------------------------------------------------------------
+killswitch_cmd() {
+  case "${1:-}" in
+    find) python3 "$ROOT/killswitch/killswitch.py" --find "${2:-30}" ;;
+    install)
+      [[ -n ${KILLSWITCH_DEVICE:-} && -n ${KILLSWITCH_KEY:-} ]] ||
+        die "set KILLSWITCH_DEVICE and KILLSWITCH_KEY in plutonium.env first (plutonium killswitch find)"
+      mkdir -p "$HOME/.config/systemd/user"
+      cat > "$HOME/.config/systemd/user/plutonium-killswitch.service" <<EOF
+[Unit]
+Description=Plutonium kill switch: a button press stops Ash on DRM
+
+[Service]
+ExecStart=$(command -v python3) $ROOT/killswitch/killswitch.py
+Environment="KILLSWITCH_DEVICE=$KILLSWITCH_DEVICE" "KILLSWITCH_KEY=$KILLSWITCH_KEY"
+Environment="PATH=$PATH"
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+EOF
+      systemctl --user daemon-reload
+      systemctl --user enable --now plutonium-killswitch
+      sleep 2
+      journalctl --user -u plutonium-killswitch -o cat --no-pager -n 3 ;;
+    test) python3 "$ROOT/killswitch/killswitch.py" --fire --dry-run ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- Doctor ------------------------------------------------------------------
+doctor() {
+  local ok=1
+  check() { if eval "$2" > /dev/null 2>&1; then echo "  ok   $1"; else echo "  MISSING  $1${3:+ — $3}"; ok=0; fi; }
+  echo "Host:"
+  check "podman" "command -v podman"
+  check "podman works from this shell" "pm info" "set PODMAN=lib/pm.sh in plutonium.env"
+  check "node 24+" "node -e 'process.exit(+process.versions.node.split(\".\")[0] >= 24 ? 0 : 1)'"
+  check "python3" "command -v python3"
+  check "git, curl" "command -v git && command -v curl"
+  check "xwayland-satellite (X11 apps)" "command -v xwayland-satellite || [ -x \"\${PLUTONIUM_XWAYLAND_SATELLITE:-}\" ]" "optional"
+  check "systemd-socket-activate (X11 apps)" "command -v systemd-socket-activate" "optional"
+  check "foot (the shells' terminal)" "command -v foot" "optional"
+  check "in the 'input' group (kill switch)" "id -nG | grep -qw input" "optional, for the kill switch"
+  echo "Container:"
+  [[ -n ${PREBUILT:-} ]] || check "image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
+  check "container $CONTAINER running" "container_running" "plutonium container create / start"
+  echo "Chromium:"
+  if [[ -n ${PREBUILT:-} ]]; then
+    check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"
+    check "chrome in the container" "chrome_built" "plutonium container create (with PREBUILT=1)"
+  else
+    check "checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1"
+    check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
+    check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
+  fi
+  echo "T3 Code (optional):"
+  check "checkout at $T3CODE_DIR" "[ -d $T3CODE_DIR/.git ]" "plutonium t3 fetch"
+  check "web app built" "[ -f $T3CODE_DIR/apps/web/dist/index.html ]" "plutonium t3 build"
+  echo "Kill switch (DRM):"
+  check "plutonium-killswitch running" "[ \$(systemctl --user is-active plutonium-killswitch) = active ]" "plutonium killswitch install"
+  [[ $ok == 1 ]] && echo "All set." || true
+}
+
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+  doctor) doctor ;;
+  container) container_cmd "$@" ;;
+  chromium) chromium_cmd "$@" ;;
+  image) image_cmd "$@" ;;
+  t3) t3_cmd "$@" ;;
+  run) run_cmd "$@" ;;
+  stop) stop_cmd "$@" ;;
+  status) status_cmd ;;
+  killswitch) killswitch_cmd "$@" ;;
+  helper) PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-wayland-plutonium} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
+  cdp) need_container; exec $PODMAN exec -e "CDP=${CDP:-localhost:9224}" "$CONTAINER" python3 "$ROOT/tools/cdp.py" "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

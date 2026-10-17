@@ -1,0 +1,1244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 17 Oct 2026 19:00:09 +1300
+Subject: [PATCH 16/16] Plutonium: niri shell keys, touchpad and scrolling,
+ drag and drop, shell links as tabs
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
+---
+ ash/drag_drop/drag_drop_controller.cc         | 21 ++++++
+ ash/drag_drop/drag_drop_controller.h          | 10 +++
+ .../ash/exo/chrome_security_delegate.cc       | 16 +++-
+ chrome/browser/exo_embedder.cc                | 39 +++++++++-
+ chrome/browser/plutonium_keys.cc              | 22 +++++-
+ chrome/browser/plutonium_tabs.cc              | 60 ++++++++++++++-
+ chrome/browser/plutonium_tabs.h               | 13 +++-
+ .../browser/ui/navigator/browser_navigator.cc |  6 ++
+ components/exo/data_device.cc                 | 21 ++++--
+ components/exo/data_offer.cc                  | 75 ++++++++++++++++++-
+ components/exo/data_offer.h                   | 10 +++
+ components/exo/data_source.h                  | 11 +++
+ components/exo/drag_drop_operation.cc         | 18 +++++
+ components/exo/drag_drop_operation.h          |  4 +
+ components/exo/embedded_windows.cc            | 63 +++++++++++++++-
+ components/exo/embedded_windows.h             |  3 +
+ components/exo/surface_tree_host.cc           |  4 +
+ .../exo/wayland/wayland_pointer_delegate.cc   | 42 ++++++-----
+ .../exo/wayland/wayland_pointer_delegate.h    |  4 +
+ .../render_widget_host_input_event_router.cc  | 60 ++++++++++++++-
+ .../render_widget_host_input_event_router.h   |  9 +++
+ ui/events/ash/event_rewriter_ash.cc           |  9 +++
+ ui/events/ozone/evdev/BUILD.gn                |  2 +-
+ .../ozone/evdev/libinput_event_converter.cc   | 22 +++++-
+ .../ozone/evdev/libinput_event_converter.h    | 11 +--
+ ui/wm/core/accelerator_filter.cc              |  4 +
+ ui/wm/core/accelerator_filter.h               |  5 ++
+ 27 files changed, 517 insertions(+), 47 deletions(-)
+
+diff --git a/ash/drag_drop/drag_drop_controller.cc b/ash/drag_drop/drag_drop_controller.cc
+index adfc2ad520..8bb22b5f65 100644
+--- a/ash/drag_drop/drag_drop_controller.cc
++++ b/ash/drag_drop/drag_drop_controller.cc
+@@ -14,6 +14,7 @@
+ #include "ash/wm/toplevel_window_event_handler.h"
+ #include "ash/wm/window_util.h"
+ #include "base/functional/bind.h"
++#include "base/no_destructor.h"
+ #include "base/run_loop.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/hang_watcher.h"
+@@ -143,6 +144,18 @@ bool DragDropController::IsDragDropCompleted() {
+   return drag_drop_completed_;
+ }
+ 
++namespace {
++DragDropController::TargetOverride& GetTargetOverride() {
++  static base::NoDestructor<DragDropController::TargetOverride> instance;
++  return *instance;
++}
++}  // namespace
++
++// static
++void DragDropController::SetTargetOverride(TargetOverride target_override) {
++  GetTargetOverride() = std::move(target_override);
++}
++
+ DragOperation DragDropController::StartDragAndDrop(
+     std::unique_ptr<ui::OSExchangeData> data,
+     aura::Window* root_window,
+@@ -397,6 +410,14 @@ void DragDropController::OnMouseEvent(ui::MouseEvent* event) {
+   }
+ 
+   auto translated_event = ConvertEvent(translated_target, *event);
++  if (GetTargetOverride()) {
++    gfx::PointF location = translated_event->location_f();
++    if (aura::Window* target =
++            GetTargetOverride().Run(translated_target, &location)) {
++      translated_target = target;
++      translated_event->set_location_f(location);
++    }
++  }
+   switch (translated_event->type()) {
+     case ui::EventType::kMouseDragged:
+       DragUpdate(translated_target, *translated_event.get());
+diff --git a/ash/drag_drop/drag_drop_controller.h b/ash/drag_drop/drag_drop_controller.h
+index 007153440f..1393278fcc 100644
+--- a/ash/drag_drop/drag_drop_controller.h
++++ b/ash/drag_drop/drag_drop_controller.h
+@@ -25,6 +25,7 @@
+ #include "ui/events/event_constants.h"
+ #include "ui/events/event_handler.h"
+ #include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/geometry/point_f.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/views/widget/unique_widget_ptr.h"
+ 
+@@ -47,6 +48,15 @@ class ASH_EXPORT DragDropController : public aura::client::DragDropClient,
+  public:
+   DragDropController();
+ 
++  // PLUTONIUM: finds the real drop target when |target| shows other windows'
++  // content (the shell page shows native windows, which aura's hit test
++  // can't see). Returns null to keep |target|; else the window to drop on,
++  // with |location_in_target| mapped into it.
++  using TargetOverride =
++      base::RepeatingCallback<aura::Window*(aura::Window* target,
++                                            gfx::PointF* location_in_target)>;
++  static void SetTargetOverride(TargetOverride target_override);
++
+   DragDropController(const DragDropController&) = delete;
+   DragDropController& operator=(const DragDropController&) = delete;
+ 
+diff --git a/chrome/browser/ash/exo/chrome_security_delegate.cc b/chrome/browser/ash/exo/chrome_security_delegate.cc
+index 0556d8477e..125ba931ae 100644
+--- a/chrome/browser/ash/exo/chrome_security_delegate.cc
++++ b/chrome/browser/ash/exo/chrome_security_delegate.cc
+@@ -118,8 +118,16 @@ std::vector<FileInfo> TranslateVMToHost(const std::string& vm_name,
+   // Do not expose any paths to unknown VMs or to ArcVm.
+   // Arc doesn't currently support drag-drop or clipboard via exo.
+   // If Arc ever adds support, we must map paths correctly like other VMs.
+-  if (vm_name.empty() ||
+-      (vm_name == arc::kArcVmName &&
++  // PLUTONIUM: Wayland apps without a VM are the user's own host programs,
++  // which share this filesystem. Their paths are host paths, as they are.
++  if (vm_name.empty()) {
++    std::vector<FileInfo> file_infos;
++    for (ui::FileInfo& info : vm_paths) {
++      file_infos.push_back({std::move(info.path), storage::FileSystemURL()});
++    }
++    return file_infos;
++  }
++  if ((vm_name == arc::kArcVmName &&
+        base::FeatureList::IsEnabled(kChromeSecurityDelegateIgnoreArcVm))) {
+     return {};
+   }
+@@ -217,6 +225,10 @@ void ShareAndTranslateHostToVM(
+         LOG(WARNING) << "Could not convert into VM path " << info.path;
+         continue;
+       }
++    } else if (vm_name.empty() && !info.path.empty() &&
++               info.path.IsAbsolute()) {
++      // PLUTONIUM: host apps get host paths (see TranslateVMToHost()).
++      file_url = ui::FilePathToFileURL(info.path);
+     } else {
+       // Ignore unknown VMs
+       continue;
+diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
+index 894bc18146..fb94e6ccbe 100644
+--- a/chrome/browser/exo_embedder.cc
++++ b/chrome/browser/exo_embedder.cc
+@@ -13,6 +13,7 @@
+ #include "base/containers/adapters.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
++#include "base/numerics/safe_conversions.h"
+ #include "base/unguessable_token.h"
+ #include "chrome/browser/exo_window_broker.h"
+ #include "chrome/browser/plutonium_shell.h"
+@@ -69,9 +70,43 @@ std::unique_ptr<ui::MouseEvent> ToMouseEvent(
+   switch (event.GetType()) {
+     case blink::WebInputEvent::Type::kMouseWheel: {
+       const auto& wheel = static_cast<const blink::WebMouseWheelEvent&>(event);
++      // PLUTONIUM: touchpads (precise pixels) scroll by pixels, as a
++      // ui::ScrollEvent that Exo sends as finger axis events; the end of the
++      // gesture becomes axis_stop. Not as wheel ticks, which truncated the
++      // small steps to nothing. Momentum is left to the client.
++      if (wheel.delta_units == ui::ScrollGranularity::kScrollByPrecisePixel) {
++        if (wheel.momentum_phase != blink::WebMouseWheelEvent::kPhaseNone) {
++          return nullptr;
++        }
++        const bool end =
++            wheel.phase == blink::WebMouseWheelEvent::kPhaseEnded ||
++            wheel.phase == blink::WebMouseWheelEvent::kPhaseCancelled;
++        if (!end && !wheel.delta_x && !wheel.delta_y) {
++          return nullptr;
++        }
++        return std::make_unique<ui::ScrollEvent>(
++            end ? ui::EventType::kScrollFlingStart : ui::EventType::kScroll,
++            gfx::PointF(), gfx::PointF(), ui::EventTimeForNow(), flags,
++            wheel.delta_x, wheel.delta_y, wheel.delta_x, wheel.delta_y,
++            /*finger_count=*/2);
++      }
++      if (!wheel.delta_x && !wheel.delta_y) {
++        return nullptr;
++      }
++      // PLUTONIUM: a wheel notch is 120 here (evdev's ticks, unscaled), but
++      // MouseWheelEvent::kWheelDelta is 53 on ChromeOS. Pass the notches as
++      // tick_120ths and the offset in kWheelDelta units, so Exo sends one
++      // notch per notch instead of 120/53 of one.
++      const gfx::Vector2d ticks(base::ClampRound(wheel.delta_x),
++                                base::ClampRound(wheel.delta_y));
++      const gfx::Vector2d offset(
++          base::ClampRound(wheel.delta_x * ui::MouseWheelEvent::kWheelDelta /
++                           120.f),
++          base::ClampRound(wheel.delta_y * ui::MouseWheelEvent::kWheelDelta /
++                           120.f));
+       return std::make_unique<ui::MouseWheelEvent>(
+-          gfx::Vector2d(wheel.delta_x, wheel.delta_y), gfx::Point(),
+-          gfx::Point(), ui::EventTimeForNow(), flags, 0);
++          offset, gfx::PointF(), gfx::PointF(), ui::EventTimeForNow(), flags,
++          0, ticks);
+     }
+     case blink::WebInputEvent::Type::kMouseMove:
+       return std::make_unique<ui::MouseEvent>(
+diff --git a/chrome/browser/plutonium_keys.cc b/chrome/browser/plutonium_keys.cc
+index 84d47606e9..2d709d2894 100644
+--- a/chrome/browser/plutonium_keys.cc
++++ b/chrome/browser/plutonium_keys.cc
+@@ -26,6 +26,7 @@
+ #include "ui/events/keycodes/dom/dom_code.h"
+ #include "ui/events/keycodes/dom/keycode_converter.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/wm/core/accelerator_filter.h"
+ 
+ namespace plutonium_keys {
+ 
+@@ -155,6 +156,9 @@ class HandlerImpl : public Handler, public ui::EventHandler {
+     const bool pressed = event->type() == ui::EventType::kKeyPressed;
+     if (!pressed) {
+       // A release goes where its press went.
++      if (shortcut_.erase(code)) {
++        MarkShellShortcut(event);
++      }
+       if (consumed_.erase(code)) {
+         event->StopPropagation();
+       } else if (to_shell_.erase(code)) {
+@@ -186,11 +190,16 @@ class HandlerImpl : public Handler, public ui::EventHandler {
+       }
+       return;
+     }
++    const bool shell_shortcut = IsShellShortcut(code, event->flags());
++    // EXO-NIRI: the shell's own shortcuts beat Ash's accelerators.
++    if (shell_shortcut) {
++      shortcut_.insert(code);
++      MarkShellShortcut(event);
++    }
+     // Keys for an embedded window: its keyboard sends them to the app
+     // unless they are the shell's. (Keys for a tab go through
+     // PlutoniumTabs.)
+-    if (exo::EmbeddedWindows::Get()->focused_window_id() &&
+-        IsShellShortcut(code, event->flags())) {
++    if (exo::EmbeddedWindows::Get()->focused_window_id() && shell_shortcut) {
+       to_shell_.insert(code);
+       MarkForShell(event);
+     }
+@@ -204,6 +213,15 @@ class HandlerImpl : public Handler, public ui::EventHandler {
+     event->SetProperties(properties);
+   }
+ 
++  static void MarkShellShortcut(ui::KeyEvent* event) {
++    ui::Event::Properties properties =
++        event->properties() ? *event->properties() : ui::Event::Properties();
++    properties.emplace(wm::kShellShortcutEventKey, std::vector<uint8_t>());
++    event->SetProperties(properties);
++  }
++
++  // Keys whose press was a shell shortcut (kept from Ash's accelerators).
++  std::set<ui::DomCode> shortcut_;
+   // Keys whose press was taken here, or sent to the shell.
+   std::set<ui::DomCode> consumed_;
+   std::set<ui::DomCode> to_shell_;
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 082af0615f..5990127b94 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -28,6 +28,8 @@
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_shells.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params_utils.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/surface_embed/browser/surface_embed_host.h"
+@@ -309,7 +311,7 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+       std::string tag,
+       std::vector<std::string> tags,
+       int32_t opener_id,
+-      const char* opened_by)
++      const std::string& opened_by)
+       : content::WebContentsObserver(contents.get()),
+         tabs_(tabs),
+         contents_(std::move(contents)) {
+@@ -830,6 +832,60 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateTab(
+   return tab->info();
+ }
+ 
++// static
++bool PlutoniumTabs::MaybeOpenFromShell(
++    NavigateParams* params,
++    base::WeakPtr<content::NavigationHandle>* handle) {
++  content::WebContents* source = params->source_contents;
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!source || !shells) {
++    return false;
++  }
++  switch (params->disposition) {
++    case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++    case WindowOpenDisposition::NEW_BACKGROUND_TAB:
++    case WindowOpenDisposition::NEW_POPUP:
++    case WindowOpenDisposition::NEW_WINDOW:
++    case WindowOpenDisposition::SINGLETON_TAB:
++      break;
++    default:
++      return false;
++  }
++  // Only the shells' own pages; their tabs handle this themselves (Tab).
++  std::optional<PlutoniumShells::Shell> shell = shells->GetShellFor(source);
++  if (!shell || Get()->IsTab(source)) {
++    return false;
++  }
++  const bool inserted = !!params->contents_to_insert;
++  std::unique_ptr<content::WebContents> contents =
++      std::move(params->contents_to_insert);
++  if (!contents) {
++    if (!params->url.is_valid()) {
++      return false;
++    }
++    content::WebContents::CreateParams create(source->GetBrowserContext());
++    create.initially_hidden = true;
++    contents = content::WebContents::Create(create);
++  }
++  if (contents->GetContainerBounds().IsEmpty()) {
++    contents->Resize(gfx::Rect(kDefaultTabSize));
++  }
++  Tab* tab = Get()->AddTab(std::move(contents), std::string(), {}, 0,
++                           "shell:" + shell->id);
++  VLOG(1) << "EXO-TABS tab #" << tab->info().id << " for "
++          << params->url.possibly_invalid_spec() << " from shell "
++          << shell->id << " (disposition "
++          << static_cast<int>(params->disposition) << ")";
++  if (!inserted) {
++    content::NavigationController::LoadURLParams load =
++        LoadURLParamsFromNavigateParams(params);
++    *handle = tab->contents()->GetController().LoadURLWithParams(load);
++  }
++  tab->Refresh();
++  params->navigated_or_inserted_contents = tab->contents();
++  return true;
++}
++
+ bool PlutoniumTabs::UpdateTags(int32_t tab_id,
+                                const std::vector<std::string>& add,
+                                const std::vector<std::string>& remove) {
+@@ -964,7 +1020,7 @@ PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
+     const std::string& tag_text,
+     const std::vector<std::string>& inherited_tags,
+     int32_t opener_id,
+-    const char* opened_by) {
++    const std::string& opened_by) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   // EXO-TAGS: the origin tag first, then (for a page's new tab) the
+   // opener's other tags.
+diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
+index adad083b3a..d89c3b5e5d 100644
+--- a/chrome/browser/plutonium_tabs.h
++++ b/chrome/browser/plutonium_tabs.h
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ #include "base/functional/callback_forward.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/observer_list.h"
+ #include "base/observer_list_types.h"
+@@ -24,9 +25,11 @@
+ 
+ class Profile;
+ class SkBitmap;
++struct NavigateParams;
+ 
+ namespace content {
+ class BrowserContext;
++class NavigationHandle;
+ class WebContents;
+ }  // namespace content
+ 
+@@ -115,6 +118,14 @@ class PlutoniumTabs : public ProfileObserver {
+                                    const std::string& url,
+                                    const std::string& tag);
+   bool Navigate(int32_t tab_id, const std::string& url);
++  // PLUTONIUM: in shell mode, a shell page's new tab or window (Ctrl+click,
++  // middle click, target=_blank, window.open) becomes one of these tabs
++  // instead of a Chrome window. It starts untagged, opened by
++  // "shell:<shell id>": that shell puts it in its current thread. False if
++  // |params| isn't such a navigation (chrome::Navigate() goes on).
++  static bool MaybeOpenFromShell(
++      NavigateParams* params,
++      base::WeakPtr<content::NavigationHandle>* handle);
+   // EXO-TAGS: adds |add| to and takes |remove| out of the tab's tags (not
+   // its origin tag). False if there is no such tab.
+   bool UpdateTags(int32_t tab_id,
+@@ -169,7 +180,7 @@ class PlutoniumTabs : public ProfileObserver {
+               const std::string& tag,
+               const std::vector<std::string>& tags,
+               int32_t opener_id,
+-              const char* opened_by);
++              const std::string& opened_by);
+   // Destroys tab |tab_id| (later, if a call into it is on the stack).
+   void RemoveTab(int32_t tab_id);
+   void TabChanged(Tab* tab);
+diff --git a/chrome/browser/ui/navigator/browser_navigator.cc b/chrome/browser/ui/navigator/browser_navigator.cc
+index 970685520a..2af68495b6 100644
+--- a/chrome/browser/ui/navigator/browser_navigator.cc
++++ b/chrome/browser/ui/navigator/browser_navigator.cc
+@@ -34,6 +34,7 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/ui/incognito_allowed_url.h"
+ #include "chrome/browser/ui/location_bar/location_bar.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+@@ -1164,6 +1165,11 @@ base::WeakPtr<content::NavigationHandle> ShowTabModalPopup(
+ }  // namespace internal
+ 
+ base::WeakPtr<content::NavigationHandle> Navigate(NavigateParams* params) {
++  // PLUTONIUM: a shell page's new tabs and windows are the shell's tabs.
++  if (base::WeakPtr<content::NavigationHandle> handle;
++      PlutoniumTabs::MaybeOpenFromShell(params, &handle)) {
++    return handle;
++  }
+   AdditionalParams additional_params;
+   return internal::NavigateImpl(params, additional_params);
+ }
+diff --git a/components/exo/data_device.cc b/components/exo/data_device.cc
+index 98af1ae805..ef19f6ccc7 100644
+--- a/components/exo/data_device.cc
++++ b/components/exo/data_device.cc
+@@ -12,6 +12,7 @@
+ #include "components/exo/data_exchange_delegate.h"
+ #include "components/exo/data_offer.h"
+ #include "components/exo/data_source.h"
++#include "components/exo/drag_drop_operation.h"
+ #include "components/exo/seat.h"
+ #include "components/exo/shell_surface_util.h"
+ #include "components/exo/surface.h"
+@@ -114,6 +115,7 @@ void DataDevice::OnDragEntered(const ui::DropTargetEvent& event) {
+       std::make_unique<ScopedDataOffer>(delegate_->OnDataOffer(), this);
+   data_offer_->get()->SetDropData(seat_->data_exchange_delegate(),
+                                   surface->window(), event.data());
++  data_offer_->get()->AddSourceMimeTypes(DragDropOperation::GetActiveSource());
+   data_offer_->get()->SetSourceActions(dnd_actions);
+   data_offer_->get()->SetActions(base::flat_set<DndAction>(), DndAction::kAsk);
+   delegate_->OnEnter(surface, event.location_f(), *data_offer_->get());
+@@ -140,8 +142,12 @@ aura::client::DragUpdateInfo DataDevice::OnDragUpdated(
+ 
+   // TODO(hirono): dnd_action() here may not be updated. Chrome needs to provide
+   // a way to update DND action asynchronously.
+-  drag_info.drag_operation = static_cast<int>(
+-      DndActionToDragOperation(data_offer_->get()->dnd_action()));
++  // PLUTONIUM: nothing can be dropped until the client accepts a type.
++  drag_info.drag_operation =
++      data_offer_->get()->accepted()
++          ? static_cast<int>(
++                DndActionToDragOperation(data_offer_->get()->dnd_action()))
++          : ui::DragDropTypes::DRAG_NONE;
+   return drag_info;
+ }
+ 
+@@ -251,12 +257,15 @@ void DataDevice::PerformDropOrExitDrag(
+     std::unique_ptr<ui::OSExchangeData> data,
+     ui::mojom::DragOperation& output_drag_op,
+     std::unique_ptr<ui::LayerTreeOwner> drag_image_layer_owner) {
+-  exit_drag.ReplaceClosure(base::DoNothing());
+-
+-  if (!data_offer_) {
++  // PLUTONIUM: as the protocol says, a target that accepted no mime type (or
++  // chose no action) gets leave, not drop, and the source a cancel. Before,
++  // it got the drop and the source was told the data had moved.
++  if (!data_offer_ || !data_offer_->get()->accepted() ||
++      data_offer_->get()->dnd_action() == DndAction::kNone) {
+     output_drag_op = DragOperation::kNone;
+-    return;
++    return;  // |exit_drag| sends leave.
+   }
++  exit_drag.ReplaceClosure(base::DoNothing());
+ 
+   DndAction dnd_action = data_offer_->get()->dnd_action();
+ 
+diff --git a/components/exo/data_offer.cc b/components/exo/data_offer.cc
+index dbf8657dd5..ae2e66ab78 100644
+--- a/components/exo/data_offer.cc
++++ b/components/exo/data_offer.cc
+@@ -12,6 +12,7 @@
+ #include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/i18n/icu_string_conversions.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/memory/ref_counted_memory.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/no_destructor.h"
+@@ -23,12 +24,14 @@
+ #include "components/exo/data_device.h"
+ #include "components/exo/data_exchange_delegate.h"
+ #include "components/exo/data_offer_delegate.h"
++#include "components/exo/data_source.h"
+ #include "components/exo/data_offer_observer.h"
+ #include "components/exo/security_delegate.h"
+ #include "net/base/filename_util.h"
+ #include "ui/base/clipboard/clipboard.h"
+ #include "ui/base/clipboard/clipboard_buffer.h"
+ #include "ui/base/clipboard/clipboard_constants.h"
++#include "ui/base/clipboard/clipboard_url_info.h"
+ #include "ui/base/clipboard/file_info.h"
+ #include "ui/base/data_transfer_policy/data_transfer_endpoint.h"
+ #include "ui/base/dragdrop/os_exchange_data.h"
+@@ -206,7 +209,10 @@ void DataOffer::RemoveObserver(DataOfferObserver* observer) {
+   observers_.RemoveObserver(observer);
+ }
+ 
+-void DataOffer::Accept(const std::string* mime_type) {}
++void DataOffer::Accept(const std::string* mime_type) {
++  // PLUTONIUM: remembered, so a target that accepts no type gets no drop.
++  accepted_ = mime_type != nullptr;
++}
+ 
+ void DataOffer::Receive(const std::string& mime_type, base::ScopedFD fd) {
+   const auto callbacks_it = data_callbacks_.find(mime_type);
+@@ -257,6 +263,45 @@ void DataOffer::SetSourceActions(
+   }
+ }
+ 
++void DataOffer::AddSourceMimeTypes(DataSource* source) {
++  if (!delegate_ || !source) {
++    return;
++  }
++  for (const std::string& mime_type : source->mime_types()) {
++    if (data_callbacks_.contains(mime_type) ||
++        data_cache_.contains(mime_type)) {
++      continue;
++    }
++    auto callback = base::BindOnce(
++        [](base::WeakPtr<DataSource> source, const std::string& mime_type,
++           DataOffer::SendDataCallback callback) {
++          if (!source) {
++            std::move(callback).Run(nullptr);
++            return;
++          }
++          auto [on_data, on_failure] =
++              base::SplitOnceCallback(std::move(callback));
++          source->ReadRawData(
++              mime_type,
++              base::BindOnce(
++                  [](DataOffer::SendDataCallback callback, const std::string&,
++                     const std::vector<uint8_t>& data) {
++                    std::move(callback).Run(
++                        base::MakeRefCounted<base::RefCountedBytes>(data));
++                  },
++                  std::move(on_data)),
++              base::BindOnce(
++                  [](DataOffer::SendDataCallback callback) {
++                    std::move(callback).Run(nullptr);
++                  },
++                  std::move(on_failure)));
++        },
++        source->GetWeakPtr(), mime_type);
++    data_callbacks_.emplace(mime_type, std::move(callback));
++    delegate_->OnOffer(mime_type);
++  }
++}
++
+ void DataOffer::SetDropData(DataExchangeDelegate* data_exchange_delegate,
+                             aura::Window* target,
+                             const ui::OSExchangeData& data) {
+@@ -347,6 +392,34 @@ void DataOffer::SetDropData(DataExchangeDelegate* data_exchange_delegate,
+     delegate_->OnOffer(mime_type);
+   }
+ 
++  // PLUTONIUM: links (from a page or a tab) as text/uri-list, for file
++  // managers and terminals, and as Firefox's text/x-moz-url (UTF-16
++  // "url\ntitle"). Before, a dragged link only arrived as text.
++  if (std::vector<ui::ClipboardUrlInfo> urls =
++          data.GetURLs(ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES);
++      !urls.empty()) {
++    std::u16string uri_list;
++    std::u16string moz_url;
++    for (const ui::ClipboardUrlInfo& info : urls) {
++      if (!info.url.is_valid()) {
++        continue;
++      }
++      const std::u16string spec = base::UTF8ToUTF16(info.url.spec());
++      uri_list += spec + u"\r\n";
++      moz_url += (moz_url.empty() ? u"" : u"\n") + spec + u"\n" + info.title;
++    }
++    if (!uri_list.empty()) {
++      const std::string uri_list_type = std::string(ui::kMimeTypeUriList);
++      data_callbacks_.emplace(uri_list_type,
++                              AsyncEncodeAsRefCountedString(uri_list, kUTF8));
++      delegate_->OnOffer(uri_list_type);
++      const std::string moz_url_type = "text/x-moz-url";
++      data_callbacks_.emplace(moz_url_type,
++                              AsyncEncodeAsRefCountedString(moz_url, kUTF16));
++      delegate_->OnOffer(moz_url_type);
++    }
++  }
++
+   if (std::optional<std::u16string> string_content = data.GetString();
+       string_content.has_value()) {
+     const std::string utf8_mime_type = std::string(ui::kMimeTypeUtf8PlainText);
+diff --git a/components/exo/data_offer.h b/components/exo/data_offer.h
+index 75551fcdb5..894c9c6342 100644
+--- a/components/exo/data_offer.h
++++ b/components/exo/data_offer.h
+@@ -39,6 +39,7 @@ namespace exo {
+ 
+ class DataOfferDelegate;
+ class DataOfferObserver;
++class DataSource;
+ class DataExchangeDelegate;
+ enum class DndAction;
+ 
+@@ -87,6 +88,12 @@ class DataOffer final : public ui::PropertyHandler {
+                    aura::Window* target,
+                    const ui::OSExchangeData& data);
+ 
++  // PLUTONIUM: also offers every mime type of |source| (a Wayland drag) that
++  // isn't offered yet, read from the source as is. The drop data above only
++  // keeps the types Chrome knows (text, html, rtf, images, files), so app
++  // types (application/x-moz-*, GTK and Qt internal ones) were lost.
++  void AddSourceMimeTypes(DataSource* source);
++
+   // Sets the clipboard data from |data| to the DataOffer object.
+   void SetClipboardData(DataExchangeDelegate* data_exchange_delegate,
+                         const ui::Clipboard& data,
+@@ -98,6 +105,8 @@ class DataOffer final : public ui::PropertyHandler {
+ 
+   DndAction dnd_action() const { return dnd_action_; }
+   bool finished() const { return finished_; }
++  // Whether the client accepted a mime type at the last Accept().
++  bool accepted() const { return accepted_; }
+ 
+  private:
+   void OnDataReady(const std::string& mime_type,
+@@ -130,6 +139,7 @@ class DataOffer final : public ui::PropertyHandler {
+   DndAction dnd_action_;
+   base::ObserverList<DataOfferObserver>::Unchecked observers_;
+   bool finished_;
++  bool accepted_ = false;
+ 
+   base::WeakPtrFactory<DataOffer> weak_ptr_factory_{this};
+ };
+diff --git a/components/exo/data_source.h b/components/exo/data_source.h
+index 1e1fc06923..a9125897f5 100644
+--- a/components/exo/data_source.h
++++ b/components/exo/data_source.h
+@@ -117,6 +117,16 @@ class DataSource {
+ 
+   bool CanBeDataSourceForCopy(Surface* surface) const;
+ 
++  // PLUTONIUM: the offered mime types, and reading one as is, for passing a
++  // Wayland drag to a Wayland target with all of its types.
++  const std::set<std::string>& mime_types() const { return mime_types_; }
++  void ReadRawData(const std::string& mime_type,
++                   ReadDataCallback callback,
++                   base::OnceClosure failure_callback) {
++    ReadData(mime_type, std::move(callback), std::move(failure_callback));
++  }
++  base::WeakPtr<DataSource> GetWeakPtr() { return weak_ptr_factory_.GetWeakPtr(); }
++
+  private:
+   // Reads data from the source. Then |callback| is invoked with read data. If
+   // Cancelled() is invoked or DataSource is destroyed before completion,
+@@ -149,6 +159,7 @@ class DataSource {
+   base::flat_set<DndAction> dnd_actions_;
+ 
+   base::WeakPtrFactory<DataSource> read_data_weak_ptr_factory_{this};
++  base::WeakPtrFactory<DataSource> weak_ptr_factory_{this};
+ };
+ 
+ class ScopedDataSource {
+diff --git a/components/exo/drag_drop_operation.cc b/components/exo/drag_drop_operation.cc
+index 9564d93d71..0c0619c3dc 100644
+--- a/components/exo/drag_drop_operation.cc
++++ b/components/exo/drag_drop_operation.cc
+@@ -249,7 +249,21 @@ DragDropOperation::DragDropOperation(
+       counter_);
+ }
+ 
++namespace {
++DragDropOperation* g_active_operation = nullptr;
++}  // namespace
++
++// static
++DataSource* DragDropOperation::GetActiveSource() {
++  return g_active_operation && g_active_operation->source_
++             ? g_active_operation->source_->get()
++             : nullptr;
++}
++
+ DragDropOperation::~DragDropOperation() {
++  if (g_active_operation == this) {
++    g_active_operation = nullptr;
++  }
+   drag_drop_controller_->RemoveObserver(this);
+ 
+   if (source_)
+@@ -371,6 +385,7 @@ void DragDropOperation::StartDragDropOperation() {
+ 
+   // This triggers a nested run loop that terminates when the drag and drop
+   // operation is completed.
++  g_active_operation = this;
+   DragOperation op = drag_drop_controller_->StartDragAndDrop(
+       std::move(os_exchange_data_), origin_->get()->window()->GetRootWindow(),
+       origin_->get()->window(), drag_start_point, dnd_operations,
+@@ -379,6 +394,9 @@ void DragDropOperation::StartDragDropOperation() {
+   // The instance deleted during StartDragAndDrop's nested RunLoop.
+   if (!weak_ptr)
+     return;
++  if (g_active_operation == this) {
++    g_active_operation = nullptr;
++  }
+ 
+   // Always reset the in_extended_drag becacuse ExtendedDragSource may be
+   // destroyed during nested loop.
+diff --git a/components/exo/drag_drop_operation.h b/components/exo/drag_drop_operation.h
+index 1df95bbf4d..fa8d87f2b8 100644
+--- a/components/exo/drag_drop_operation.h
++++ b/components/exo/drag_drop_operation.h
+@@ -47,6 +47,10 @@ class DragDropOperation : public DataSourceObserver,
+                           public aura::client::DragDropClientObserver {
+  public:
+   // Create an operation for a drag-drop originating from a wayland app.
++  // PLUTONIUM: the Wayland data source of the drag in progress, if a Wayland
++  // client started it.
++  static DataSource* GetActiveSource();
++
+   static base::WeakPtr<DragDropOperation> Create(
+       DataExchangeDelegate* data_exchange_delegate,
+       DataSource* source,
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index 6bf4651a37..ce156c2507 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -7,12 +7,15 @@
+ #include <algorithm>
+ #include <utility>
+ 
++#include "ash/drag_drop/drag_drop_controller.h"
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "components/viz/common/frame_sinks/copy_output_request.h"
+ #include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "components/viz/common/hit_test/hit_test_query.h"
++#include "components/viz/host/host_frame_sink_manager.h"
+ #include "components/exo/seat.h"
+ #include "components/exo/shell_surface_base.h"
+ #include "components/exo/shell_surface_util.h"
+@@ -21,7 +24,9 @@
+ #include "ui/aura/client/capture_client.h"
+ #include "ui/aura/window.h"
+ #include "ui/views/widget/widget.h"
++#include "ui/compositor/compositor.h"
+ #include "ui/compositor/layer.h"
++#include "ui/aura/window_tree_host.h"
+ #include "ui/events/base_event_utils.h"
+ #include "ui/events/event.h"
+ #include "ui/wm/core/compound_event_filter.h"
+@@ -67,7 +72,63 @@ EmbeddedWindows* EmbeddedWindows::Get() {
+   return instance.get();
+ }
+ 
+-EmbeddedWindows::EmbeddedWindows() = default;
++EmbeddedWindows::EmbeddedWindows() {
++  // PLUTONIUM: drops onto a native window shown in a page land on that window.
++  ash::DragDropController::SetTargetOverride(base::BindRepeating(
++      &EmbeddedWindows::FindDropTarget, base::Unretained(this)));
++}
++
++aura::Window* EmbeddedWindows::FindDropTarget(aura::Window* window,
++                                              gfx::PointF* location) {
++  // Aura's hit test finds the window showing the page. Ask viz what is drawn
++  // there: the same hit-test data that routes the pointer into the windows.
++  aura::WindowTreeHost* host = window->GetHost();
++  if (!host || !host->compositor()->context_factory()) {
++    return nullptr;
++  }
++  ui::Compositor* compositor = host->compositor();
++  viz::HostFrameSinkManager* manager =
++      compositor->context_factory()->GetHostFrameSinkManager();
++  if (!manager) {
++    return nullptr;
++  }
++  const auto& queries = manager->GetDisplayHitTestQuery();
++  auto it = queries.find(compositor->frame_sink_id());
++  if (it == queries.end() || !it->second) {
++    return nullptr;
++  }
++  // Start from |window|'s own frame sink (the page), as the browser's input
++  // router does: from the display root, a native window's parked copy in
++  // Ash's window tree can be hit instead, with its own (stale) offset.
++  if (!window->GetFrameSinkId().is_valid()) {
++    return nullptr;
++  }
++  const float scale = compositor->device_scale_factor();
++  viz::Target target = it->second->FindTargetForLocationStartingFrom(
++      viz::EventSource::MOUSE, gfx::ScalePoint(*location, scale),
++      window->GetFrameSinkId());
++  const int32_t window_id = GetWindowIdForFrameSink(target.frame_sink_id);
++  if (!window_id || !IsAttached(window_id)) {
++    return nullptr;
++  }
++  ShellSurfaceBase* shell_surface = FindShellSurface(window_id);
++  aura::Window* host_window =
++      shell_surface ? shell_surface->host_window() : nullptr;
++  if (!host_window || host_window == window ||
++      !shell_surface->root_surface()) {
++    return nullptr;
++  }
++  // As in DoDispatchMouseEvent(): the deepest sub-surface under the point.
++  gfx::PointF point = gfx::ScalePoint(target.location_in_target, 1.f / scale);
++  aura::Window* drop =
++      host_window->GetEventHandlerForPoint(gfx::ToFlooredPoint(point));
++  if (!drop || drop == host_window) {
++    drop = shell_surface->root_surface()->window();
++  }
++  aura::Window::ConvertPointToTarget(host_window, drop, &point);
++  *location = point;
++  return drop;
++}
+ EmbeddedWindows::~EmbeddedWindows() = default;
+ 
+ void EmbeddedWindows::AddObserver(Observer* observer) {
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index 4359101386..46e48ab265 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -197,6 +197,9 @@ class EmbeddedWindows : public aura::WindowObserver {
+ 
+   int32_t FindWindowId(const ShellSurfaceBase* shell_surface) const;
+   ShellSurfaceBase* FindShellSurface(int32_t window_id) const;
++  // The drop target under |location| in |window| when that window shows
++  // embedded windows; see ash::DragDropController::SetTargetOverride().
++  aura::Window* FindDropTarget(aura::Window* window, gfx::PointF* location);
+   std::optional<Info> ComputeInfo(int32_t window_id) const;
+   void NotifyIfChanged(int32_t window_id);
+   void ActivateOnDesktop(ShellSurfaceBase* shell_surface);
+diff --git a/components/exo/surface_tree_host.cc b/components/exo/surface_tree_host.cc
+index 49a73b32b3..28f48d0af6 100644
+--- a/components/exo/surface_tree_host.cc
++++ b/components/exo/surface_tree_host.cc
+@@ -664,6 +664,10 @@ viz::CompositorFrame SurfaceTreeHost::PrepareToSubmitCompositorFrame() {
+   render_pass->SetNew(kRenderPassId, gfx::Rect(output_surface_size_in_pixels),
+                       gfx::Rect(), gfx::Transform());
+   frame.metadata.device_scale_factor = device_scale_factor;
++  // EXO-EMBED: where the element showing a window is bigger than its surface
++  // (a terminal snapping to whole cells), viz fills the gap with this color.
++  // The default is white; show what is behind the window instead.
++  frame.metadata.root_background_color = SkColors::kTransparent;
+ 
+   if (output_surface_size_in_pixels !=
+           layer_tree_frame_sink_holder_->LastSizeInPixels() ||
+diff --git a/components/exo/wayland/wayland_pointer_delegate.cc b/components/exo/wayland/wayland_pointer_delegate.cc
+index 9ad480a387..dab2e8bbdf 100644
+--- a/components/exo/wayland/wayland_pointer_delegate.cc
++++ b/components/exo/wayland/wayland_pointer_delegate.cc
+@@ -112,9 +112,10 @@ void WaylandPointerDelegate::OnPointerScroll(base::TimeTicks time_stamp,
+   // The unit aura considers to be "one scroll tick".
+   const int kAuraScrollUnit = ui::MouseWheelEvent::kWheelDelta;
+ 
+-  // Weston, the reference compositor, treats one scroll tick as 10 units, with
+-  // no acceleration applied.
+-  constexpr int kWaylandScrollUnit = 10;
++  // PLUTONIUM: one wheel tick is 15 units, as libinput reports it and as
++  // KWin, wlroots and niri pass it on (Weston uses 10). Clients like GTK
++  // scale wheel scrolling by this value, so 10 scrolled 2/3 as far.
++  constexpr int kWaylandScrollUnit = 15;
+ 
+   // The ratio between the wayland and aura unit sizes. Multiplying by this
+   // converts from aura units to wayland units, dividing does the reverse.
+@@ -128,28 +129,35 @@ void WaylandPointerDelegate::OnPointerScroll(base::TimeTicks time_stamp,
+     wl_pointer_send_axis_source(pointer_resource_, axis_source);
+   }
+ 
+-  double x_value = -offset.x() * kAxisStepDistance;
+-  double y_value = -offset.y() * kAxisStepDistance;
++  // PLUTONIUM: finger (touchpad) scroll offsets are already in pixels, the
++  // unit wl_pointer.axis uses for them; only wheel ticks need converting.
++  const double scale = discrete ? kAxisStepDistance : 1.0;
++  double x_value = -offset.x() * scale;
++  double y_value = -offset.y() * scale;
+ 
+   // ::axis_discrete events must be sent before their corresponding ::axis
+   // events, per the specification.
+   if (wl_resource_get_version(pointer_resource_) >=
+           WL_POINTER_AXIS_DISCRETE_SINCE_VERSION &&
+       discrete) {
+-    // Ensure that we never round the discrete value down to 0.
+-    int discrete_x = static_cast<int>(x_value / kWaylandScrollUnit);
+-    if (discrete_x == 0 && x_value != 0) {
+-      discrete_x = copysign(1, x_value);
++    // PLUTONIUM: high-resolution wheels send fractions of a tick. Count whole
++    // ticks across events, so a client that steps per axis_discrete moves
++    // once per notch, not once per fraction.
++    wheel_remainder_ += gfx::Vector2dF(-offset.x(), -offset.y());
++    const int discrete_x =
++        static_cast<int>(wheel_remainder_.x() / kAuraScrollUnit);
++    const int discrete_y =
++        static_cast<int>(wheel_remainder_.y() / kAuraScrollUnit);
++    wheel_remainder_ -= gfx::Vector2dF(discrete_x * kAuraScrollUnit,
++                                       discrete_y * kAuraScrollUnit);
++    if (discrete_x) {
++      wl_pointer_send_axis_discrete(
++          pointer_resource_, WL_POINTER_AXIS_HORIZONTAL_SCROLL, discrete_x);
+     }
+-    int discrete_y = static_cast<int>(y_value / kWaylandScrollUnit);
+-    if (discrete_y == 0 && y_value != 0) {
+-      discrete_y = copysign(1, y_value);
++    if (discrete_y) {
++      wl_pointer_send_axis_discrete(
++          pointer_resource_, WL_POINTER_AXIS_VERTICAL_SCROLL, discrete_y);
+     }
+-
+-    wl_pointer_send_axis_discrete(
+-        pointer_resource_, WL_POINTER_AXIS_HORIZONTAL_SCROLL, discrete_x);
+-    wl_pointer_send_axis_discrete(pointer_resource_,
+-                                  WL_POINTER_AXIS_VERTICAL_SCROLL, discrete_y);
+   }
+ 
+   SendTimestamp(time_stamp);
+diff --git a/components/exo/wayland/wayland_pointer_delegate.h b/components/exo/wayland/wayland_pointer_delegate.h
+index fd16db1ff2..1233ec81e9 100644
+--- a/components/exo/wayland/wayland_pointer_delegate.h
++++ b/components/exo/wayland/wayland_pointer_delegate.h
+@@ -9,6 +9,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "components/exo/pointer_delegate.h"
+ #include "components/exo/wayland/wayland_input_delegate.h"
++#include "ui/gfx/geometry/vector2d_f.h"
+ 
+ struct wl_client;
+ struct wl_resource;
+@@ -59,6 +60,9 @@ class WaylandPointerDelegate : public WaylandInputDelegate,
+   // Owned by Server, which always outlives this delegate.
+   const raw_ptr<SerialTracker> serial_tracker_;
+ 
++  // PLUTONIUM: wheel offset (aura units) not yet sent as a whole tick.
++  gfx::Vector2dF wheel_remainder_;
++
+   base::WeakPtrFactory<WaylandPointerDelegate> weak_factory_{this};
+ };
+ 
+diff --git a/components/input/render_widget_host_input_event_router.cc b/components/input/render_widget_host_input_event_router.cc
+index dbeadcc9f3..83587d8053 100644
+--- a/components/input/render_widget_host_input_event_router.cc
++++ b/components/input/render_widget_host_input_event_router.cc
+@@ -856,6 +856,38 @@ bool RenderWidgetHostInputEventRouter::RouteToForeignCapture(
+   if (!ButtonsDownAfter(event)) {
+     foreign_capture_sink_ = viz::FrameSinkId();
+   }
++  RouteToForeignSink(root_view, sink, event);
++  return true;
++}
++
++// EXO-EMBED: the rest of a wheel sequence (phases changed/ended, momentum)
++// goes where its first event went. The targeter only hit-tests the first one
++// and sends the others to |wheel_target_|, a view; a native window has none,
++// so they were dropped, and an app only saw the first event of each scroll.
++bool RenderWidgetHostInputEventRouter::RouteWheelToForeignLatch(
++    RenderWidgetHostViewInput* root_view,
++    const blink::WebMouseWheelEvent& event) {
++  if (!foreign_wheel_sink_.is_valid()) {
++    return false;
++  }
++  const bool starts =
++      event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++      event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin;
++  const bool unlatched =
++      event.phase == blink::WebMouseWheelEvent::kPhaseNone &&
++      event.momentum_phase == blink::WebMouseWheelEvent::kPhaseNone;
++  if (starts || unlatched) {
++    foreign_wheel_sink_ = viz::FrameSinkId();
++    return false;
++  }
++  RouteToForeignSink(root_view, foreign_wheel_sink_, event);
++  return true;
++}
++
++void RenderWidgetHostInputEventRouter::RouteToForeignSink(
++    RenderWidgetHostViewInput* root_view,
++    const viz::FrameSinkId& sink,
++    const blink::WebMouseEvent& event) {
+   // Map the point through the page's view: the sink may also be embedded
+   // elsewhere (e.g. by Ash, for the parked window), and the point may be
+   // outside the sink.
+@@ -864,7 +896,7 @@ bool RenderWidgetHostInputEventRouter::RouteToForeignCapture(
+   gfx::Transform to_view;
+   if (!query ||
+       !query->GetTransformToTarget(root_view->GetFrameSinkId(), &to_view)) {
+-    return true;  // The page went away; drop the rest of the drag.
++    return;  // The page went away; drop the rest of the drag.
+   }
+   float device_scale_factor = root_view->GetDeviceScaleFactor();
+   gfx::PointF point = gfx::ConvertPointToPixels(event.PositionInWidget(),
+@@ -874,11 +906,10 @@ bool RenderWidgetHostInputEventRouter::RouteToForeignCapture(
+   if (!query->TransformLocationForTarget(
+           {sink, root_view->GetFrameSinkId(), root_view->GetRootFrameSinkId()},
+           in_root, &in_sink)) {
+-    return true;  // The sink went away; drop the rest of the drag.
++    return;  // The sink went away; drop the rest of the drag.
+   }
+   RouteToForeign(root_view, sink,
+                  gfx::ConvertPointToDips(in_sink, device_scale_factor), event);
+-  return true;
+ }
+ 
+ bool RenderWidgetHostInputEventRouter::RouteToForeignFrameSink(
+@@ -926,6 +957,14 @@ void RenderWidgetHostInputEventRouter::RouteToForeign(
+     return;
+   }
+   page_mouse_down_ = false;
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseWheel) {
++    const auto& wheel = static_cast<const blink::WebMouseWheelEvent&>(event);
++    if (wheel.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++        wheel.phase == blink::WebMouseWheelEvent::kPhaseMayBegin) {
++      foreign_wheel_sink_ = frame_sink_id;
++      wheel_target_ = nullptr;
++    }
++  }
+   if (foreign_hover_sink_ != frame_sink_id) {
+     ForeignHoverLeave();
+     foreign_hover_sink_ = frame_sink_id;
+@@ -1097,6 +1136,10 @@ void RenderWidgetHostInputEventRouter::RouteMouseWheelEvent(
+   if (!IsViewInMap(root_view)) {
+     return;
+   }
++  if (!event_targeter_->HasEventsPendingDispatch() &&
++      RouteWheelToForeignLatch(root_view, *event)) {
++    return;
++  }
+   if (MaybeRouteToForeignFrameSink(root_view, *event)) {
+     return;
+   }
+@@ -1137,6 +1180,17 @@ void RenderWidgetHostInputEventRouter::DispatchMouseWheelEvent(
+               PhaseToString(mouse_wheel_event.momentum_phase), "target",
+               static_cast<void*>(target), "wheel_target_",
+               static_cast<void*>(wheel_target_));
++  // EXO-EMBED: events that queued behind the targeter while it resolved the
++  // first one of a sequence that went to a native window.
++  if (!root_view->IsPointerLocked() &&
++      RouteWheelToForeignLatch(root_view, mouse_wheel_event)) {
++    return;
++  }
++  if (!root_view->IsPointerLocked() &&
++      (mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++       mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin)) {
++    foreign_wheel_sink_ = viz::FrameSinkId();
++  }
+   if (!root_view->IsPointerLocked()) {
+     if (mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
+         mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin) {
+diff --git a/components/input/render_widget_host_input_event_router.h b/components/input/render_widget_host_input_event_router.h
+index fff59df98d..24dee7f137 100644
+--- a/components/input/render_widget_host_input_event_router.h
++++ b/components/input/render_widget_host_input_event_router.h
+@@ -308,6 +308,13 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   // any. Returns true if routed (or dropped because the sink is gone).
+   bool RouteToForeignCapture(RenderWidgetHostViewInput* root_view,
+                              const blink::WebMouseEvent& event);
++  // Routes the rest of a wheel sequence to the native window it started on.
++  bool RouteWheelToForeignLatch(RenderWidgetHostViewInput* root_view,
++                                const blink::WebMouseWheelEvent& event);
++  // Routes |event| to |sink|, mapping its point through |root_view|.
++  void RouteToForeignSink(RenderWidgetHostViewInput* root_view,
++                          const viz::FrameSinkId& sink,
++                          const blink::WebMouseEvent& event);
+   void RouteToForeign(RenderWidgetHostViewInput* root_view,
+                       const viz::FrameSinkId& frame_sink_id,
+                       const gfx::PointF& location,
+@@ -498,6 +505,8 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   // A mouse button went down on this foreign frame sink; it gets all mouse
+   // events until the buttons are released (like an implicit grab).
+   viz::FrameSinkId foreign_capture_sink_;
++  // EXO-EMBED: the native window the current wheel sequence started on.
++  viz::FrameSinkId foreign_wheel_sink_;
+   // A mouse button went down on page content; foreign frame sinks don't get
+   // events until the buttons are released.
+   bool page_mouse_down_ = false;
+diff --git a/ui/events/ash/event_rewriter_ash.cc b/ui/events/ash/event_rewriter_ash.cc
+index ae8361b378..bfea6f7378 100644
+--- a/ui/events/ash/event_rewriter_ash.cc
++++ b/ui/events/ash/event_rewriter_ash.cc
+@@ -12,6 +12,7 @@
+ #include <cstdint>
+ 
+ #include "ash/constants/ash_features.h"
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+@@ -1722,6 +1723,14 @@ void EventRewriterAsh::RewriteExtendedKeys(const KeyEvent& key_event,
+     return;
+   }
+ 
++  // EXO-NIRI: a Plutonium shell runs on desktop keyboards, which have real
++  // Home/End/Page keys; Search+arrows are the shell's (niri's Super+Left),
++  // and Alt+arrows the apps'.
++  static const bool plutonium_shell =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (plutonium_shell) {
++    return;
++  }
+   if (incoming.flags & (EF_COMMAND_DOWN | EF_ALT_DOWN)) {
+     MaybeRewriteKeyEventToSixPackKeyAction(delegate_, key_event, state,
+                                            last_keyboard_device_id_);
+diff --git a/ui/events/ozone/evdev/BUILD.gn b/ui/events/ozone/evdev/BUILD.gn
+index f338774561..4b1ebe8dda 100644
+--- a/ui/events/ozone/evdev/BUILD.gn
++++ b/ui/events/ozone/evdev/BUILD.gn
+@@ -200,7 +200,7 @@ component("evdev") {
+ 
+   if (use_libinput) {
+     configs += [ ":libinput" ]
+-    public_configs += [ ":libinput_config" ]
++    configs += [ ":libinput_config" ]  # PLUTONIUM: only evdev reads it
+ 
+     sources += [
+       "libinput_event_converter.cc",
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.cc b/ui/events/ozone/evdev/libinput_event_converter.cc
+index cfe335e2ae..9d795388c1 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.cc
++++ b/ui/events/ozone/evdev/libinput_event_converter.cc
+@@ -2,6 +2,11 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#ifdef UNSAFE_BUFFERS_BUILD
++// PLUTONIUM: libinput hands us a printf format and va_list.
++#pragma allow_unsafe_buffers
++#endif
++
+ #include "ui/events/ozone/evdev/libinput_event_converter.h"
+ 
+ #include <fcntl.h>
+@@ -409,13 +414,22 @@ void LibInputEventConverter::HandlePointerAxis(const LibInputEvent& evt) {
+   libinput_event_pointer* event = evt.PointerEvent();
+   const auto h = GetAxisValue(event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+   const auto v = GetAxisValue(event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+-  const gfx::Vector2d delta(h, v);
++  // PLUTONIUM: keep the fraction. Finger scrolling comes in steps well under
++  // a pixel, which gfx::Vector2d truncated to nothing.
++  const gfx::Vector2dF delta(h, v);
+ 
+   DVLOG(3) << "Pointer axis h:" << h << ", v:" << v;
+ 
+-  dispatcher_->DispatchScrollEvent({input_device_.id, EventType::kScroll,
+-                                    cursor_->GetLocation(), delta, delta, 2,
+-                                    Timestamp(evt)});
++  // PLUTONIUM: libinput ends a finger scroll with an axis event of 0. That is
++  // a fling start in aura (fingers lifted), which Exo sends as axis_stop so
++  // clients can start kinetic scrolling.
++  const bool stop =
++      delta.IsZero() &&
++      libinput_event_pointer_get_axis_source(event) ==
++          LIBINPUT_POINTER_AXIS_SOURCE_FINGER;
++  dispatcher_->DispatchScrollEvent(
++      {input_device_.id, stop ? EventType::kScrollFlingStart : EventType::kScroll,
++       cursor_->GetLocation(), delta, delta, 2, Timestamp(evt)});
+ }
+ 
+ base::TimeTicks LibInputEventConverter::Timestamp(const LibInputEvent& evt) {
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.h b/ui/events/ozone/evdev/libinput_event_converter.h
+index c030a344c4..4a343835ca 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.h
++++ b/ui/events/ozone/evdev/libinput_event_converter.h
+@@ -10,6 +10,7 @@
+ #include <optional>
+ #include <ostream>
+ 
++#include "base/memory/raw_ptr_exclusion.h"
+ #include "ui/events/ozone/evdev/event_converter_evdev.h"
+ 
+ namespace ui {
+@@ -38,7 +39,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     libinput_event_type Type() const;
+ 
+    private:
+-    libinput_event* event_;
++    RAW_PTR_EXCLUSION libinput_event* event_;
+   };
+ 
+   // This class wraps the libinput_device struct from libinput library.
+@@ -60,7 +61,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     void SetTapToClickEnabled(const bool enabled) const;
+ 
+     const int device_id_;
+-    libinput_device* device_;
++    RAW_PTR_EXCLUSION libinput_device* device_;
+   };
+ 
+   // This class wraps the libinput struct from libinput library. Any operations
+@@ -93,7 +94,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     static constexpr libinput_interface interface_ = {OpenRestricted,
+                                                       CloseRestricted};
+ 
+-    libinput* li_;
++    RAW_PTR_EXCLUSION libinput* li_;
+   };
+ 
+   static std::unique_ptr<LibInputEventConverter> Create(
+@@ -134,8 +135,8 @@ class LibInputEventConverter : public EventConverterEvdev {
+   void HandlePointerAxis(const LibInputEvent& evt);
+   base::TimeTicks Timestamp(const LibInputEvent& evt);
+ 
+-  DeviceEventDispatcherEvdev* const dispatcher_;
+-  CursorDelegateEvdev* const cursor_;
++  RAW_PTR_EXCLUSION DeviceEventDispatcherEvdev* const dispatcher_;
++  RAW_PTR_EXCLUSION CursorDelegateEvdev* const cursor_;
+ 
+   const bool has_keyboard_;
+   const bool has_mouse_;
+diff --git a/ui/wm/core/accelerator_filter.cc b/ui/wm/core/accelerator_filter.cc
+index c07d630f31..40f11d0f37 100644
+--- a/ui/wm/core/accelerator_filter.cc
++++ b/ui/wm/core/accelerator_filter.cc
+@@ -47,6 +47,10 @@ void AcceleratorFilter::OnKeyEvent(ui::KeyEvent* event) {
+   DCHECK(event->target());
+   if (ShouldFilter(event))
+     return;
++  if (event->properties() &&
++      event->properties()->contains(kShellShortcutEventKey)) {
++    return;
++  }
+ 
+   ui::Accelerator accelerator(*event);
+   if (delegate_->ProcessAccelerator(*event, accelerator))
+diff --git a/ui/wm/core/accelerator_filter.h b/ui/wm/core/accelerator_filter.h
+index 3be814082f..0529a8eb52 100644
+--- a/ui/wm/core/accelerator_filter.h
++++ b/ui/wm/core/accelerator_filter.h
+@@ -13,6 +13,11 @@
+ namespace wm {
+ class AcceleratorDelegate;
+ 
++// EXO-NIRI: a key event with this property is one of the Plutonium shell
++// page's own shortcuts (navigator.windowBroker.setShellShortcuts): it goes to
++// the page instead of running an Ash accelerator (Search+D is Dictation).
++inline constexpr char kShellShortcutEventKey[] = "plutonium-shell-shortcut";
++
+ // AcceleratorFilter filters key events for AcceleratorControler handling global
+ // keyboard accelerators.
+ class COMPONENT_EXPORT(UI_WM) AcceleratorFilter : public ui::EventHandler {

@@ -1,0 +1,8 @@
+{
+  "name": "plutonium-helper",
+  "private": true,
+  "type": "module",
+  "description": "Frontend-neutral Plutonium helper: thread environment, pid-to-thread resolver, app launching and the agent bridge (MCP).",
+  "bin": { "plutonium": "./plutonium.ts" },
+  "engines": { "node": ">=24" }
+}

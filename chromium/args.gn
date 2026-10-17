@@ -1,0 +1,7 @@
+target_os = "chromeos"
+is_component_build = true
+is_debug = false
+dcheck_always_on = true
+symbol_level = 1
+use_system_minigbm = true
+use_libinput = true

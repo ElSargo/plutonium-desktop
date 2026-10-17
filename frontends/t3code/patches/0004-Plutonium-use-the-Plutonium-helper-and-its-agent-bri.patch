@@ -1,0 +1,733 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 16 Oct 2026 10:11:22 +1300
+Subject: [PATCH 4/9] Plutonium: use the Plutonium helper and its agent bridge
+
+The thread environment, per-thread X display and pid-to-thread resolver
+moved to Plutonium's helper (plutoniumd). The server now asks it for each
+thread's setup, and Claude sessions get its MCP server (list, launch,
+snapshot, focus, close the thread's windows). The window-threads route is
+gone. The web app loads the helper's shell library, and an agent's
+focus_window opens the app tab in its thread. ?plutoniumHelper= is read at
+boot so the pairing redirect doesn't drop it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/http.ts                       |  14 --
+ apps/server/src/plutonium.ts                  | 235 ++++++------------
+ .../src/provider/Layers/ClaudeAdapter.ts      |  33 ++-
+ apps/server/src/server.ts                     |   2 -
+ apps/web/src/main.tsx                         |   2 +
+ apps/web/src/plutonium/PlutoniumWindows.tsx   |  28 ++-
+ apps/web/src/plutonium/helperOrigin.ts        |  23 ++
+ apps/web/src/plutonium/windowStore.ts         | 168 +++++--------
+ 8 files changed, 217 insertions(+), 288 deletions(-)
+ create mode 100644 apps/web/src/plutonium/helperOrigin.ts
+
+diff --git a/apps/server/src/http.ts b/apps/server/src/http.ts
+index 9355bd3ed2..30b368e621 100644
+--- a/apps/server/src/http.ts
++++ b/apps/server/src/http.ts
+@@ -46,7 +46,6 @@ import {
+   failEnvironmentInternal,
+ } from "./auth/http.ts";
+ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+-import { PLUTONIUM_WINDOW_THREADS_PATH, resolveWindowThreads } from "./plutonium.ts";
+ import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+ 
+ const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
+@@ -387,19 +386,6 @@ export const untracedRequestsLayer = Layer.succeed(HttpMiddleware.TracerDisabled
+   );
+ });
+ 
+-// Plutonium: which thread started each native window's client process.
+-export const plutoniumWindowThreadsRouteLayer = HttpRouter.add(
+-  "GET",
+-  PLUTONIUM_WINDOW_THREADS_PATH,
+-  Effect.gen(function* () {
+-    yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+-    const request = yield* HttpServerRequest.HttpServerRequest;
+-    const url = HttpServerRequest.toURL(request);
+-    const pids = Option.isSome(url) ? url.value.searchParams.get("pids") : null;
+-    return HttpServerResponse.jsonUnsafe(yield* resolveWindowThreads(pids));
+-  }),
+-);
+-
+ export const assetRouteLayer = HttpRouter.add(
+   "GET",
+   `${ASSET_ROUTE_PREFIX}/*`,
+diff --git a/apps/server/src/plutonium.ts b/apps/server/src/plutonium.ts
+index 151ca7d0ec..b4b3b094dd 100644
+--- a/apps/server/src/plutonium.ts
++++ b/apps/server/src/plutonium.ts
+@@ -1,176 +1,89 @@
+-// @effect-diagnostics nodeBuiltinImport:off - agent and terminal environments are built synchronously at spawn
++// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off - agent and terminal environments are built synchronously at spawn, outside Effect
+ // Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
+ // native Wayland apps that agents start show up as page elements.
+ //
+-// Only active when the server is started with PLUTONIUM_WAYLAND_DISPLAY (the
+-// Exo socket, e.g. "wayland-cros"). Agents then get that display plus their
+-// thread id in their environment, and every process they start inherits both.
+-// The shell page learns each window's client pid from the browser's window
+-// broker and asks this server which thread the pid belongs to.
+-import { spawn, type ChildProcess } from "node:child_process";
+-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+-import { delimiter, join } from "node:path";
+-
+-import * as Effect from "effect/Effect";
+-import * as FileSystem from "effect/FileSystem";
+-
+-const THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
+-// Enough to get from a GUI app through shells and wrappers to the agent.
+-const MAX_PARENT_DEPTH = 16;
+-
+-export const PLUTONIUM_WINDOW_THREADS_PATH = "/api/plutonium/window-threads";
+-
+-export function plutoniumWaylandDisplay(): string | undefined {
+-  return process.env.PLUTONIUM_WAYLAND_DISPLAY || undefined;
+-}
+-
+-/** Variables that send an agent's GUI apps to Exo and tag them with the thread. */
+-export function plutoniumAgentEnvironment(
+-  threadId: string | undefined,
+-): Readonly<Record<string, string>> {
+-  const display = plutoniumWaylandDisplay();
+-  if (!display || !threadId) return {};
+-  const xDisplay = threadXDisplay(threadId, display);
+-  return {
+-    [THREAD_ID_VARIABLE]: threadId,
+-    WAYLAND_DISPLAY: display,
+-    GDK_BACKEND: "wayland",
+-    QT_QPA_PLATFORM: "wayland",
+-    MOZ_ENABLE_WAYLAND: "1",
+-    // X11-only apps (e.g. games on GLFW) get the thread's own X server rather
+-    // than the host desktop's.
+-    ...(xDisplay ? { DISPLAY: xDisplay } : {}),
+-  };
+-}
+-
+-// X11 apps: one rootless Xwayland per thread, through xwayland-satellite,
+-// which shows X windows as Wayland toplevels on Exo. Exo sees the satellite as
+-// the client, so its windows resolve to the thread through the satellite's
+-// own PLUTONIUM_THREAD_ID. systemd-socket-activate holds the X socket and only
+-// starts the satellite (in its own process) when an X client first connects.
+-const X_DISPLAY_FIRST = 200;
+-const X_DISPLAY_LAST = 299;
+-const xDisplays = new Map<string, { display: number; process: ChildProcess }>();
+-
+-function findExecutable(name: string): string | undefined {
+-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+-    if (directory && existsSync(join(directory, name))) return join(directory, name);
+-  }
+-  return undefined;
+-}
+-
+-const xSocketPath = (display: number) => `/tmp/.X11-unix/X${display}`;
+-const xLockPath = (display: number) => `/tmp/.X${display}-lock`;
++// The frontend-neutral parts live in Plutonium's helper (plutoniumd, in the
++// plutonium repo under helper/): the thread environment (Exo display, thread
++// tag, a per-thread X display), pid → thread resolution, and the agent bridge
++// (an MCP server). This server only asks the helper what to add to a thread's
++// agents and terminals. The web app talks to the helper directly.
++//
++// Only active when the server is started with PLUTONIUM_HELPER (the helper's
++// Unix socket) or PLUTONIUM_WAYLAND_DISPLAY (Exo's socket name, from which the
++// helper's default socket path follows).
++import { spawnSync } from "node:child_process";
++import { join } from "node:path";
+ 
+-function releaseXDisplay(display: number): void {
+-  for (const path of [xSocketPath(display), xLockPath(display)]) {
+-    try {
+-      unlinkSync(path);
+-    } catch {
+-      // Already gone.
+-    }
+-  }
++export interface PlutoniumThreadSetup {
++  /** Variables for the thread's processes (agents, terminals). */
++  readonly env: Readonly<Record<string, string>>;
++  /** The agent bridge as a stdio MCP server. */
++  readonly mcpServer: { readonly command: string; readonly args: readonly string[] };
+ }
+ 
+-function threadXDisplay(threadId: string, waylandDisplay: string): string | undefined {
+-  const existing = xDisplays.get(threadId);
+-  if (existing) return `:${existing.display}`;
+-  if (process.platform !== "linux") return undefined;
+-  const satellite =
+-    process.env.PLUTONIUM_XWAYLAND_SATELLITE || findExecutable("xwayland-satellite");
+-  const activate = findExecutable("systemd-socket-activate");
+-  if (!satellite || !activate) return undefined;
+-  for (let display = X_DISPLAY_FIRST; display <= X_DISPLAY_LAST; display++) {
+-    if (existsSync(xSocketPath(display)) || existsSync(xLockPath(display))) continue;
+-    try {
+-      // Reserves the number; the format is what X servers write.
+-      writeFileSync(xLockPath(display), `${String(process.pid).padStart(10)}\n`, { flag: "wx" });
+-    } catch {
+-      continue;
+-    }
+-    const child = spawn(
+-      activate,
+-      [
+-        ...["XDG_RUNTIME_DIR", "PATH", "WAYLAND_DISPLAY", THREAD_ID_VARIABLE].flatMap((name) => [
+-          "-E",
+-          name,
+-        ]),
+-        "-l",
+-        xSocketPath(display),
+-        satellite,
+-        `:${display}`,
+-        "-listenfd",
+-        "3",
+-      ],
+-      {
+-        env: { ...process.env, WAYLAND_DISPLAY: waylandDisplay, [THREAD_ID_VARIABLE]: threadId },
+-        stdio: "ignore",
+-      },
+-    );
+-    xDisplays.set(threadId, { display, process: child });
+-    child.once("exit", () => {
+-      if (xDisplays.get(threadId)?.process === child) xDisplays.delete(threadId);
+-      releaseXDisplay(display);
+-    });
+-    return `:${display}`;
+-  }
+-  return undefined;
++function helperSocket(): string | undefined {
++  if (process.env.PLUTONIUM_HELPER) return process.env.PLUTONIUM_HELPER;
++  const display = process.env.PLUTONIUM_WAYLAND_DISPLAY;
++  if (!display) return undefined;
++  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`;
++  return join(runtime, "plutonium", `${display}.sock`);
+ }
+ 
+-process.once("exit", () => {
+-  for (const { display, process: child } of xDisplays.values()) {
+-    child.kill();
+-    releaseXDisplay(display);
+-  }
++// Environments are built synchronously at spawn, so the request runs in a
++// short-lived child (about 50 ms).
++const REQUEST_SCRIPT = `
++const [socketPath, path] = process.argv.slice(1);
++require("node:http").get({ socketPath, path }, (res) => {
++  let body = "";
++  res.setEncoding("utf8");
++  res.on("data", (chunk) => (body += chunk));
++  res.on("end", () => {
++    process.stdout.write(body);
++    process.exit(res.statusCode === 200 ? 0 : 1);
++  });
++}).on("error", (error) => {
++  process.stderr.write(error.message);
++  process.exit(1);
+ });
++`;
+ 
+-const readThreadId = (fileSystem: FileSystem.FileSystem, pid: number) =>
+-  fileSystem.readFileString(`/proc/${pid}/environ`).pipe(
+-    Effect.map((environ) => {
+-      const prefix = `${THREAD_ID_VARIABLE}=`;
+-      const entry = environ.split("\0").find((line) => line.startsWith(prefix));
+-      return entry?.slice(prefix.length) || undefined;
+-    }),
+-    // Gone, or not ours.
+-    Effect.orElseSucceed(() => undefined),
+-  );
++let warned = false;
++// A session start asks for the environment and the MCP server separately.
++const CACHE_MS = 10_000;
++const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
+ 
+-const readParentPid = (fileSystem: FileSystem.FileSystem, pid: number) =>
+-  fileSystem.readFileString(`/proc/${pid}/stat`).pipe(
+-    Effect.map((stat) => {
+-      // The command name is in parentheses and may contain spaces.
+-      const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+-      return parent > 1 ? parent : undefined;
+-    }),
+-    Effect.orElseSucceed(() => undefined),
++/** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
++export function plutoniumThreadSetup(
++  threadId: string | undefined,
++): PlutoniumThreadSetup | undefined {
++  const socket = helperSocket();
++  if (!socket || !threadId) return undefined;
++  const cached = cache.get(threadId);
++  if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
++  const result = spawnSync(
++    process.execPath,
++    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(threadId)}`],
++    { encoding: "utf8", timeout: 5_000 },
+   );
+-
+-/**
+- * The thread whose agent started `pid`: the process's own tag, or the nearest
+- * tagged ancestor (for apps that clear their environment).
+- */
+-const resolveThreadForPid = (fileSystem: FileSystem.FileSystem, pid: number) =>
+-  Effect.gen(function* () {
+-    let current: number | undefined = pid;
+-    for (let depth = 0; current !== undefined && depth < MAX_PARENT_DEPTH; depth++) {
+-      const threadId = yield* readThreadId(fileSystem, current);
+-      if (threadId) return threadId;
+-      current = yield* readParentPid(fileSystem, current);
++  if (result.status !== 0) {
++    if (!warned) {
++      warned = true;
++      console.warn(
++        `Plutonium: the helper at ${socket} did not answer (${(result.stderr || result.stdout || "").trim()}); ` +
++          "thread processes won't be tagged until it does.",
++      );
+     }
+     return undefined;
+-  });
++  }
++  warned = false;
++  const setup = JSON.parse(result.stdout) as PlutoniumThreadSetup;
++  cache.set(threadId, { at: Date.now(), setup });
++  return setup;
++}
+ 
+-/** pids → thread ids, for the `?pids=1,2,3` query. Unknown pids are left out. */
+-export const resolveWindowThreads = (pidsQuery: string | null) =>
+-  Effect.gen(function* () {
+-    const fileSystem = yield* FileSystem.FileSystem;
+-    const result: Record<string, string> = {};
+-    if (process.platform !== "linux" || !pidsQuery) return result;
+-    for (const part of pidsQuery.split(",").slice(0, 256)) {
+-      const pid = Number(part);
+-      if (!Number.isInteger(pid) || pid <= 1) continue;
+-      const threadId = yield* resolveThreadForPid(fileSystem, pid);
+-      if (threadId) result[String(pid)] = threadId;
+-    }
+-    return result;
+-  });
++/** Variables that send a thread's GUI apps to Exo and tag them with the thread. */
++export function plutoniumAgentEnvironment(
++  threadId: string | undefined,
++): Readonly<Record<string, string>> {
++  return plutoniumThreadSetup(threadId)?.env ?? {};
++}
+diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
+index c81ccd9f35..1da4a23402 100644
+--- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
++++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
+@@ -89,6 +89,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+ import { resolveAttachmentPath } from "../../attachmentStore.ts";
+ import { ServerConfig } from "../../config.ts";
+ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
++import { plutoniumThreadSetup } from "../../plutonium.ts";
+ import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
+ import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+ import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
+@@ -4983,6 +4984,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+         ...(input.cwd ? [input.cwd] : []),
+         serverConfig.attachmentsDir,
+       ];
++      // Plutonium (no-op unless enabled): the helper's MCP server for this thread.
++      const plutoniumSetup = plutoniumThreadSetup(input.threadId);
+       const queryOptions: ClaudeQueryOptions = {
+         ...(input.cwd ? { cwd: input.cwd } : {}),
+         ...(apiModelId ? { model: apiModelId } : {}),
+@@ -5026,16 +5029,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
+         ),
+         additionalDirectories,
+         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
+-        ...(mcpSession
++        ...(mcpSession || plutoniumSetup
+           ? {
+               mcpServers: {
+-                "t3-code": {
+-                  type: "http",
+-                  url: mcpSession.endpoint,
+-                  headers: {
+-                    Authorization: mcpSession.authorizationHeader,
+-                  },
+-                },
++                ...(mcpSession
++                  ? {
++                      "t3-code": {
++                        type: "http" as const,
++                        url: mcpSession.endpoint,
++                        headers: {
++                          Authorization: mcpSession.authorizationHeader,
++                        },
++                      },
++                    }
++                  : {}),
++                // Plutonium: the agent bridge to this thread's app windows.
++                ...(plutoniumSetup
++                  ? {
++                      plutonium: {
++                        type: "stdio" as const,
++                        command: plutoniumSetup.mcpServer.command,
++                        args: [...plutoniumSetup.mcpServer.args],
++                      },
++                    }
++                  : {}),
+               },
+             }
+           : {}),
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index fb5498e2e1..43bba34bd8 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -27,7 +27,6 @@ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
+ import * as ServerConfig from "./config.ts";
+ import {
+   otlpTracesProxyRouteLayer,
+-  plutoniumWindowThreadsRouteLayer,
+   assetRouteLayer,
+   attachmentUploadRouteLayer,
+   serverEnvironmentHttpApiLayer,
+@@ -606,7 +605,6 @@ export const makeRoutesLayer = Layer.mergeAll(
+       Layer.provide(environmentAuthenticatedAuthLayer),
+     ),
+     otlpTracesProxyRouteLayer,
+-    plutoniumWindowThreadsRouteLayer,
+     assetRouteLayer,
+     attachmentUploadRouteLayer,
+     deviceHubProxyRouteLayer,
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 81d1c2140a..dea4746cf0 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -5,6 +5,7 @@ import { createHashHistory, createBrowserHistory } from "@tanstack/react-router"
+ import "./index.css";
+ 
+ import { prepareProviderAuthDelivery } from "./providerAuthDelivery";
++import { rememberPlutoniumHelper } from "./plutonium/helperOrigin";
+ import { isElectron } from "./env";
+ import { hasCloudPublicConfig } from "./cloud/publicConfig";
+ import { getRouter } from "./router";
+@@ -16,6 +17,7 @@ import { AppRoot } from "./AppRoot";
+ import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+ 
+ prepareProviderAuthDelivery();
++rememberPlutoniumHelper();
+ 
+ // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
+ const history = isElectron ? createHashHistory() : createBrowserHistory();
+diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
+index 0975606fff..51fb12c3fa 100644
+--- a/apps/web/src/plutonium/PlutoniumWindows.tsx
++++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
+@@ -1,14 +1,20 @@
+ // Plutonium: native windows in the right panel. The "Apps" surface lists the
+ // windows a thread started, and each one opens as its own tab, shown live as a
+ // <native-window> element.
++import { ThreadId } from "@t3tools/contracts";
++import { useRouter } from "@tanstack/react-router";
+ import { AppWindowIcon, SquareArrowOutUpRightIcon } from "lucide-react";
+ import { createElement, useEffect, useRef, useState } from "react";
+ 
+ import { Button } from "~/components/ui/button";
+ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
++import { useRightPanelStore } from "~/rightPanelStore";
++import { usePrimaryEnvironmentId } from "~/state/environments";
++import { buildThreadRouteParams } from "~/threadRoutes";
+ 
+ import {
+   grantFor,
++  setPlutoniumFocusHandler,
+   showOnDesktop,
+   startPlutoniumWindows,
+   type NativeWindowEntry,
+@@ -17,9 +23,29 @@ import {
+   useUntaggedWindows,
+ } from "./windowStore";
+ 
+-/** Subscribes to the window broker for the whole app. Renders nothing. */
++/**
++ * Connects to the Plutonium helper for the whole app, and opens a window's tab
++ * in its thread when the thread's agent asks to show it. Renders nothing.
++ */
+ export function PlutoniumWindowsStarter() {
++  const router = useRouter();
++  const environmentId = usePrimaryEnvironmentId();
+   useEffect(startPlutoniumWindows, []);
++  useEffect(() => {
++    if (environmentId === null) return;
++    // Plutonium threads run on this machine: the primary environment.
++    setPlutoniumFocusHandler((window) => {
++      if (!window.threadId) return false;
++      const ref = { environmentId, threadId: ThreadId.make(window.threadId) };
++      useRightPanelStore.getState().openApp(ref, { windowId: window.id, appId: window.appId });
++      void router.navigate({
++        to: "/$environmentId/$threadId",
++        params: buildThreadRouteParams(ref),
++      });
++      return true;
++    });
++    return () => setPlutoniumFocusHandler(null);
++  }, [environmentId, router]);
+   return null;
+ }
+ 
+diff --git a/apps/web/src/plutonium/helperOrigin.ts b/apps/web/src/plutonium/helperOrigin.ts
+new file mode 100644
+index 0000000000..7450e43574
+--- /dev/null
++++ b/apps/web/src/plutonium/helperOrigin.ts
+@@ -0,0 +1,23 @@
++// Plutonium: where the helper serves the shell library. The launcher passes a
++// non-default helper as ?plutoniumHelper=<origin>; it is read at boot, before
++// any redirect (e.g. pairing) drops the query, and remembered.
++const STORAGE_KEY = "t3code:plutonium-helper";
++const DEFAULT_HELPER = "http://127.0.0.1:3780";
++
++export function rememberPlutoniumHelper(): void {
++  const fromUrl = new URLSearchParams(window.location.search).get("plutoniumHelper");
++  if (!fromUrl) return;
++  try {
++    localStorage.setItem(STORAGE_KEY, fromUrl);
++  } catch {
++    // Not persisted; the default applies after the next navigation.
++  }
++}
++
++export function plutoniumHelperOrigin(): string {
++  try {
++    return localStorage.getItem(STORAGE_KEY) ?? DEFAULT_HELPER;
++  } catch {
++    return DEFAULT_HELPER;
++  }
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 7259602fb4..3b66e87831 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -1,14 +1,17 @@
+ // Plutonium: native windows from the browser's window broker, grouped by the
+-// thread whose agent started them.
++// thread whose agent or terminals started them.
+ //
+ // Only active when this page is the Plutonium shell (Chromium exposes
+-// `navigator.windowBroker` to the shell origin only). Window → thread comes
+-// from the server: it reads PLUTONIUM_THREAD_ID from the client process (see
+-// apps/server/src/plutonium.ts).
++// `navigator.windowBroker` to the shell origin only). The window list, the
++// window → thread mapping and the agent bridge come from Plutonium's shell
++// library, loaded from its helper (helper/web/plutonium-shell.js in the
++// plutonium repo); this file mirrors its state into a store for React.
+ import { create } from "zustand";
+ 
+ import { useRightPanelStore } from "~/rightPanelStore";
+ 
++import { plutoniumHelperOrigin } from "./helperOrigin";
++
+ export interface NativeWindowEntry {
+   readonly id: number;
+   readonly appId: string;
+@@ -19,149 +22,110 @@ export interface NativeWindowEntry {
+   readonly embedded: boolean;
+   readonly focused: boolean;
+   readonly pid: number;
++  /** The thread that started it; null if none did; undefined until known. */
++  readonly threadId: string | null | undefined;
+ }
+ 
+-interface NativeWindowEvent extends Event {
+-  readonly windowId: number;
+-  readonly entry: NativeWindowEntry | null;
+-}
+-
+-interface NativeWindowBroker extends EventTarget {
+-  getWindows(): Promise<NativeWindowEntry[]>;
+-  requestGrant(windowId: number): Promise<string>;
+-  revokeGrant(grant: string): void;
++/** The parts of the shell library's PlutoniumShell used here. */
++interface PlutoniumShell extends EventTarget {
++  readonly available: boolean;
++  readonly ready: Promise<void>;
++  readonly windows: ReadonlyMap<number, NativeWindowEntry>;
++  onFocus: ((window: NativeWindowEntry) => boolean | Promise<boolean>) | undefined;
++  grantFor(windowId: number): Promise<string>;
+   showOnDesktop(windowId: number): void;
+ }
+ 
+-const WINDOW_THREADS_PATH = "/api/plutonium/window-threads";
+-
+ interface PlutoniumWindowState {
+   readonly available: boolean;
+   readonly windows: Readonly<Record<number, NativeWindowEntry>>;
+-  /** Client pid → thread id, as resolved by the server. */
+-  readonly threadByPid: Readonly<Record<number, string>>;
+-  /** Pids the server has answered for, tagged or not. */
+-  readonly resolvedPids: Readonly<Record<number, true>>;
+ }
+ 
+ export const usePlutoniumWindowStore = create<PlutoniumWindowState>(() => ({
+   available: false,
+   windows: {},
+-  threadByPid: {},
+-  resolvedPids: {},
+ }));
+ 
+-function broker(): NativeWindowBroker | null {
+-  return (navigator as Navigator & { windowBroker?: NativeWindowBroker }).windowBroker ?? null;
+-}
++let shell: PlutoniumShell | null = null;
++let focusHandler: ((window: NativeWindowEntry) => boolean) | null = null;
+ 
+-const grants = new Map<number, Promise<string>>();
++/** How an agent's "show this window" (the bridge's focus) reaches the UI. */
++export function setPlutoniumFocusHandler(
++  handler: ((window: NativeWindowEntry) => boolean) | null,
++): void {
++  focusHandler = handler;
++}
+ 
+ /** A grant to embed `windowId` in this document (one per window, reused). */
+ export function grantFor(windowId: number): Promise<string> {
+-  const windowBroker = broker();
+-  if (!windowBroker) return Promise.reject(new Error("not the Plutonium shell"));
+-  let grant = grants.get(windowId);
+-  if (!grant) {
+-    grant = windowBroker.requestGrant(windowId);
+-    grant.catch(() => grants.delete(windowId));
+-    grants.set(windowId, grant);
+-  }
+-  return grant;
+-}
+-
+-const pendingPids = new Set<number>();
+-let resolveTimer: ReturnType<typeof setTimeout> | null = null;
+-
+-// A client's environment is fixed at exec, so a pid resolves once. Unresolved
+-// pids are retried on the window's next change.
+-function resolvePid(pid: number): void {
+-  if (pid <= 0 || pid in usePlutoniumWindowStore.getState().threadByPid) return;
+-  pendingPids.add(pid);
+-  resolveTimer ??= setTimeout(() => {
+-    resolveTimer = null;
+-    const pids = [...pendingPids];
+-    pendingPids.clear();
+-    void fetch(`${WINDOW_THREADS_PATH}?pids=${pids.join(",")}`, { credentials: "include" })
+-      .then((response) => (response.ok ? response.json() : {}))
+-      .then((resolved: Record<string, string>) => {
+-        const entries = Object.entries(resolved).map(([pid, threadId]) => [Number(pid), threadId]);
+-        usePlutoniumWindowStore.setState((state) => ({
+-          threadByPid: { ...state.threadByPid, ...Object.fromEntries(entries) },
+-          resolvedPids: {
+-            ...state.resolvedPids,
+-            ...Object.fromEntries(pids.map((pid) => [pid, true] as const)),
+-          },
+-        }));
+-      })
+-      .catch(() => undefined);
+-  }, 50);
+-}
+-
+-function onWindow(event: Event): void {
+-  const { windowId, entry } = event as NativeWindowEvent;
+-  if (!entry) return;
+-  usePlutoniumWindowStore.setState((state) => ({
+-    windows: { ...state.windows, [windowId]: entry },
+-  }));
+-  resolvePid(entry.pid);
+-}
+-
+-function onWindowRemoved(event: Event): void {
+-  const { windowId } = event as NativeWindowEvent;
+-  grants.delete(windowId);
+-  usePlutoniumWindowStore.setState((state) => {
+-    const { [windowId]: _removed, ...windows } = state.windows;
+-    return { windows };
+-  });
+-  useRightPanelStore.getState().reconcileAppSurfaces((id) => id !== windowId);
++  return shell ? shell.grantFor(windowId) : Promise.reject(new Error("not the Plutonium shell"));
+ }
+ 
+ /** Raises `windowId` on the Ash desktop once no element shows it any more. */
+ export function showOnDesktop(windowId: number): void {
+-  broker()?.showOnDesktop(windowId);
++  shell?.showOnDesktop(windowId);
++}
++
++function mirror(): void {
++  if (!shell) return;
++  usePlutoniumWindowStore.setState({ windows: Object.fromEntries(shell.windows) });
+ }
+ 
+ let started = false;
+ 
+-/** Subscribe to the broker once per document. A no-op outside the shell. */
++/** Connect to the helper once per document. A no-op outside the shell. */
+ export function startPlutoniumWindows(): void {
+   if (started) return;
+   started = true;
+-  const windowBroker = broker();
+-  if (!windowBroker) {
++  const dropAppTabs = () => useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++  if (!("windowBroker" in navigator)) {
+     // App tabs restored from storage have nothing to show outside the shell.
+-    useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++    dropAppTabs();
+     return;
+   }
+-  usePlutoniumWindowStore.setState({ available: true });
+-  // Window ids only hold within one Ash session: drop restored tabs whose
+-  // window is gone or is now some other app.
+-  void windowBroker.getWindows().then((windows) => {
+-    const appIds = new Map(windows.map((entry) => [entry.id, entry.appId]));
+-    useRightPanelStore.getState().reconcileAppSurfaces((id, appId) => appIds.get(id) === appId);
+-  });
+-  windowBroker.addEventListener("windowadded", onWindow);
+-  windowBroker.addEventListener("windowchanged", onWindow);
+-  windowBroker.addEventListener("windowremoved", onWindowRemoved);
++  const url = `${plutoniumHelperOrigin()}/v1/shell.js`;
++  import(/* @vite-ignore */ url).then(
++    (library: { connect(options: object): PlutoniumShell }) => {
++      shell = library.connect({
++        onFocus: (window: NativeWindowEntry) => focusHandler?.(window) ?? false,
++      });
++      usePlutoniumWindowStore.setState({ available: shell.available });
++      shell.addEventListener("change", mirror);
++      // Window ids only hold within one Ash session: once the list is in,
++      // drop restored tabs whose window is gone or is now some other app.
++      void shell.ready.then(() => {
++        if (!shell) return;
++        const { windows } = shell;
++        mirror();
++        useRightPanelStore
++          .getState()
++          .reconcileAppSurfaces((id, appId) => windows.get(id)?.appId === appId);
++        // From then on, a closed window closes its tab.
++        shell.addEventListener("change", () =>
++          useRightPanelStore.getState().reconcileAppSurfaces((id) => windows.has(id)),
++        );
++      });
++    },
++    (error: unknown) => {
++      console.warn(`Plutonium: could not load the shell library from ${url}`, error);
++      dropAppTabs();
++    },
++  );
+ }
+ 
+ /** Windows started by `threadId`'s agent or terminals, oldest first. */
+ export function useThreadWindows(threadId: string | null): readonly NativeWindowEntry[] {
+   const windows = usePlutoniumWindowStore((state) => state.windows);
+-  const threadByPid = usePlutoniumWindowStore((state) => state.threadByPid);
+   if (threadId === null) return [];
+   return Object.values(windows)
+-    .filter((entry) => threadByPid[entry.pid] === threadId)
++    .filter((entry) => entry.threadId === threadId)
+     .toSorted((a, b) => a.id - b.id);
+ }
+ 
+-/** Windows that no thread started (once the server has said so), oldest first. */
++/** Windows that no thread started (once the helper has said so), oldest first. */
+ export function useUntaggedWindows(): readonly NativeWindowEntry[] {
+   const windows = usePlutoniumWindowStore((state) => state.windows);
+-  const threadByPid = usePlutoniumWindowStore((state) => state.threadByPid);
+-  const resolvedPids = usePlutoniumWindowStore((state) => state.resolvedPids);
+   return Object.values(windows)
+-    .filter((entry) => !(entry.pid in threadByPid) && (entry.pid <= 0 || entry.pid in resolvedPids))
++    .filter((entry) => entry.threadId === null)
+     .toSorted((a, b) => a.id - b.id);
+ }

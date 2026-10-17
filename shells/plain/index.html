@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plain Shell</title>
+<!--
+  A second Plutonium frontend, built only on the substrate: navigator.windowBroker,
+  <native-window>, browser tabs (SurfaceEmbed <embed>s) and the helper's shell
+  library. Threads are local (named lists), apps launch through the helper, web
+  pages open as tabs tagged with the thread, and an agent is Claude Code in a
+  terminal app of the thread, with the helper's MCP server. The helper is http://127.0.0.1:3780
+  unless the page URL says ?helper=<origin>.
+
+  A thread's id is its tag (plain:thread/<id>). The shell describes its threads
+  to the browser (setGroups), so other shells and the browser's overlay can
+  label them. "Elsewhere" lists windows and tabs no thread here has, such as
+  another shell's, and adds one to the current thread on a click.
+-->
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+    --accent: #2f5bd3; --accent-text: #ffffff; --hover: #eeede8; --danger: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9a9993; --line: #33332f;
+      --accent: #7b9cff; --accent-text: #0e1220; --hover: #2a2a27; --danger: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-columns: 220px 1fr; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, sans-serif;
+  }
+  aside { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  aside h1 { font-size: 13px; margin: 0; padding: 12px; display: flex; justify-content: space-between; align-items: center; }
+  aside ul { list-style: none; margin: 0; padding: 0 6px; overflow-y: auto; }
+  aside li button { width: 100%; text-align: left; }
+  aside li button.current { background: var(--hover); font-weight: 600; }
+  aside footer { margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px; }
+  button {
+    font: inherit; color: inherit; background: none; border: 0; border-radius: 6px;
+    padding: 5px 8px; cursor: pointer;
+  }
+  button:hover { background: var(--hover); }
+  button.primary { background: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { display: grid; grid-template-rows: auto auto auto auto 1fr; min-width: 0; min-height: 0; }
+  header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  header h2 { font-size: 14px; margin: 0 8px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header input {
+    flex: 1; min-width: 0; font: 12px ui-monospace, monospace; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text);
+  }
+  #apps { padding: 6px 12px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  #apps .label { color: var(--muted); font-size: 11px; margin-right: 4px; }
+  #apps button { border: 1px solid var(--line); background: var(--panel); }
+  #apps button small { color: var(--muted); margin-left: 6px; }
+  #apps button.elsewhere { border-style: dashed; }
+  #tabs { display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--line); align-items: end; min-height: 34px; }
+  #tabs .tab { border-radius: 6px 6px 0 0; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #tabs .tab.current { background: var(--panel); border: 1px solid var(--line); border-bottom-color: var(--panel); margin-bottom: -1px; }
+  #tabs .actions { margin-left: auto; display: flex; gap: 2px; padding-bottom: 3px; }
+  #tabs .tab.web::before { content: "◍ "; color: var(--muted); }
+  #tabs .tab.loading::before { content: "◌ "; }
+  #webbar { display: flex; gap: 4px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  #webbar[hidden] { display: none; }
+  #webbar input {
+    flex: 1; min-width: 0; font: 12px ui-monospace, monospace; padding: 4px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text);
+  }
+  /* Always the 1fr row, also while #webbar is hidden. */
+  #stage-wrap { position: relative; min-height: 0; grid-row: 5; }
+  #stage { position: absolute; inset: 0; background: var(--panel); }
+  #stage embed { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+  #tabs .tab.dialog::after { content: " •"; color: var(--danger); }
+  #dialog {
+    position: absolute; z-index: 1; top: 12px; left: 50%; transform: translateX(-50%); width: min(480px, 90%);
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 6px 24px rgb(0 0 0 / .2); padding: 14px; display: grid; gap: 10px;
+  }
+  #dialog[hidden] { display: none; }
+  #dialog p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #dialog small { color: var(--muted); }
+  #dialog input { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  #dialog div { display: flex; justify-content: end; gap: 6px; }
+  /* A replaced element: it takes the window's size unless given one. */
+  #stage native-window { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #stage .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; }
+  #status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); max-width: 90vw; }
+  dialog img { display: block; max-width: 80vw; max-height: 75vh; }
+  @media (max-width: 640px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 30vh; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Threads <button id="new-thread" title="New thread">＋</button></h1>
+  <ul id="threads"></ul>
+  <footer id="footer">connecting…</footer>
+</aside>
+<main>
+  <header>
+    <h2 id="thread-name"></h2>
+    <input id="command" placeholder="Command to launch (e.g. foot), or a web address to open" spellcheck="false">
+    <button id="launch" class="primary">Launch</button>
+    <button id="open-tab" title="Open the address as a browser tab of this thread">Open tab</button>
+    <button id="agent" title="Claude Code in a terminal, with the Plutonium MCP server">Start agent</button>
+    <span id="status"></span>
+  </header>
+  <div id="apps"></div>
+  <div id="tabs"></div>
+  <div id="webbar" hidden>
+    <button id="web-back" title="Back">←</button>
+    <button id="web-forward" title="Forward">→</button>
+    <button id="web-reload" title="Reload">⟳</button>
+    <input id="web-url" spellcheck="false" aria-label="Address">
+  </div>
+  <div id="stage-wrap">
+  <div id="stage"></div>
+  <form id="dialog" hidden>
+    <small id="dialog-origin"></small>
+    <p id="dialog-message"></p>
+    <input id="dialog-input" spellcheck="false">
+    <div><button type="button" id="dialog-cancel">Cancel</button><button class="primary" id="dialog-ok">OK</button></div>
+  </form>
+  </div>
+</main>
+<dialog id="snapshot"><img alt="Window snapshot"><form method="dialog"><button>Close</button></form></dialog>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+const $ = (id) => document.getElementById(id);
+
+// Threads and per-thread tabs live in this page's storage.
+function load(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+const state = {
+  threads: load("plain-shell.threads", []),
+  current: load("plain-shell.current", null),
+  // threadId → { open: [windowId], active }. active is a window id, or
+  // "tab:<id>" for a browser tab (a thread's browser tabs are always listed).
+  tabs: load("plain-shell.tabs", {}),
+};
+// Threads from before tags were namespaced (plain-<id>) are dropped.
+state.threads = state.threads.filter((t) => t.id.startsWith("plain:thread/"));
+for (const id of Object.keys(state.tabs)) if (!state.threads.some((t) => t.id === id)) delete state.tabs[id];
+const webKey = (tabId) => `tab:${tabId}`;
+const webId = (key) => (typeof key === "string" && key.startsWith("tab:") ? Number(key.slice(4)) : null);
+if (state.threads.length === 0) newThread("Thread 1");
+if (!state.threads.some((t) => t.id === state.current)) state.current = state.threads[0].id;
+
+function newThread(name) {
+  const thread = { id: `plain:thread/${crypto.randomUUID().slice(0, 8)}`, name };
+  state.threads.push(thread);
+  state.current = thread.id;
+  persist();
+  return thread;
+}
+// Tells the browser what this shell's tags are called.
+function describeThreads() {
+  shell?.setGroups(state.threads.map((t) => ({ tag: t.id, label: t.name })));
+}
+const threadIds = () => state.threads.map((t) => t.id);
+function persist() {
+  save("plain-shell.threads", state.threads);
+  save("plain-shell.current", state.current);
+  save("plain-shell.tabs", state.tabs);
+}
+function tabsOf(threadId) {
+  return (state.tabs[threadId] ??= { open: [], active: null });
+}
+function openTab(threadId, windowId) {
+  const tabs = tabsOf(threadId);
+  if (!tabs.open.includes(windowId)) tabs.open.push(windowId);
+  tabs.active = windowId;
+  persist();
+}
+function closeTab(threadId, windowId) {
+  const tabs = tabsOf(threadId);
+  tabs.open = tabs.open.filter((id) => id !== windowId);
+  if (tabs.active === windowId) tabs.active = tabs.open.at(-1) ?? null;
+  persist();
+}
+
+function setStatus(text) { $("status").textContent = text; }
+const label = (w) => w.title || w.appId || `Window ${w.id}`;
+function argvOf(line) {
+  return [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+}
+
+let shell = null;
+// Whether the broker's window list is in (before that, every tab looks stale).
+let listed = false;
+try {
+  const { connect } = await import(`${helper}/v1/shell.js`);
+  shell = connect({
+    // An agent (or the browser's overlay) asked to show a window: open its
+    // tab, in the first thread here it belongs to (else the current one).
+    onFocus(window) {
+      const thread = state.threads.find((t) => shell.windowsOf(t.id).some((w) => w.id === window.id));
+      const threadId = thread?.id ?? state.current;
+      if (!thread && !shell.tagsAvailable) return false;
+      if (!thread) shell.tagWindow(window.id, [threadId]).catch(() => {});
+      state.current = threadId;
+      openTab(threadId, window.id);
+      render();
+      return true;
+    },
+    // A link this page opened (Ctrl+click, target=_blank): a tab in the
+    // current thread.
+    onOpenTab: () => state.current,
+    // The same for a browser tab.
+    onFocusTab(tab) {
+      const thread = state.threads.find((t) => tab.tags.includes(t.id));
+      const threadId = thread?.id ?? state.current;
+      if (!thread && !shell.tagsAvailable) return false;
+      if (!thread) shell.tagTab(tab.id, [threadId]).catch(() => {});
+      state.current = threadId;
+      tabsOf(threadId).active = webKey(tab.id);
+      persist();
+      render();
+      return true;
+    },
+  });
+  shell.addEventListener("change", render);
+  shell.ready.then(() => { listed = true; describeThreads(); render(); });
+} catch (error) {
+  console.error(error);
+}
+
+// Tabs a page opened (window.open, target=_blank) come to the front if their
+// opener is the tab being looked at, as in a browser.
+const seenTabs = new Set();
+function adoptNewTabs() {
+  if (!shell?.tabsAvailable) return;
+  for (const tab of shell.tabs.values()) {
+    if (seenTabs.has(tab.id)) continue;
+    seenTabs.add(tab.id);
+    const tabs = state.tabs[tab.tags.find((tag) => state.tabs[tag]) ?? tab.tag];
+    if (tab.openedBy === "page" && tabs && webId(tabs.active) === tab.openerId) {
+      tabs.active = webKey(tab.id);
+      persist();
+    }
+  }
+}
+
+function render() {
+  adoptNewTabs();
+  const thread = state.threads.find((t) => t.id === state.current);
+  $("footer").textContent = !shell
+    ? `helper unreachable (${helper})`
+    : shell.available ? `shell · helper ${new URL(helper).port}` : "not the shell (no window broker)";
+
+  const list = $("threads");
+  list.replaceChildren(...state.threads.map((t) => {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    const count = shell ? shell.windowsOf(t.id).length + shell.tabsOf(t.id).length : 0;
+    button.textContent = count ? `${t.name} · ${count}` : t.name;
+    button.className = t.id === state.current ? "current" : "";
+    button.onclick = () => { state.current = t.id; persist(); render(); };
+    li.append(button);
+    return li;
+  }));
+  $("thread-name").textContent = thread.name;
+
+  const windows = shell ? shell.windowsOf(thread.id) : [];
+  const live = new Map((shell ? [...shell.windows.values()] : []).map((w) => [w.id, w]));
+  const tabs = tabsOf(thread.id);
+  // Window ids restart with Ash: drop tabs whose window is gone.
+  if (listed) {
+    for (const id of [...tabs.open]) if (!live.has(id)) closeTab(thread.id, id);
+  }
+  const webTabs = shell?.tabsAvailable ? shell.tabsOf(thread.id) : [];
+  if (listed && webId(tabs.active) !== null && !shell.tabs.has(webId(tabs.active))) {
+    tabs.active = webTabs.at(-1) ? webKey(webTabs.at(-1).id) : (tabs.open.at(-1) ?? null);
+    persist();
+  }
+
+  const apps = $("apps");
+  const row = (w) => {
+    const button = document.createElement("button");
+    button.textContent = label(w);
+    const small = document.createElement("small");
+    small.textContent = w.embedded ? "shown" : w.appId;
+    button.append(small);
+    button.onclick = () => { openTab(thread.id, w.id); render(); };
+    button.dataset.window = w.id;
+    return button;
+  };
+  const heading = (text) => Object.assign(document.createElement("span"), { className: "label", textContent: text });
+  // Windows and tabs no thread here has (another shell's, or nobody's): a
+  // click adds one to this thread and opens it.
+  const elsewhere = shell ? shell.elsewhere(threadIds()) : { windows: [], tabs: [] };
+  const where = (tags) => (tags.length ? shell.labelOf(tags[0]) : "no thread");
+  const importButton = (text, tags, onclick) => {
+    const button = document.createElement("button");
+    button.className = "elsewhere";
+    button.textContent = text;
+    const small = document.createElement("small");
+    small.textContent = where(tags);
+    button.append(small);
+    button.title = tags.length ? `Add to this thread (tags: ${tags.join(" ")})` : "Add to this thread";
+    button.onclick = onclick;
+    return button;
+  };
+  const imports = [
+    ...elsewhere.windows.map((w) => importButton(label(w), w.tags, async () => {
+      if (shell.tagsAvailable) await shell.tagWindow(w.id, [thread.id]).catch((e) => setStatus(e.message));
+      openTab(thread.id, w.id);
+      render();
+    })),
+    ...(shell?.tabsAvailable ? elsewhere.tabs : []).map((t) => importButton(t.title || t.url, t.tags, async () => {
+      await shell.tagTab(t.id, [thread.id]).catch((e) => setStatus(e.message));
+      tabs.active = webKey(t.id);
+      persist();
+      render();
+    })),
+  ];
+  apps.replaceChildren(
+    heading("Apps"),
+    ...(windows.length ? windows.map(row) : [heading("none yet")]),
+    ...(imports.length ? [heading("· Elsewhere"), ...imports] : []),
+  );
+
+  const tabStrip = $("tabs");
+  const tabButtons = tabs.open.filter((id) => live.has(id)).map((id) => {
+    const button = document.createElement("button");
+    button.className = `tab${id === tabs.active ? " current" : ""}`;
+    button.textContent = label(live.get(id));
+    button.onclick = () => { tabs.active = id; persist(); render(); };
+    return button;
+  });
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const active = live.get(tabs.active);
+  if (active) {
+    const action = (text, fn, className = "") =>
+      Object.assign(document.createElement("button"), { textContent: text, onclick: fn, className });
+    actions.append(
+      action("Snapshot", () => showSnapshot(active.id)),
+      action("Pop out", () => {
+        shell.showOnDesktop(active.id);
+        closeTab(thread.id, active.id);
+        render();
+      }),
+      action("Hide", () => { closeTab(thread.id, active.id); render(); }),
+      // Brought in from elsewhere: it can leave again (where it came from it stays).
+      ...(shell.tagsAvailable && active.tag !== thread.id && active.tags.includes(thread.id)
+        ? [action("Remove from thread", async () => {
+            await shell.tagWindow(active.id, [], [thread.id]).catch((e) => setStatus(e.message));
+            closeTab(thread.id, active.id);
+            render();
+          })]
+        : []),
+      action("Close app", () => shell.close(active.id), "danger"),
+    );
+  }
+  const webButtons = webTabs.map((tab) => {
+    const button = document.createElement("button");
+    const key = webKey(tab.id);
+    button.className = `tab web${key === tabs.active ? " current" : ""}${tab.loading ? " loading" : ""}${tab.dialogType ? " dialog" : ""}`;
+    button.textContent = tab.title || tab.url || "New tab";
+    button.title = tab.url;
+    button.onclick = () => { tabs.active = key; persist(); render(); };
+    return button;
+  });
+  const activeTab = webId(tabs.active) !== null ? shell.tabs.get(webId(tabs.active)) : undefined;
+  if (activeTab) {
+    const action = (text, fn, className = "") =>
+      Object.assign(document.createElement("button"), { textContent: text, onclick: fn, className });
+    actions.append(
+      action("Snapshot", () => showTabSnapshot(activeTab.id)),
+      ...(shell.tagsAvailable && activeTab.tag !== thread.id && activeTab.tags.includes(thread.id)
+        ? [action("Remove from thread", () => shell.tagTab(activeTab.id, [], [thread.id]).catch((e) => setStatus(e.message)))]
+        : []),
+      action("Close tab", () => shell.tabCommand(activeTab.id, "close"), "danger"),
+    );
+  }
+  tabStrip.replaceChildren(...tabButtons, ...webButtons, actions);
+
+  const webbar = $("webbar");
+  webbar.hidden = !activeTab;
+  if (activeTab) {
+    $("web-back").disabled = !activeTab.canGoBack;
+    $("web-forward").disabled = !activeTab.canGoForward;
+    $("web-reload").textContent = activeTab.loading ? "✕" : "⟳";
+    $("web-reload").title = activeTab.loading ? "Stop" : "Reload";
+    const url = $("web-url");
+    // Don't overwrite what the user is typing.
+    if (document.activeElement !== url) url.value = activeTab.url;
+  }
+
+  if (activeTab) renderWebStage(activeTab);
+  else renderStage(active);
+  renderDialog(activeTab);
+}
+
+// The active tab's page dialog (alert, confirm, prompt, beforeunload), drawn
+// over the tab. Other tabs' dialogs wait, marked in the tab strip.
+let dialogFor = null;
+function renderDialog(tab) {
+  const form = $("dialog");
+  const pending = tab?.dialogType ? `${tab.id}:${tab.dialogType}:${tab.dialogMessage}` : null;
+  form.hidden = !pending;
+  if (!pending || pending === dialogFor) { if (!pending) dialogFor = null; return; }
+  dialogFor = pending;
+  $("dialog-origin").textContent = tab.dialogType === "beforeunload"
+    ? "This page asks:" : `${new URL(tab.url).host} says:`;
+  $("dialog-message").textContent = tab.dialogMessage;
+  const input = $("dialog-input");
+  input.hidden = tab.dialogType !== "prompt";
+  input.value = tab.dialogDefaultPrompt;
+  $("dialog-cancel").hidden = tab.dialogType === "alert";
+  $("dialog-ok").textContent = tab.dialogType === "beforeunload" ? "Leave" : "OK";
+  (tab.dialogType === "prompt" ? input : $("dialog-ok")).focus();
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    shell.answerTabDialog(tab.id, true, input.value);
+  };
+  $("dialog-cancel").onclick = () => shell.answerTabDialog(tab.id, false);
+}
+
+// One <embed> for the active browser tab.
+function renderWebStage(tab) {
+  if (shown?.tabId === tab.id) return;
+  const element = shell.tabElement(tab.id);
+  shown = { tabId: tab.id, element };
+  $("stage").replaceChildren(element);
+}
+
+// One <native-window> for the active tab, replaced when the tab changes.
+let shown = null;
+async function renderStage(active) {
+  const stage = $("stage");
+  if (shown && shown.tabId === undefined && shown.windowId === active?.id) return;
+  stage.replaceChildren();
+  shown = null;
+  if (!active) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = shell?.available
+      ? "Launch an app, start an agent, or open one of the thread's apps."
+      : "This page is not the Plutonium shell.";
+    stage.append(empty);
+    return;
+  }
+  const element = document.createElement("native-window");
+  element.dataset.window = active.id;
+  shown = { windowId: active.id, element };
+  stage.append(element);
+  try {
+    const grant = await shell.grantFor(active.id);
+    if (shown?.element !== element) return;
+    element.setAttribute("window", String(active.id));
+    element.setAttribute("grant", grant);
+  } catch {
+    setStatus("no grant for this window");
+  }
+}
+
+function showSnapshot(windowId) {
+  return showBlob(() => shell.snapshot(windowId));
+}
+function showTabSnapshot(tabId) {
+  return showBlob(() => shell.snapshotTab(tabId));
+}
+async function showBlob(take) {
+  try {
+    const blob = await take();
+    const img = $("snapshot").querySelector("img");
+    URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(blob);
+    $("snapshot").showModal();
+  } catch (error) {
+    setStatus(`snapshot failed: ${error.message}`);
+  }
+}
+
+async function launch(argv) {
+  const threadId = state.current;
+  setStatus(`starting ${argv[0]}…`);
+  try {
+    const { windows } = await shell.launch(threadId, argv, { waitMs: 8000 });
+    setStatus(windows.length ? "" : `${argv[0]} started, no window yet`);
+    if (windows[0]) { openTab(threadId, windows[0].id); render(); }
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+$("launch").onclick = () => {
+  const argv = argvOf($("command").value);
+  if (argv.length) launch(argv);
+};
+$("command").onkeydown = (event) => { if (event.key === "Enter") $("launch").click(); };
+$("open-tab").onclick = async () => {
+  const url = $("command").value.trim();
+  if (!url || !shell?.tabsAvailable) {
+    setStatus(shell?.tabsAvailable ? "type an address first" : "this Chromium has no browser tabs");
+    return;
+  }
+  const threadId = state.current;
+  try {
+    const tab = await shell.createTab(threadId, url);
+    seenTabs.add(tab.id);
+    tabsOf(threadId).active = webKey(tab.id);
+    persist();
+    $("command").value = "";
+    setStatus("");
+    render();
+  } catch (error) {
+    setStatus(error.message);
+  }
+};
+const activeWebTab = () => shell?.tabs.get(webId(tabsOf(state.current).active));
+$("web-back").onclick = () => { const t = activeWebTab(); if (t) shell.tabCommand(t.id, "back"); };
+$("web-forward").onclick = () => { const t = activeWebTab(); if (t) shell.tabCommand(t.id, "forward"); };
+$("web-reload").onclick = () => {
+  const t = activeWebTab();
+  if (t) shell.tabCommand(t.id, t.loading ? "stop" : "reload");
+};
+$("web-url").onkeydown = (event) => {
+  const t = activeWebTab();
+  if (event.key !== "Enter" || !t) return;
+  shell.navigateTab(t.id, event.target.value).catch((error) => setStatus(error.message));
+  event.target.blur();
+};
+$("agent").onclick = async () => {
+  // Claude Code in a terminal that belongs to the thread, with the agent bridge.
+  const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(state.current)}`).then((r) => r.json());
+  const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
+  launch(["foot", "-T", "agent", "-e", "claude", "--mcp-config", mcp]);
+};
+$("new-thread").onclick = () => {
+  newThread(`Thread ${state.threads.length + 1}`);
+  describeThreads();
+  render();
+};
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,1592 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 17 Oct 2026 08:34:15 +1300
+Subject: [PATCH 5/9] Plutonium: the browser panel on Plutonium's browser tabs
+
+In the Plutonium shell (navigator.windowBroker with tabs), T3's browser
+works without Electron:
+
+- plutonium/previewBridge.ts implements DesktopPreviewBridge on the
+  broker's tabs, tagged with their thread id. What a page opens loads in
+  the same tab, as in Electron. A reload of the shell adopts its tabs.
+- plutonium/PlutoniumBrowserHost.tsx shows each session's tab with a
+  SurfaceEmbed <embed> where the panel or mini player wants it, at the
+  session's viewport (scaled to fit), invisibly while automation runs in
+  the background, and draws the page's alert/confirm/prompt.
+- plutonium/previewAutomation.ts: agent automation (status, snapshot,
+  click, type, press, scroll, evaluate, waitFor) over the broker's
+  DevTools passthrough; lookups run in an isolated world. Locators: CSS,
+  text=, role=[name=], xpath, id=, data-testid=, >> chains, nth=.
+- previewBridge, isPreviewSupportedInRuntime and PreviewAutomationHosts
+  accept the Plutonium shell; the automation host also finds <embed>s.
+
+Not yet: zoom, color scheme, element picking, screenshots to file,
+recording, picture-in-picture windows, cookie import, DevTools window.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TNhRAcr4c5t15KWH3mHxTk
+---
+ apps/web/src/AppRoot.tsx                      |   2 +
+ .../preview/PreviewAutomationHosts.tsx        |  13 +-
+ .../src/components/preview/previewBridge.ts   |   9 +-
+ .../src/plutonium/PlutoniumBrowserHost.tsx    | 261 ++++++
+ apps/web/src/plutonium/previewAutomation.ts   | 817 ++++++++++++++++++
+ apps/web/src/plutonium/previewBridge.ts       | 356 ++++++++
+ apps/web/src/previewStateStore.ts             |   3 +-
+ 7 files changed, 1454 insertions(+), 7 deletions(-)
+ create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+ create mode 100644 apps/web/src/plutonium/previewAutomation.ts
+ create mode 100644 apps/web/src/plutonium/previewBridge.ts
+
+diff --git a/apps/web/src/AppRoot.tsx b/apps/web/src/AppRoot.tsx
+index 857125c9fd..7a2559fa07 100644
+--- a/apps/web/src/AppRoot.tsx
++++ b/apps/web/src/AppRoot.tsx
+@@ -3,6 +3,7 @@ import { RouterProvider } from "@tanstack/react-router";
+ import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
+ import { PreviewAutomationHosts } from "./components/preview/PreviewAutomationHosts";
+ import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
++import { PlutoniumBrowserHost } from "./plutonium/PlutoniumBrowserHost";
+ import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
+ import type { AppRouter } from "./router";
+ 
+@@ -17,6 +18,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
+       <RouterProvider router={router} />
+       <PreviewAutomationHosts />
+       <ElectronBrowserHost />
++      <PlutoniumBrowserHost />
+       <QuitHoldOverlay />
+     </AppAtomRegistryProvider>
+   );
+diff --git a/apps/web/src/components/preview/PreviewAutomationHosts.tsx b/apps/web/src/components/preview/PreviewAutomationHosts.tsx
+index 173a027e9d..4c593d86ab 100644
+--- a/apps/web/src/components/preview/PreviewAutomationHosts.tsx
++++ b/apps/web/src/components/preview/PreviewAutomationHosts.tsx
+@@ -58,6 +58,7 @@ import {
+ import { runBrowserViewportMutation } from "~/browser/browserViewportActions";
+ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { isElectron } from "~/env";
++import { plutoniumPreview } from "~/plutonium/previewBridge";
+ import { useEnvironments } from "~/state/environments";
+ import { previewEnvironment } from "~/state/preview";
+ import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
+@@ -137,9 +138,12 @@ interface ExecutablePreviewWebview extends Element {
+ }
+ 
+ const findPreviewWebview = (tabId: string): ExecutablePreviewWebview | null =>
+-  Array.from(document.querySelectorAll<ExecutablePreviewWebview>("webview[data-preview-tab]")).find(
+-    (candidate) => candidate.getAttribute("data-preview-tab") === tabId,
+-  ) ?? null;
++  // Plutonium: its browser host shows tabs with <embed>s (PlutoniumBrowserHost).
++  Array.from(
++    document.querySelectorAll<ExecutablePreviewWebview>(
++      "webview[data-preview-tab], embed[data-preview-tab]",
++    ),
++  ).find((candidate) => candidate.getAttribute("data-preview-tab") === tabId) ?? null;
+ 
+ const isPreviewWebviewRendering = (runtimeTabId: string): boolean => {
+   const wrapper = findPreviewWebview(runtimeTabId)?.closest<HTMLElement>("[data-preview-viewport]");
+@@ -275,7 +279,8 @@ const raisePreviewAutomationHostError = (
+ 
+ export function PreviewAutomationHosts() {
+   const { environments } = useEnvironments();
+-  if (!isElectron || !previewBridge?.automation) return null;
++  // Plutonium: the shell's browser tabs are automatable too.
++  if ((!isElectron && !plutoniumPreview()?.automatable) || !previewBridge?.automation) return null;
+   return (
+     <>
+       {/*
+diff --git a/apps/web/src/components/preview/previewBridge.ts b/apps/web/src/components/preview/previewBridge.ts
+index 90e9bf7241..b5cd31c9a8 100644
+--- a/apps/web/src/components/preview/previewBridge.ts
++++ b/apps/web/src/components/preview/previewBridge.ts
+@@ -1,9 +1,14 @@
++import { createPlutoniumPreviewBridge } from "~/plutonium/previewBridge";
++
+ /**
+  * Module-level handle to the desktop preview bridge.
+  *
+  * Resolved once at import time so React hooks don't pay for repeated
+  * `window.desktopBridge?.preview` lookups on every render. `null` on the web
+- * build where there's no Electron host.
++ * build where there's no Electron host, unless the page is the Plutonium shell
++ * (its browser tabs implement the same bridge).
+  */
+ export const previewBridge =
+-  typeof window === "undefined" ? null : (window.desktopBridge?.preview ?? null);
++  typeof window === "undefined"
++    ? null
++    : (window.desktopBridge?.preview ?? createPlutoniumPreviewBridge());
+diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+new file mode 100644
+index 0000000000..2cd7337b90
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+@@ -0,0 +1,261 @@
++"use client";
++
++// Plutonium: ElectronBrowserHost's counterpart in the Plutonium shell. Each
++// open preview session gets a browser tab (previewBridge.ts) shown where the
++// right panel's browser surface is, with an <embed> instead of a <webview>.
++// The tab belongs to the browser: removing the <embed> only hides it, and the
++// next one shows it again.
++
++import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
++import {
++  FILL_PREVIEW_VIEWPORT,
++  type PreviewViewportSetting,
++  type ScopedThreadRef,
++} from "@t3tools/contracts";
++import {
++  createElement,
++  useCallback,
++  useEffect,
++  useMemo,
++  useState,
++  useSyncExternalStore,
++} from "react";
++import { useShallow } from "zustand/react/shallow";
++
++import {
++  resolveBrowserSurfacePanelRect,
++  useBrowserSurfaceStore,
++} from "~/browser/browserSurfaceStore";
++import { acquireDesktopTab } from "~/browser/desktopTabLifetime";
++import {
++  browserViewportSettingKey,
++  resolveBrowserViewportLayout,
++} from "~/browser/browserViewportLayout";
++import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
++import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
++import { useClientSettingsHydrated } from "~/hooks/useSettings";
++import { useActivePreviewSessions } from "~/previewStateStore";
++
++import { isBlank, plutoniumPreview, type BrokerTab } from "./previewBridge";
++
++export function PlutoniumBrowserHost() {
++  const previewByThreadKey = useActivePreviewSessions();
++  const sessions = useMemo(
++    () =>
++      Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
++        const threadRef = parseScopedThreadKey(threadKey);
++        return threadRef
++          ? Object.values(previewState.sessions).map((snapshot) => ({
++              threadRef,
++              tabId: snapshot.tabId,
++              runtimeTabId: previewRuntimeTabId(
++                threadRef,
++                previewState.serverEpoch,
++                snapshot.tabId,
++              ),
++              url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
++              viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
++            }))
++          : [];
++      }),
++    [previewByThreadKey],
++  );
++  if (!plutoniumPreview()) return null;
++  return (
++    <div className="contents" data-plutonium-browser-host>
++      {sessions.map((session) => (
++        <PlutoniumBrowserTab key={session.runtimeTabId} {...session} />
++      ))}
++    </div>
++  );
++}
++
++/** The broker tab behind `runtimeTabId`, kept current. */
++function useBrokerTab(runtimeTabId: string): BrokerTab | null {
++  const preview = plutoniumPreview();
++  return useSyncExternalStore(
++    (onChange) => preview?.onTabs(onChange) ?? (() => undefined),
++    () => preview?.tab(runtimeTabId) ?? null,
++  );
++}
++
++function PlutoniumBrowserTab(props: {
++  readonly threadRef: ScopedThreadRef;
++  readonly tabId: string;
++  readonly runtimeTabId: string;
++  readonly url: string | null;
++  readonly viewport: PreviewViewportSetting;
++}) {
++  const { threadRef, tabId, runtimeTabId, url, viewport } = props;
++  const clientSettingsHydrated = useClientSettingsHydrated();
++  const [initialUrl] = useState(url);
++  const presentation = useBrowserSurfaceStore(
++    useShallow((state) => ({
++      rect: resolveBrowserSurfacePanelRect(state.byTabId, runtimeTabId),
++      visible: state.byTabId[runtimeTabId]?.visible ?? false,
++      zIndex: state.byTabId[runtimeTabId]?.zIndex ?? 30,
++      cornerRadius: state.byTabId[runtimeTabId]?.cornerRadius ?? 0,
++    })),
++  );
++  // Automation of a tab nobody is looking at (e.g. an agent's background tab)
++  // still needs it attached and painting.
++  const backgroundActivity = useBrowserSurfaceStore(
++    (state) => (state.activityByTabId[runtimeTabId] ?? 0) > 0,
++  );
++  const tab = useBrokerTab(runtimeTabId);
++  usePreviewBridge({ threadRef, tabId, runtimeTabId });
++
++  // The tab lives while the session does; the first URL is the session's.
++  useEffect(() => {
++    if (!clientSettingsHydrated) return;
++    const lease = acquireDesktopTab(runtimeTabId);
++    let disposed = false;
++    void lease.ready.then(() => {
++      // An adopted tab (after a reload of this page) already shows its page.
++      const current = plutoniumPreview()?.tab(runtimeTabId)?.url ?? "";
++      if (!disposed && initialUrl && isBlank(current)) {
++        void plutoniumPreview()?.navigate(runtimeTabId, initialUrl);
++      }
++    });
++    return () => {
++      disposed = true;
++      lease.release();
++    };
++  }, [clientSettingsHydrated, initialUrl, runtimeTabId]);
++
++  // Stands in for the Electron <webview>'s executeJavaScript, which the
++  // preview automation host uses to measure the page's viewport.
++  const embedRef = useCallback(
++    (node: HTMLElement | null) => {
++      if (!node) return;
++      Object.assign(node, {
++        executeJavaScript: async (code: string) => {
++          const response = (await plutoniumPreview()?.devtools(runtimeTabId, "Runtime.evaluate", {
++            expression: code,
++            returnByValue: true,
++            awaitPromise: true,
++          })) as { result?: { value?: unknown } } | undefined;
++          return response?.result?.value;
++        },
++      });
++    },
++    [runtimeTabId],
++  );
++
++  const active = presentation.visible && presentation.rect !== null;
++  if (!tab || (!active && !backgroundActivity)) return null;
++  // In the background: invisible, at the size it would be shown at.
++  const rect = active
++    ? presentation.rect!
++    : {
++        x: 0,
++        y: 0,
++        width: viewport._tag === "fill" ? 1280 : viewport.width,
++        height: viewport._tag === "fill" ? 800 : viewport.height,
++      };
++  // A fixed viewport (e.g. the 1280×800 agents open with) is laid out at its
++  // own size and scaled down to fit, as in the Electron build.
++  const layout = resolveBrowserViewportLayout(rect, viewport);
++  const cssWidth = Math.max(1, Math.round(layout.viewportWidth / layout.viewportScale));
++  const cssHeight = Math.max(1, Math.round(layout.viewportHeight / layout.viewportScale));
++  return (
++    <div
++      className={
++        layout.fillsPanel ? "fixed overflow-hidden bg-white" : "fixed overflow-hidden bg-muted/35"
++      }
++      style={{
++        left: rect.x,
++        top: rect.y,
++        width: rect.width,
++        height: rect.height,
++        zIndex: active ? presentation.zIndex : -1,
++        borderRadius: presentation.cornerRadius,
++        ...(active ? {} : { opacity: 0, pointerEvents: "none" as const }),
++      }}
++      aria-hidden={active ? undefined : true}
++      data-preview-viewport={runtimeTabId}
++      data-preview-rendering="active"
++    >
++      {createElement("embed", {
++        ref: embedRef,
++        type: "application/x-chromium-surface-embed",
++        "data-content-id": tab.contentId,
++        "data-preview-tab": runtimeTabId,
++        "data-preview-server-tab": tabId,
++        "data-preview-viewport-mode": viewport._tag,
++        "data-preview-viewport-key": browserViewportSettingKey(viewport),
++        "data-preview-css-width": cssWidth,
++        "data-preview-css-height": cssHeight,
++        className: "absolute block border-0 bg-white",
++        style: {
++          left: layout.viewportX,
++          top: layout.viewportY,
++          width: cssWidth,
++          height: cssHeight,
++          transform: layout.viewportScale < 1 ? `scale(${layout.viewportScale})` : undefined,
++          transformOrigin: "top left",
++        },
++      })}
++      {tab.dialogType ? <PageDialog runtimeTabId={runtimeTabId} tab={tab} /> : null}
++    </div>
++  );
++}
++
++/** The page's alert/confirm/prompt, drawn over it (the browser shows none). */
++function PageDialog({ runtimeTabId, tab }: { runtimeTabId: string; tab: BrokerTab }) {
++  const [text, setText] = useState(tab.dialogDefaultPrompt);
++  const answer = (accept: boolean) =>
++    plutoniumPreview()?.answerDialog(runtimeTabId, accept, tab.dialogType === "prompt" ? text : "");
++  let origin = "";
++  try {
++    origin = new URL(tab.url).host;
++  } catch {
++    // No origin to show.
++  }
++  return (
++    <div className="absolute inset-0 flex items-start justify-center bg-black/20 p-4 pt-6">
++      <form
++        className="grid w-full max-w-md gap-3 rounded-lg border bg-popover p-4 text-popover-foreground shadow-lg"
++        onSubmit={(event) => {
++          event.preventDefault();
++          answer(true);
++        }}
++      >
++        <div className="text-xs text-muted-foreground">
++          {tab.dialogType === "beforeunload"
++            ? "Leave this page? Changes you made may not be saved."
++            : `${origin || "This page"} says`}
++        </div>
++        {tab.dialogType === "beforeunload" ? null : (
++          <div className="whitespace-pre-wrap text-sm">{tab.dialogMessage}</div>
++        )}
++        {tab.dialogType === "prompt" ? (
++          <input
++            className="rounded-md border bg-background px-2 py-1 text-sm"
++            value={text}
++            onChange={(event) => setText(event.target.value)}
++            autoFocus
++          />
++        ) : null}
++        <div className="flex justify-end gap-2">
++          {tab.dialogType === "alert" ? null : (
++            <button
++              type="button"
++              className="rounded-md border px-3 py-1 text-sm"
++              onClick={() => answer(false)}
++            >
++              Cancel
++            </button>
++          )}
++          <button
++            type="submit"
++            className="rounded-md bg-primary px-3 py-1 text-sm text-primary-foreground"
++            autoFocus={tab.dialogType !== "prompt"}
++          >
++            {tab.dialogType === "beforeunload" ? "Leave" : "OK"}
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/previewAutomation.ts b/apps/web/src/plutonium/previewAutomation.ts
+new file mode 100644
+index 0000000000..61c6d2ec57
+--- /dev/null
++++ b/apps/web/src/plutonium/previewAutomation.ts
+@@ -0,0 +1,817 @@
++// Plutonium: agent automation of T3's browser (DesktopPreviewBridge.automation)
++// on Plutonium's browser tabs.
++//
++// The Electron build drives its webviews with the DevTools protocol and
++// Playwright's injected script in the main process. Here the shell page sends
++// DevTools commands to its tabs itself (navigator.windowBroker
++// .sendTabDevToolsCommand: page domains only, shell document only). Element
++// lookup, snapshots and editability checks run in an isolated world, so the
++// page can't see or tamper with them; input is synthesized by the browser
++// (Input.dispatch*), as for a real user.
++//
++// Locators: CSS (also css=…), text=… (quoted: exact), role=…[name=…],
++// xpath=… or //…, id=…, data-testid=…, chained with >>, plus nth=<n> and the
++// :has-text("…") pseudo-class. That covers what snapshots hand out (CSS
++// paths) and the role/text forms agents write; it is not all of Playwright.
++import type {
++  DesktopPreviewAutomationStatus,
++  PreviewAutomationActionEvent,
++  PreviewAutomationClickInput,
++  PreviewAutomationEvaluateInput,
++  PreviewAutomationPressInput,
++  PreviewAutomationScrollInput,
++  PreviewAutomationSnapshot,
++  PreviewAutomationTypeInput,
++  PreviewAutomationWaitForInput,
++} from "@t3tools/contracts";
++
++/** What automation needs from the preview: the broker tab and DevTools. */
++export interface AutomationTarget {
++  tab(runtimeTabId: string): {
++    readonly url: string;
++    readonly title: string;
++    readonly loading: boolean;
++    readonly embedded: boolean;
++  } | null;
++  devtools(runtimeTabId: string, method: string, params?: object): Promise<unknown>;
++}
++
++const DEFAULT_TIMEOUT_MS = 15_000;
++const POLL_MS = 100;
++const MAX_ELEMENTS = 250;
++const MAX_TEXT = 20_000;
++const ISOLATED_WORLD = "plutonium-automation";
++
++// Runs in the page's isolated world: defines globalThis.__pa. Must not
++// reference anything outside itself.
++function pageHelpers() {
++  if ((globalThis as { __pa?: unknown }).__pa) return;
++  const visible = (el: Element) => {
++    const rect = el.getBoundingClientRect();
++    if (rect.width <= 0 || rect.height <= 0) return false;
++    const style = getComputedStyle(el);
++    return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
++  };
++  const text = (el: Element) =>
++    ((el as HTMLElement).innerText ?? el.textContent ?? "").replace(/\s+/g, " ").trim();
++  const implicitRole = (el: Element): string | null => {
++    const tag = el.tagName.toLowerCase();
++    const type = (el.getAttribute("type") ?? "").toLowerCase();
++    switch (tag) {
++      case "a":
++      case "area":
++        return el.hasAttribute("href") ? "link" : null;
++      case "button":
++        return "button";
++      case "summary":
++        return "button";
++      case "select":
++        return (el as HTMLSelectElement).multiple ? "listbox" : "combobox";
++      case "textarea":
++        return "textbox";
++      case "option":
++        return "option";
++      case "img":
++        return el.getAttribute("alt") === "" ? "presentation" : "img";
++      case "nav":
++        return "navigation";
++      case "main":
++        return "main";
++      case "header":
++        return "banner";
++      case "footer":
++        return "contentinfo";
++      case "aside":
++        return "complementary";
++      case "form":
++        return "form";
++      case "dialog":
++        return "dialog";
++      case "ul":
++      case "ol":
++        return "list";
++      case "li":
++        return "listitem";
++      case "table":
++        return "table";
++      case "tr":
++        return "row";
++      case "td":
++        return "cell";
++      case "th":
++        return "columnheader";
++      case "progress":
++        return "progressbar";
++      case "h1":
++      case "h2":
++      case "h3":
++      case "h4":
++      case "h5":
++      case "h6":
++        return "heading";
++      case "input":
++        if (["button", "submit", "reset", "image"].includes(type)) return "button";
++        if (type === "checkbox") return "checkbox";
++        if (type === "radio") return "radio";
++        if (type === "range") return "slider";
++        if (type === "number") return "spinbutton";
++        if (type === "search") return "searchbox";
++        if (type === "hidden") return null;
++        return "textbox";
++    }
++    return null;
++  };
++  const role = (el: Element) => el.getAttribute("role")?.split(/\s+/)[0] || implicitRole(el);
++  const labelText = (el: Element): string => {
++    const labelledBy = el.getAttribute("aria-labelledby");
++    if (labelledBy) {
++      const parts = labelledBy
++        .split(/\s+/)
++        .map((id) => document.getElementById(id))
++        .filter((node): node is HTMLElement => node !== null)
++        .map(text);
++      if (parts.length) return parts.join(" ");
++    }
++    const aria = el.getAttribute("aria-label");
++    if (aria) return aria.trim();
++    if (
++      el instanceof HTMLInputElement ||
++      el instanceof HTMLTextAreaElement ||
++      el instanceof HTMLSelectElement
++    ) {
++      const labels = el.labels ? Array.from(el.labels).map(text).filter(Boolean) : [];
++      if (labels.length) return labels.join(" ");
++      if (el instanceof HTMLInputElement && ["button", "submit", "reset"].includes(el.type))
++        return el.value;
++      return el.getAttribute("placeholder") ?? el.getAttribute("title") ?? "";
++    }
++    if (el instanceof HTMLImageElement) return el.alt || el.title || "";
++    return text(el) || el.getAttribute("title") || "";
++  };
++  const cssEscape = (value: string) => CSS.escape(value);
++  const cssPath = (el: Element): string => {
++    if (el.id && document.querySelectorAll(`#${cssEscape(el.id)}`).length === 1)
++      return `#${cssEscape(el.id)}`;
++    const parts: string[] = [];
++    let node: Element | null = el;
++    while (node && node !== document.documentElement) {
++      const current: Element = node;
++      if (current.id && document.querySelectorAll(`#${cssEscape(current.id)}`).length === 1) {
++        parts.unshift(`#${cssEscape(current.id)}`);
++        break;
++      }
++      const tag = current.tagName.toLowerCase();
++      const parent: Element | null = current.parentElement;
++      const same = parent
++        ? Array.from(parent.children).filter((c) => c.tagName === current.tagName)
++        : [];
++      parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(current) + 1})` : tag);
++      node = parent;
++    }
++    return parts.join(" > ");
++  };
++  const unquote = (value: string): { text: string; exact: boolean } => {
++    const v = value.trim();
++    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
++      return { text: v.slice(1, -1), exact: true };
++    }
++    return { text: v, exact: false };
++  };
++  const matchesText = (actual: string, wanted: { text: string; exact: boolean }) =>
++    wanted.exact
++      ? actual === wanted.text
++      : actual.toLowerCase().includes(wanted.text.toLowerCase());
++  const all = (scope: ParentNode) => Array.from(scope.querySelectorAll("*"));
++  const byText = (scope: ParentNode, wanted: { text: string; exact: boolean }) => {
++    // The innermost elements whose text matches.
++    const hits = all(scope).filter((el) => matchesText(text(el), wanted));
++    return hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
++  };
++  const byRole = (scope: ParentNode, spec: string) => {
++    const match = /^([a-z]+)\s*(.*)$/i.exec(spec.trim());
++    if (!match) throw new Error(`Bad role selector: ${spec}`);
++    const wantedRole = match[1]!.toLowerCase();
++    const attrs = match[2] ?? "";
++    let name: { text: string; exact: boolean } | null = null;
++    let nameRegex: RegExp | null = null;
++    const nameAttr = /\[\s*name\s*=\s*("([^"]*)"|'([^']*)'|\/(.*)\/([a-z]*))\s*([is])?\s*\]/.exec(
++      attrs,
++    );
++    if (nameAttr) {
++      if (nameAttr[4] !== undefined) nameRegex = new RegExp(nameAttr[4], nameAttr[5]);
++      else name = { text: nameAttr[2] ?? nameAttr[3] ?? "", exact: nameAttr[6] !== "i" };
++    }
++    const levelAttr = /\[\s*level\s*=\s*(\d+)\s*\]/.exec(attrs);
++    return all(scope).filter((el) => {
++      if (role(el) !== wantedRole) return false;
++      if (levelAttr && el.tagName.toLowerCase() !== `h${levelAttr[1]}`) return false;
++      const accessibleName = labelText(el).replace(/\s+/g, " ").trim();
++      if (nameRegex) return nameRegex.test(accessibleName);
++      if (name)
++        return name.exact ? accessibleName === name.text : matchesText(accessibleName, name);
++      return true;
++    });
++  };
++  const byCss = (scope: ParentNode, selector: string) => {
++    // :has-text("…") isn't CSS: filter on it afterwards.
++    const hasText: { text: string; exact: boolean }[] = [];
++    const css = selector.replace(/:has-text\(\s*("[^"]*"|'[^']*')\s*\)/g, (_m, quoted: string) => {
++      hasText.push({ text: quoted.slice(1, -1), exact: false });
++      return "";
++    });
++    let found = Array.from(scope.querySelectorAll(css || "*"));
++    for (const wanted of hasText) found = found.filter((el) => matchesText(text(el), wanted));
++    return found;
++  };
++  const byXpath = (scope: Node, path: string) => {
++    const result = document.evaluate(
++      path,
++      scope,
++      null,
++      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
++      null,
++    );
++    const out: Element[] = [];
++    for (let i = 0; i < result.snapshotLength; i++) {
++      const node = result.snapshotItem(i);
++      if (node instanceof Element) out.push(node);
++    }
++    return out;
++  };
++  const step = (scopes: Element[] | null, part: string): Element[] => {
++    const roots: ParentNode[] = scopes ?? [document];
++    const nth = /^nth\s*=\s*(-?\d+)$/.exec(part);
++    if (nth) {
++      const list = scopes ?? [];
++      const i = Number(nth[1]);
++      const el = i < 0 ? list[list.length + i] : list[i];
++      return el ? [el] : [];
++    }
++    const eq = /^([a-z-]+)\s*=\s*([\s\S]*)$/i.exec(part);
++    const engine = eq && !part.startsWith("[") ? eq[1]!.toLowerCase() : null;
++    const body = engine ? eq![2]! : part;
++    const out: Element[] = [];
++    for (const root of roots) {
++      if (engine === "text") out.push(...byText(root, unquote(body)));
++      else if (engine === "role") out.push(...byRole(root, body));
++      else if (engine === "xpath") out.push(...byXpath(root as Node, body));
++      else if (engine === "id")
++        out.push(...byCss(root, `[id="${CSS.escape(unquote(body).text)}"]`));
++      else if (engine === "data-testid" || engine === "data-test-id")
++        out.push(...byCss(root, `[${engine}="${CSS.escape(unquote(body).text)}"]`));
++      else if (engine === "css") out.push(...byCss(root, body));
++      else if (part.startsWith("//") || part.startsWith("(//"))
++        out.push(...byXpath(root as Node, part));
++      else out.push(...byCss(root, part));
++    }
++    return Array.from(new Set(out));
++  };
++  const resolveAll = (selector: string | undefined, locator: string | undefined): Element[] => {
++    if (selector) return Array.from(document.querySelectorAll(selector));
++    if (!locator) return [];
++    let scopes: Element[] | null = null;
++    for (const part of locator.split(/\s*>>\s*/)) scopes = step(scopes, part.trim());
++    return scopes ?? [];
++  };
++  const resolve = (selector?: string, locator?: string) => {
++    const found = resolveAll(selector, locator);
++    return found.find(visible) ?? found[0] ?? null;
++  };
++  const editable = (el: Element | null) =>
++    !!el &&
++    ((el instanceof HTMLInputElement &&
++      ![
++        "button",
++        "submit",
++        "reset",
++        "checkbox",
++        "radio",
++        "range",
++        "color",
++        "file",
++        "image",
++        "hidden",
++      ].includes(el.type) &&
++      !el.disabled &&
++      !el.readOnly) ||
++      (el instanceof HTMLTextAreaElement && !el.disabled && !el.readOnly) ||
++      (el as HTMLElement).isContentEditable);
++  const INTERACTIVE =
++    'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role],[onclick],[contenteditable=""],[contenteditable="true"],[tabindex]:not([tabindex="-1"])';
++  const STRUCTURE = "h1,h2,h3,h4,h5,h6,nav,main,header,footer,aside,form,dialog,[role]";
++  (globalThis as { __pa?: unknown }).__pa = {
++    // Center of the target in viewport CSS pixels, scrolled into view.
++    point(selector?: string, locator?: string) {
++      const el = resolve(selector, locator);
++      if (!el) return null;
++      el.scrollIntoView({
++        block: "center",
++        inline: "center",
++        behavior: "instant" as ScrollBehavior,
++      });
++      const rect = el.getBoundingClientRect();
++      const x = rect.left + rect.width / 2;
++      const y = rect.top + rect.height / 2;
++      const top = document.elementFromPoint(x, y);
++      return {
++        x,
++        y,
++        visible: visible(el),
++        covered:
++          !!top && top !== el && !el.contains(top) && !top.contains(el) ? cssPath(top) : null,
++      };
++    },
++    found(selector?: string, locator?: string) {
++      const el = resolve(selector, locator);
++      return !!el && visible(el);
++    },
++    // Focuses the target (or keeps the focused element) for typing.
++    focusForTyping(selector: string | undefined, locator: string | undefined, clear: boolean) {
++      let el: Element | null =
++        selector || locator ? resolve(selector, locator) : document.activeElement;
++      if (!el) return { ok: false, reason: "not found" };
++      if (!editable(el)) {
++        const inner = el.querySelector(
++          "input,textarea,[contenteditable='true'],[contenteditable='']",
++        );
++        if (inner && editable(inner)) el = inner;
++      }
++      if (!editable(el)) return { ok: false, reason: "not editable" };
++      const target = el as HTMLElement;
++      target.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
++      target.focus();
++      if (clear) {
++        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
++          target.select();
++        else {
++          const range = document.createRange();
++          range.selectNodeContents(target);
++          const selection = getSelection();
++          selection?.removeAllRanges();
++          selection?.addRange(range);
++        }
++      } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
++        const end = target.value.length;
++        try {
++          target.setSelectionRange(end, end);
++        } catch {
++          // Some input types have no selection.
++        }
++      }
++      return {
++        ok: true,
++        clearing: clear && ((target as HTMLInputElement).value ?? target.textContent ?? "") !== "",
++      };
++    },
++    scrollElement(
++      selector: string | undefined,
++      locator: string | undefined,
++      dx: number,
++      dy: number,
++    ) {
++      const el = resolve(selector, locator);
++      if (!el) return false;
++      el.scrollBy({ left: dx, top: dy, behavior: "instant" as ScrollBehavior });
++      return true;
++    },
++    hasText(wanted: string) {
++      return (document.body?.innerText ?? "").includes(wanted);
++    },
++    snapshot() {
++      const elements = Array.from(document.querySelectorAll(INTERACTIVE))
++        .filter(visible)
++        .slice(0, 250)
++        .map((el) => {
++          const rect = el.getBoundingClientRect();
++          return {
++            tag: el.tagName.toLowerCase(),
++            role: role(el),
++            name: labelText(el).replace(/\s+/g, " ").trim().slice(0, 120),
++            selector: cssPath(el),
++            x: Math.round(rect.left),
++            y: Math.round(rect.top),
++            width: Math.round(rect.width),
++            height: Math.round(rect.height),
++          };
++        });
++      // A compact outline: landmarks, headings and controls in document order.
++      const outline: string[] = [];
++      for (const el of Array.from(document.querySelectorAll(`${STRUCTURE},${INTERACTIVE}`))) {
++        if (!visible(el) || outline.length >= 400) continue;
++        const r = role(el);
++        if (!r || r === "presentation" || r === "none") continue;
++        const name = labelText(el).replace(/\s+/g, " ").trim().slice(0, 80);
++        const level = /^h([1-6])$/i.exec(el.tagName)?.[1];
++        let state = "";
++        if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio"))
++          state = el.checked ? " [checked]" : "";
++        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
++          state += el.value ? ` value=${JSON.stringify(el.value.slice(0, 60))}` : "";
++        if (el === document.activeElement) state += " [focused]";
++        outline.push(
++          `- ${r}${name ? ` ${JSON.stringify(name)}` : ""}${level ? ` [level=${level}]` : ""}${state}`,
++        );
++      }
++      return {
++        url: location.href,
++        title: document.title,
++        visibleText: (document.body?.innerText ?? "").slice(0, 20000),
++        interactiveElements: elements,
++        outline: outline.join("\n"),
++        width: innerWidth,
++        height: innerHeight,
++      };
++    },
++  };
++}
++
++const KEYS: Record<string, { code: string; keyCode: number; text?: string }> = {
++  Enter: { code: "Enter", keyCode: 13, text: "\r" },
++  Tab: { code: "Tab", keyCode: 9 },
++  Escape: { code: "Escape", keyCode: 27 },
++  Backspace: { code: "Backspace", keyCode: 8 },
++  Delete: { code: "Delete", keyCode: 46 },
++  ArrowUp: { code: "ArrowUp", keyCode: 38 },
++  ArrowDown: { code: "ArrowDown", keyCode: 40 },
++  ArrowLeft: { code: "ArrowLeft", keyCode: 37 },
++  ArrowRight: { code: "ArrowRight", keyCode: 39 },
++  Home: { code: "Home", keyCode: 36 },
++  End: { code: "End", keyCode: 35 },
++  PageUp: { code: "PageUp", keyCode: 33 },
++  PageDown: { code: "PageDown", keyCode: 34 },
++  Space: { code: "Space", keyCode: 32, text: " " },
++  " ": { code: "Space", keyCode: 32, text: " " },
++  Insert: { code: "Insert", keyCode: 45 },
++};
++for (let i = 1; i <= 12; i++) KEYS[`F${i}`] = { code: `F${i}`, keyCode: 111 + i };
++const MODIFIER_BITS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 } as const;
++
++function keyInfo(key: string): { key: string; code: string; keyCode: number; text?: string } {
++  const known = KEYS[key];
++  if (known) return { key: key === "Space" ? " " : key, ...known };
++  if (key.length === 1) {
++    const upper = key.toUpperCase();
++    const isLetter = upper >= "A" && upper <= "Z";
++    const isDigit = key >= "0" && key <= "9";
++    return {
++      key,
++      code: isLetter ? `Key${upper}` : isDigit ? `Digit${key}` : "",
++      keyCode: isLetter || isDigit ? upper.charCodeAt(0) : 0,
++      text: key,
++    };
++  }
++  throw new Error(`Unknown key: ${key}`);
++}
++
++/** A failure that waiting longer won't fix. */
++class AutomationFailure extends Error {}
++
++const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
++
++interface RuntimeEvaluateResult {
++  result?: { value?: unknown; description?: string; type?: string };
++  exceptionDetails?: { text?: string; exception?: { description?: string } };
++}
++
++export class PlutoniumAutomation {
++  private readonly timelines = new Map<string, PreviewAutomationActionEvent[]>();
++  private nextActionId = 1;
++
++  constructor(private readonly target: AutomationTarget) {}
++
++  private cdp<T>(runtimeTabId: string, method: string, params?: object): Promise<T> {
++    return this.target.devtools(runtimeTabId, method, params) as Promise<T>;
++  }
++
++  /** Evaluates |expression| in an isolated world of the main frame, helpers loaded. */
++  private async isolated<T>(runtimeTabId: string, expression: string): Promise<T> {
++    const tree = await this.cdp<{ frameTree: { frame: { id: string } } }>(
++      runtimeTabId,
++      "Page.getFrameTree",
++    );
++    const world = await this.cdp<{ executionContextId: number }>(
++      runtimeTabId,
++      "Page.createIsolatedWorld",
++      {
++        frameId: tree.frameTree.frame.id,
++        worldName: ISOLATED_WORLD,
++      },
++    );
++    const response = await this.cdp<RuntimeEvaluateResult>(runtimeTabId, "Runtime.evaluate", {
++      expression: `(${pageHelpers.toString()})(); ${expression}`,
++      contextId: world.executionContextId,
++      returnByValue: true,
++      awaitPromise: true,
++    });
++    if (response.exceptionDetails) {
++      throw new Error(
++        response.exceptionDetails.exception?.description ??
++          response.exceptionDetails.text ??
++          "Script failed",
++      );
++    }
++    return response.result?.value as T;
++  }
++
++  private async track<T>(runtimeTabId: string, action: string, run: () => Promise<T>): Promise<T> {
++    const timeline = this.timelines.get(runtimeTabId) ?? [];
++    this.timelines.set(runtimeTabId, timeline);
++    const event: PreviewAutomationActionEvent = {
++      id: `plutonium-${this.nextActionId++}`,
++      action,
++      status: "running",
++      startedAt: new Date().toISOString(),
++    };
++    timeline.push(event);
++    if (timeline.length > 50) timeline.shift();
++    const finish = (status: "succeeded" | "failed", error?: string) => {
++      const index = timeline.indexOf(event);
++      const done: PreviewAutomationActionEvent = {
++        ...event,
++        status,
++        completedAt: new Date().toISOString(),
++        ...(error ? { error } : {}),
++      };
++      if (index >= 0) timeline[index] = done;
++    };
++    try {
++      const result = await run();
++      finish("succeeded");
++      return result;
++    } catch (error) {
++      finish("failed", error instanceof Error ? error.message : String(error));
++      throw error;
++    }
++  }
++
++  /** Polls |check| until it returns a value or |timeoutMs| passes. */
++  private async until<T>(
++    timeoutMs: number,
++    what: string,
++    check: () => Promise<T | null | false>,
++  ): Promise<T> {
++    const deadline = Date.now() + timeoutMs;
++    let lastError: unknown = null;
++    for (;;) {
++      try {
++        const value = await check();
++        if (value) return value;
++      } catch (error) {
++        if (error instanceof AutomationFailure) throw error;
++        // Navigations destroy contexts mid-poll; retry until the deadline.
++        lastError = error;
++      }
++      if (Date.now() >= deadline) {
++        const detail = lastError instanceof Error ? ` (${lastError.message})` : "";
++        throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}${detail}`);
++      }
++      await sleep(POLL_MS);
++    }
++  }
++
++  async status(runtimeTabId: string): Promise<DesktopPreviewAutomationStatus> {
++    const tab = this.target.tab(runtimeTabId);
++    const blank = !tab || tab.url === "" || tab.url === "about:blank";
++    let viewport: { width: number; height: number } | undefined;
++    if (tab) {
++      try {
++        const size = await this.cdp<RuntimeEvaluateResult>(runtimeTabId, "Runtime.evaluate", {
++          expression: "({ width: innerWidth, height: innerHeight })",
++          returnByValue: true,
++        });
++        const value = size.result?.value as { width: number; height: number } | undefined;
++        if (value && value.width > 0 && value.height > 0) viewport = value;
++      } catch {
++        // No viewport yet.
++      }
++    }
++    return {
++      available: !!tab,
++      visible: tab?.embedded ?? false,
++      tabId: tab ? runtimeTabId : null,
++      url: blank ? null : tab!.url,
++      title: blank ? null : tab!.title,
++      loading: tab?.loading ?? false,
++      ...(viewport ? { viewport } : {}),
++    };
++  }
++
++  snapshot(runtimeTabId: string): Promise<PreviewAutomationSnapshot> {
++    return this.track(runtimeTabId, "snapshot", async () => {
++      const page = await this.isolated<{
++        url: string;
++        title: string;
++        visibleText: string;
++        interactiveElements: PreviewAutomationSnapshot["interactiveElements"];
++        outline: string;
++        width: number;
++        height: number;
++      }>(runtimeTabId, "__pa.snapshot()");
++      const shot = await this.cdp<{ data: string }>(runtimeTabId, "Page.captureScreenshot", {
++        format: "png",
++      });
++      const dpr = await this.cdp<RuntimeEvaluateResult>(runtimeTabId, "Runtime.evaluate", {
++        expression: "devicePixelRatio",
++        returnByValue: true,
++      });
++      const scale = Number(dpr.result?.value) || 1;
++      return {
++        url: page.url,
++        title: page.title,
++        loading: this.target.tab(runtimeTabId)?.loading ?? false,
++        visibleText: page.visibleText.slice(0, MAX_TEXT),
++        interactiveElements: page.interactiveElements.slice(0, MAX_ELEMENTS),
++        accessibilityTree: page.outline,
++        consoleEntries: [],
++        networkEntries: [],
++        actionTimeline: [...(this.timelines.get(runtimeTabId) ?? [])],
++        screenshot: {
++          mimeType: "image/png",
++          data: shot.data,
++          width: Math.round(page.width * scale),
++          height: Math.round(page.height * scale),
++        },
++      };
++    });
++  }
++
++  private async mouseClick(runtimeTabId: string, x: number, y: number): Promise<void> {
++    const base = { x, y, button: "left", pointerType: "mouse" };
++    await this.cdp(runtimeTabId, "Input.dispatchMouseEvent", {
++      ...base,
++      type: "mouseMoved",
++      button: "none",
++    });
++    await this.cdp(runtimeTabId, "Input.dispatchMouseEvent", {
++      ...base,
++      type: "mousePressed",
++      buttons: 1,
++      clickCount: 1,
++    });
++    await this.cdp(runtimeTabId, "Input.dispatchMouseEvent", {
++      ...base,
++      type: "mouseReleased",
++      buttons: 0,
++      clickCount: 1,
++    });
++  }
++
++  click(runtimeTabId: string, input: PreviewAutomationClickInput): Promise<void> {
++    const label = input.locator ?? input.selector ?? `${input.x},${input.y}`;
++    return this.track(runtimeTabId, `click ${label}`, async () => {
++      if (input.x !== undefined && input.y !== undefined && !input.locator && !input.selector) {
++        await this.mouseClick(runtimeTabId, input.x, input.y);
++        return;
++      }
++      const args = JSON.stringify([input.selector, input.locator]);
++      const point = await this.until(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, label, async () => {
++        const found = await this.isolated<{
++          x: number;
++          y: number;
++          visible: boolean;
++          covered: string | null;
++        } | null>(runtimeTabId, `__pa.point(...${args})`);
++        return found && found.visible && !found.covered ? found : null;
++      });
++      await this.mouseClick(runtimeTabId, point.x, point.y);
++    });
++  }
++
++  type(runtimeTabId: string, input: PreviewAutomationTypeInput): Promise<void> {
++    const label = input.locator ?? input.selector ?? "the focused element";
++    return this.track(runtimeTabId, `type into ${label}`, async () => {
++      const args = JSON.stringify([input.selector, input.locator, input.clear ?? false]);
++      const focus = await this.until(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, label, async () => {
++        const result = await this.isolated<{ ok: boolean; reason?: string; clearing?: boolean }>(
++          runtimeTabId,
++          `__pa.focusForTyping(...${args})`,
++        );
++        if (!result.ok && result.reason === "not editable") {
++          throw new AutomationFailure(`${label} is not editable`);
++        }
++        return result.ok ? result : null;
++      });
++      if (focus.clearing) {
++        // The selection covers the old value; delete it like a user would.
++        await this.pressKey(runtimeTabId, "Backspace", []);
++      }
++      if (input.text) await this.cdp(runtimeTabId, "Input.insertText", { text: input.text });
++    });
++  }
++
++  private async pressKey(
++    runtimeTabId: string,
++    key: string,
++    modifiers: readonly string[],
++  ): Promise<void> {
++    const info = keyInfo(key);
++    const bits = modifiers.reduce(
++      (sum, m) => sum | (MODIFIER_BITS[m as keyof typeof MODIFIER_BITS] ?? 0),
++      0,
++    );
++    // Text only when no modifier other than Shift changes what the key does.
++    const text = bits & ~MODIFIER_BITS.Shift ? undefined : info.text;
++    const common = {
++      key: info.key,
++      code: info.code,
++      windowsVirtualKeyCode: info.keyCode,
++      nativeVirtualKeyCode: info.keyCode,
++      modifiers: bits,
++    };
++    await this.cdp(runtimeTabId, "Input.dispatchKeyEvent", {
++      ...common,
++      type: text ? "keyDown" : "rawKeyDown",
++      ...(text ? { text, unmodifiedText: text } : {}),
++    });
++    await this.cdp(runtimeTabId, "Input.dispatchKeyEvent", { ...common, type: "keyUp" });
++  }
++
++  press(runtimeTabId: string, input: PreviewAutomationPressInput): Promise<void> {
++    const modifiers = input.modifiers ?? [];
++    const label = [...modifiers, input.key].join("+");
++    return this.track(runtimeTabId, `press ${label}`, () =>
++      this.pressKey(runtimeTabId, input.key, modifiers),
++    );
++  }
++
++  scroll(runtimeTabId: string, input: PreviewAutomationScrollInput): Promise<void> {
++    const dx = input.deltaX ?? 0;
++    const dy = input.deltaY ?? 0;
++    const label = input.locator ?? input.selector ?? "page";
++    return this.track(runtimeTabId, `scroll ${label} by ${dx},${dy}`, async () => {
++      if (input.locator || input.selector) {
++        const ok = await this.isolated<boolean>(
++          runtimeTabId,
++          `__pa.scrollElement(...${JSON.stringify([input.selector, input.locator, dx, dy])})`,
++        );
++        if (!ok) throw new Error(`Could not find ${label}`);
++        return;
++      }
++      const size = await this.isolated<{ width: number; height: number }>(
++        runtimeTabId,
++        "({ width: innerWidth, height: innerHeight })",
++      );
++      await this.cdp(runtimeTabId, "Input.dispatchMouseEvent", {
++        type: "mouseWheel",
++        x: Math.round(size.width / 2),
++        y: Math.round(size.height / 2),
++        deltaX: dx,
++        deltaY: dy,
++        pointerType: "mouse",
++      });
++    });
++  }
++
++  evaluate(runtimeTabId: string, input: PreviewAutomationEvaluateInput): Promise<unknown> {
++    return this.track(runtimeTabId, "evaluate", async () => {
++      const returnByValue = input.returnByValue ?? true;
++      const response = await this.cdp<RuntimeEvaluateResult>(runtimeTabId, "Runtime.evaluate", {
++        expression: input.expression,
++        awaitPromise: input.awaitPromise ?? true,
++        returnByValue,
++        userGesture: true,
++      });
++      if (response.exceptionDetails) {
++        throw new Error(
++          response.exceptionDetails.exception?.description ??
++            response.exceptionDetails.text ??
++            "Evaluation failed",
++        );
++      }
++      return returnByValue
++        ? (response.result?.value ?? null)
++        : (response.result?.description ?? null);
++    });
++  }
++
++  waitFor(runtimeTabId: string, input: PreviewAutomationWaitForInput): Promise<void> {
++    const what =
++      input.locator ??
++      input.selector ??
++      (input.text ? `text ${JSON.stringify(input.text)}` : null) ??
++      (input.urlIncludes ? `URL containing ${JSON.stringify(input.urlIncludes)}` : "the page");
++    return this.track(runtimeTabId, `wait for ${what}`, async () => {
++      await this.until(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, what, async () => {
++        if (input.urlIncludes) {
++          const url = this.target.tab(runtimeTabId)?.url ?? "";
++          if (!url.includes(input.urlIncludes)) return false;
++        }
++        if (input.locator || input.selector) {
++          const found = await this.isolated<boolean>(
++            runtimeTabId,
++            `__pa.found(...${JSON.stringify([input.selector, input.locator])})`,
++          );
++          if (!found) return false;
++        }
++        if (input.text) {
++          const found = await this.isolated<boolean>(
++            runtimeTabId,
++            `__pa.hasText(${JSON.stringify(input.text)})`,
++          );
++          if (!found) return false;
++        }
++        return true;
++      });
++    });
++  }
++}
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+new file mode 100644
+index 0000000000..9e519d9fd4
+--- /dev/null
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -0,0 +1,356 @@
++// Plutonium: T3's browser on Plutonium's browser tabs.
++//
++// In the Electron build, `window.desktopBridge.preview` drives tabs owned by
++// the main process and shown with <webview>. In the Plutonium shell the
++// browser owns them instead: `navigator.windowBroker` creates and drives real
++// tabs (a WebContents each), and the page shows one with
++//   <embed type="application/x-chromium-surface-embed" data-content-id="…">
++// (PlutoniumBrowserHost). This file implements the DesktopPreviewBridge
++// contract on top of the broker, so the rest of the preview UI is unchanged.
++//
++// Tabs are tagged with their thread id, which is how Plutonium's helper lets
++// that thread's agent reach them. A tab's page can't open windows of its own:
++// like the Electron build, what it opens loads in the same tab.
++import type {
++  DesktopPreviewBridge,
++  DesktopPreviewNavStatus,
++  DesktopPreviewTabState,
++} from "@t3tools/contracts";
++
++import { PlutoniumAutomation } from "./previewAutomation";
++
++/** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
++export interface BrokerTab {
++  readonly id: number;
++  readonly contentId: string;
++  readonly url: string;
++  readonly title: string;
++  readonly loading: boolean;
++  readonly canGoBack: boolean;
++  readonly canGoForward: boolean;
++  readonly embedded: boolean;
++  readonly focused: boolean;
++  readonly tag: string;
++  readonly openerId: number;
++  readonly openedBy: "shell" | "page";
++  readonly dialogType: "" | "alert" | "confirm" | "prompt" | "beforeunload";
++  readonly dialogMessage: string;
++  readonly dialogDefaultPrompt: string;
++}
++
++interface BrowserTabEvent extends Event {
++  readonly tabId: number;
++  readonly entry: BrokerTab | null;
++}
++
++interface TabBroker extends EventTarget {
++  getTabs(): Promise<BrokerTab[]>;
++  createTab(url: string, tag: string): Promise<BrokerTab>;
++  navigateTab(tabId: number, url: string): Promise<void>;
++  tabCommand(tabId: number, command: "back" | "forward" | "reload" | "stop" | "close"): void;
++  answerTabDialog(tabId: number, accept: boolean, text?: string): void;
++  snapshotTab(tabId: number): Promise<Blob>;
++  sendTabDevToolsCommand?(tabId: number, method: string, paramsJson?: string): Promise<string>;
++}
++
++function tabBroker(): TabBroker | null {
++  if (typeof navigator === "undefined") return null;
++  const broker = (navigator as Navigator & { windowBroker?: Partial<TabBroker> }).windowBroker;
++  return broker && typeof broker.createTab === "function" ? (broker as TabBroker) : null;
++}
++
++/** The thread id inside a previewRuntimeTabId ([environmentId, threadId, epoch, tabId]). */
++function threadOf(runtimeTabId: string): string {
++  try {
++    const parsed: unknown = JSON.parse(runtimeTabId);
++    if (Array.isArray(parsed) && typeof parsed[1] === "string") return parsed[1];
++  } catch {
++    // Not a runtime tab id; untagged.
++  }
++  return "";
++}
++
++export const isBlank = (url: string) => url === "" || url === "about:blank";
++
++// Which broker tab backs which preview tab. Tabs outlive a reload of the
++// shell page, so the reloaded page adopts them instead of opening new ones.
++const STORAGE_KEY = "t3code:plutonium-preview-tabs";
++
++function loadStoredIds(): Record<string, number> {
++  try {
++    const parsed: unknown = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "{}");
++    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
++  } catch {
++    return {};
++  }
++}
++
++class PlutoniumPreview {
++  readonly broker: TabBroker;
++  /** runtime tab id → broker tab id, and back. */
++  private readonly ids = new Map<string, number>();
++  private readonly runtimeIds = new Map<number, string>();
++  private readonly tabs = new Map<number, BrokerTab>();
++  /** Tabs a page opened that haven't got a URL yet: their opener's broker id. */
++  private readonly pendingPopups = new Map<number, number>();
++  private readonly stateListeners = new Set<
++    (tabId: string, state: DesktopPreviewTabState) => void
++  >();
++  private readonly tabListeners = new Set<() => void>();
++
++  constructor(broker: TabBroker) {
++    this.broker = broker;
++    const onTab = (event: Event) => {
++      const { entry } = event as BrowserTabEvent;
++      if (entry) this.update(entry);
++    };
++    broker.addEventListener("tabadded", onTab);
++    broker.addEventListener("tabchanged", onTab);
++    broker.addEventListener("tabremoved", (event) => {
++      const { tabId } = event as BrowserTabEvent;
++      this.tabs.delete(tabId);
++      this.pendingPopups.delete(tabId);
++      const runtimeTabId = this.runtimeIds.get(tabId);
++      if (runtimeTabId !== undefined) {
++        // The page closed itself (window.close()). The preview tab stays, idle.
++        this.runtimeIds.delete(tabId);
++        this.ids.delete(runtimeTabId);
++        this.storeIds();
++        this.emit(runtimeTabId, null);
++      }
++      this.notifyTabs();
++    });
++  }
++
++  private update(entry: BrokerTab): void {
++    this.tabs.set(entry.id, entry);
++    // What a preview's page opens loads in the preview itself.
++    const opener =
++      entry.openedBy === "page"
++        ? (this.pendingPopups.get(entry.id) ??
++          (this.runtimeIds.has(entry.openerId) ? entry.openerId : undefined))
++        : undefined;
++    if (opener !== undefined && !this.runtimeIds.has(entry.id)) {
++      if (isBlank(entry.url)) {
++        this.pendingPopups.set(entry.id, opener);
++      } else {
++        this.pendingPopups.delete(entry.id);
++        this.broker.tabCommand(entry.id, "close");
++        if (this.runtimeIds.has(opener)) void this.broker.navigateTab(opener, entry.url);
++      }
++      return;
++    }
++    const runtimeTabId = this.runtimeIds.get(entry.id);
++    if (runtimeTabId !== undefined) this.emit(runtimeTabId, entry);
++    this.notifyTabs();
++  }
++
++  private emit(runtimeTabId: string, entry: BrokerTab | null): void {
++    const state = toState(runtimeTabId, entry);
++    for (const listener of this.stateListeners) listener(runtimeTabId, state);
++  }
++
++  private notifyTabs(): void {
++    for (const listener of this.tabListeners) listener();
++  }
++
++  /** The broker tab behind a preview tab, once it exists. */
++  tab(runtimeTabId: string): BrokerTab | null {
++    const id = this.ids.get(runtimeTabId);
++    return id === undefined ? null : (this.tabs.get(id) ?? null);
++  }
++
++  /** Called whenever any preview tab's broker tab changes. */
++  onTabs(listener: () => void): () => void {
++    this.tabListeners.add(listener);
++    return () => this.tabListeners.delete(listener);
++  }
++
++  answerDialog(runtimeTabId: string, accept: boolean, text?: string): void {
++    const id = this.ids.get(runtimeTabId);
++    if (id !== undefined) this.broker.answerTabDialog(id, accept, text);
++  }
++
++  private require(runtimeTabId: string): number {
++    const id = this.ids.get(runtimeTabId);
++    if (id === undefined) throw new Error(`No browser tab for ${runtimeTabId}`);
++    return id;
++  }
++
++  private storeIds(): void {
++    try {
++      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(this.ids)));
++    } catch {
++      // Not remembered: a reload opens a new tab.
++    }
++  }
++
++  async createTab(runtimeTabId: string): Promise<void> {
++    if (this.ids.has(runtimeTabId)) return;
++    const tag = threadOf(runtimeTabId);
++    const storedId = loadStoredIds()[runtimeTabId];
++    const adopted =
++      storedId === undefined
++        ? undefined
++        : (await this.broker.getTabs()).find((tab) => tab.id === storedId && tab.tag === tag);
++    if (this.ids.has(runtimeTabId)) return;
++    const entry = adopted ?? (await this.broker.createTab("about:blank", tag));
++    this.ids.set(runtimeTabId, entry.id);
++    this.runtimeIds.set(entry.id, runtimeTabId);
++    this.storeIds();
++    this.update(entry);
++  }
++
++  closeTab(runtimeTabId: string): void {
++    const id = this.ids.get(runtimeTabId);
++    if (id === undefined) return;
++    this.ids.delete(runtimeTabId);
++    this.runtimeIds.delete(id);
++    this.storeIds();
++    this.broker.tabCommand(id, "close");
++    this.notifyTabs();
++  }
++
++  async navigate(runtimeTabId: string, url: string): Promise<void> {
++    if (!this.ids.has(runtimeTabId)) await this.createTab(runtimeTabId);
++    await this.broker.navigateTab(this.require(runtimeTabId), url);
++  }
++
++  command(runtimeTabId: string, command: "back" | "forward" | "reload" | "stop"): void {
++    const id = this.ids.get(runtimeTabId);
++    if (id !== undefined) this.broker.tabCommand(id, command);
++  }
++
++  snapshot(runtimeTabId: string): Promise<Blob> {
++    return this.broker.snapshotTab(this.require(runtimeTabId));
++  }
++
++  /** Whether this Chromium lets the shell automate its tabs. */
++  get automatable(): boolean {
++    return typeof this.broker.sendTabDevToolsCommand === "function";
++  }
++
++  /** Sends a DevTools protocol command to the preview's tab. */
++  async devtools(runtimeTabId: string, method: string, params?: object): Promise<unknown> {
++    const send = this.broker.sendTabDevToolsCommand;
++    if (!send) throw new Error("This Chromium can't automate tabs");
++    const result = await send.call(
++      this.broker,
++      this.require(runtimeTabId),
++      method,
++      params ? JSON.stringify(params) : "",
++    );
++    return JSON.parse(result);
++  }
++
++  onStateChange(listener: (tabId: string, state: DesktopPreviewTabState) => void): () => void {
++    this.stateListeners.add(listener);
++    // Like the Electron bridge, a new listener learns the current state.
++    for (const [runtimeTabId, id] of this.ids) {
++      listener(runtimeTabId, toState(runtimeTabId, this.tabs.get(id) ?? null));
++    }
++    return () => this.stateListeners.delete(listener);
++  }
++}
++
++function toState(runtimeTabId: string, entry: BrokerTab | null): DesktopPreviewTabState {
++  const navStatus: DesktopPreviewNavStatus =
++    !entry || isBlank(entry.url)
++      ? { kind: "Idle" }
++      : { kind: entry.loading ? "Loading" : "Success", url: entry.url, title: entry.title };
++  return {
++    tabId: runtimeTabId,
++    webContentsId: entry ? entry.id : null,
++    navStatus,
++    canGoBack: entry?.canGoBack ?? false,
++    canGoForward: entry?.canGoForward ?? false,
++    zoomFactor: 1,
++    pictureInPicture: false,
++    colorScheme: "system",
++    audioMuted: false,
++    audible: false,
++    controller: "none",
++    updatedAt: new Date().toISOString(),
++  };
++}
++
++const unsupported = (what: string) => () =>
++  Promise.reject(new Error(`${what} is not available in the Plutonium browser yet`));
++const ignored = () => Promise.resolve();
++
++let preview: PlutoniumPreview | null | undefined;
++
++/** The Plutonium preview, or null outside the Plutonium shell. */
++export function plutoniumPreview(): PlutoniumPreview | null {
++  if (preview === undefined) {
++    const broker = tabBroker();
++    preview = broker ? new PlutoniumPreview(broker) : null;
++  }
++  return preview;
++}
++
++/** DesktopPreviewBridge on Plutonium's browser tabs, or null outside the shell. */
++export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
++  const p = plutoniumPreview();
++  if (!p) return null;
++  const auto = new PlutoniumAutomation(p);
++  const automation: DesktopPreviewBridge["automation"] = p.automatable
++    ? {
++        status: (tabId) => auto.status(tabId),
++        snapshot: (tabId) => auto.snapshot(tabId),
++        click: (tabId, input) => auto.click(tabId, input),
++        type: (tabId, input) => auto.type(tabId, input),
++        press: (tabId, input) => auto.press(tabId, input),
++        scroll: (tabId, input) => auto.scroll(tabId, input),
++        evaluate: (tabId, input) => auto.evaluate(tabId, input),
++        waitFor: (tabId, input) => auto.waitFor(tabId, input),
++      }
++    : {
++        status: unsupported("Browser automation"),
++        snapshot: unsupported("Browser automation"),
++        click: unsupported("Browser automation"),
++        type: unsupported("Browser automation"),
++        press: unsupported("Browser automation"),
++        scroll: unsupported("Browser automation"),
++        evaluate: unsupported("Browser automation"),
++        waitFor: unsupported("Browser automation"),
++      };
++  return {
++    createTab: (tabId) => p.createTab(tabId),
++    closeTab: async (tabId) => p.closeTab(tabId),
++    registerWebview: ignored,
++    navigate: (tabId, url) => p.navigate(tabId, url),
++    goBack: async (tabId) => p.command(tabId, "back"),
++    goForward: async (tabId) => p.command(tabId, "forward"),
++    refresh: async (tabId) => p.command(tabId, "reload"),
++    hardReload: async (tabId) => p.command(tabId, "reload"),
++    zoomIn: ignored,
++    zoomOut: ignored,
++    resetZoom: ignored,
++    setColorScheme: ignored,
++    setAudioMuted: ignored,
++    openDevTools: ignored,
++    clearCookies: ignored,
++    clearCache: ignored,
++    getPreviewConfig: async () => ({ partition: "", webPreferences: "", preloadUrl: null }),
++    listBrowserImportSources: async () => [],
++    importBrowserCookies: unsupported("Importing cookies"),
++    setAnnotationTheme: ignored,
++    pickElement: unsupported("Picking elements"),
++    cancelPickElement: ignored,
++    captureScreenshot: unsupported("Saving screenshots"),
++    revealArtifact: ignored,
++    copyArtifactToClipboard: ignored,
++    pictureInPicture: { open: ignored, close: ignored },
++    recording: {
++      onInput: () => () => undefined,
++      startScreencast: unsupported("Recording"),
++      stopScreencast: ignored,
++      save: unsupported("Recording"),
++      onFrame: () => () => undefined,
++    },
++    automation,
++    onStateChange: (listener) => p.onStateChange(listener),
++    onPointerEvent: () => () => undefined,
++  };
++}
+diff --git a/apps/web/src/previewStateStore.ts b/apps/web/src/previewStateStore.ts
+index 1e7ec37066..e505804b26 100644
+--- a/apps/web/src/previewStateStore.ts
++++ b/apps/web/src/previewStateStore.ts
+@@ -18,6 +18,7 @@ import {
+ import { Atom } from "effect/unstable/reactivity";
+ 
+ import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
++import { plutoniumPreview } from "./plutonium/previewBridge";
+ import { appAtomRegistry } from "./rpc/atomRegistry";
+ 
+ export interface DesktopPreviewOverlay {
+@@ -461,7 +462,7 @@ export function rememberPreviewUrl(ref: ScopedThreadRef, url: string): void {
+ 
+ export function isPreviewSupportedInRuntime(): boolean {
+   if (typeof window === "undefined") return false;
+-  return Boolean(window.desktopBridge?.preview);
++  return Boolean(window.desktopBridge?.preview ?? plutoniumPreview());
+ }
+ 
+ export function resetPreviewStateForTests(): void {

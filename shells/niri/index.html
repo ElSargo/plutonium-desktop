@@ -1,0 +1,1343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>niri</title>
+<!--
+  A niri clone as a Plutonium frontend: scrollable tiling on the substrate
+  (navigator.windowBroker, <native-window>, browser tabs and the helper's shell
+  library), with niri's default binds and look.
+
+  - Each workspace is an infinite horizontal strip of columns; a column holds
+    one or more windows stacked vertically (or tabbed). New windows open as a
+    new column right of the focused one, and the view scrolls to keep the
+    focused column on screen.
+  - Workspaces are dynamic and stacked vertically: there is always one empty
+    workspace at the bottom, and empty ones disappear once you leave them.
+  - The overview (Super+O, or the top-left hot corner) zooms out to every
+    workspace. Click a window to go to it, drag one to another workspace.
+  - Super+Shift+/ lists the binds (also shown at startup).
+
+  Windows and tabs are the shell's when tagged niri:desktop: everything
+  launched from here, plus windows nobody claims. Others (another shell's)
+  come in through the browser's Super+Tab overlay. The layout is kept in
+  this page's storage. Window ids restart with Ash, so a restart starts over.
+
+  The browser keeps Super+F (fullscreen), Super+Tab (shells) and Super+Escape
+  (release the pointer), so niri's Super+F (maximize column) is Super+M here,
+  and Super+Shift+F is fullscreen as in niri. The helper is
+  http://127.0.0.1:3780 unless the page URL says ?helper=<origin>.
+-->
+<style>
+  :root {
+    --anim: 280ms cubic-bezier(.25, 1, .5, 1);
+    --text: #e6e6e6; --muted: #9a9a9a; --panel: #1e1e1e; --line: #3a3a3a;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body { background: #101012; color: var(--text); font: 13px/1.4 system-ui, sans-serif; user-select: none; }
+
+  /* The wallpaper stays put while workspaces slide, as with swaybg under niri. */
+  #wallpaper {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(120% 90% at 85% 110%, #3b2a5c 0%, transparent 55%),
+      radial-gradient(90% 80% at 10% -10%, #1f4a5e 0%, transparent 55%),
+      linear-gradient(160deg, #15171c, #1c1d26 60%, #17151d);
+  }
+  /* The overview's backdrop. */
+  #backdrop { position: fixed; inset: 0; background: #262626; opacity: 0; transition: opacity var(--anim); }
+  body.overview #backdrop { opacity: 1; }
+
+  #world { position: fixed; inset: 0; transform-origin: 50% 50%; transition: transform var(--anim); }
+  body.noanim #world, body.noanim .tile, body.noanim .wscard, body.noanim .tabind { transition: none !important; }
+
+  /* Each workspace's card: invisible in normal mode, a mini screen in the overview. */
+  .wscard {
+    position: absolute; left: 0; top: 0; border-radius: 0; opacity: 0; pointer-events: none;
+    transition: transform var(--anim), opacity var(--anim), border-radius var(--anim);
+    background:
+      radial-gradient(120% 90% at 85% 110%, #3b2a5c 0%, transparent 55%),
+      radial-gradient(90% 80% at 10% -10%, #1f4a5e 0%, transparent 55%),
+      linear-gradient(160deg, #15171c, #1c1d26 60%, #17151d);
+  }
+  body.overview .wscard { opacity: 1; pointer-events: auto; border-radius: 24px; box-shadow: 0 10px 60px 10px #0008; }
+  body.overview .wscard.current { outline: 6px solid #ffffff22; outline-offset: 6px; }
+
+  .tile {
+    position: absolute; left: 0; top: 0; z-index: 1;
+    transition: transform var(--anim), opacity 150ms;
+    overflow: hidden; background: transparent;
+  }
+  .tile.floating { z-index: 2; }
+  .tile.dragging { z-index: 3; transition: none; opacity: .85; }
+  .tile.hidden { visibility: hidden; }
+  .tile > native-window, .tile > embed {
+    display: block; position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+  }
+  /* Above the window: takes the pointer in the overview and while Super is held. */
+  .tile > .hit { position: absolute; inset: 0; pointer-events: none; }
+  body.overview .tile > .hit, body.mod .tile > .hit { pointer-events: auto; cursor: grab; }
+  body.overview .tile > .hit:hover { background: #ffffff10; }
+  .tile.dragging > .hit { cursor: grabbing; }
+  .tile > .placeholder {
+    position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
+    background: #1a1a1a; font-size: 12px;
+  }
+  .tile > .tabdialog {
+    position: absolute; left: 50%; top: 16px; transform: translateX(-50%); width: min(420px, 90%);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    display: grid; gap: 8px; box-shadow: 0 6px 24px #0008; user-select: text;
+  }
+  .tabdialog p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tabdialog div { display: flex; gap: 6px; justify-content: end; }
+
+  /* Tab indicator of a tabbed column, in the gap to its left. */
+  .tabind {
+    position: absolute; left: 0; top: 0; display: flex; flex-direction: column; gap: 4px; z-index: 1;
+    transition: transform var(--anim);
+  }
+  .tabind span { flex: 1; border-radius: 2px; background: #505050; }
+  .tabind span.active { background: var(--focus); }
+
+  #hot-corner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 50; }
+
+  /* Popups: launcher, hotkey overlay, notices. */
+  .modal {
+    position: fixed; z-index: 60; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: #1e1e1eee; border: 1px solid #ffffff1a; border-radius: 14px; box-shadow: 0 16px 60px #000a;
+    backdrop-filter: blur(12px);
+  }
+  .modal[hidden] { display: none; }
+  #launcher { top: 22%; transform: translateX(-50%); width: min(560px, calc(100vw - 32px)); padding: 10px; }
+  #launcher input {
+    width: 100%; font: 15px system-ui, sans-serif; padding: 10px 12px; border-radius: 9px;
+    border: 1px solid #ffffff1f; background: #111; color: var(--text); outline: none;
+  }
+  #launcher ul { list-style: none; margin: 8px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #launcher li { display: flex; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 8px; cursor: default; }
+  #launcher li.selected { background: #7fc8ff2a; }
+  #launcher li img, #launcher li .noicon { width: 24px; height: 24px; flex: none; }
+  #launcher li .noicon { border-radius: 6px; background: #ffffff14; display: grid; place-items: center; font-size: 11px; color: var(--muted); }
+  #launcher li small { color: var(--muted); margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+  #hotkeys { padding: 18px 22px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; }
+  #hotkeys h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; text-align: center; }
+  #hotkeys table { border-collapse: collapse; }
+  #hotkeys td { padding: 3px 10px; white-space: nowrap; }
+  #hotkeys td:first-child { text-align: right; }
+  #hotkeys kbd {
+    font: 12px ui-monospace, monospace; background: #ffffff14; border: 1px solid #ffffff22;
+    border-radius: 5px; padding: 1px 6px;
+  }
+  #notice {
+    position: fixed; z-index: 70; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: #2b2b2bee; border: 1px solid #ffffff1a; border-radius: 10px; padding: 8px 14px;
+    box-shadow: 0 6px 30px #0008; transition: opacity 200ms; opacity: 0; pointer-events: none;
+  }
+  #notice.shown { opacity: 1; }
+  #empty-hint {
+    position: fixed; inset: 0; display: grid; place-items: center; color: #ffffff40; font-size: 14px;
+    pointer-events: none; text-align: center; transition: opacity var(--anim);
+  }
+  #empty-hint[hidden] { display: none; }
+  body.overview #empty-hint { opacity: 0; }
+  button {
+    font: inherit; color: inherit; background: #ffffff14; border: 1px solid #ffffff1f; border-radius: 7px;
+    padding: 4px 10px; cursor: pointer;
+  }
+</style>
+</head>
+<body class="noanim">
+<div id="wallpaper"></div>
+<div id="backdrop"></div>
+<div id="world"></div>
+<div id="empty-hint" hidden></div>
+<div id="hot-corner"></div>
+<div id="launcher" class="modal" hidden>
+  <input id="launcher-input" spellcheck="false" placeholder="Run an app, a command, or open a web address">
+  <ul id="launcher-list"></ul>
+</div>
+<div id="hotkeys" class="modal" hidden></div>
+<div id="notice"></div>
+<script type="module">
+// niri's knobs, with its defaults where it has them (niri's config is KDL;
+// these are the same options). Border on, focus ring off, shadows on and
+// 12 px corners give the usual "rounded, bordered, shadowed" niri look.
+const CONFIG = {
+  gaps: 16,
+  cornerRadius: 12,
+  focusRing: { on: false, width: 4, active: "#7fc8ff", inactive: "#505050" },
+  border: { on: true, width: 4, active: "#7fc8ff", inactive: "#505050" },
+  shadow: { on: true, softness: 30, spread: 5, offsetX: 0, offsetY: 5, color: "#0007" },
+  presetColumnWidths: [1 / 3, 1 / 2, 2 / 3],
+  presetWindowHeights: [1 / 3, 1 / 2, 2 / 3],
+  defaultColumnWidth: 1 / 2,
+  // "never": scroll just enough to show the focused column; "always": center it;
+  // "on-overflow": center it when it and the previous one don't both fit.
+  centerFocusedColumn: "never",
+  overviewZoom: 0.5,
+  hotCorner: true,
+  hotkeyOverlayAtStartup: true,
+  terminal: ["foot"],
+};
+// Everything this shell shows carries this tag (it's also the thread apps launch in).
+const TAG = "niri:desktop";
+
+const params = new URLSearchParams(location.search);
+const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+const $ = (id) => document.getElementById(id);
+const g = CONFIG.gaps;
+const MIN = 60;
+const W = () => innerWidth;
+const H = () => innerHeight;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const focusColor = CONFIG.border.on ? CONFIG.border.active : CONFIG.focusRing.active;
+document.documentElement.style.setProperty("--focus", focusColor);
+
+// ---------------------------------------------------------------- layout model
+// Items are "w:<window id>" or "t:<tab id>".
+// workspace: { id, columns: [column], active, viewX, floating: [{ key, x, y, w, h }],
+//              floatActive, focusFloating }
+// column: { items: [key], active, width: { p } | { px }, full, tabbed, heights: { key: p } }
+const newWorkspace = () => ({
+  id: crypto.randomUUID().slice(0, 8), columns: [], active: 0, viewX: -g,
+  floating: [], floatActive: 0, focusFloating: false,
+});
+const newColumn = (key) => ({
+  items: [key], active: 0, width: { p: CONFIG.defaultColumnWidth }, full: false, tabbed: false, heights: {},
+});
+let layout = { workspaces: [newWorkspace()], cur: 0 };
+let overview = false;
+const curWs = () => layout.workspaces[layout.cur];
+const isEmpty = (ws) => ws.columns.length === 0 && ws.floating.length === 0;
+
+function focusedKey(ws = curWs()) {
+  if (ws.focusFloating && ws.floating.length) return ws.floating[ws.floatActive]?.key ?? null;
+  const col = ws.columns[ws.active];
+  return col ? col.items[col.active] : null;
+}
+
+/** Where `key` is: { wi, ci, ii } for a tiled item, { wi, fi } for a floating one. */
+function find(key) {
+  for (const [wi, ws] of layout.workspaces.entries()) {
+    for (const [ci, col] of ws.columns.entries()) {
+      const ii = col.items.indexOf(key);
+      if (ii >= 0) return { wi, ci, ii };
+    }
+    const fi = ws.floating.findIndex((f) => f.key === key);
+    if (fi >= 0) return { wi, fi };
+  }
+  return null;
+}
+
+// Always exactly one empty workspace at the bottom; other empty ones go away
+// once they aren't focused.
+function normalize() {
+  const list = layout.workspaces;
+  for (let i = list.length - 2; i >= 0; i--) {
+    if (isEmpty(list[i]) && i !== layout.cur) {
+      list.splice(i, 1);
+      if (i < layout.cur) layout.cur--;
+    }
+  }
+  if (!isEmpty(list.at(-1))) list.push(newWorkspace());
+  // Two trailing empty ones only while the focused one is the first of them.
+  while (list.length >= 2 && isEmpty(list.at(-1)) && isEmpty(list.at(-2)) && layout.cur < list.length - 2) list.pop();
+  layout.cur = clamp(layout.cur, 0, list.length - 1);
+  for (const ws of list) {
+    ws.active = clamp(ws.active, 0, Math.max(0, ws.columns.length - 1));
+    ws.floatActive = clamp(ws.floatActive, 0, Math.max(0, ws.floating.length - 1));
+    if (!ws.floating.length) ws.focusFloating = false;
+    if (!ws.columns.length && ws.floating.length) ws.focusFloating = true;
+    for (const col of ws.columns) col.active = clamp(col.active, 0, col.items.length - 1);
+  }
+}
+
+// ---------------------------------------------------------------- geometry
+function colWidth(col) {
+  if (col.full) return W() - 2 * g;
+  const w = col.width.px ?? (W() - g) * col.width.p - g;
+  return clamp(Math.round(w), MIN, W() * 4);
+}
+const proportionOf = (col) => (col.full ? 1 : col.width.p ?? (colWidth(col) + g) / (W() - g));
+function colX(ws, ci) {
+  let x = 0;
+  for (let i = 0; i < ci; i++) x += colWidth(ws.columns[i]) + g;
+  return x;
+}
+function itemHeights(col) {
+  const n = col.items.length;
+  const total = H() - g * (n + 1);
+  const fixed = col.items.map((k) => (col.heights[k] !== undefined ? Math.max(MIN, (H() - g) * col.heights[k] - g) : null));
+  // With nothing left to stretch, the last window takes the rest.
+  if (fixed.every((h) => h !== null)) fixed[n - 1] = null;
+  const autos = fixed.filter((h) => h === null).length;
+  const used = fixed.reduce((s, h) => s + (h ?? 0), 0);
+  const auto = Math.max(MIN, (total - used) / autos);
+  return fixed.map((h) => Math.round(h ?? auto));
+}
+const ovGap = () => H() * 0.2;
+const wsTop = (wi) => (wi - layout.cur) * (H() + (overview ? ovGap() : 0));
+
+// Scrolls `ws` so its focused column is on screen (niri's center-focused-column).
+function ensureVisible(ws = curWs(), prev = null) {
+  const col = ws.columns[ws.active];
+  if (!col) return;
+  const x = colX(ws, ws.active);
+  const w = colWidth(col);
+  const center = () => { ws.viewX = x + w / 2 - W() / 2; };
+  if (w > W() - 2 * g) { ws.viewX = x - g; return; }
+  let mode = CONFIG.centerFocusedColumn;
+  if (mode === "on-overflow" && prev !== null && ws.columns[prev]) {
+    const px = colX(ws, prev);
+    const span = Math.max(px + colWidth(ws.columns[prev]), x + w) - Math.min(px, x);
+    mode = span + 2 * g > W() ? "always" : "never";
+  }
+  if (mode === "always") return center();
+  if (x - g < ws.viewX) ws.viewX = x - g;
+  else if (x + w + g > ws.viewX + W()) ws.viewX = x + w + g - W();
+}
+
+// ---------------------------------------------------------------- items
+let shell = null;
+let ready = false;
+const tiles = new Map(); // key → { el, content, hit, kind, id }
+const live = () => {
+  const keys = new Set();
+  if (!shell) return keys;
+  for (const w of shell.windows.values()) if (manages(w)) keys.add(`w:${w.id}`);
+  if (shell.tabsAvailable) for (const t of shell.tabs.values()) if (t.tags.includes(TAG)) keys.add(`t:${t.id}`);
+  return keys;
+};
+const tagsOf = (w) => (w.tags.length ? w.tags : w.threadId ? [w.threadId] : []);
+const adopted = new Set(); // windows taken in without tags (a browser without tags)
+function manages(w) {
+  if (w.threadId === undefined) return false; // not known yet
+  return tagsOf(w).includes(TAG) || adopted.has(w.id);
+}
+
+// Windows nobody claims (no tag at all) are this shell's: a window manager shows everything.
+function adoptStrays() {
+  if (!shell) return;
+  for (const w of shell.windows.values()) {
+    if (w.threadId !== null || tagsOf(w).length || adopted.has(w.id)) continue;
+    adopted.add(w.id);
+    if (shell.tagsAvailable) shell.tagWindow(w.id, [TAG]).catch(() => {});
+  }
+  if (shell.tabsAvailable) {
+    // Not a link another shell's page just opened: that shell is putting it
+    // in one of its threads (onOpenTab).
+    const othersLink = (t) => t.openedBy.startsWith("shell:") && t.openedBy !== `shell:${shell.shellId}`;
+    for (const t of shell.tabs.values()) {
+      if (!t.tags.length && !othersLink(t)) shell.tagTab(t.id, [TAG]).catch(() => {});
+    }
+  }
+}
+
+/** Adds `key` as a new column right of the focused one, on the current workspace. */
+function addItem(key, { focus = true } = {}) {
+  if (find(key)) return;
+  const ws = curWs();
+  const prev = ws.active;
+  const at = ws.columns.length ? ws.active + 1 : 0;
+  ws.columns.splice(at, 0, newColumn(key));
+  if (focus || ws.columns.length === 1) {
+    ws.active = at;
+    ws.focusFloating = false;
+    ensureVisible(ws, prev);
+  } else if (at <= ws.active) ws.active++;
+  openAnimation.add(key);
+  normalize();
+}
+
+/** Takes `key` out of the layout. Its column goes too if it was the last item. */
+function detach(key) {
+  const at = find(key);
+  if (!at) return null;
+  const ws = layout.workspaces[at.wi];
+  if (at.fi !== undefined) {
+    const [f] = ws.floating.splice(at.fi, 1);
+    if (ws.floatActive >= ws.floating.length) ws.floatActive = ws.floating.length - 1;
+    return { ...at, floating: f };
+  }
+  const col = ws.columns[at.ci];
+  col.items.splice(at.ii, 1);
+  delete col.heights[key];
+  if (at.ii < col.active || col.active >= col.items.length) col.active = Math.max(0, col.active - 1);
+  if (!col.items.length) {
+    ws.columns.splice(at.ci, 1);
+    // niri: the column that slides in from the right takes the focus.
+    if (at.ci < ws.active || ws.active >= ws.columns.length) ws.active = Math.max(0, ws.active - 1);
+  }
+  return at;
+}
+
+function removeItem(key) {
+  const at = detach(key);
+  const tile = tiles.get(key);
+  if (tile) { tile.el.remove(); tiles.delete(key); }
+  if (at) {
+    const ws = layout.workspaces[at.wi];
+    if (ws.columns.length) ensureVisible(ws);
+    normalize();
+  }
+}
+
+// Brings the layout in line with the broker: new items get a column, gone ones leave.
+function reconcile() {
+  if (!ready) return;
+  adoptStrays();
+  const keys = live();
+  for (const key of [...tiles.keys()]) if (!keys.has(key)) removeItem(key);
+  for (const ws of layout.workspaces) {
+    for (const col of ws.columns) col.items = col.items.filter((k) => keys.has(k) || tiles.has(k));
+    ws.columns = ws.columns.filter((c) => c.items.length);
+    ws.floating = ws.floating.filter((f) => keys.has(f.key) || tiles.has(f.key));
+  }
+  for (const key of keys) if (!find(key)) addItem(key);
+  normalize();
+}
+
+// ---------------------------------------------------------------- rendering
+const openAnimation = new Set();
+function tileFor(key) {
+  let tile = tiles.get(key);
+  if (tile) return tile;
+  const [kind, raw] = key.split(":");
+  const id = Number(raw);
+  const el = document.createElement("div");
+  el.className = "tile";
+  let content;
+  if (kind === "w") {
+    content = document.createElement("native-window");
+    content.addEventListener("windowfocus", () => onItemFocused(key));
+    content.addEventListener("windowerror", () => notice("could not show a window"));
+    shell.grantFor(id).then((grant) => {
+      content.setAttribute("window", String(id));
+      content.setAttribute("grant", grant);
+    }, () => notice("no grant for a window"));
+  } else {
+    content = shell.tabElement(id);
+  }
+  const hit = document.createElement("div");
+  hit.className = "hit";
+  bindPointer(hit, key);
+  el.append(content, hit);
+  $("world").append(el);
+  tile = { el, content, hit, kind, id, dialog: null };
+  tiles.set(key, tile);
+  return tile;
+}
+
+function placeTile(tile, x, y, w, h) {
+  tile.el.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
+  tile.el.style.width = `${Math.max(1, Math.round(w))}px`;
+  tile.el.style.height = `${Math.max(1, Math.round(h))}px`;
+}
+
+function styleTile(tile, active) {
+  const s = tile.el.style;
+  const b = CONFIG.border.on ? CONFIG.border.width : 0;
+  s.borderRadius = `${CONFIG.cornerRadius + b}px`;
+  s.border = b ? `${b}px solid ${active ? CONFIG.border.active : CONFIG.border.inactive}` : "0";
+  const sh = CONFIG.shadow;
+  s.boxShadow = sh.on ? `${sh.offsetX}px ${sh.offsetY}px ${sh.softness}px ${sh.spread}px ${sh.color}` : "none";
+  const fr = CONFIG.focusRing;
+  s.outline = fr.on && active ? `${fr.width}px solid ${fr.active}` : "none";
+}
+
+function render() {
+  const world = $("world");
+  document.body.classList.toggle("overview", overview);
+  const z = CONFIG.overviewZoom;
+  world.style.transform = overview ? `scale(${z})` : "none";
+  // The overview zooms out around the screen's center: undo it for the cards' outlines.
+  const focus = focusedKey();
+  const seen = new Set();
+
+  // Workspace cards.
+  const cards = [...world.querySelectorAll(".wscard")];
+  layout.workspaces.forEach((ws, wi) => {
+    let card = cards.find((c) => c.dataset.ws === ws.id);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "wscard";
+      card.dataset.ws = ws.id;
+      card.onclick = () => {
+        const i = layout.workspaces.findIndex((w) => w.id === ws.id);
+        if (i >= 0) { layout.cur = i; overview = false; commit(); }
+      };
+      world.prepend(card);
+    }
+    card.style.width = `${W()}px`;
+    card.style.height = `${H()}px`;
+    card.style.transform = `translate3d(0, ${wsTop(wi)}px, 0)`;
+    card.classList.toggle("current", wi === layout.cur);
+    seen.add(card);
+  });
+  for (const c of cards) if (!seen.has(c)) c.remove();
+
+  // Tiles, and tab indicators of tabbed columns.
+  const indicators = [...world.querySelectorAll(".tabind")];
+  let nextIndicator = 0;
+  layout.workspaces.forEach((ws, wi) => {
+    const top = wsTop(wi);
+    let x = 0;
+    ws.columns.forEach((col, ci) => {
+      const w = colWidth(col);
+      const sx = x - ws.viewX;
+      if (col.tabbed) {
+        col.items.forEach((key, ii) => {
+          const tile = tileFor(key);
+          placeTile(tile, sx, top + g, w, H() - 2 * g);
+          tile.el.classList.toggle("hidden", ii !== col.active);
+          tile.el.classList.remove("floating");
+          tile.el.style.zIndex = "";
+          styleTile(tile, key === focus);
+        });
+        const ind = indicators[nextIndicator++] ?? world.appendChild(Object.assign(document.createElement("div"), { className: "tabind" }));
+        const len = (H() - 2 * g) * 0.5;
+        ind.style.width = "4px";
+        ind.style.height = `${len}px`;
+        ind.style.transform = `translate3d(${Math.round(sx - 9)}px, ${Math.round(top + g + (H() - 2 * g - len) / 2)}px, 0)`;
+        ind.replaceChildren(...col.items.map((_, ii) =>
+          Object.assign(document.createElement("span"), { className: ii === col.active ? "active" : "" })));
+      } else {
+        const hs = itemHeights(col);
+        let y = g;
+        col.items.forEach((key, ii) => {
+          const tile = tileFor(key);
+          placeTile(tile, sx, top + y, w, hs[ii]);
+          tile.el.classList.remove("hidden", "floating");
+          tile.el.style.zIndex = "";
+          styleTile(tile, key === focus);
+          y += hs[ii] + g;
+        });
+      }
+      x += w + g;
+    });
+    ws.floating.forEach((f) => {
+      const tile = tileFor(f.key);
+      placeTile(tile, f.x, top + f.y, f.w, f.h);
+      tile.el.classList.remove("hidden");
+      tile.el.classList.add("floating");
+      tile.el.style.zIndex = String(2 + ws.floating.indexOf(f));
+      styleTile(tile, f.key === focus);
+    });
+  });
+  for (const ind of indicators.slice(nextIndicator)) ind.remove();
+
+  for (const key of openAnimation) {
+    const tile = tiles.get(key);
+    if (!tile || document.body.classList.contains("noanim")) continue;
+    tile.content.animate([{ transform: "scale(.5)", opacity: 0 }, { transform: "none", opacity: 1 }],
+      { duration: 200, easing: "cubic-bezier(.16, 1, .3, 1)" });
+  }
+  openAnimation.clear();
+  for (const tile of tiles.values()) if (tile.kind === "t") renderTabDialog(tile);
+
+  const hint = $("empty-hint");
+  hint.hidden = !isEmpty(curWs()) || !ready;
+  hint.textContent = !shell?.available
+    ? "This page is not the Plutonium shell (no window broker)."
+    : `Workspace ${layout.cur + 1} · Super+T terminal · Super+D run · Super+Shift+/ hotkeys`;
+  syncKeyboard();
+  save();
+}
+
+// A tab's page dialog (alert, confirm, prompt), drawn over its tile.
+function renderTabDialog(tile) {
+  const tab = shell.tabs.get(tile.id);
+  const pending = tab?.dialogType ? `${tab.dialogType}:${tab.dialogMessage}` : null;
+  if (tile.dialog?.dataset.pending === pending) return;
+  tile.dialog?.remove();
+  tile.dialog = null;
+  if (!pending) return;
+  const box = document.createElement("form");
+  box.className = "tabdialog";
+  box.dataset.pending = pending;
+  const message = Object.assign(document.createElement("p"), { textContent: tab.dialogMessage || "This page asks to leave." });
+  const input = Object.assign(document.createElement("input"), { value: tab.dialogDefaultPrompt, hidden: tab.dialogType !== "prompt" });
+  const row = document.createElement("div");
+  const cancel = Object.assign(document.createElement("button"), { type: "button", textContent: "Cancel", hidden: tab.dialogType === "alert" });
+  cancel.onclick = () => shell.answerTabDialog(tab.id, false);
+  row.append(cancel, Object.assign(document.createElement("button"), { textContent: tab.dialogType === "beforeunload" ? "Leave" : "OK" }));
+  box.append(message, input, row);
+  box.onsubmit = (e) => { e.preventDefault(); shell.answerTabDialog(tab.id, true, input.value); };
+  tile.el.append(box);
+  tile.dialog = box;
+}
+
+// ---------------------------------------------------------------- keyboard focus
+let appliedFocus = undefined;
+let modal = null; // "launcher" | "hotkeys" | null
+function syncKeyboard() {
+  if (!shell?.available || modal || document.visibilityState !== "visible") return;
+  const key = focusedKey();
+  if (key === appliedFocus) return;
+  appliedFocus = key;
+  const tile = key && tiles.get(key);
+  if (!tile) {
+    // Nothing to focus here: keys go to the page (and so to our binds).
+    for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
+    document.activeElement?.blur?.();
+    return;
+  }
+  if (tile.kind === "w") {
+    if (tile.content.windowState === "attached") tile.content.focusWindow();
+    else {
+      // Not attached yet (just opened): focus once it is.
+      const retry = () => { if (focusedKey() === key && !modal) tile.content.focusWindow(); };
+      tile.content.addEventListener("windowchange", retry, { once: true });
+      setTimeout(retry, 300);
+    }
+  } else {
+    tile.content.focus();
+  }
+}
+function refocus() { appliedFocus = undefined; syncKeyboard(); }
+
+// A click on an app (or its own request) moved the keyboard there: follow it.
+function onItemFocused(key) {
+  if (focusedKey() === key) { appliedFocus = key; return; }
+  if (!focusItem(key)) return;
+  appliedFocus = key;
+  commit();
+}
+
+/** Makes `key` the focused item (switching workspace if needed). */
+function focusItem(key) {
+  const at = find(key);
+  if (!at) return false;
+  const ws = layout.workspaces[at.wi];
+  layout.cur = at.wi;
+  if (at.fi !== undefined) {
+    ws.focusFloating = true;
+    ws.floatActive = at.fi;
+  } else {
+    const prev = ws.active;
+    ws.focusFloating = false;
+    ws.active = at.ci;
+    ws.columns[at.ci].active = at.ii;
+    ensureVisible(ws, prev);
+  }
+  normalize();
+  return true;
+}
+
+function commit() {
+  normalize();
+  render();
+}
+
+// ---------------------------------------------------------------- actions
+const tiledCol = () => { const ws = curWs(); return ws.focusFloating ? null : ws.columns[ws.active]; };
+const focusedFloat = () => { const ws = curWs(); return ws.focusFloating ? ws.floating[ws.floatActive] : null; };
+
+const actions = {
+  focusColumn(d) {
+    const ws = curWs();
+    if (ws.focusFloating) {
+      if (!ws.floating.length) return;
+      ws.floatActive = (ws.floatActive + d + ws.floating.length) % ws.floating.length;
+      return;
+    }
+    const prev = ws.active;
+    ws.active = clamp(ws.active + d, 0, ws.columns.length - 1);
+    ensureVisible(ws, prev);
+  },
+  focusColumnEdge(last) {
+    const ws = curWs();
+    ws.focusFloating = false;
+    const prev = ws.active;
+    ws.active = last ? ws.columns.length - 1 : 0;
+    ensureVisible(ws, prev);
+  },
+  focusWindow(d) {
+    const col = tiledCol();
+    if (col) col.active = clamp(col.active + d, 0, col.items.length - 1);
+    else actions.focusColumn(d);
+  },
+  moveColumn(d) {
+    const ws = curWs();
+    const f = focusedFloat();
+    if (f) { f.x += d * 50; return; }
+    const to = ws.active + d;
+    if (to < 0 || to >= ws.columns.length) return;
+    [ws.columns[ws.active], ws.columns[to]] = [ws.columns[to], ws.columns[ws.active]];
+    ws.active = to;
+    ensureVisible(ws);
+  },
+  moveColumnEdge(last) {
+    const ws = curWs();
+    if (ws.focusFloating || !ws.columns.length) return;
+    const [col] = ws.columns.splice(ws.active, 1);
+    if (last) ws.columns.push(col); else ws.columns.unshift(col);
+    ws.active = last ? ws.columns.length - 1 : 0;
+    ensureVisible(ws);
+  },
+  moveWindow(d) {
+    const f = focusedFloat();
+    if (f) { f.y += d * 50; return; }
+    const col = tiledCol();
+    if (!col) return;
+    const to = col.active + d;
+    if (to < 0 || to >= col.items.length) return;
+    [col.items[col.active], col.items[to]] = [col.items[to], col.items[col.active]];
+    col.active = to;
+  },
+  focusWorkspace(i) {
+    layout.cur = clamp(i, 0, layout.workspaces.length - 1);
+  },
+  focusWorkspaceDelta(d) { actions.focusWorkspace(layout.cur + d); },
+  moveColumnToWorkspace(i) {
+    const from = curWs();
+    const key = focusedKey();
+    if (!key) return;
+    i = clamp(i, 0, layout.workspaces.length - 1);
+    if (i === layout.cur) return;
+    const to = layout.workspaces[i];
+    if (from.focusFloating) {
+      const [f] = from.floating.splice(from.floatActive, 1);
+      to.floating.push(f);
+      to.floatActive = to.floating.length - 1;
+      to.focusFloating = true;
+    } else {
+      const [col] = from.columns.splice(from.active, 1);
+      if (from.active >= from.columns.length) from.active = Math.max(0, from.columns.length - 1);
+      const at = to.columns.length ? to.active + 1 : 0;
+      to.columns.splice(at, 0, col);
+      to.active = at;
+      to.focusFloating = false;
+      ensureVisible(to);
+    }
+    if (from.columns.length) ensureVisible(from);
+    layout.cur = i;
+  },
+  moveColumnToWorkspaceDelta(d) { actions.moveColumnToWorkspace(layout.cur + d); },
+  moveWorkspace(d) {
+    const list = layout.workspaces;
+    const to = layout.cur + d;
+    if (to < 0 || to >= list.length) return;
+    [list[layout.cur], list[to]] = [list[to], list[layout.cur]];
+    layout.cur = to;
+  },
+  consumeOrExpel(d) {
+    const ws = curWs();
+    const col = tiledCol();
+    if (!col) return;
+    const key = col.items[col.active];
+    if (col.items.length > 1) {
+      // Expel into a new column on that side.
+      col.items.splice(col.active, 1);
+      delete col.heights[key];
+      col.active = Math.min(col.active, col.items.length - 1);
+      const at = d < 0 ? ws.active : ws.active + 1;
+      ws.columns.splice(at, 0, { ...newColumn(key), width: { ...col.width } });
+      ws.active = at;
+    } else {
+      // Join the neighbouring column, at its bottom.
+      const target = ws.columns[ws.active + d];
+      if (!target) return;
+      target.items.push(key);
+      target.active = target.items.length - 1;
+      ws.columns.splice(ws.active, 1);
+      ws.active = ws.columns.indexOf(target);
+    }
+    ensureVisible(ws);
+  },
+  consumeIntoColumn() {
+    const ws = curWs();
+    const col = tiledCol();
+    const next = ws.columns[ws.active + 1];
+    if (!col || !next) return;
+    col.items.push(next.items.shift());
+    if (!next.items.length) ws.columns.splice(ws.active + 1, 1);
+    else next.active = Math.min(next.active, next.items.length - 1);
+  },
+  expelFromColumn() {
+    const ws = curWs();
+    const col = tiledCol();
+    if (!col || col.items.length < 2) return;
+    const [key] = col.items.splice(col.active, 1);
+    delete col.heights[key];
+    col.active = Math.min(col.active, col.items.length - 1);
+    ws.columns.splice(ws.active + 1, 0, { ...newColumn(key), width: { ...col.width } });
+    ws.active++;
+    ensureVisible(ws);
+  },
+  switchPresetColumnWidth() {
+    const col = tiledCol();
+    if (!col) return;
+    const p = proportionOf(col);
+    const presets = CONFIG.presetColumnWidths;
+    const next = presets.find((x) => x > p + 0.01) ?? presets[0];
+    col.width = { p: next };
+    col.full = false;
+    ensureVisible();
+  },
+  switchPresetWindowHeight() {
+    const col = tiledCol();
+    if (!col || col.items.length < 2) return;
+    const key = col.items[col.active];
+    const h = itemHeights(col)[col.active];
+    const p = col.heights[key] ?? (h + g) / (H() - g);
+    const presets = CONFIG.presetWindowHeights;
+    col.heights[key] = presets.find((x) => x > p + 0.01) ?? presets[0];
+  },
+  resetWindowHeight() {
+    const col = tiledCol();
+    if (col) col.heights = {};
+  },
+  maximizeColumn() {
+    const col = tiledCol();
+    if (!col) return;
+    col.full = !col.full;
+    ensureVisible();
+  },
+  fullscreenWindow() {
+    const tile = tiles.get(focusedKey());
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else tile?.content.requestFullscreen().catch((e) => notice(`fullscreen: ${e.message}`));
+  },
+  expandColumn() {
+    // Take the space the other fully visible columns leave.
+    const ws = curWs();
+    const col = tiledCol();
+    if (!col) return;
+    let others = 0;
+    ws.columns.forEach((c, ci) => {
+      if (ci === ws.active) return;
+      const x = colX(ws, ci) - ws.viewX;
+      if (x >= 0 && x + colWidth(c) <= W()) others += colWidth(c) + g;
+    });
+    col.full = false;
+    col.width = { px: W() - 2 * g - others };
+    ensureVisible(ws);
+  },
+  centerColumn() {
+    const ws = curWs();
+    const col = tiledCol();
+    if (col) ws.viewX = colX(ws, ws.active) + colWidth(col) / 2 - W() / 2;
+  },
+  centerVisibleColumns() {
+    const ws = curWs();
+    const visible = ws.columns.map((c, ci) => ci).filter((ci) => {
+      const x = colX(ws, ci) - ws.viewX;
+      return x >= 0 && x + colWidth(ws.columns[ci]) <= W();
+    });
+    if (!visible.length) return actions.centerColumn();
+    const a = colX(ws, visible[0]);
+    const b = colX(ws, visible.at(-1)) + colWidth(ws.columns[visible.at(-1)]);
+    ws.viewX = (a + b) / 2 - W() / 2;
+  },
+  setColumnWidth(delta) {
+    const f = focusedFloat();
+    if (f) { f.w = clamp(f.w + delta * W(), MIN, W()); return; }
+    const col = tiledCol();
+    if (!col) return;
+    col.width = { p: clamp(proportionOf(col) + delta, 0.05, 1) };
+    col.full = false;
+    ensureVisible();
+  },
+  setWindowHeight(delta) {
+    const f = focusedFloat();
+    if (f) { f.h = clamp(f.h + delta * H(), MIN, H()); return; }
+    const col = tiledCol();
+    if (!col || col.items.length < 2) return;
+    const key = col.items[col.active];
+    const p = col.heights[key] ?? (itemHeights(col)[col.active] + g) / (H() - g);
+    col.heights[key] = clamp(p + delta, 0.05, 1);
+  },
+  toggleFloating() {
+    const ws = curWs();
+    const key = focusedKey();
+    if (!key) return;
+    if (ws.focusFloating) {
+      detach(key);
+      const at = ws.columns.length ? ws.active + 1 : 0;
+      ws.columns.splice(at, 0, newColumn(key));
+      ws.active = at;
+      ws.focusFloating = false;
+      ensureVisible(ws);
+    } else {
+      // Floats at the size it had as a tile, a bit smaller, centered.
+      const col = tiledCol();
+      const w = Math.min(colWidth(col), W() * 0.8);
+      const h = Math.min(itemHeights(col)[col.active], H() * 0.8);
+      detach(key);
+      ws.floating.push({ key, w, h, x: (W() - w) / 2, y: (H() - h) / 2 });
+      ws.floatActive = ws.floating.length - 1;
+      ws.focusFloating = true;
+      if (ws.columns.length) ensureVisible(ws);
+    }
+  },
+  switchFocusFloatingTiling() {
+    const ws = curWs();
+    if (ws.focusFloating ? ws.columns.length : ws.floating.length) ws.focusFloating = !ws.focusFloating;
+  },
+  toggleTabbed() {
+    const col = tiledCol();
+    if (col) col.tabbed = !col.tabbed;
+  },
+  toggleOverview() { overview = !overview; updateShortcuts(); },
+  closeWindow() {
+    const tile = tiles.get(focusedKey());
+    if (!tile) return;
+    if (tile.kind === "w") shell.close(tile.id);
+    else shell.tabCommand(tile.id, "close");
+  },
+  spawn(argv) {
+    shell.launch(TAG, argv).catch((e) => notice(`spawn ${argv[0]}: ${e.message}`));
+  },
+  launcher() { openLauncher(); },
+  hotkeys() { showHotkeys(); },
+};
+
+// ---------------------------------------------------------------- binds
+// niri's default binds (its default config.kdl), with Mod = Super.
+const binds = [];
+function bind(keys, label, action, { repeat = true, hotkey = false } = {}) {
+  binds.push({ keys: [].concat(keys), label, action, repeat, hotkey });
+}
+bind("Super+Shift+Slash", "Show Important Hotkeys", () => actions.hotkeys(), { repeat: false, hotkey: true });
+bind("Super+KeyT", "Spawn Terminal", () => actions.spawn(CONFIG.terminal), { repeat: false, hotkey: true });
+bind("Super+KeyD", "Run an Application", () => actions.launcher(), { repeat: false, hotkey: true });
+bind("Super+KeyO", "Open the Overview", () => actions.toggleOverview(), { repeat: false, hotkey: true });
+bind("Super+KeyQ", "Close Focused Window", () => actions.closeWindow(), { repeat: false, hotkey: true });
+bind(["Super+ArrowLeft", "Super+KeyH"], "Focus Column to the Left", () => actions.focusColumn(-1), { hotkey: true });
+bind(["Super+ArrowRight", "Super+KeyL"], "Focus Column to the Right", () => actions.focusColumn(1), { hotkey: true });
+bind(["Super+ArrowDown", "Super+KeyJ"], "Focus Window Down", () => actions.focusWindow(1));
+bind(["Super+ArrowUp", "Super+KeyK"], "Focus Window Up", () => actions.focusWindow(-1));
+bind(["Super+Ctrl+ArrowLeft", "Super+Ctrl+KeyH"], "Move Column Left", () => actions.moveColumn(-1), { hotkey: true });
+bind(["Super+Ctrl+ArrowRight", "Super+Ctrl+KeyL"], "Move Column Right", () => actions.moveColumn(1), { hotkey: true });
+bind(["Super+Ctrl+ArrowDown", "Super+Ctrl+KeyJ"], "Move Window Down", () => actions.moveWindow(1));
+bind(["Super+Ctrl+ArrowUp", "Super+Ctrl+KeyK"], "Move Window Up", () => actions.moveWindow(-1));
+bind("Super+Home", "Focus First Column", () => actions.focusColumnEdge(false));
+bind("Super+End", "Focus Last Column", () => actions.focusColumnEdge(true));
+bind("Super+Ctrl+Home", "Move Column to First", () => actions.moveColumnEdge(false));
+bind("Super+Ctrl+End", "Move Column to Last", () => actions.moveColumnEdge(true));
+bind(["Super+PageDown", "Super+KeyU"], "Switch Workspace Down", () => actions.focusWorkspaceDelta(1), { hotkey: true });
+bind(["Super+PageUp", "Super+KeyI"], "Switch Workspace Up", () => actions.focusWorkspaceDelta(-1), { hotkey: true });
+bind(["Super+Ctrl+PageDown", "Super+Ctrl+KeyU"], "Move Column to Workspace Down", () => actions.moveColumnToWorkspaceDelta(1), { hotkey: true });
+bind(["Super+Ctrl+PageUp", "Super+Ctrl+KeyI"], "Move Column to Workspace Up", () => actions.moveColumnToWorkspaceDelta(-1), { hotkey: true });
+bind(["Super+Shift+PageDown", "Super+Shift+KeyU"], "Move Workspace Down", () => actions.moveWorkspace(1));
+bind(["Super+Shift+PageUp", "Super+Shift+KeyI"], "Move Workspace Up", () => actions.moveWorkspace(-1));
+for (let n = 1; n <= 9; n++) {
+  bind(`Super+Digit${n}`, `Focus Workspace ${n}`, () => actions.focusWorkspace(n - 1), { repeat: false });
+  bind(`Super+Ctrl+Digit${n}`, `Move Column to Workspace ${n}`, () => actions.moveColumnToWorkspace(n - 1), { repeat: false });
+}
+bind("Super+BracketLeft", "Consume or Expel Window Left", () => actions.consumeOrExpel(-1));
+bind("Super+BracketRight", "Consume or Expel Window Right", () => actions.consumeOrExpel(1));
+bind("Super+Comma", "Consume Window Into Column", () => actions.consumeIntoColumn(), { hotkey: true });
+bind("Super+Period", "Expel Window From Column", () => actions.expelFromColumn(), { hotkey: true });
+bind("Super+KeyR", "Switch Preset Column Widths", () => actions.switchPresetColumnWidth(), { hotkey: true });
+bind("Super+Shift+KeyR", "Switch Preset Window Heights", () => actions.switchPresetWindowHeight());
+bind("Super+Ctrl+KeyR", "Reset Window Height", () => actions.resetWindowHeight());
+bind("Super+KeyM", "Maximize Column", () => actions.maximizeColumn(), { hotkey: true });
+bind("Super+Shift+KeyF", "Fullscreen Window", () => actions.fullscreenWindow(), { repeat: false, hotkey: true });
+bind("Super+Ctrl+KeyF", "Expand Column to Available Width", () => actions.expandColumn());
+bind("Super+KeyC", "Center Column", () => actions.centerColumn());
+bind("Super+Ctrl+KeyC", "Center Visible Columns", () => actions.centerVisibleColumns());
+bind("Super+Minus", "Decrease Column Width", () => actions.setColumnWidth(-0.1));
+bind("Super+Equal", "Increase Column Width", () => actions.setColumnWidth(0.1));
+bind("Super+Shift+Minus", "Decrease Window Height", () => actions.setWindowHeight(-0.1));
+bind("Super+Shift+Equal", "Increase Window Height", () => actions.setWindowHeight(0.1));
+bind("Super+KeyV", "Move Window Between Floating and Tiling", () => actions.toggleFloating(), { repeat: false, hotkey: true });
+bind("Super+Shift+KeyV", "Switch Focus Between Floating and Tiling", () => actions.switchFocusFloatingTiling(), { repeat: false, hotkey: true });
+bind("Super+KeyW", "Toggle Column Tabbed Display", () => actions.toggleTabbed(), { repeat: false, hotkey: true });
+
+const byCombo = new Map(binds.flatMap((b) => b.keys.map((k) => [k, b])));
+const comboOf = (e) =>
+  `${e.metaKey ? "Super+" : ""}${e.ctrlKey ? "Ctrl+" : ""}${e.altKey ? "Alt+" : ""}${e.shiftKey ? "Shift+" : ""}${e.code}`;
+// Normalize "Super+Shift+KeyR" etc. to comboOf's order.
+const normalizeCombo = (text) => {
+  const parts = text.split("+");
+  const code = parts.pop();
+  const has = (m) => parts.includes(m);
+  return `${has("Super") ? "Super+" : ""}${has("Ctrl") ? "Ctrl+" : ""}${has("Alt") ? "Alt+" : ""}${has("Shift") ? "Shift+" : ""}${code}`;
+};
+for (const [k, b] of [...byCombo]) { byCombo.delete(k); byCombo.set(normalizeCombo(k), b); }
+
+// Keys this page keeps while an app or tab has the keyboard: every bind,
+// Super itself (so Super+drag and Super+wheel reach the page), and Escape and
+// Enter while the overview is open.
+function updateShortcuts() {
+  shell?.setShellShortcuts([
+    ...byCombo.keys(),
+    "MetaLeft", "MetaRight", "Super+MetaLeft", "Super+MetaRight",
+    ...(overview ? ["Escape", "Enter", "KeyO"] : []),
+  ]);
+}
+
+addEventListener("keydown", (e) => {
+  if (e.code === "MetaLeft" || e.code === "MetaRight") { setMod(true); return; }
+  if (modal === "hotkeys") { closeModal(); if (!e.metaKey) { e.preventDefault(); return; } }
+  if (overview && !e.metaKey && (e.code === "Escape" || e.code === "Enter")) {
+    e.preventDefault();
+    overview = false;
+    updateShortcuts();
+    commit();
+    return;
+  }
+  const b = byCombo.get(comboOf(e));
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.repeat && !b.repeat) return;
+  if (modal === "launcher" && b.action !== actions.launcher) closeModal();
+  b.action();
+  commit();
+}, true);
+addEventListener("keyup", (e) => { if (e.code === "MetaLeft" || e.code === "MetaRight") setMod(false); }, true);
+addEventListener("blur", () => setMod(false));
+
+// ---------------------------------------------------------------- pointer
+// Super held: the windows' hit layers take the pointer, for Super+drag
+// (move) and Super+right-drag (resize). A missed release is noticed on the
+// next pointer event without Super.
+function setMod(on) { document.body.classList.toggle("mod", on); }
+addEventListener("pointermove", (e) => { if (!e.metaKey && !drag) setMod(false); }, true);
+
+let drag = null;
+function bindPointer(hit, key) {
+  hit.addEventListener("contextmenu", (e) => e.preventDefault());
+  hit.addEventListener("pointerdown", (e) => {
+    if (!overview && !e.metaKey) return;
+    e.preventDefault();
+    hit.setPointerCapture(e.pointerId);
+    const at = find(key);
+    if (!at) return;
+    const ws = layout.workspaces[at.wi];
+    const tile = tiles.get(key);
+    const resize = e.button === 2 && !overview;
+    drag = {
+      key, resize, startX: e.clientX, startY: e.clientY, moved: false, tile,
+      base: tile.el.style.transform,
+      col: at.fi === undefined ? ws.columns[at.ci] : null,
+      float: at.fi !== undefined ? ws.floating[at.fi] : null,
+      startW: at.fi === undefined ? colWidth(ws.columns[at.ci]) : ws.floating[at.fi].w,
+      startH: at.fi !== undefined ? ws.floating[at.fi].h : 0,
+      startFX: at.fi !== undefined ? ws.floating[at.fi].x : 0,
+      startFY: at.fi !== undefined ? ws.floating[at.fi].y : 0,
+    };
+  });
+  hit.addEventListener("pointermove", (e) => {
+    if (!drag || drag.key !== key) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+    drag.moved = true;
+    const z = overview ? CONFIG.overviewZoom : 1;
+    if (drag.resize) {
+      if (drag.float) { drag.float.w = clamp(drag.startW + dx, MIN, W()); drag.float.h = clamp(drag.startH + dy, MIN, H()); }
+      else { drag.col.full = false; drag.col.width = { px: clamp(drag.startW + dx, MIN, W() - 2 * g) }; }
+      render();
+      return;
+    }
+    if (drag.float && !overview) {
+      drag.float.x = drag.startFX + dx;
+      drag.float.y = drag.startFY + dy;
+      render();
+      return;
+    }
+    drag.tile.el.classList.add("dragging");
+    drag.tile.el.style.transform = `${drag.base} translate3d(${dx / z}px, ${dy / z}px, 0)`;
+  });
+  const end = (e) => {
+    if (!drag || drag.key !== key) return;
+    const d = drag;
+    drag = null;
+    d.tile.el.classList.remove("dragging");
+    if (!d.moved) {
+      // A click: go to the window.
+      overview = false;
+      updateShortcuts();
+      focusItem(key);
+      refocus();
+      commit();
+      return;
+    }
+    if (!d.resize && !(d.float && !overview)) dropItem(key, e.clientX, e.clientY);
+    commit();
+  };
+  hit.addEventListener("pointerup", end);
+  hit.addEventListener("pointercancel", end);
+}
+
+// Drops a dragged item as a new column where the pointer is (any workspace in the overview).
+function dropItem(key, px, py) {
+  const z = overview ? CONFIG.overviewZoom : 1;
+  const wx = (px - W() / 2) / z + W() / 2;
+  const wy = (py - H() / 2) / z + H() / 2;
+  const spacing = H() + (overview ? ovGap() : 0);
+  const wi = clamp(layout.cur + Math.floor((wy + (overview ? ovGap() / 2 : 0)) / spacing), 0, layout.workspaces.length - 1);
+  const target = layout.workspaces[wi];
+  const from = find(key);
+  const old = from ? layout.workspaces[from.wi].columns[from.ci] : null;
+  const width = old ? { ...old.width } : { p: CONFIG.defaultColumnWidth };
+  detach(key);
+  const stripX = wx + target.viewX;
+  let at = target.columns.length;
+  for (let ci = 0; ci < target.columns.length; ci++) {
+    if (stripX < colX(target, ci) + colWidth(target.columns[ci]) / 2) { at = ci; break; }
+  }
+  target.columns.splice(at, 0, { ...newColumn(key), width });
+  target.active = at;
+  target.focusFloating = false;
+  layout.cur = wi;
+  ensureVisible(target);
+}
+
+// Super+wheel: workspaces up and down; with Shift, or sideways, columns;
+// with Ctrl, take the column along. In the overview, no Super needed.
+let wheelAt = 0;
+addEventListener("wheel", (e) => {
+  if (!(e.metaKey || overview || document.body.classList.contains("mod"))) return;
+  e.preventDefault();
+  const now = performance.now();
+  if (now - wheelAt < 150) return;
+  const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
+  const delta = sideways ? (e.shiftKey ? e.deltaY || e.deltaX : e.deltaX) : e.deltaY;
+  if (Math.abs(delta) < 1) return;
+  wheelAt = now;
+  const d = Math.sign(delta);
+  if (sideways) actions.focusColumn(d);
+  else if (e.ctrlKey) actions.moveColumnToWorkspaceDelta(d);
+  else actions.focusWorkspaceDelta(d);
+  commit();
+}, { passive: false, capture: true });
+
+// The hot corner opens (and closes) the overview.
+let cornerArmed = true;
+$("hot-corner").addEventListener("pointerenter", () => {
+  if (!CONFIG.hotCorner || !cornerArmed) return;
+  cornerArmed = false;
+  actions.toggleOverview();
+  commit();
+});
+$("hot-corner").addEventListener("pointerleave", () => { cornerArmed = true; });
+
+// ---------------------------------------------------------------- launcher
+let apps = null;
+let launcherItems = [];
+let launcherSelected = 0;
+function openModal(name) {
+  modal = name;
+  // Keys come to the page while a popup is open.
+  for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
+}
+function closeModal() {
+  if (!modal) return;
+  $(modal).hidden = true;
+  modal = null;
+  refocus();
+}
+async function openLauncher() {
+  if (modal === "launcher") { closeModal(); return; }
+  closeModal();
+  openModal("launcher");
+  $("launcher").hidden = false;
+  const input = $("launcher-input");
+  input.value = "";
+  input.focus();
+  renderLauncher();
+  if (!apps) {
+    apps = await shell.apps().catch(() => []);
+    if (modal === "launcher") renderLauncher();
+  }
+}
+const recent = (() => { try { return JSON.parse(localStorage.getItem("niri-shell.recent")) ?? []; } catch { return []; } })();
+function renderLauncher() {
+  const q = $("launcher-input").value.trim();
+  const ql = q.toLowerCase();
+  const score = (a) => {
+    if (!ql) return recent.includes(a.id) ? 2 + (recent.length - recent.indexOf(a.id)) : 1;
+    const name = a.name.toLowerCase();
+    if (name.startsWith(ql)) return 100;
+    if (name.includes(ql)) return 50;
+    if ((a.genericName ?? "").toLowerCase().includes(ql)) return 20;
+    if ((a.keywords ?? []).some((k) => k.toLowerCase().includes(ql))) return 10;
+    if ((a.comment ?? "").toLowerCase().includes(ql)) return 5;
+    return 0;
+  };
+  const matches = (apps ?? []).map((a) => [score(a), a]).filter(([s]) => s > 0)
+    .sort((x, y) => y[0] - x[0] || x[1].name.localeCompare(y[1].name)).slice(0, 40).map(([, a]) => a);
+  launcherItems = matches.map((a) => ({ kind: "app", app: a, label: a.name, detail: a.genericName || a.comment || "" }));
+  const looksLikeUrl = /^(https?:\/\/|www\.)|^[\w-]+(\.[\w-]+)+(\/|$)|^localhost(:\d+)?/.test(q);
+  if (q && !looksLikeUrl) launcherItems.push({ kind: "cmd", label: q, detail: "run command" });
+  if (q && shell.tabsAvailable && (looksLikeUrl || !matches.length)) {
+    launcherItems.splice(looksLikeUrl ? 0 : launcherItems.length, 0, { kind: "tab", label: q, detail: "open in a browser tab" });
+  }
+  if (q && looksLikeUrl) launcherItems.push({ kind: "cmd", label: q, detail: "run command" });
+  if (!q || "claude agent".includes(ql)) launcherItems.push({ kind: "agent", label: "Claude Code", detail: "agent in a terminal, with Plutonium's MCP tools" });
+  launcherSelected = clamp(launcherSelected, 0, Math.max(0, launcherItems.length - 1));
+  $("launcher-list").replaceChildren(...launcherItems.map((item, i) => {
+    const li = document.createElement("li");
+    li.className = i === launcherSelected ? "selected" : "";
+    const icon = document.createElement("span");
+    icon.className = "noicon";
+    icon.textContent = { app: "", tab: "◍", cmd: "$", agent: "✳" }[item.kind];
+    li.append(icon);
+    if (item.kind === "app" && item.app.hasIcon) {
+      shell.appIcon(item.app.id).then((url) => {
+        if (url) icon.replaceWith(Object.assign(document.createElement("img"), { src: url, alt: "" }));
+      });
+    }
+    li.append(Object.assign(document.createElement("span"), { textContent: item.label }));
+    li.append(Object.assign(document.createElement("small"), { textContent: item.detail }));
+    li.onmousemove = () => { if (launcherSelected !== i) { launcherSelected = i; renderLauncher(); } };
+    li.onclick = () => runLauncherItem(item);
+    return li;
+  }));
+  $("launcher-list").children[launcherSelected]?.scrollIntoView({ block: "nearest" });
+}
+async function runLauncherItem(item) {
+  closeModal();
+  try {
+    if (item.kind === "app") {
+      const r = recent.filter((id) => id !== item.app.id);
+      r.unshift(item.app.id);
+      recent.splice(0, recent.length, ...r.slice(0, 8));
+      try { localStorage.setItem("niri-shell.recent", JSON.stringify(recent)); } catch {}
+      await shell.launchApp(TAG, item.app.id);
+    } else if (item.kind === "tab") {
+      await shell.createTab(TAG, item.label);
+    } else if (item.kind === "cmd") {
+      await shell.launch(TAG, ["sh", "-c", item.label]);
+    } else if (item.kind === "agent") {
+      const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(TAG)}`).then((r) => r.json());
+      const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
+      await shell.launch(TAG, [...CONFIG.terminal, "-T", "agent", "-e", "claude", "--mcp-config", mcp]);
+    }
+  } catch (e) {
+    notice(`${item.label}: ${e.message}`);
+  }
+}
+$("launcher-input").addEventListener("input", () => { launcherSelected = 0; renderLauncher(); });
+$("launcher-input").addEventListener("keydown", (e) => {
+  if (e.metaKey) return;
+  if (e.key === "Escape") { e.preventDefault(); closeModal(); }
+  else if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) { e.preventDefault(); launcherSelected++; renderLauncher(); }
+  else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) { e.preventDefault(); launcherSelected = Math.max(0, launcherSelected - 1); renderLauncher(); }
+  else if (e.key === "Enter") { e.preventDefault(); const item = launcherItems[launcherSelected]; if (item) runLauncherItem(item); }
+});
+addEventListener("pointerdown", (e) => {
+  if (modal && !$(modal).contains(e.target)) closeModal();
+}, true);
+
+// ---------------------------------------------------------------- hotkey overlay
+const pretty = (combo) => combo.split("+").map((p) => ({
+  Super: "Super", Ctrl: "Ctrl", Shift: "Shift", Alt: "Alt", ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓",
+  Slash: "/", Comma: ",", Period: ".", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", PageDown: "Page Down", PageUp: "Page Up",
+})[p] ?? p.replace(/^Key|^Digit/, "")).join(" + ");
+function showHotkeys() {
+  const box = $("hotkeys");
+  const rows = binds.filter((b) => b.hotkey).map((b) => {
+    const tr = document.createElement("tr");
+    const keys = document.createElement("td");
+    keys.append(Object.assign(document.createElement("kbd"), { textContent: pretty(b.keys[0]) }));
+    tr.append(keys, Object.assign(document.createElement("td"), { textContent: b.label }));
+    return tr;
+  });
+  const extra = [
+    ["Super + 1…9", "Focus Workspace"], ["Super + drag", "Move Window"], ["Super + right-drag", "Resize Column"],
+    ["Super + F", "Fullscreen (browser)"], ["Super + Tab", "Shells and windows (browser)"],
+  ].map(([k, label]) => {
+    const tr = document.createElement("tr");
+    const keys = document.createElement("td");
+    keys.append(Object.assign(document.createElement("kbd"), { textContent: k }));
+    tr.append(keys, Object.assign(document.createElement("td"), { textContent: label }));
+    return tr;
+  });
+  const table = document.createElement("table");
+  table.append(...rows, ...extra);
+  box.replaceChildren(Object.assign(document.createElement("h2"), { textContent: "Important Hotkeys" }), table);
+  closeModal();
+  openModal("hotkeys");
+  box.hidden = false;
+}
+$("hotkeys").addEventListener("click", closeModal);
+
+let noticeTimer = null;
+function notice(text) {
+  const el = $("notice");
+  el.textContent = text;
+  el.classList.add("shown");
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => el.classList.remove("shown"), 4000);
+}
+
+// ---------------------------------------------------------------- persistence
+function save() {
+  try { localStorage.setItem("niri-shell.layout", JSON.stringify(layout)); } catch {}
+}
+function restore() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("niri-shell.layout"));
+    if (saved?.workspaces?.length) layout = saved;
+  } catch {}
+}
+
+// ---------------------------------------------------------------- start
+addEventListener("resize", () => { for (const ws of layout.workspaces) ensureVisible(ws); render(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refocus(); });
+try {
+  const { connect } = await import(`${helper}/v1/shell.js`);
+  shell = connect({
+    // An agent or the browser's overlay asked to show a window: bring it in if
+    // it's another shell's, then go to it.
+    onFocus(window) {
+      const key = `w:${window.id}`;
+      if (!manages(window)) {
+        adopted.add(window.id);
+        if (shell.tagsAvailable) shell.tagWindow(window.id, [TAG]).catch(() => {});
+        addItem(key);
+      }
+      overview = false;
+      focusItem(key);
+      refocus();
+      commit();
+      return true;
+    },
+    // A link the page opened (Ctrl+click, target=_blank) is a tile here.
+    onOpenTab: () => TAG,
+    onFocusTab(tab) {
+      const key = `t:${tab.id}`;
+      if (!tab.tags.includes(TAG) && shell.tagsAvailable) shell.tagTab(tab.id, [TAG]).catch(() => {});
+      if (!find(key)) addItem(key);
+      overview = false;
+      focusItem(key);
+      refocus();
+      commit();
+      return true;
+    },
+  });
+  shell.addEventListener("change", () => {
+    reconcile();
+    // A click into a browser tab moved the keyboard there.
+    for (const [key, tile] of tiles) {
+      if (tile.kind === "t" && shell.tabs.get(tile.id)?.focused && focusedKey() !== key) onItemFocused(key);
+    }
+    render();
+  });
+  await shell.ready;
+  shell.setGroups([{ tag: TAG, label: "niri" }]);
+  updateShortcuts();
+  restore();
+  ready = true;
+  reconcile();
+} catch (error) {
+  console.error(error);
+  notice(`helper unreachable (${helper})`);
+}
+ready = true;
+normalize();
+render();
+requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("noanim")));
+if (CONFIG.hotkeyOverlayAtStartup && shell?.available) showHotkeys();
+</script>
+</body>
+</html>

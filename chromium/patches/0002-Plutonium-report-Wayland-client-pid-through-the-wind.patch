@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Thu, 15 Oct 2026 22:14:48 +1300
+Subject: [PATCH 02/16] Plutonium: report Wayland client pid through the window
+ broker
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/exo_window_broker.cc                          | 3 ++-
+ chrome/browser/exo_window_broker.h                           | 3 +++
+ chrome/browser/plutonium_shell.cc                            | 2 +-
+ components/exo/embedded_windows.cc                           | 4 ++++
+ components/exo/embedded_windows.h                            | 2 ++
+ components/exo/surface.cc                                    | 3 +++
+ components/exo/surface.h                                     | 4 ++++
+ components/exo/wayland/wl_compositor.cc                      | 5 +++++
+ .../blink/public/mojom/native_window/window_broker.mojom     | 2 ++
+ third_party/blink/renderer/core/html/native_window_broker.cc | 1 +
+ third_party/blink/renderer/core/html/native_window_entry.idl | 2 ++
+ 11 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/exo_window_broker.cc b/chrome/browser/exo_window_broker.cc
+index c05c5135be..3ed1ddf931 100644
+--- a/chrome/browser/exo_window_broker.cc
++++ b/chrome/browser/exo_window_broker.cc
+@@ -27,6 +27,7 @@ ExoWindowBroker::WindowInfo FromExo(int32_t window_id,
+   window.device_scale_factor = info.device_scale_factor;
+   window.embedded = info.attached;
+   window.focused = info.focused;
++  window.pid = info.client_pid;
+   return window;
+ }
+ 
+@@ -37,7 +38,7 @@ std::string Describe(const ExoWindowBroker::WindowInfo& window) {
+              << "\" size=" << window.size.ToString()
+              << " scale=" << window.device_scale_factor
+              << " embedded=" << window.embedded
+-             << " focused=" << window.focused;
++             << " focused=" << window.focused << " pid=" << window.pid;
+   return out.str();
+ }
+ 
+diff --git a/chrome/browser/exo_window_broker.h b/chrome/browser/exo_window_broker.h
+index ca2e74bfeb..37e98095c6 100644
+--- a/chrome/browser/exo_window_broker.h
++++ b/chrome/browser/exo_window_broker.h
+@@ -59,6 +59,9 @@ class ExoWindowBroker : public exo::EmbeddedWindows::Observer {
+     // not on the Ash desktop), and whether it has embedded keyboard focus.
+     bool embedded = false;
+     bool focused = false;
++    // Pid of the Wayland client, in the browser's pid namespace (0 if
++    // unknown). Lets the shell tie a window to whatever launched it.
++    int32_t pid = 0;
+   };
+ 
+   class Observer : public base::CheckedObserver {
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index f6826c3831..9c68d8a4f2 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -63,7 +63,7 @@ blink::mojom::NativeWindowEntryPtr ToMojo(
+   return blink::mojom::NativeWindowEntry::New(
+       window.id, window.app_id, base::UTF16ToUTF8(window.title),
+       window.size.width(), window.size.height(), window.device_scale_factor,
+-      window.embedded, window.focused);
++      window.embedded, window.focused, window.pid);
+ }
+ 
+ std::vector<blink::mojom::NativeWindowEntryPtr> CurrentWindows() {
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index b35bdb88b5..a7e0e68827 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -380,6 +380,10 @@ std::optional<EmbeddedWindows::Info> EmbeddedWindows::ComputeInfo(
+   info.title = shell_surface->GetWindowTitle();
+   info.focused = focused_window_id_ == window_id;
+   info.attached = windows_.at(window_id).attach_count > 0;
++  info.client_pid =
++      shell_surface->root_surface()
++          ? shell_surface->root_surface()->GetProperty(kClientPidKey)
++          : 0;
+   return info;
+ }
+ 
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index 83eb1a8655..f289f5080a 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -69,6 +69,8 @@ class EmbeddedWindows : public aura::WindowObserver {
+     // EXO-BROKER: whether at least one page element is attached (the window
+     // is parked).
+     bool attached = false;
++    // EXO-BROKER: pid of the client (0 if unknown).
++    int32_t client_pid = 0;
+   };
+ 
+   class Observer : public base::CheckedObserver {
+diff --git a/components/exo/surface.cc b/components/exo/surface.cc
+index d713008b17..091e3aba79 100644
+--- a/components/exo/surface.cc
++++ b/components/exo/surface.cc
+@@ -342,6 +342,9 @@ DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(std::string, kClientSurfaceIdKey)
+ // component.
+ DEFINE_UI_CLASS_PROPERTY_KEY(int32_t, kWindowSessionId, -1)
+ 
++// EXO-BROKER
++DEFINE_UI_CLASS_PROPERTY_KEY(int32_t, kClientPidKey, 0)
++
+ ScopedSurface::ScopedSurface(Surface* surface, SurfaceObserver* observer)
+     : surface_(surface), observer_(observer) {
+   surface_->AddSurfaceObserver(observer_);
+diff --git a/components/exo/surface.h b/components/exo/surface.h
+index 6914f23ccd..0f92e1cccd 100644
+--- a/components/exo/surface.h
++++ b/components/exo/surface.h
+@@ -92,6 +92,10 @@ extern const ui::ClassProperty<std::string*>* const kClientSurfaceIdKey;
+ // component.
+ extern const ui::ClassProperty<int32_t>* const kWindowSessionId;
+ 
++// EXO-BROKER: the pid of the Wayland client that created the surface (0 if
++// unknown, e.g. a client outside the server's pid namespace).
++extern const ui::ClassProperty<int32_t>* const kClientPidKey;
++
+ // This class represents a rectangular area that is displayed on the screen.
+ // It has a location, size and pixel contents.
+ class Surface final : public ui::PropertyHandler {
+diff --git a/components/exo/wayland/wl_compositor.cc b/components/exo/wayland/wl_compositor.cc
+index d253660cd2..7f0f4d9df6 100644
+--- a/components/exo/wayland/wl_compositor.cc
++++ b/components/exo/wayland/wl_compositor.cc
+@@ -249,6 +249,11 @@ void compositor_create_surface(wl_client* client,
+   // Set the surface resource property for type-checking downcast support.
+   SetSurfaceResource(surface.get(), surface_resource);
+ 
++  // EXO-BROKER: remember the client's pid so the window broker can report it.
++  pid_t pid = 0;
++  wl_client_get_credentials(client, &pid, nullptr, nullptr);
++  surface->SetProperty(kClientPidKey, static_cast<int32_t>(pid));
++
+   // Notify after the surface is initialized.
+   if (display->seat()) {
+     display->seat()->NotifySurfaceCreated(surface.get());
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 18d1f39824..ab56049320 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -29,6 +29,8 @@ struct NativeWindowEntry {
+   // keyboard focus.
+   bool embedded;
+   bool focused;
++  // Pid of the Wayland client in the browser's pid namespace (0 if unknown).
++  int32 pid;
+ };
+ 
+ // Window lifecycle events, surfaced to script as navigator.windowBroker's
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index cd72eb426d..a8b4168ed9 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -30,6 +30,7 @@ NativeWindowEntry* ToEntry(const mojom::blink::NativeWindowEntry& window) {
+   entry->setDeviceScaleFactor(window.device_scale_factor);
+   entry->setEmbedded(window.embedded);
+   entry->setFocused(window.focused);
++  entry->setPid(window.pid);
+   return entry;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/html/native_window_entry.idl b/third_party/blink/renderer/core/html/native_window_entry.idl
+index 4a86e8a83d..8949dc0a7a 100644
+--- a/third_party/blink/renderer/core/html/native_window_entry.idl
++++ b/third_party/blink/renderer/core/html/native_window_entry.idl
+@@ -15,4 +15,6 @@ dictionary NativeWindowEntry {
+     // An element shows it / it has embedded keyboard focus.
+     required boolean embedded;
+     required boolean focused;
++    // Pid of the Wayland client (0 if unknown).
++    required long pid;
+ };
