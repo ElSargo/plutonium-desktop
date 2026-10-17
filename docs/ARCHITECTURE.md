@@ -32,7 +32,7 @@
 
 **`<native-window>`** (patch 0001) is an element that shows an Exo window inside the page.
 - **Drawing:** the window is a surface layer, composited by viz with the rest of the page. It gets no CPU copy, and a fullscreen one goes on a display plane.
-- **Size:** the element's size is sent to the app (`xdg_toplevel.configure`).
+- **Size:** the element's size is sent to the app (`xdg_toplevel.configure`). The page alone sizes a window it shows: the app's own maximize, minimize and move/resize requests are answered with the state unchanged, and anything in Ash that changes its state or size is undone.
 - **Input:** pointer and keyboard input over the element is routed to the app, through the same hit testing that routes input into iframes. So are touchpad scrolling, drag and drop (`features/DRAG_AND_DROP.md`), pointer lock and fullscreen (`features/CONTROLS.md`).
 
 **The window broker** (`navigator.windowBroker`) is how the shell finds and controls windows.

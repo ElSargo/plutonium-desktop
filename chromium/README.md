@@ -28,6 +28,7 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0014 | Tags and groups on windows and tabs; the Super+Tab overlay | [features/SHELLS](../docs/features/SHELLS.md) |
 | 0015 | Overlay fix: no empty "Shells" heading | |
 | 0016 | Shell shortcuts beat Ash's accelerators; no Search+arrow rewriting; transparent gutter; touchpads through libinput and scrolling fixes; drag and drop; links from shell pages open as tabs | [features/NIRI_SHELL](../docs/features/NIRI_SHELL.md), [DRAG_AND_DROP](../docs/features/DRAG_AND_DROP.md), [OPENING_LINKS](../docs/features/OPENING_LINKS.md) |
+| 0017 | The page alone sizes an embedded window: its maximize, minimize, move and resize requests are refused, and Ash's changes undone | [ARCHITECTURE](../docs/ARCHITECTURE.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).
