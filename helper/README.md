@@ -113,6 +113,10 @@ await shell.launchApp(threadId, "foot.desktop");  // shown unless { show: false 
 shell.addEventListener("windowopened", (event) => { const { window, show } = event.detail; });
 shell.addEventListener("tabopened", (event) => event.detail.tab);  // a tab that appears after connecting
 shell.setShellShortcuts(["Alt+Digit1", "Ctrl+KeyT"]);  // keys this page keeps while an app or tab has focus
+// Chrome's context menus (this page's and its tabs') are drawn here, styled with
+// --plutonium-menu-bg, -fg, -border, … (docs/features/CHROME_UI.md). connect({ contextMenu: false })
+// leaves them to Chrome; contextMenu: (request) => true draws them, then
+// shell.closeContextMenu(request.menuId, itemId).
 
 // Browser tabs (Chromium with the tab broker; shell.tabsAvailable):
 const tab = await shell.createTab(threadId, "example.com");

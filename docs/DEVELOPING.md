@@ -95,7 +95,7 @@ Run `live` from the checkout whose slot the session is in: the main checkout for
 - **DRM**, unattended or from an agent: someone stays logged in on a text console, and you run `plutonium run --vt tty2 [--hold N] …`.
 
 **Inspecting and driving it:**
-- **DevTools:** `plutonium cdp list`, `cdp eval <url-part> '<js>'` (add `--gesture` for user activation), `cdp shot`, `cdp click`, `cdp console`. Set `CDP=localhost:9223` for the X11 session. Browser tabs are targets of type `other`, and they work too.
+- **DevTools:** `plutonium cdp list`, `cdp eval <url-part> '<js>'` (add `--gesture` for user activation), `cdp shot`, `cdp click`, `cdp console`. Set `CDP=localhost:9223` for the X11 session. Browser tabs are targets of type `page` too.
 - **Input on DRM without a person:**
   1. `sudo tools/uinput.py <fifo>` creates a virtual keyboard and mouse. Start it **before** the session, because the container doesn't see devices plugged in later.
   2. Write commands to the fifo: `type`, `key LEFTMETA+T`, `move`, `click`, `down`/`up`, `scroll`.

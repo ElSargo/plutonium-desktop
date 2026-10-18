@@ -170,12 +170,12 @@ Verified on Xvfb with the host's T3 data:
 
 ## Limits and next steps
 - **No `Browser` behind a tab.** Some things go through a `Browser` window and are missing:
-  - the context menu's Back/Forward/Reload, keyboard shortcuts (Ctrl+L, Ctrl+T…), find-in-page, printing, zoom UI;
+  - keyboard shortcuts beyond DevTools, back, forward and reload (`CHROME_UI.md`), find-in-page, printing, zoom UI;
   - permission prompts (they'd be denied), downloads UI, file pickers (`<input type=file>` untested);
   - autofill and password manager tab helpers;
   - fullscreen requests (they'd be refused).
   Options: attach the needed tab helpers to the registry's `WebContents`, or keep tabs in a hidden real `Browser` (as the WebUI browser does with its own `BrowserWindow`), which would also allow popping a tab out to a normal window.
 - **Tabs don't survive a browser restart** (no session restore).
-- **DevTools:** tabs are listed as CDP targets of type `other`, not `page`. Evaluate and screenshot work through their websocket (`plutonium cdp eval`, `plutonium cdp shot`).
+- **DevTools:** tabs are CDP targets of type `page` (`other` before `CHROME_UI.md`). A tab's DevTools is a tab of its own (`openedBy: "devtools"`), listed as `other`.
 - A key typed within milliseconds of switching tabs can be lost while the tab re-attaches. No key was lost with a 50 ms gap.
 - SurfaceEmbed is new upstream: enabled by default, but only used by the experimental WebUI browser. Its README describes it as the "secure and simple" replacement for iframe-based embedding (`GuestContents`, which is marked not for production).

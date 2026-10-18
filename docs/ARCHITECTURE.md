@@ -81,6 +81,7 @@
 | Drag and drop | [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md) |
 | Window sizing, `object-fit`, cross-fade, `windowrequest` | [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md) |
 | Links as tabs in their thread | [features/OPENING_LINKS.md](features/OPENING_LINKS.md) |
+| Chrome's own UI in the shell: DevTools, context menus, browser and Ash keys | [features/CHROME_UI.md](features/CHROME_UI.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |
 | The helper's HTTP API and shell library | [../helper/README.md](../helper/README.md) |

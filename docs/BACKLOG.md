@@ -142,14 +142,21 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   not.
 - [ ] **T3 browser features still missing.** M · Zoom, color scheme, mute,
   element picker, screenshots to file, recording, PiP windows, DevTools
-  window, console/network entries in snapshots.
+  window, console/network entries in snapshots. T3 doesn't draw Chrome's
+  context menus itself yet (`CHROME_UI.md`): it gets Chrome's, filtered.
 - [x] **Touchpad on DRM.** Through libinput (`use_libinput`), with scrolling
   into native windows fixed (`NIRI_SHELL.md`, "Scrolling in apps").
 - [ ] **Browser features tabs lack** (no `Browser` behind them). M–L ·
-  Shortcuts, find-in-page, printing, zoom, permission prompts, downloads,
-  file pickers, autofill/passwords, fullscreen; the context menu's
-  navigation items. Attach tab helpers, or host tabs in a hidden `Browser`
-  (which would also allow popping a tab out to a normal window).
+  Find-in-page, printing, zoom, permission prompts, downloads, file
+  pickers, autofill/passwords. (DevTools, back, forward and reload keys and
+  menu items work: `CHROME_UI.md`.) Attach tab helpers, or host tabs in a
+  hidden `Browser` (which would also allow popping a tab out to a normal
+  window).
+- [ ] **Chrome UI still in the shell** (`CHROME_UI.md`). S–M · Ash's
+  tooltips for `title`; a shell page's own `alert()`, permission bubbles
+  and file pickers; the system clipboard read before a context menu stalls
+  an X11 session's menu until the next X event (seen once in four on
+  Xvfb).
 - [ ] **Tabs don't survive a browser restart.** M · Session restore.
 - [x] **Drag and drop** between native apps, tabs and pages
   (`DRAG_AND_DROP.md`). Tested on DRM in the niri shell.
