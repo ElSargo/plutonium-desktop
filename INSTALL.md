@@ -139,23 +139,29 @@ If apps render in software, `plutonium run` says so, and `logs/helper-*.log` exp
 
 ## 7. As the desktop: DRM
 
-1. Switch to a text console (Ctrl+Alt+F2, or F3…) and log in. logind then gives that session the display and input devices.
-2. Your graphical session must not be in front; switching to the text console already does that.
-3. From this repository, run:
+1. Switch to a text console (Ctrl+Alt+F2, or F3…) and log in.
+2. From this repository, run:
 
 ```
 plutonium run niri plain       # niri first, the plain shell behind it (Super+Tab)
 ```
 
-**Leaving the session:**
-- The kill switch kills Ash and switches back to your graphical session.
-- `plutonium stop --drm` (from ssh, or from a terminal inside Plutonium) stops Ash, and the text console comes back.
+Ash runs in that console's logind session, which hands it the display and input devices ([docs/features/SEAT.md](docs/features/SEAT.md)).
 
-**From another shell.** If someone is logged in on tty2, you can run it against that VT from anywhere, for example over ssh or from an agent. This needs passwordless sudo for `python3`:
+**Switching VTs.** Ctrl+Alt+F1…F12 switch to another VT, such as your graphical desktop, while Plutonium keeps running. Switch back to its VT and it's as you left it. Apps keep running in between; they just aren't drawn.
+
+**Leaving the session:**
+- **Ctrl+Alt+Backspace** ends it, and the text console comes back.
+- `plutonium stop --drm` (from ssh, another VT, or a terminal inside Plutonium) does the same.
+- The kill switch kills Ash and switches back to your graphical session. It's for when Ash hangs.
+
+However the session ends, even when Ash crashes or is killed, the text console comes back in working order: logind restores it.
+
+**From another shell.** If you're logged in on tty2, you can start a session there from anywhere, for example over ssh or from an agent. tty2 must be in front when it starts:
 
 ```
 plutonium run --vt tty2 niri
-plutonium run --vt tty2 --hold 120 niri    # unattended: waits for the graphical session to go inactive, stops after 120 s
+plutonium run --vt tty2 --hold 120 niri    # unattended: waits up to 120 s for tty2 to come to the front, stops after 120 s
 ```
 
 **Choosing shells.** List them in order; the first one is the desktop:
@@ -198,9 +204,9 @@ The niri shell's launcher (Super+D) has an entry that starts Claude Code with th
 |---|---|
 | `podman`: "cannot re-exec process to join the existing user namespace" | `PODMAN=lib/pm.sh` in `plutonium.env` |
 | The container exits a minute after starting | Start it with `plutonium container start`, which runs it from a lasting user unit. Starting it from a short-lived wrapper takes its monitor process down with it |
-| `run`: "the graphical session … is active" | Run it from a text console, or pass `--vt ttyN` |
-| `run`: "… is not the active VT" | The console you ran it from isn't the one on screen |
-| The text console is dead after a crash (no echo, no keys) | From ssh: `sudo python3 lib/tty_vt.py restore < /dev/ttyN` |
+| `run`: "… is in no logind session" or "… is not on a seat's VT" | Run it from a text console you logged in on (not a terminal in your desktop), or pass `--vt ttyN` |
+| `run`: "session … is not in front" | The console isn't the one on screen. Switch to it, or use `--hold` with `--vt`, which waits for it |
+| `run`: "no system D-Bus where Ash runs" | The container is from before seat management. Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
 | Apps render in software | See `logs/helper-*.log` and `docs/features/GPU_X11.md`. The host needs Mesa with your GPU's driver |
 | Hotplugged keyboards or mice are ignored on DRM | Plug them in before starting the session. The rootless container doesn't receive udev hotplug events (`docs/BACKLOG.md`) |
 | X11 apps don't start | Install `xwayland-satellite`, or set `PLUTONIUM_XWAYLAND_SATELLITE` |

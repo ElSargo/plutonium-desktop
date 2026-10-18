@@ -16,6 +16,7 @@
 - [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md): who sizes a window, object-fit, the resize cross-fade, windowrequest
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread
 - [features/GPU_X11.md](features/GPU_X11.md): the GPU path for apps
+- [features/SEAT.md](features/SEAT.md): DRM sessions through logind: starting, stopping, switching VTs
 
 **History.** These are the reports as they were written, in order. Their commands and paths refer to the original research repository: `tools/launch-*.sh` is now `plutonium run`, `patches/exo-*.patch` is now `chromium/patches/`, and `shell/` and `shell-niri/` are now `shells/`.
 1. [history/exo-viability-handoff.md](history/exo-viability-handoff.md): the brief

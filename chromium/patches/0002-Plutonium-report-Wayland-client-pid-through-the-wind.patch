@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Thu, 15 Oct 2026 22:14:48 +1300
-Subject: [PATCH 02/20] Plutonium: report Wayland client pid through the window
+Subject: [PATCH 02/21] Plutonium: report Wayland client pid through the window
  broker
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

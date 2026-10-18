@@ -79,8 +79,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   2026-10-17). Not investigated. S
 - [ ] **Shell mode locks every browser window in fullscreen**, not just the
   shell's (as kiosk does). Scope it to the shell window if needed. S
-- [ ] **A way out of a DRM session other than the kill switch** (sign-out is
-  blocked in app mode). S
+- [x] **A way out of a DRM session other than the kill switch.** Done
+  (`features/SEAT.md`): Ctrl+Alt+Backspace, and VT switching with
+  Ctrl+Alt+Fn. Ash is a logind session controller.
+- [ ] **Start a DRM session on a VT that isn't in front.** logind hands out the
+  devices paused, but Ash's first display configuration needs master. Defer it
+  until the session is active. S
 - [x] **App launching from the shell.** Done in Phase 3: the helper's
   `launch` (shell library `shell.launch()`, MCP `launch_app`).
 - [x] **Zero-copy / display planes for embedded windows.** Done

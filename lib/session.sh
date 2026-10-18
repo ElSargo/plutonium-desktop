@@ -9,9 +9,9 @@
 #   SHELLS       more shells, "<name>=<url>|<name>=<url>" (Super+Tab switches)
 #   ORIGINS      every shell's origin, comma-separated (for the helper)
 #   SOCKET       Exo's Wayland socket name; CDP_PORT, HELPER_PORT, PROFILE
-#   drm:  VT (run against ttyN through sudo), HOLD_S (stop after N seconds),
-#         NO_KILLSWITCH, WAIT_S (with HOLD_S: wait for the graphical session to
-#         go inactive first)
+#   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
+#         seconds), NO_KILLSWITCH, WAIT_S (wait up to N seconds for that
+#         session to come to the front)
 #   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
 #   EXTRA_FLAGS  more Chromium flags, VMODULE
 set -u
@@ -111,45 +111,55 @@ if [[ $MODE == x11 ]]; then
 fi
 
 # --- DRM ---------------------------------------------------------------------
-# A graphical session of this user (Plasma, GNOME, …), which must not hold the
-# display while Ash takes it.
-graphical_session() {
+# Ash is the controller of a logind session on a VT (docs/features/SEAT.md):
+# it opens the display and input devices through logind, which switches VTs
+# for it (Ctrl+Alt+Fn), takes the devices away while another VT is in front
+# and gives them back, and puts the VT back in text mode when Ash exits, even
+# if it crashes or is killed.
+
+# The logind session to run in: the one logged in on $VT, or this shell's own.
+session_id() {
+  [[ -z ${VT:-} ]] && { echo "${XDG_SESSION_ID:-}"; return; }
   local sid
   for sid in $(loginctl list-sessions --no-legend | awk -v u="$(id -u)" '$2==u {print $1}'); do
-    loginctl show-session "$sid" -p Type --value | grep -qE '^(wayland|x11)$' && { echo "$sid"; return; }
+    [[ $(loginctl show-session "$sid" -p TTY --value) == "$VT" ]] && { echo "$sid"; return; }
   done
 }
-graphical_active() { [[ -n $GUI && $(loginctl show-session "$GUI" -p Active --value) == yes ]]; }
+session_prop() { loginctl show-session "$SID" -p "$1" --value 2>/dev/null; }
 killswitch_ok() {
   [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
     journalctl --user -u plutonium-killswitch -o cat --no-pager -n 50 |
       grep -E 'killswitch starting|listening on|lost |device not found' | tail -1 | grep -q 'listening on'
 }
-# lib/tty_vt.py on this shell's VT, or as root on $VT.
-tty_vt() {
-  if [[ -n ${VT:-} ]]; then sudo -n "$(command -v python3)" "$ROOT/lib/tty_vt.py" "$@" < "/dev/$VT"
-  else python3 "$ROOT/lib/tty_vt.py" "$@"; fi
-}
 
-GUI=$(graphical_session)
+SID=$(session_id)
+if [[ -z $SID ]]; then
+  if [[ -n ${VT:-} ]]; then log "ABORT: nobody of yours is logged in on $VT"
+  else log "ABORT: this shell is in no logind session; log in on a text console (Ctrl+Alt+F2), or pass --vt ttyN"; fi
+  exit 1
+fi
+if [[ -z $(session_prop Seat) || $(session_prop VTNr) == 0 ]]; then
+  log "ABORT: session $SID ($(session_prop Type), $(session_prop TTY)) is not on a seat's VT; run this from a text console (Ctrl+Alt+F2), or pass --vt ttyN"
+  exit 1
+fi
+on_ash test -S /run/dbus/system_bus_socket ||
+  { log "ABORT: no system D-Bus where Ash runs; make the container again (plutonium container stop; podman rm $CONTAINER; plutonium container create), with /run/dbus"; exit 1; }
 if ! killswitch_ok; then
   if [[ -n ${HOLD_S:-} ]]; then log "no kill switch; Ash stops by itself after $HOLD_S s"
-  elif [[ -n ${NO_KILLSWITCH:-} ]]; then log "WARNING: no kill switch; only stopping Ash from elsewhere (ssh: plutonium stop --drm) gets the VT back"
+  elif [[ -n ${NO_KILLSWITCH:-} ]]; then log "WARNING: no kill switch; if Ash hangs, only stopping it from elsewhere (ssh: plutonium stop --drm) gets the VT back"
   else log "ABORT: the kill switch is not listening (plutonium killswitch install), and no --hold or --no-killswitch"; exit 1
   fi
 fi
-if [[ -n ${HOLD_S:-} && -n ${WAIT_S:-} ]]; then
-  for _ in $(seq 1 "$WAIT_S"); do graphical_active || break; sleep 1; done
+if [[ -n ${WAIT_S:-} ]]; then
+  for _ in $(seq 1 "$WAIT_S"); do [[ $(session_prop Active) == yes ]] && break; sleep 1; done
 fi
-graphical_active && { log "ABORT: the graphical session $GUI is active; run this from a text VT (Ctrl+Alt+F2 and log in) or with --vt"; exit 1; }
-tty_vt check >> "$LOG" 2>&1 || { log "ABORT: ${VT:-stdin} is not the active VT"; exit 1; }
+[[ $(session_prop Active) == yes ]] ||
+  { log "ABORT: session $SID ($(session_prop TTY)) is not in front; switch to it first (Ctrl+Alt+F$(session_prop VTNr))"; exit 1; }
 
 start_helper
-echo "Starting Ash on DRM. This VT's keyboard is off until it exits."
-tty_vt graphics >> "$LOG" 2>&1 || { log "ABORT: could not set KD_GRAPHICS/K_OFF"; exit 1; }
-trap 'tty_vt restore >> "$LOG" 2>&1' EXIT
-
+echo "Starting Ash on DRM in session $SID ($(session_prop TTY)). Ctrl+Alt+F1…F12 switch VTs, Ctrl+Alt+Backspace ends it."
 FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
+        "--plutonium-logind-session=$SID"
         # No ChromeOS gestures library in this build: touchpads go through
         # libinput (use_libinput=true in args.gn) or they don't move the cursor.
         --enable-features=LibinputHandleTouchpad)
@@ -166,6 +176,6 @@ fi
 wait $ash
 log "Ash exited ($?)"
 [[ -n ${stopper:-} ]] && kill "$stopper" 2>/dev/null
-# Let DRM master go before anyone else takes the display.
+# Its children too, before anyone else takes the display.
 stop_ash KILL
 exit 0
