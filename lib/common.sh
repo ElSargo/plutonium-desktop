@@ -92,6 +92,16 @@ ASH_BIN='[^ ]*/chrome'
 # switch and the launchers find Ash by it.
 ASH_MARK=--plutonium-shell-origin=
 
+# The live frontends (plutonium live): what this slot's shell servers and
+# helper serve, through a `current` link per part that a running session
+# follows. Until something is applied, it's the checkout's own files.
+LIVE_DIR=$DATA_DIR/live/slot$SLOT
+live_current() {   # <part> <the checkout's own directory for it>
+  local link=$LIVE_DIR/$1/current
+  [[ -e $link ]] || { mkdir -p "$LIVE_DIR/$1"; ln -sfn "$2" "$link"; }
+  echo "$link"
+}
+
 # The helper reads this when it starts a thread's X server.
 [[ -n ${PLUTONIUM_XWAYLAND_SATELLITE:-} ]] && export PLUTONIUM_XWAYLAND_SATELLITE
 

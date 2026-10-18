@@ -47,7 +47,9 @@ export interface DaemonOptions {
 }
 
 const HELPER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SHELL_LIBRARY = join(HELPER_ROOT, "web", "plutonium-shell.js");
+// A session serves the live one (`plutonium live`), read on every request.
+const SHELL_LIBRARY =
+  process.env.PLUTONIUM_SHELL_LIBRARY || join(HELPER_ROOT, "web", "plutonium-shell.js");
 const CLI = join(HELPER_ROOT, "plutonium.ts");
 const MAX_BODY = 1 << 26;
 // How long a group list from the browser is used for routing.

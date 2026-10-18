@@ -39,7 +39,8 @@ start_helper() {
   # Apps the helper launches inherit its environment: leave out an agent
   # session's own variables when this runs from one (Claude Code).
   setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') \
-    node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" \
+    PLUTONIUM_SHELL_LIBRARY="$(live_current shell-lib "$ROOT/helper/web")/plutonium-shell.js" \
+    node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
     --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" > "$HELPER_LOG" 2>&1 < /dev/null &
   echo $! > "$pidfile"
 }

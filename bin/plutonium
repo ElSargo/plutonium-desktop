@@ -34,6 +34,8 @@ Sessions:
   t3 stop                    stop the T3 Code server
   t3 <command>               T3 Code's own CLI on the same data: t3 pair, t3 connect link, ...
   status                     what is running
+  live apply|revert|status   swap what a running session's shells serve (niri, plain, shell.js,
+                             T3 Code's web app) and reload them: plutonium live --help
 
 Development:
   helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
@@ -503,6 +505,13 @@ t3_check_db() {
     ' "$db" "$backup" 2> /dev/null || die "couldn't back up $db"
   fi
 }
+# The part of a T3 Code checkout its web app talks to: the server and the
+# contracts between them. A web app built where these differ from what the
+# running server was started from may not work with it.
+t3_fingerprint() {
+  (cd "$1" && git ls-files -co --exclude-standard -z -- apps/server/src packages/contracts/src ':!:*.test.ts' |
+    sort -z | xargs -0 sha256sum 2> /dev/null || true) | sha256sum | cut -c1-12
+}
 # Start the server for a session's socket: "restart" restarts ours, otherwise
 # ours is reused if it serves that socket.
 t3_start() {
@@ -532,6 +541,8 @@ t3_start() {
       > "$LOGS/t3-server.log" 2>&1 < /dev/null &
     echo $! > "$pidfile"
   )
+  # What its clients talk to, for `live apply t3` (t3_fingerprint).
+  t3_fingerprint "$T3CODE_DIR" > "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint"
   for _ in $(seq 1 30); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
   die "the T3 Code server didn't start (logs/t3-server.log)"
 }
@@ -610,6 +621,11 @@ t3_cmd() {
       [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
       (cd "$T3CODE_DIR" && t3_pnpm install) || die "pnpm install failed"
       t3_stamp_version "$base"
+      # A live web app (plutonium live apply t3): build in place of it, not into it.
+      if [[ -L $T3CODE_DIR/apps/web/dist ]]; then
+        rm "$T3CODE_DIR/apps/web/dist"
+        echo "the server serves this build now, not the live one (plutonium live status)"
+      fi
       (cd "$T3CODE_DIR/apps/web" && t3_pnpm exec vp build) ;;
     server)
       local mode=drm
@@ -647,8 +663,8 @@ serve_shell() {
 shell_entry() {
   local helper=http://127.0.0.1:$HELPER_PORT
   case "$1" in
-    niri) serve_shell "$ROOT/shells/niri" "$(slot_port 8775)"; echo "niri=http://127.0.0.1:$(slot_port 8775)/?helper=$helper" ;;
-    plain) serve_shell "$ROOT/shells/plain" "$(slot_port 8770)"; echo "Plain=http://127.0.0.1:$(slot_port 8770)/?helper=$helper" ;;
+    niri) serve_shell "$(live_current niri "$ROOT/shells/niri")" "$(slot_port 8775)"; echo "niri=http://127.0.0.1:$(slot_port 8775)/?helper=$helper" ;;
+    plain) serve_shell "$(live_current plain "$ROOT/shells/plain")" "$(slot_port 8770)"; echo "Plain=http://127.0.0.1:$(slot_port 8770)/?helper=$helper" ;;
     t3|t3=*)
       local url=${1#t3}; url=${url#=}
       if [[ -z $url ]]; then t3_start "$SOCKET"; url=$(t3_pair_url)
@@ -733,6 +749,330 @@ status_cmd() {
   (( SLOT )) && echo "slot $SLOT (plutonium worktree info)"
   [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
     echo "kill switch: active" || echo "kill switch: not installed or not running"
+}
+
+# --- Live frontends ----------------------------------------------------------
+# A session's shells come through links (live_current, in common.sh) that their
+# servers read through on every request. Pointing a link at other files and
+# reloading the page changes a shell without restarting anything, and the page
+# stays on the origin that Ash gave shell rights to when it started.
+LIVE_KEEP=${LIVE_KEEP:-5}
+LIVE_ALL=(niri plain shell-lib t3)
+live_usage() {
+  cat <<EOF2
+Usage: plutonium live <command>
+
+Changes what this slot's running sessions use as their shells, with no restart.
+Parts: niri, plain, shell-lib (the helper's /v1/shell.js), t3 (T3 Code's web
+app); "shells" means niri, plain and shell-lib.
+
+  apply <part>... [--from <dir|commit>] [--follow] [--no-reload] [--force]
+        Copy the part from a checkout's files as they are now (default: this
+        checkout; for t3, T3CODE_DIR, building its web app), or from a commit
+        of this repository. Serve the copy, and reload the pages that use it.
+        --follow serves the checkout's own files (for t3, its dist) instead.
+        t3 refuses a checkout whose server or contracts differ from what the
+        running server was started from; --force applies it anyway.
+  revert <part>...   go back to what was served before
+  reload <part>...   reload the pages that use it
+  status             what each part serves, and from where
+  list <part>        its copies
+EOF2
+}
+# A part's directory: its copies, and the links current and previous. T3's
+# belongs to the T3 checkout, whose apps/web/dist becomes a link to it.
+live_root() {
+  if [[ $1 == t3 ]]; then echo "$DATA_DIR/live/t3-$(realpath -m "$T3CODE_DIR" | sha256sum | cut -c1-8)"
+  else echo "$LIVE_DIR/$1"; fi
+}
+live_subdir() { case $1 in niri|plain) echo "shells/$1" ;; shell-lib) echo helper/web ;; esac; }
+# The URL prefixes of the pages that load a part.
+live_pages() {
+  case $1 in
+    niri) echo "http://127.0.0.1:$(slot_port 8775)/" ;;
+    plain) echo "http://127.0.0.1:$(slot_port 8770)/" ;;
+    t3) echo "http://127.0.0.1:$T3_PORT/" ;;
+    shell-lib) live_pages niri; live_pages plain; live_pages t3 ;;
+  esac
+}
+live_port() { case $1 in niri) slot_port 8775 ;; plain) slot_port 8770 ;; esac; }
+# Repoint a link with one rename, so no request finds it missing.
+live_link() { ln -sfn "$2" "$1.tmp" && mv -T "$1.tmp" "$1"; }
+# Make a target the part's current one; what was current becomes previous.
+live_switch() {
+  local root=$1 target=$2 old
+  old=$(readlink "$root/current" 2> /dev/null || true)
+  [[ -n $old && $old != "$target" ]] && live_link "$root/previous" "$old"
+  live_link "$root/current" "$target"
+}
+live_new_id() {   # <root> <label>: a new copy's name, unused in <root>
+  local id n=1
+  id=$(date +%Y%m%d-%H%M%S)-$2
+  while [[ -e $1/$id ]]; do n=$((n + 1)) id=${id%_[0-9]*}_$n; done
+  echo "$id"
+}
+# "<commit>", with "-dirty" if the checkout has changes under the paths.
+live_commit_of() {
+  local dir=$1 commit
+  shift
+  commit=$(git -C "$dir" rev-parse --short=8 HEAD 2> /dev/null || echo nogit)
+  [[ -n $(git -C "$dir" status --porcelain -- "$@" 2> /dev/null) ]] && commit+=-dirty
+  echo "$commit"
+}
+live_note() {   # <root> <id> <source> <commit>
+  printf 'source %s\ncommit %s\ntaken %s\n' "$3" "$4" "$(date '+%F %T')" > "$1/$2.info"
+}
+
+# Copy a shell part (or link it, with follow); prints the new target.
+live_take() {   # <part> <source> <follow>
+  local part=$1 src=$2 follow=$3 root sub id commit
+  root=$(live_root "$part") sub=$(live_subdir "$part")
+  mkdir -p "$root"
+  if [[ -d $src ]]; then
+    src=$(realpath "$src")
+    [[ -d $src/$sub ]] || die "$src has no $sub"
+    [[ -n $follow ]] && { echo "$src/$sub"; return; }
+    commit=$(live_commit_of "$src" "$sub")
+    id=$(live_new_id "$root" "$commit")
+    cp -a --reflink=auto "$src/$sub" "$root/$id"
+  else
+    [[ -z $follow ]] || die "--follow takes a checkout directory, not a commit"
+    commit=$(git -C "$ROOT" rev-parse --short=8 -q --verify "$src^{commit}") ||
+      die "'$src' is neither a directory nor a commit in $ROOT"
+    id=$(live_new_id "$root" "$commit") src="$ROOT at $src"
+    mkdir "$root/$id"
+    git -C "$ROOT" archive "$commit" "$sub" | tar -x -C "$root/$id" --strip-components=$(( $(tr -cd / <<< "$sub" | wc -c) + 1 ))
+  fi
+  live_note "$root" "$id" "$src" "$commit"
+  echo "$id"
+}
+
+# Whether a T3 checkout's server and contracts are what the running server was
+# started from (t3_start records it; before that, T3CODE_DIR as it is now).
+live_t3_compatible() {
+  local file=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint want
+  if [[ -f $file ]]; then want=$(cat "$file"); else want=$(t3_fingerprint "$T3CODE_DIR"); fi
+  [[ $(t3_fingerprint "$1") == "$want" ]]
+}
+# Build a T3 checkout's web app (or link its dist, with follow); prints the new target.
+live_take_t3() {   # <source> <follow>
+  local src=$1 follow=$2 root id commit version
+  [[ -d $src ]] || die "t3 comes from a T3 Code checkout directory (--from <dir>), not a commit"
+  src=$(realpath "$src") root=$(live_root t3)
+  [[ -f $src/apps/web/package.json ]] || die "$src isn't a T3 Code checkout"
+  mkdir -p "$root"
+  if [[ -n $follow ]]; then
+    [[ $src != "$(realpath "$T3CODE_DIR")" ]] || die "that's the server's own checkout; its dist is what the link replaces"
+    [[ -f $src/apps/web/dist/index.html ]] || die "$src has no build (its apps/web/dist)"
+    echo "$src/apps/web/dist"
+    return
+  fi
+  [[ -d $src/node_modules ]] || die "$src has no dependencies installed (pnpm install there)"
+  commit=$(live_commit_of "$src" .)
+  id=$(live_new_id "$root" "$commit")
+  # Built as the running server's version, so the page doesn't report a mismatch.
+  version=$(node -p 'require(process.argv[1]).version' "$T3CODE_DIR/apps/server/package.json")
+  echo "building T3 Code's web app from $src (log logs/live-t3-build.log)" >&2
+  (
+    cd "$src/apps/web"
+    # T3 Connect's settings, as the server's checkout has them, if this one has none.
+    [[ -f $src/.env || ! -f $T3CODE_DIR/.env ]] || { set -a; . "$T3CODE_DIR/.env"; set +a; }
+    APP_VERSION=$version t3_pnpm exec vp build --outDir "$root/$id" --emptyOutDir
+  ) > "$LOGS/live-t3-build.log" 2>&1 || { rm -rf "${root:?}/$id"; die "the build failed (logs/live-t3-build.log)"; }
+  live_note "$root" "$id" "$src" "$commit"
+  echo "$id"
+}
+# Turn T3CODE_DIR's dist into a link to the live one. The build it holds is
+# kept as a copy (made before the swap, so the server always has one to serve).
+live_t3_adopt() {
+  local dist=$T3CODE_DIR/apps/web/dist root id
+  root=$(live_root t3)
+  [[ -L $dist && $(readlink "$dist") == "$root/current" ]] && return
+  [[ ! -e $dist || -L $dist || -d $dist ]] || die "$dist isn't a directory"
+  if [[ -d $dist && ! -L $dist ]]; then
+    id=$(live_new_id "$root" built)
+    cp -a --reflink=auto "$dist" "$root/$id"
+    live_note "$root" "$id" "$T3CODE_DIR (its own build, before live)" "$(live_commit_of "$T3CODE_DIR" .)"
+    [[ -e $root/current ]] || live_link "$root/current" "$id"
+    mv "$dist" "$dist.before-live"
+  fi
+  live_link "$dist" "$root/current"
+  rm -rf "$dist.before-live"
+}
+
+# A shell server Plutonium started on other files (a session from another
+# checkout, or from before live) is restarted on the live link.
+live_rehome() {   # <part>
+  local port dir pidfile pid cmd
+  port=$(live_port "$1") || true
+  [[ -n $port ]] || return 0
+  dir=$LIVE_DIR/$1/current pidfile=$RUN_DIR/plutonium/serve-$port.pid
+  pid=$(cat "$pidfile" 2> /dev/null || true)
+  cmd=$([[ -n $pid ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null || true)
+  if [[ $cmd != *"http.server $port "* ]]; then
+    curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" &&
+      echo "warning: port $port is served by something Plutonium didn't start; $1 isn't live there" >&2
+    return 0
+  fi
+  [[ $cmd == *" --directory $dir "* || $cmd == *" --directory $dir" ]] && return 0
+  kill "$pid"
+  for _ in $(seq 1 25); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$port/" || break; sleep 0.2; done
+  serve_shell "$dir" "$port"
+  cmd=${cmd##*--directory }
+  echo "$1: the server on $port serves the live link now (it served ${cmd% })" >&2
+}
+# The running helpers of this slot that serve shell.js from elsewhere.
+live_helper_check() {
+  local mode pid want=$LIVE_DIR/shell-lib/current/plutonium-shell.js
+  for mode in drm x11; do
+    session_vars "$mode"
+    pid=$(cat "$RUN_DIR/plutonium/helper-$SOCKET.pid" 2> /dev/null || true)
+    [[ -n $pid && -r /proc/$pid/environ ]] || continue
+    tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF "PLUTONIUM_SHELL_LIBRARY=$want" && continue
+    echo "warning: the $mode session's helper started before live, and serves its own shell.js until the session restarts" >&2
+  done
+}
+live_reload() {   # <part>...
+  local mode prefix part prefixes
+  prefixes=$(for part; do live_pages "$part"; done | sort -u)
+  for mode in drm x11; do
+    session_vars "$mode"
+    pgrep -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)" > /dev/null || continue
+    for prefix in $prefixes; do
+      on_ash -e "CDP=localhost:$CDP_PORT" python3 "$MAIN_ROOT/tools/cdp.py" reload "$prefix" | sed "/reloaded 0 pages/d; s/^/$mode session: /"
+    done
+  done
+}
+live_prune() {   # <root>
+  local root=$1 cur prev id
+  cur=$(readlink "$root/current" 2> /dev/null || true) prev=$(readlink "$root/previous" 2> /dev/null || true)
+  { ls -1 "$root" | grep -E '^[0-9]{8}-[0-9]{6}-[^.]*$' | sort -r | tail -n +$(( LIVE_KEEP + 1 )); } 2> /dev/null |
+    while read -r id; do
+      [[ $id == "$cur" || $id == "$prev" ]] || rm -rf "${root:?}/$id" "$root/$id.info"
+    done || true
+}
+live_describe() {   # <root> <link>
+  local target
+  target=$(readlink "$1/$2" 2> /dev/null) || { echo "-"; return; }
+  if [[ $target == /* ]]; then echo "$target, as it is"
+  else echo "$target, from $(sed -n 's/^source //p' "$1/$target.info" 2> /dev/null), taken $(sed -n 's/^taken //p' "$1/$target.info" 2> /dev/null)"; fi
+}
+live_parts() {   # the arguments' parts, or die
+  local arg
+  for arg; do
+    case $arg in
+      shells) echo niri plain shell-lib ;;
+      niri|plain|shell-lib|t3) echo "$arg" ;;
+      *) die "unknown part '$arg' (niri, plain, shell-lib, t3, shells)" ;;
+    esac
+  done
+}
+
+live_cmd() {
+  local cmd=${1:-} parts=() part root target from= follow= reload=1 force=
+  shift || true
+  case $cmd in
+    apply)
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --from) from=${2:?--from needs a directory or commit}; shift ;;
+          --follow) follow=1 ;;
+          --no-reload) reload= ;;
+          --force) force=1 ;;
+          *) parts+=($(live_parts "$1")) ;;
+        esac
+        shift
+      done
+      [[ ${#parts[@]} -gt 0 ]] || { live_usage; exit 2; }
+      if [[ -n $from && " ${parts[*]} " == *" t3 "* && ${#parts[@]} -gt 1 ]]; then
+        die "t3 comes from a T3 Code checkout, the others from a Plutonium one: apply them separately"
+      fi
+      for part in "${parts[@]}"; do
+        root=$(live_root "$part")
+        if [[ $part == t3 ]]; then
+          local src=${from:-$T3CODE_DIR}
+          if [[ -z $force ]] && ! live_t3_compatible "$src"; then
+            if [[ $(realpath "$src") == "$(realpath "$T3CODE_DIR")" ]]; then
+              echo "$src's server or contracts (apps/server/src, packages/contracts/src) have changed since" >&2
+              echo "the running T3 Code server started, so its web app may not work with that server." >&2
+            else
+              echo "$src's server or contracts (apps/server/src, packages/contracts/src) differ from what the running" >&2
+              echo "T3 Code server was started from, so its web app may not work with that server:" >&2
+            fi
+            diff -rq -x '*.test.ts' "$T3CODE_DIR/apps/server/src" "$src/apps/server/src" 2> /dev/null | head -5 >&2 || true
+            diff -rq -x '*.test.ts' "$T3CODE_DIR/packages/contracts/src" "$src/packages/contracts/src" 2> /dev/null | head -5 >&2 || true
+            die "restart the server on it instead (T3CODE_DIR, plutonium t3 server), or --force"
+          fi
+          target=$(live_take_t3 "$src" "$follow")
+          live_t3_adopt
+        else
+          live_current "$part" "$ROOT/$(live_subdir "$part")" > /dev/null
+          target=$(live_take "$part" "${from:-$ROOT}" "$follow")
+        fi
+        live_switch "$root" "$target"
+        echo "$part: $(live_describe "$root" current)"
+        live_rehome "$part"
+        live_prune "$root"
+      done
+      [[ " ${parts[*]} " == *" shell-lib "* ]] && live_helper_check
+      if [[ -n $reload ]]; then
+        [[ " ${parts[*]} " == *" t3 "* || " ${parts[*]} " == *" shell-lib "* ]] &&
+          echo "(reloading T3 Code: its browser panel tabs move to Elsewhere, as after any reload)"
+        live_reload "${parts[@]}"
+      fi ;;
+    revert)
+      [[ $# -gt 0 ]] || { live_usage; exit 2; }
+      parts=($(live_parts "$@"))
+      for part in "${parts[@]}"; do
+        root=$(live_root "$part")
+        target=$(readlink "$root/previous" 2> /dev/null) || die "$part has nothing to go back to"
+        [[ $part == t3 ]] && live_t3_adopt
+        live_switch "$root" "$target"
+        echo "$part: $(live_describe "$root" current)"
+        live_rehome "$part"
+      done
+      live_reload "${parts[@]}" ;;
+    reload)
+      [[ $# -gt 0 ]] || { live_usage; exit 2; }
+      live_reload $(live_parts "$@") ;;
+    status)
+      local dist=$T3CODE_DIR/apps/web/dist port pid cmd
+      for part in "${LIVE_ALL[@]}"; do
+        root=$(live_root "$part")
+        if [[ ! -L $root/current ]]; then
+          if [[ $part == t3 ]]; then echo "t3: not live; the server serves $dist"
+          else echo "$part: this checkout's own files (the next session links them)"; fi
+          continue
+        fi
+        echo "$part: $(live_describe "$root" current)"
+        [[ -L $root/previous ]] && echo "  previous: $(live_describe "$root" previous)"
+        case $part in
+          niri|plain)
+            port=$(live_port "$part") pid=$(cat "$RUN_DIR/plutonium/serve-$port.pid" 2> /dev/null || true)
+            cmd=$([[ -n $pid ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null || true)
+            if [[ $cmd != *"http.server $port "* ]]; then echo "  no server on $port"
+            elif [[ $cmd == *"$root/current"* ]]; then echo "  served on $port"
+            else cmd=${cmd##*--directory }; echo "  but the server on $port serves ${cmd% } (live apply $part moves it)"; fi ;;
+          shell-lib) live_helper_check 2>&1 | sed 's/^warning: /  /' ;;
+          t3)
+            if [[ -L $dist && $(readlink "$dist") == "$root/current" ]]; then echo "  served by $T3CODE_DIR's server"
+            else echo "  but the server serves $dist (live apply t3 moves it)"; fi ;;
+        esac
+      done ;;
+    list)
+      [[ $# -eq 1 ]] || { live_usage; exit 2; }
+      part=$(live_parts "$1") root=$(live_root "$part")
+      local cur prev id mark
+      cur=$(readlink "$root/current" 2> /dev/null || true) prev=$(readlink "$root/previous" 2> /dev/null || true)
+      for id in $(ls -1 "$root" 2> /dev/null | grep -E '^[0-9]{8}-[0-9]{6}-[^.]*$' | sort -r || true); do
+        mark="  "; [[ $id == "$cur" ]] && mark="* "; [[ $id == "$prev" ]] && mark="< "
+        echo "$mark$id  $(sed -n 's/^source //p' "$root/$id.info" 2> /dev/null)"
+      done
+      [[ $cur == /* ]] && echo "* $cur (followed)"
+      [[ $prev == /* ]] && echo "< $prev (followed)"
+      true ;;
+    *) live_usage; [[ -z $cmd || $cmd == -h || $cmd == --help ]] || exit 2 ;;
+  esac
 }
 
 # --- Kill switch -------------------------------------------------------------
@@ -872,6 +1212,7 @@ case "$cmd" in
   stop) stop_cmd "$@" ;;
   status) status_cmd ;;
   killswitch) killswitch_cmd "$@" ;;
+  live) live_cmd "$@" ;;
   worktree) worktree_cmd "$@" ;;
   helper) session_vars drm; PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-$SOCKET} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
   # tools/cdp.py from the main checkout, which the container mounts.

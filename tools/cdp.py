@@ -12,6 +12,7 @@ CDP=host:port picks the session (DRM 9224, X11 9223).
   cdp.py shot <url-part> <out.png>         screenshot a page or tab, even while hidden
   cdp.py click <url-part> <x> <y>          click at CSS pixels (renderer input, not Ash's)
   cdp.py console <url-part> <seconds>      print console messages and exceptions
+  cdp.py reload <url-prefix>               reload every page whose URL starts with it
   cdp.py shots <url-part> <js> <n> <out>   run js, then take n screenshots back to back
                                            (<out>0.png, ...), to film an animation
 """
@@ -67,6 +68,13 @@ async def main(args):
     if cmd == "list":
         for t in targets():
             print(t["type"], t["url"])
+    elif cmd == "reload":
+        pages = [t for t in targets() if t["type"] == "page" and t["url"].startswith(rest[0])]
+        for t in pages:
+            async with websockets.connect(t["webSocketDebuggerUrl"], max_size=None) as ws:
+                # Bypassing the cache: the files can be older than the cached ones.
+                await Session(ws).call("Page.reload", {"ignoreCache": True})
+        print(f"reloaded {len(pages)} page{'' if len(pages) == 1 else 's'} at {rest[0]}")
     elif cmd == "browser":
         url = json.load(urllib.request.urlopen(f"http://{HOST}/json/version"))["webSocketDebuggerUrl"]
         async with websockets.connect(url, max_size=None) as ws:

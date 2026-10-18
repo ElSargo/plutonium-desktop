@@ -5,8 +5,9 @@
 | Change | Where | Then |
 |---|---|---|
 | The helper, its API, link opening, MCP tools | `helper/` (TypeScript run by Node 24 directly, no build) | restart the session, or only its helper |
-| A shell's UI | `shells/<name>/index.html` | reload the page (DevTools, or `plutonium cdp eval <part> 'location.reload()'`) |
-| T3 Code's integration | the checkout in `frontends/t3code/checkout` | `plutonium t3 build`, reload; commit, then `plutonium t3 export` |
+| The shell library (`/v1/shell.js`) | `helper/web/plutonium-shell.js` | reload the shells; from a worktree, `plutonium live apply shell-lib` |
+| A shell's UI | `shells/<name>/index.html` | reload the page (`plutonium live reload <name>`); from a worktree, `plutonium live apply <name>` |
+| T3 Code's integration | the checkout in `frontends/t3code/checkout` | `plutonium t3 build`, reload; or `plutonium live apply t3`; commit, then `plutonium t3 export` |
 | Chromium: Exo, the broker, elements, tabs, shell mode | the checkout in `$CHROMIUM_DIR/src`, branch `plutonium` | `plutonium chromium build`, restart the session; commit, then `plutonium chromium export` |
 
 ## Chromium workflow
@@ -60,6 +61,32 @@ plutonium image push                 # that tag and :latest
 ```
 
 Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium container create`, then run sessions with the same two variables set.
+
+## Applying changes to a running session
+
+`plutonium live` changes what a running session's shells are made of, with no restart: niri, plain, the helper's `shell.js` (`shell-lib`), and T3 Code's web app (`t3`).
+
+```
+plutonium live apply niri plain --from ~/.t3/worktrees/plutonium-desktop/t3-60ce77be
+plutonium live apply t3 --from ~/.t3/worktrees/t3code-oauth-popups
+plutonium live status
+plutonium live revert t3
+```
+
+**How it works.** Ash gives shell rights to origins fixed when it starts (`127.0.0.1:8775`, and so on), so a worktree's own servers, on its slot's ports, can't stand in for them. What's behind those origins can change instead:
+- **The links.** The shell servers serve `$DATA_DIR/live/slot<N>/<part>/current`, and the helper serves `shell.js` from `shell-lib/current`. These are links. Until something is applied, each one points at the checkout's own files, which is how sessions worked before.
+- **T3 Code.** Its server serves its checkout's `apps/web/dist`, read on every request. The first `apply t3` keeps a copy of the build that's there, then makes `dist` a link to the live one.
+- **`apply`** copies the part from a checkout's files as they are (a worktree an agent is working in, uncommitted changes included) or from a commit of this repository. For t3, it builds the checkout's web app into the copy, as the running server's version (about 40 s; the checkout needs its `pnpm install`). It then points `current` at the copy, in one rename, and reloads every page of this slot's sessions that uses the part, bypassing the cache. The page keeps its origin, so it keeps its shell rights. `--follow` points at the checkout's own files instead of a copy, so each reload shows its latest edits. `--no-reload` leaves reloading to you.
+- **`revert`** goes back to the previous one. The newest `LIVE_KEEP` (5) copies of each part are kept, and `live list <part>` shows them.
+
+**What it can't change without a restart:**
+- **The T3 Code server.** Its web app talks to it through `packages/contracts`. `apply t3` refuses a checkout whose `apps/server/src` or `packages/contracts/src` differ from what the running server was started from: restart the server on it instead (`plutonium t3 server`, with `T3CODE_DIR` pointing at it). `--force` applies it anyway. A restart cuts running agent turns, which T3 then continues.
+- **The helper's own code**, and Chromium.
+- **A session from before `live`.** Its shell servers serve other files. The first `apply` of a shell restarts that shell's server on the link, which pages don't notice. Its helper keeps serving its own `shell.js` until the session restarts; `live status` says so.
+
+**Reloading** loses what a page doesn't keep. niri and plain keep their layout and state in the page's storage. T3 Code's browser panel tabs move to Elsewhere, as after any reload.
+
+Run `live` from the checkout whose slot the session is in: the main checkout for your own desktop. A worktree's `live` changes its own slot's sessions.
 
 ## Testing a session
 

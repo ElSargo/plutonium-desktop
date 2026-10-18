@@ -19,6 +19,8 @@ node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3774[,<origin>â€
 
 `--cdp-port` is the browser's `--remote-debugging-port`; without it there are no server-driven tabs. `PLUTONIUM_DEBUG_TABS=1` logs their traffic.
 
+`/v1/shell.js` is `web/plutonium-shell.js`, or the file in `PLUTONIUM_SHELL_LIBRARY` (a session sets it to its live one, `plutonium live`), read on every request.
+
 A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
 
 `plutonium run` starts it with Ash (DRM sessions on port 3782, X11 ones on 3781). X11 apps need `xwayland-satellite` on `PATH` or in `PLUTONIUM_XWAYLAND_SATELLITE`, plus `systemd-socket-activate`.
