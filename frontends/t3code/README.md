@@ -7,7 +7,7 @@
 T3 Code is optional. The niri and plain shells need nothing from here.
 
 - **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
-- **`patches/`**: the series (`git am`): 12 commits, about 2,600 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`patches/`**: the series (`git am`): 13 commits, about 3,000 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
@@ -44,6 +44,7 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0010 | Panel apps cross-fade when the panel is maximized or restored; an app's maximize button maximizes the panel |
 | 0011 | The shell pairs with the launcher's token only when it needs to (not paired, or missing scopes) |
 | 0012 | The server drives the panel's tabs, as it drives the desktop app's: over the helper's socket, with Playwright, through a relay to that one tab of the real browser. T3's agents use their own `preview_*` tools |
+| 0013 | What the user starts comes to the front: apps from a terminal (not setup or settle scripts) or the launcher open in the thread's panel with the keyboard. In another thread, they wait in its panel. What agents open waits, and a toast with Show says so while its thread is open |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 
@@ -52,7 +53,9 @@ Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/histo
 - **Thread tagging:** guaranteed for Claude and Codex threads. The other providers only get the tag when T3 gives the thread an MCP session.
 - **T3's browser tools:** agents only get T3's `preview_*` tools with "Agent browser access" on (Settings). Without them, they can still use the helper's tab tools.
 - **The agent bridge:** only Claude sessions get the helper's MCP server.
-- **New apps:** an app that is launched doesn't get a tab by itself; open it from Apps.
+- **New apps:** only apps the user started open by themselves: from a thread's terminal or the launcher (`PLUTONIUM_SHOW`). An agent's wait in Apps, with a toast while their thread is open. Agents can ask for theirs to be shown (`focus: true`, or `PLUTONIUM_SHOW=1 <command>`).
+- **X11 apps** started from a terminal don't open by themselves: Plutonium sees their windows as the thread's X server's, which has no `PLUTONIUM_SHOW`. They get the toast. The launcher still opens them.
+- **Single-instance apps** (Firefox, VS Code, file managers): a second launch reuses the running process, so its new window goes by how that process was started.
 
 ## Changing it
 

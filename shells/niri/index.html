@@ -1002,7 +1002,8 @@ const actions = {
     else shell.tabCommand(tile.id, "close");
   },
   spawn(argv) {
-    shell.launch(TAG, argv).catch((e) => notice(`spawn ${argv[0]}: ${e.message}`));
+    // The user's: links its apps open come to the front (PLUTONIUM_SHOW).
+    shell.launch(TAG, argv, { show: true }).catch((e) => notice(`spawn ${argv[0]}: ${e.message}`));
   },
   launcher() { openLauncher(); },
   hotkeys() { showHotkeys(); },
@@ -1321,11 +1322,11 @@ async function runLauncherItem(item) {
     } else if (item.kind === "tab") {
       await shell.createTab(TAG, item.label);
     } else if (item.kind === "cmd") {
-      await shell.launch(TAG, ["sh", "-c", item.label]);
+      await shell.launch(TAG, ["sh", "-c", item.label], { show: true });
     } else if (item.kind === "agent") {
       const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(TAG)}`).then((r) => r.json());
       const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
-      await shell.launch(TAG, [...CONFIG.terminal, "-T", "agent", "-e", "claude", "--mcp-config", mcp]);
+      await shell.launch(TAG, [...CONFIG.terminal, "-T", "agent", "-e", "claude", "--mcp-config", mcp], { show: true });
     }
   } catch (e) {
     notice(`${item.label}: ${e.message}`);

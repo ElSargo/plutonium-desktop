@@ -17,7 +17,7 @@ import { helperJson } from "./src/client.ts";
 import { Daemon, defaultSocketPath } from "./src/daemon.ts";
 import { runMcpServer } from "./src/mcp.ts";
 import { runOpen } from "./src/opener.ts";
-import { HELPER_VARIABLE } from "./src/threads.ts";
+import { HELPER_VARIABLE, wantsShow } from "./src/threads.ts";
 
 const [command, ...rest] = process.argv.slice(2);
 // An app's own arguments (after `launch <thread-id>`) aren't ours to parse.
@@ -86,7 +86,15 @@ switch (command) {
     const [threadId, ...argv] = rest[0] === "--" ? rest.slice(1) : rest;
     if (!threadId || argv.length === 0) usage();
     console.log(
-      JSON.stringify(await helperJson(socketPath, "POST", "/v1/launch", { thread: threadId, argv, waitMs: 10_000 })),
+      JSON.stringify(
+        await helperJson(socketPath, "POST", "/v1/launch", {
+          thread: threadId,
+          argv,
+          waitMs: 10_000,
+          // Shown if whoever ran this was (a terminal's command is).
+          show: wantsShow(process.env),
+        }),
+      ),
     );
     break;
   }

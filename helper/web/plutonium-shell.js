@@ -18,6 +18,12 @@
 // (tabElement() makes one). `onFocusTab` is how an agent's "show this tab"
 // reaches the UI.
 //
+// New items: a window that appears once the page is connected is announced as
+// a "windowopened" event, { window, show }, once its thread is known. `show`
+// says the user started it (PLUTONIUM_SHOW in its environment: a terminal's or
+// a launcher's process), so the frontend brings it to the front; else the
+// frontend may just let the user know. A new tab is a "tabopened" event, { tab }.
+//
 // Server-driven tabs: a frontend's server can drive a tab this page shows for
 // it (T3 Code drives its browser panel's tabs with Playwright). The page shows
 // the tab and calls showServerTab(); the helper gives the server that one
@@ -103,6 +109,14 @@ export class PlutoniumShell extends EventTarget {
     /** @type {Map<number, Promise<string>>} */
     this.grants = new Map();
     this._pendingPids = new Set();
+    /** @type {Map<number, boolean>} pid → whether its start asked to show its windows */
+    this.showByPid = new Map();
+    this._pendingShowPids = new Set();
+    this._showTimer = null;
+    /** New windows not yet announced ("windowopened"): their thread or show isn't known yet. */
+    this._unannounced = new Set();
+    /** Set once the windows from before connecting are in: later ones are new. */
+    this._live = false;
     /** Windows the browser couldn't find the thread of, to tag once the helper has. */
     this._tagFromHelper = new Set();
     this._resolveTimer = null;
@@ -123,6 +137,7 @@ export class PlutoniumShell extends EventTarget {
     this.broker.addEventListener("windowchanged", onWindow);
     this.broker.addEventListener("windowremoved", (event) => {
       this.grants.delete(event.windowId);
+      this._unannounced.delete(event.windowId);
       if (this.windows.delete(event.windowId)) this._changed();
     });
     if (this.tabsAvailable) {
@@ -130,8 +145,10 @@ export class PlutoniumShell extends EventTarget {
       const onTab = (event) => {
         if (!event.entry) return;
         const tab = plainTab(event.entry);
+        const opened = this._live && !this.tabs.has(event.tabId);
         this.tabs.set(event.tabId, tab);
         this._changed();
+        if (opened) this.dispatchEvent(new CustomEvent("tabopened", { detail: { tab } }));
         this._maybeClaimOpenedTab(tab);
       };
       this.broker.addEventListener("tabadded", onTab);
@@ -181,6 +198,7 @@ export class PlutoniumShell extends EventTarget {
     this._serveBridge();
     const windows = await this.broker.getWindows();
     for (const entry of windows) this._setWindow(entry);
+    this._live = true;
   }
 
   // A link this page opened in a new tab (the browser makes it a tab opened
@@ -198,6 +216,10 @@ export class PlutoniumShell extends EventTarget {
 
   _setWindow(entry) {
     if (!entry) return;
+    if (this._live && !this.windows.has(entry.id)) {
+      this._unannounced.add(entry.id);
+      if (entry.pid > 0 && !this.showByPid.has(entry.pid)) this._resolveShow(entry.pid);
+    }
     if (this.tagsAvailable && (entry.tag || entry.tags.length > 0 || entry.pid <= 0)) {
       // The browser read the thread from the app's environment.
       this.windows.set(entry.id, { ...plain(entry), threadId: entry.tag || entry.tags[0] || null });
@@ -220,6 +242,37 @@ export class PlutoniumShell extends EventTarget {
 
   _changed() {
     this.dispatchEvent(new Event("change"));
+    this._announce();
+  }
+
+  // "windowopened" for new windows whose thread and show are known.
+  _announce() {
+    for (const id of this._unannounced) {
+      const window = this.windows.get(id);
+      const show = !window || window.pid <= 0 ? false : this.showByPid.get(window.pid);
+      if (window && (window.threadId === undefined || show === undefined)) continue;
+      this._unannounced.delete(id);
+      if (window) this.dispatchEvent(new CustomEvent("windowopened", { detail: { window, show } }));
+    }
+  }
+
+  // As _resolvePid, for PLUTONIUM_SHOW. A helper that can't say means no.
+  _resolveShow(pid) {
+    this._pendingShowPids.add(pid);
+    this._showTimer ??= setTimeout(async () => {
+      this._showTimer = null;
+      const pids = [...this._pendingShowPids];
+      this._pendingShowPids.clear();
+      let shows = {};
+      try {
+        const response = await fetch(`${HELPER}/v1/window-shows?pids=${pids.join(",")}`);
+        if (response.ok) shows = await response.json();
+      } catch {
+        // Not shown, then.
+      }
+      for (const pid of pids) this.showByPid.set(pid, shows[pid] === true);
+      this._changed();
+    }, 0);
   }
 
   // A client's environment is fixed at exec, so a pid resolves once.
@@ -463,14 +516,15 @@ export class PlutoniumShell extends EventTarget {
 
   /**
    * Starts `argv` as one of `threadId`'s processes. With `waitMs`, resolves
-   * once its window shows up (or the time is up).
+   * once its window shows up (or the time is up). With `show`, its windows
+   * are announced as shown ("windowopened").
    * @returns {Promise<{ pid: number, windows: object[] }>}
    */
-  async launch(threadId, argv, { cwd, waitMs = 0 } = {}) {
+  async launch(threadId, argv, { cwd, waitMs = 0, show = false } = {}) {
     const response = await fetch(`${HELPER}/v1/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread: threadId, argv, cwd, waitMs }),
+      body: JSON.stringify({ thread: threadId, argv, cwd, waitMs, show }),
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error ?? `launch failed (${response.status})`);
@@ -505,14 +559,15 @@ export class PlutoniumShell extends EventTarget {
 
   /**
    * Starts desktop app `appId` as one of `threadId`'s processes. With
-   * `waitMs`, resolves once its window shows up (or the time is up).
+   * `waitMs`, resolves once its window shows up (or the time is up). Its
+   * windows are announced as shown unless `show` is false.
    * @returns {Promise<{ pid: number, windows: object[] }>}
    */
-  async launchApp(threadId, appId, { waitMs = 0 } = {}) {
+  async launchApp(threadId, appId, { waitMs = 0, show = true } = {}) {
     const response = await fetch(`${HELPER}/v1/apps/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread: threadId, id: appId, waitMs }),
+      body: JSON.stringify({ thread: threadId, id: appId, waitMs, show }),
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error ?? `launch failed (${response.status})`);

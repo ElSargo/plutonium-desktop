@@ -44,7 +44,8 @@ const TOOLS = [
     name: "launch_app",
     description:
       "Start a GUI app as part of this thread and wait for its window. The app runs detached from your shell, " +
-      "on the Plutonium desktop, and its windows belong to this thread. Returns the new windows (empty if none appeared in time).",
+      "on the Plutonium desktop, and its windows belong to this thread. Its windows wait in the thread (the user is told, " +
+      "and can open them) unless focus is true. Returns the new windows (empty if none appeared in time).",
     inputSchema: {
       type: "object",
       properties: {
@@ -56,6 +57,12 @@ const TOOLS = [
         },
         cwd: { type: "string", description: "Working directory (default: your home directory)." },
         wait_seconds: { type: "number", description: "How long to wait for a window (default 10, 0 to not wait)." },
+        focus: {
+          type: "boolean",
+          description:
+            "Bring the app's windows to the front (default false). Only when the user asked to see the app, " +
+            "since it takes them away from what they're doing.",
+        },
       },
       required: ["argv"],
       additionalProperties: false,
@@ -91,12 +98,16 @@ const TOOLS = [
     name: "open_tab",
     description:
       "Open a web page in a new browser tab of this thread (a real Chromium tab in the user's browser profile, " +
-      "so the user's logins apply). Shows it to the user unless focus is false. Returns the tab once the page has loaded.",
+      "so the user's logins apply). It waits in the thread (the user is told, and can open it) unless focus is true. " +
+      "Returns the tab once the page has loaded.",
     inputSchema: {
       type: "object",
       properties: {
         url: { type: "string", description: "A URL, or anything an address bar accepts (e.g. example.com)." },
-        focus: { type: "boolean", description: "Show the tab to the user (default true)." },
+        focus: {
+          type: "boolean",
+          description: "Bring the tab to the front (default false). Only when the user asked to see the page.",
+        },
         wait_seconds: waitSecondsProperty,
       },
       required: ["url"],
@@ -208,7 +219,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Co
       return text(
         await helperJson(socket, "POST", `/v1/threads/${thread}/tabs`, {
           url: args.url,
-          focus: args.focus !== false,
+          focus: args.focus === true,
           waitMs: waitMs(),
         }),
       );
@@ -258,6 +269,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Co
           argv,
           cwd: typeof args.cwd === "string" ? args.cwd : undefined,
           waitMs: Math.max(0, waitSeconds * 1000),
+          show: args.focus === true,
         }),
       );
     }
@@ -309,7 +321,8 @@ async function handle(message: JsonRpcMessage): Promise<unknown> {
           "Native app windows and browser tabs of this chat thread on the Plutonium desktop. Use launch_app to open GUI apps, " +
           "snapshot_window to see them, focus_window to show one to the user and close_window to close it. " +
           "Use open_tab to open web pages in real browser tabs, snapshot_tab to see them, and navigate_tab, " +
-          "tab_action, focus_tab and close_tab to drive them.",
+          "tab_action, focus_tab and close_tab to drive them. What you open waits in the thread without interrupting " +
+          "the user; pass focus: true (or run a command as PLUTONIUM_SHOW=1 <command>) only when they asked to see it.",
       };
     }
     case "ping":

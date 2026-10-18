@@ -3,8 +3,8 @@
 The frontend-neutral part of a Plutonium shell. A frontend (T3 Code, the plain shell in `shells/plain/`, anything else) only adds UI on top of it. Node 24+, no dependencies; run the `.ts` files directly.
 
 What it does:
-- **Thread environment.** Gives each thread's processes the variables that bind their windows to it: `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, toolkit backends, `PLUTONIUM_HELPER` (this socket), and `DISPLAY` for a per-thread rootless Xwayland (xwayland-satellite, started on the first X client).
-- **pid → thread.** Reads `/proc/<pid>/environ`, walking up parent pids, to say which thread a window's client belongs to.
+- **Thread environment.** Gives each thread's processes the variables that bind their windows to it: `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, toolkit backends, `PLUTONIUM_HELPER` (this socket), and `DISPLAY` for a per-thread rootless Xwayland (xwayland-satellite, started on the first X client). Processes the user started (a terminal, a launcher) also get `PLUTONIUM_SHOW=1`, and frontends bring their windows and links to the front; an agent's don't, so what they open waits in the thread. An agent can opt in with `PLUTONIUM_SHOW=1 <command>`, or `focus: true` on `launch_app` and `open_tab`.
+- **pid → thread.** Reads `/proc/<pid>/environ`, walking up parent pids, to say which thread a window's client belongs to, and whether it asked to be shown.
 - **Launching apps** into a thread, optionally waiting for the app's window.
 - **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
@@ -58,12 +58,13 @@ Shared (socket and shell):
 | Request | Answer |
 |---|---|
 | `GET /v1/status` | Wayland display, shell origins, the connected shells (`shells`: origin, shell id, visible), and `gpu`: `{dmabufVersion, renderNode, accelerated}`, what Exo tells GL/Vulkan apps (null until Exo is up). Not `accelerated` means apps render in software; the helper also logs a warning |
-| `GET /v1/thread-setup?thread=<id>` | `{env, mcpServer: {command, args}}` |
+| `GET /v1/thread-setup?thread=<id>` | `{env, terminalEnv, mcpServer: {command, args}}`: `env` for the thread's agents, `terminalEnv` (with `PLUTONIUM_SHOW=1`) for terminals the user types in |
 | `GET /v1/window-threads?pids=1,2` | `{"<pid>": "<thread>"}`, untagged pids left out (for browsers without tags) |
-| `POST /v1/launch {thread, argv, cwd?, waitMs?}` | `{pid, windows}`; `windows` are the thread's new windows, if any appeared within `waitMs` |
+| `GET /v1/window-shows?pids=1,2` | `{"<pid>": true}` for pids whose thread-tagged process (itself, or the nearest ancestor) has `PLUTONIUM_SHOW` |
+| `POST /v1/launch {thread, argv, cwd?, waitMs?, show?}` | `{pid, windows}`; `windows` are the thread's new windows, if any appeared within `waitMs`. `show: true` sets `PLUTONIUM_SHOW` |
 | `GET /v1/apps` | launchable desktop apps (`.desktop` entries from the XDG data dirs): `{id, name, genericName, comment, keywords, categories, hasIcon, terminal}`, by name |
 | `GET /v1/apps/<id>/icon` | the app's icon (SVG or PNG; themes `PLUTONIUM_ICON_THEME`, breeze, hicolor, Adwaita) |
-| `POST /v1/apps/launch {thread, id, waitMs?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot) |
+| `POST /v1/apps/launch {thread, id, waitMs?, show?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot); shown unless `show: false` |
 
 Socket only (the agent bridge; `<thread>` is the caller's thread):
 
@@ -102,9 +103,13 @@ shell.windowsOf(threadId);   // windows tagged threadId: { …NativeWindowEntry,
 shell.untaggedWindows();
 await shell.grantFor(id);    // for <native-window grant=…>
 shell.showOnDesktop(id); shell.close(id); await shell.snapshot(id);
-await shell.launch(threadId, ["foot"], { waitMs: 8000 });
+await shell.launch(threadId, ["foot"], { waitMs: 8000, show: true });  // show: the user's (default false)
 await shell.apps();                      // desktop apps; shell.appIcon(id) → object URL
-await shell.launchApp(threadId, "foot.desktop");
+await shell.launchApp(threadId, "foot.desktop");  // shown unless { show: false }
+// A window that appears after connecting, once its thread is known. show: its process has
+// PLUTONIUM_SHOW (the user started it), so bring it to the front; else maybe just say so.
+shell.addEventListener("windowopened", (event) => { const { window, show } = event.detail; });
+shell.addEventListener("tabopened", (event) => event.detail.tab);  // a tab that appears after connecting
 shell.setShellShortcuts(["Alt+Digit1", "Ctrl+KeyT"]);  // keys this page keeps while an app or tab has focus
 
 // Browser tabs (Chromium with the tab broker; shell.tabsAvailable):
@@ -138,7 +143,7 @@ It keeps the window, tab and group lists from `navigator.windowBroker` events an
 
 ## MCP tools
 
-`list_windows`, `launch_app {argv, cwd?, wait_seconds?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`.
+`list_windows`, `launch_app {argv, cwd?, wait_seconds?, focus?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`. What an agent launches or opens waits in its thread unless it passes `focus: true` (`launch_app`, `open_tab`).
 
 For example, Claude Code:
 
