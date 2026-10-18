@@ -9,6 +9,8 @@ The browser handles these in every shell:
 | Super+Tab | The overlay, with the next shell selected. Super+Tab again or ↑/↓ moves, Enter acts, Escape closes. It switches, adds (Ctrl+N), turns off (Ctrl+O) and removes (Ctrl+Delete) shells. Its search finds any window or tab, to show in its shell, pop out, add to a thread or close |
 | Super+F | Fullscreen the focused app or tab (it's resized to the screen, not scaled) |
 | Super+Escape | Release an app's pointer lock or confinement |
+| Ctrl+Alt+F1…F12 | On DRM: switch to that VT. Switching back returns to the session as it was ([features/SEAT.md](features/SEAT.md)) |
+| Ctrl+Alt+Backspace | On DRM: end the session (as `plutonium stop --drm`); the text console comes back |
 
 Each shell adds its own keys, which keep working while an app or tab has the keyboard.
 
