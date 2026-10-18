@@ -29,7 +29,9 @@ Sessions:
   run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
                              The first is the desktop, Super+Tab switches. Default: niri plain.
   stop [--drm|--x11]         stop a session's Ash (both if neither is given)
-  t3 server                  start the T3 Code server for a session (before 'run t3')
+  t3 server [--x11]          (re)start the T3 Code server for a session ('run t3' starts it)
+  t3 stop                    stop the T3 Code server
+  t3 <command>               T3 Code's own CLI on the same data: t3 pair, t3 connect link, ...
   status                     what is running
 
 Development:
@@ -47,9 +49,9 @@ run_usage() {
   cat <<EOF
 Usage: plutonium run [options] [shell...]
 
-Shells: niri (scrollable tiling), plain (the minimal shell), t3 (T3 Code: run
-'plutonium t3 server' first), or <name>=<url> for any page. The first one is the
-desktop; the others run behind it (Super+Tab).
+Shells: niri (scrollable tiling), plain (the minimal shell), t3 (T3 Code, on
+the host's T3 Code data; started and paired as needed), or <name>=<url> for
+any page. The first one is the desktop; the others run behind it (Super+Tab).
 
 Where:
   --x11 [display]   Ash in a window on an X11 display (default :99, a private Xvfb)
@@ -254,6 +256,113 @@ committer() {
 
 # --- T3 Code -----------------------------------------------------------------
 t3_pnpm() { if command -v pnpm > /dev/null; then pnpm "$@"; else corepack pnpm "$@"; fi; }
+# T3 Code runs off the host's own data ($T3_HOME), so it never runs beside a
+# T3 Code that Plutonium didn't start: the T3 Code desktop app, a "t3" CLI
+# server, a boot service. Ours carry PLUTONIUM_T3=<this checkout>.
+t3_ours() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep -qxF "PLUTONIUM_T3=$ROOT"; }
+# The processes using T3 Code's database, and the server it says is running.
+t3_pids() {
+  local state=$T3_HOME/userdata/server-runtime.json pid
+  find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state.sqlite" 2>/dev/null | cut -d/ -f3
+  pid=$(grep -o '"pid":[0-9]*' "$state" 2>/dev/null | cut -d: -f2)
+  [[ -n $pid && -d /proc/$pid ]] && echo "$pid"
+  true
+}
+t3_refuse_others() {
+  local pid unit other others=()
+  for pid in $(t3_pids | sort -u); do t3_ours "$pid" || others+=("$pid"); done
+  [[ ${#others[@]} -eq 0 ]] && return
+  {
+    echo "plutonium: another T3 Code is using $T3_HOME:"
+    for pid in "${others[@]}"; do
+      echo "  $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline" | cut -c1-120)"
+      other=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^PLUTONIUM_T3=//p')
+      [[ -n $other ]] && echo "     (started by the Plutonium checkout in $other)"
+      unit=$(grep -o '[^/]*\.service$' "/proc/$pid/cgroup" 2>/dev/null || true)
+      [[ -n $unit && $unit != app-* && $unit != run-* ]] && echo "     (run by $unit: systemctl --user stop $unit)"
+    done
+    echo "Stop it first (quit the T3 Code app, or stop that server): Plutonium runs its own T3 Code on the same data."
+  } >&2
+  exit 1
+}
+# T3 Code's database is migrated by whichever version opens it. Refuse one newer
+# than this checkout knows; before migrating an older one, keep a copy.
+t3_check_db() {
+  local db=$T3_HOME/userdata/state.sqlite ours have
+  [[ -f $db ]] || return 0
+  ours=$(ls "$T3CODE_DIR/apps/server/src/persistence/Migrations" | grep -v '\.test\.ts$' | grep -o '^[0-9]*' | sort -n | tail -1)
+  ours=$((10#$ours))
+  have=$(node -e '
+    const db = new (require("node:sqlite").DatabaseSync)(process.argv[1], { readOnly: true });
+    console.log(db.prepare("select max(migration_id) as m from effect_sql_migrations").get().m ?? 0);
+  ' "$db" 2> /dev/null) || die "can't read T3 Code's database $db"
+  if (( have > ours )); then
+    die "T3 Code's database ($db) is from a newer T3 Code (migration $have; this checkout has $ours). Update frontends/t3code to a newer T3 Code first."
+  elif (( have < ours )); then
+    local backup=$db.before-migration-$ours
+    echo "T3 Code's database is at migration $have and this checkout migrates it to $ours; keeping a copy in $backup"
+    node -e '
+      const db = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
+      db.prepare("VACUUM INTO ?").run(process.argv[2]);
+    ' "$db" "$backup" 2> /dev/null || die "couldn't back up $db"
+  fi
+}
+# Start the server for a session's socket: "restart" restarts ours, otherwise
+# ours is reused if it serves that socket.
+t3_start() {
+  local socket=$1 restart=${2:-} port=${T3_PORT:-3774} satellite pid pidfile=$RUN_DIR/plutonium/t3-server.pid
+  [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
+  t3_refuse_others
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  if [[ -n $pid ]] && t3_ours "$pid"; then
+    if [[ -z $restart ]]; then
+      tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF "PLUTONIUM_WAYLAND_DISPLAY=$socket" && return
+      local flag=; [[ $socket == *-x11 ]] && flag=" --x11"
+      die "the T3 Code server is serving the other session; restart it for this one (plutonium t3 server$flag)"
+    fi
+    t3_stop
+  fi
+  curl -s -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
+  t3_check_db
+  satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
+  mkdir -p "$T3_HOME" "$RUN_DIR/plutonium"
+  (
+    cd "$T3CODE_DIR"
+    # T3 Connect (remote devices through T3's relay): its public settings.
+    [[ -f .env ]] && { set -a; . ./.env; set +a; }
+    setsid env PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+      ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
+      node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host "${T3_HOST:-127.0.0.1}" --no-browser \
+      > "$LOGS/t3-server.log" 2>&1 < /dev/null &
+    echo $! > "$pidfile"
+  )
+  for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
+  die "the T3 Code server didn't start (logs/t3-server.log)"
+}
+# T3 Code's own CLI, on the same data and settings as the server.
+t3_cli() {
+  cd "$T3CODE_DIR" || die "no T3 Code checkout at $T3CODE_DIR (plutonium t3 fetch)"
+  [[ -f .env ]] && { set -a; . ./.env; set +a; }
+  T3CODE_HOME="$T3_HOME" exec node apps/server/src/bin.ts "$@"
+}
+# Stops ours (a server this checkout started), and waits for it to let go of
+# the database.
+t3_stop() {
+  local pid
+  pid=$(cat "$RUN_DIR/plutonium/t3-server.pid" 2>/dev/null) && t3_ours "$pid" || return 1
+  kill "$pid"
+  for _ in $(seq 1 50); do [[ -z $(t3_pids) ]] && break; sleep 0.2; done
+  rm -f "$RUN_DIR/plutonium/t3-server.pid"
+}
+# A one-time pairing token for the shell's profile, good for 5 minutes, offered
+# as #plutoniumPair: the page uses it only if the profile isn't paired yet.
+t3_pair_url() {
+  local port=${T3_PORT:-3774} token
+  token=$(cd "$T3CODE_DIR" && T3CODE_HOME="$T3_HOME" node apps/server/src/bin.ts auth pairing create \
+    --ttl 5m --label "Plutonium shell" --json 2> /dev/null | grep -o '"credential": *"[^"]*"' | cut -d'"' -f4)
+  [[ -n $token ]] || die "couldn't create a T3 Code pairing token"
+  echo "http://127.0.0.1:$port/#plutoniumPair=$token"
+}
 t3_cmd() {
   local base
   base=$(cat "$ROOT/frontends/t3code/BASE")
@@ -264,37 +373,27 @@ t3_cmd() {
       [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "$T3CODE_DIR has uncommitted changes"
       git -C "$T3CODE_DIR" checkout -q -B plutonium "$base"
       committer git -C "$T3CODE_DIR" am -q --3way "$ROOT"/frontends/t3code/patches/*.patch
+      # T3 Connect, as in T3's release builds (the same public settings).
+      [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
       echo "T3 Code is on branch plutonium in $T3CODE_DIR. Next: plutonium t3 build" ;;
     build)
       [[ -d $T3CODE_DIR ]] || die "no T3 Code checkout at $T3CODE_DIR (plutonium t3 fetch)"
+      [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
       (cd "$T3CODE_DIR" && t3_pnpm install && cd apps/web && t3_pnpm exec vp build) ;;
     server)
-      [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
-      local socket=wayland-plutonium port=${T3_PORT:-3774} satellite
+      local socket=wayland-plutonium
       [[ ${2:-} == --x11 ]] && socket=wayland-plutonium-x11
-      satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
-      # Any T3 server on this port, from whichever checkout.
-      pkill -f "^node .*/apps/server/src/bin.ts --port $port( |\$)" 2>/dev/null && sleep 2 || true
-      mkdir -p "$T3_HOME"
-      (cd "$T3CODE_DIR" && setsid env PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
-        ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
-        node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host 127.0.0.1 --no-browser \
-        > "$LOGS/t3-server.log" 2>&1 < /dev/null &)
-      local up=
-      for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$port/" && up=1 && break; sleep 1; done
-      [[ -n $up ]] || die "the T3 Code server didn't start (logs/t3-server.log)"
-      sleep 1
-      echo "T3 Code server on http://127.0.0.1:$port for $socket (log logs/t3-server.log)"
-      local pair
-      pair=$(grep -o 'http://[^ ]*/pair#token=[^ ]*' "$LOGS/t3-server.log" | tail -1 || true)
-      [[ -n $pair ]] && echo "Not paired yet: the first time, start the session with  plutonium run 't3=$pair'"
-      true ;;
+      t3_start "$socket" restart
+      echo "T3 Code server on http://127.0.0.1:${T3_PORT:-3774} for $socket, data in $T3_HOME (log logs/t3-server.log)" ;;
+    stop)
+      t3_stop || echo "no T3 Code server from this checkout is running" ;;
     export)
       [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "commit your changes in $T3CODE_DIR first"
       rm -f "$ROOT"/frontends/t3code/patches/*.patch
       git -C "$T3CODE_DIR" format-patch -q --zero-commit --no-signature -o "$ROOT/frontends/t3code/patches" "$base"..HEAD
       ls "$ROOT/frontends/t3code/patches" | wc -l | xargs echo "patches written to frontends/t3code/patches:" ;;
-    *) usage; exit 2 ;;
+    "") usage; exit 2 ;;
+    *) t3_cli "$@" ;;
   esac
 }
 
@@ -319,8 +418,9 @@ shell_entry() {
     niri) serve_shell "$ROOT/shells/niri" 8775; echo "niri=http://127.0.0.1:8775/?helper=$helper" ;;
     plain) serve_shell "$ROOT/shells/plain" 8770; echo "Plain=http://127.0.0.1:8770/?helper=$helper" ;;
     t3|t3=*)
-      local url=${1#t3}; url=${url#=}; url=${url:-http://127.0.0.1:${T3_PORT:-3774}/}
-      curl -s -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url (plutonium t3 server)"
+      local url=${1#t3}; url=${url#=}
+      if [[ -z $url ]]; then t3_start "$SOCKET"; url=$(t3_pair_url)
+      else curl -s -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url"; fi
       local base=${url%%#*} fragment=
       [[ $url == *#* ]] && fragment="#${url#*#}"
       [[ $base == *\?* ]] && base+="&" || base+="?"

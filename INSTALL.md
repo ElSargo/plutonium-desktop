@@ -174,16 +174,12 @@ The browser profile remembers shells, including ones added from the Super+Tab ov
 ```
 plutonium t3 fetch            # clone at frontends/t3code/BASE, apply the patches
 plutonium t3 build            # pnpm install + build the web app (the checkout grows to ~4 GB)
-plutonium t3 server           # for DRM sessions; --x11 for X11 ones
+plutonium run t3 niri         # starts T3 Code's server and pairs the shell
 ```
 
-The first time, the server prints a pairing URL. Start a session with it once:
+T3 Code runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
 
-```
-plutonium run 't3=http://127.0.0.1:3774/pair#token=…' niri
-```
-
-Then T3 walks you through its own setup (computers, agents, projects). After that, `plutonium run t3 niri` is enough. Restart `plutonium t3 server` after a reboot.
+Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium t3` (T3's CLI on the same data): `plutonium t3 connect link` for T3 Connect, or `plutonium t3 pair --tailscale`.
 
 ## 9. Agents
 

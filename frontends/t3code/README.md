@@ -7,22 +7,28 @@
 T3 Code is optional. The niri and plain shells need nothing from here.
 
 - **`BASE`**: the upstream T3 Code commit the patches apply to (`6c8fed35dd`, 2026-10-02).
-- **`patches/`**: the series (`git am`): 9 commits, about 3,000 lines, mostly in `apps/web/src/plutonium/` and `apps/server/src/plutonium.ts`.
+- **`patches/`**: the series (`git am`): 11 commits, about 3,000 lines, mostly in `apps/web/src/plutonium/` and `apps/server/src/plutonium.ts`.
 
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
 plutonium t3 build     # pnpm install, build the web app
-plutonium t3 server    # start the server for the DRM session (--x11 for an X11 one)
 plutonium run t3 niri  # T3 as the desktop, niri behind it (Super+Tab)
 ```
 
-On the first run, the server prints a pairing URL. Start the session with it once, so the shell's browser profile is paired:
+`plutonium run t3` starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`. The page passes it on to T3 only if the profile isn't paired yet, so a paired profile doesn't add a session each time.
 
-```
-plutonium run 't3=http://127.0.0.1:3774/pair#token=…'
-```
+### The host's T3 Code
 
-The server keeps its data in `$DATA_DIR/t3` (default `~/.local/share/plutonium/t3`), and its log is `logs/t3-server.log`. It needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
+The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `$T3CODE_HOME`, else `~/.t3` (`T3_HOME` overrides it). Threads, settings, and paired devices are the same in and out of Plutonium.
+
+- **One at a time:** before starting, Plutonium looks for anything else using that data: the T3 Code app, a `t3` server, a boot service. It finds them by the open database, and by T3's `server-runtime.json`. If there is one, it refuses and says what it found; quit that one first. Plutonium's own server carries `PLUTONIUM_T3=<this checkout>`, so it is told apart and restarted.
+- **The database's version:** T3 migrates its database when it opens it. Plutonium refuses a database from a newer T3 Code than the checkout. An older one is migrated, and first copied to `state.sqlite.before-migration-<n>`.
+- **Remote devices:** `plutonium t3 <command>` is T3's own CLI on the same data. `fetch` and `build` copy T3's `.env.example` to `.env`, the T3 Connect settings T3's release builds have. Without them, a source build has no T3 Connect. To pair remote devices, use one of:
+  - `plutonium t3 connect link`: signs in to T3 Connect once; the server then registers with T3's relay at every start.
+  - `plutonium t3 pair --tailscale`: a QR code over your tailnet.
+  - `T3_HOST=0.0.0.0` with `plutonium t3 pair`: a QR code on your network.
+
+The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
 
 ## What the patches do
 
@@ -35,6 +41,7 @@ The server keeps its data in `$DATA_DIR/t3` (default `~/.local/share/plutonium/t
 | 0007–0008 | Thread tags and groups, and an "Elsewhere" list for importing windows and tabs from other shells |
 | 0009 | Links and Ctrl+click open in the thread's browser panel |
 | 0010 | Panel apps cross-fade when the panel is maximized or restored; an app's maximize button maximizes the panel |
+| 0011 | The shell pairs with the launcher's token only if it isn't paired yet |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

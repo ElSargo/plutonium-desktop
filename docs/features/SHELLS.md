@@ -17,10 +17,10 @@ Tested on 2026-10-17. On Xvfb (`:99`) the plain shell was the startup shell, wit
 
 ```
 # DRM: T3 at startup, the plain shell second
-plutonium t3 server && plutonium run t3 plain
+plutonium run t3 plain
 
 # Xvfb: the plain shell at startup, T3 second
-plutonium t3 server --x11 && plutonium run --x11 plain t3
+plutonium run --x11 plain t3
 ```
 
 **Super+Tab** shows the next shell and **Super+Shift+Tab** the previous one. These are stand-ins until the overlay (step 3) exists.

@@ -12,7 +12,7 @@ CHROMIUM_OUT=${CHROMIUM_OUT:-out/Plutonium}           # build dir, relative to s
 CHROMIUM_RELEASE_OUT=${CHROMIUM_RELEASE_OUT:-out/Release}  # release build, for the prebuilt image
 T3CODE_DIR=${T3CODE_DIR:-$ROOT/frontends/t3code/checkout}
 DATA_DIR=${DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/plutonium}   # browser profiles
-T3_HOME=${T3_HOME:-$DATA_DIR/t3}                      # T3 Code's server data
+T3_HOME=${T3_HOME:-${T3CODE_HOME:-$HOME/.t3}}          # T3 Code's data: the host's own
 RUN_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 LOGS=${LOGS:-$ROOT/logs}
 
