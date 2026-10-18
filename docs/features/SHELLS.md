@@ -29,7 +29,7 @@ plutonium run --x11 plain t3
 
 ### How it works
 
-- **The list** lives in local state (`plutonium.shells`: id, name, URL, enabled). The startup shell (`--plutonium-shell-url`) and the `--plutonium-shells` entries are added to it when it doesn't have them yet. The startup shell is always enabled.
+- **The list** lives in local state (`plutonium.shells`: id, name, URL, enabled). The startup shell (`--plutonium-shell-url`) and the `--plutonium-shells` entries are added to it when it doesn't have them yet. An entry it has is one with the same URL but for the fragment (where the launcher puts T3's one-time pairing token), or the same name on the same origin; it takes the new URL. The startup shell is always enabled.
 - **Windows.** The startup browser (`--app`) becomes the startup shell's window. Once it exists, every other enabled shell gets its own fullscreen app window, opened hidden. Switching shows and activates the target window and hides the previous one. A hidden page reports `document.visibilityState === "hidden"` and is throttled like a background tab, but it keeps running: its WebSocket, its EventSource and its broker events all carry on.
 - **Who is a shell.** A shell document has to be in its own shell's window and on that shell's origin. A shell's origin in another shell's window doesn't count. Outside shell mode nothing changed: there's one `--plutonium-shell-origin`, in any top-level page. Renderers get the list of origins (comma-separated `--plutonium-shell-origin`), so the SurfaceEmbed plugin loads in every shell.
 - **Only the visible shell drives.** Every shell gets the full broker: windows, tabs, grants and events. Only the visible one decides how windows and tabs are shown:

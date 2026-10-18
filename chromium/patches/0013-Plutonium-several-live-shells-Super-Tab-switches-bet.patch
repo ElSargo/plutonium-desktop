@@ -17,7 +17,7 @@ Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
  .../browser/chrome_content_browser_client.cc  |  15 +-
  chrome/browser/exo_embedder.cc                |  43 ++-
  chrome/browser/exo_embedder.h                 |   4 +
- chrome/browser/plutonium_keys.cc              |  79 ++++-
+ chrome/browser/plutonium_keys.cc              |  79 +++-
  chrome/browser/plutonium_keys.h               |  12 +-
  chrome/browser/plutonium_shell.cc             | 109 +++++-
  chrome/browser/plutonium_shell.h              |  28 +-
@@ -29,13 +29,13 @@ Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
  .../browser/ui/ash/main_extra_parts/BUILD.gn  |   7 +
  .../chrome_browser_main_extra_parts_ash.cc    |   6 +
  .../chrome_browser_main_extra_parts_ash.h     |   4 +
- .../main_extra_parts/plutonium_shells_impl.cc | 328 ++++++++++++++++++
+ .../main_extra_parts/plutonium_shells_impl.cc | 338 ++++++++++++++++++
  .../main_extra_parts/plutonium_shells_impl.h  |  72 ++++
  .../exclusive_access_manager.cc               |   3 +-
  .../chrome_content_renderer_client.cc         |  23 +-
  .../browser/surface_embed_host.cc             |  65 +++-
  .../browser/surface_embed_host.h              |  21 ++
- 22 files changed, 1002 insertions(+), 58 deletions(-)
+ 22 files changed, 1012 insertions(+), 58 deletions(-)
  create mode 100644 chrome/browser/plutonium_shells.cc
  create mode 100644 chrome/browser/plutonium_shells.h
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
@@ -1040,10 +1040,10 @@ index bcbe06c694..4968ed14bc 100644
    std::unique_ptr<ImeControllerClientImpl> ime_controller_client_;
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
 new file mode 100644
-index 0000000000..d8f4ef8b44
+index 0000000000..54d07355a8
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,338 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1155,8 +1155,18 @@ index 0000000000..d8f4ef8b44
 +void PlutoniumShellsImpl::AddFromCommandLine(const std::string& name,
 +                                             const GURL& url,
 +                                             bool startup) {
-+  auto it = std::ranges::find_if(
-+      entries_, [&](const Entry& entry) { return entry.shell.url == url; });
++  // The same shell as before if it has the same URL but for the fragment (a
++  // launcher may put a one-time token there), or the same name on the same
++  // origin. It then takes the new URL.
++  const url::Origin url_origin = url::Origin::Create(url);
++  auto it = std::ranges::find_if(entries_, [&](const Entry& entry) {
++    return entry.shell.url.GetWithoutRef() == url.GetWithoutRef() ||
++           (!name.empty() && entry.shell.name == name &&
++            entry.shell.origin.IsSameOriginWith(url_origin));
++  });
++  if (it != entries_.end()) {
++    it->shell.url = url;
++  }
 +  if (it == entries_.end()) {
 +    Entry entry;
 +    entry.shell.id = NewId();

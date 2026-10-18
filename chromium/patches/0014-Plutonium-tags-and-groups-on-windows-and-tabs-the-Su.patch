@@ -2359,7 +2359,7 @@ index 0000000000..104970fb1e
 +
 +#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_OVERLAY_H_
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
-index d8f4ef8b44..da408a2f48 100644
+index 54d07355a8..4b73dbbf86 100644
 --- a/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
 @@ -17,6 +17,7 @@
@@ -2398,7 +2398,7 @@ index d8f4ef8b44..da408a2f48 100644
  
  void PlutoniumShellsImpl::Load() {
    PrefService* local_state = g_browser_process->local_state();
-@@ -235,6 +245,7 @@ void PlutoniumShellsImpl::OnBrowserCreated(BrowserWindowInterface* browser) {
+@@ -245,6 +255,7 @@ void PlutoniumShellsImpl::OnBrowserCreated(BrowserWindowInterface* browser) {
    }
    // The startup browser: the --app window for --plutonium-shell-url.
    startup->browser = browser;
@@ -2406,7 +2406,7 @@ index d8f4ef8b44..da408a2f48 100644
    visible_id_ = startup_id_;
    // Once it has its page and is shown; the other shells' windows come next.
    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-@@ -302,6 +313,132 @@ void PlutoniumShellsImpl::OpenWindows(Profile* profile) {
+@@ -312,6 +323,132 @@ void PlutoniumShellsImpl::OpenWindows(Profile* profile) {
    NotifyShellsChanged();
  }
  
@@ -2539,7 +2539,7 @@ index d8f4ef8b44..da408a2f48 100644
  // static
  content::WebContents* PlutoniumShellsImpl::ContentsOf(const Entry& entry) {
    if (!entry.browser) {
-@@ -320,6 +457,11 @@ PlutoniumShellsImpl::Entry* PlutoniumShellsImpl::Find(const std::string& id) {
+@@ -330,6 +467,11 @@ PlutoniumShellsImpl::Entry* PlutoniumShellsImpl::Find(const std::string& id) {
    return it == entries_.end() ? nullptr : &*it;
  }
  
