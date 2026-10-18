@@ -31,6 +31,7 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0017 | The page alone sizes an embedded window: its maximize, minimize, move and resize requests are refused, and Ash's changes undone | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 | 0018 | `object-fit` for `<native-window>`; `crossfade`, the resize cross-fade | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 | 0019 | `windowrequest` events; which element drives a window several show | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
+| 0020 | The box is where the window is (the app's frame stretched to it until it answers a resize); `crossfade-easing`, and niri's cross-fade; no fade on a window's first size | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).

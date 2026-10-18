@@ -11,6 +11,8 @@ CDP=host:port picks the session (DRM 9224, X11 9223).
   cdp.py shot <url-part> <out.png>         screenshot a page or tab, even while hidden
   cdp.py click <url-part> <x> <y>          click at CSS pixels (renderer input, not Ash's)
   cdp.py console <url-part> <seconds>      print console messages and exceptions
+  cdp.py shots <url-part> <js> <n> <out>   run js, then take n screenshots back to back
+                                           (<out>0.png, ...), to film an animation
 """
 import asyncio
 import base64
@@ -90,6 +92,16 @@ async def main(args):
             for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
                 await s.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "clickCount": 1,
                                                           "button": "none" if kind == "mouseMoved" else "left"})
+        await with_target(rest[0], body)
+    elif cmd == "shots":
+        async def body(s):
+            await s.call("Runtime.evaluate", {"expression": rest[1]})
+            start = asyncio.get_running_loop().time()
+            for i in range(int(rest[2])):
+                r = await s.call("Page.captureScreenshot")
+                print(f"shot {i} at {(asyncio.get_running_loop().time() - start) * 1000:.0f} ms")
+                with open(f"{rest[3]}{i}.png", "wb") as f:
+                    f.write(base64.b64decode(r["data"]))
         await with_target(rest[0], body)
     elif cmd == "console":
         async def body(s):

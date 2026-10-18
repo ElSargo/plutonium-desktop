@@ -421,9 +421,12 @@ function tileFor(key) {
   let content;
   if (kind === "w") {
     content = document.createElement("native-window");
-    // The frame from before a resize, stretched, fades into the app's frame
-    // at the new size.
+    // On a resize, its frame from before fades into its new one with the
+    // tiles' duration and easing, as niri mixes them.
     content.crossfade = ANIM.ms;
+    content.crossfadeEasing = ANIM.easing;
+    // A window drawing at its new size may complete a transaction.
+    content.addEventListener("windowchange", completeTransaction);
     content.addEventListener("windowfocus", () => onItemFocused(key));
     // The app's own maximize button: niri's maximize column.
     content.addEventListener("windowrequest", (e) => {
@@ -454,16 +457,23 @@ function tileFor(key) {
   return tile;
 }
 
-// The tile animates its size (a CSS transition). A window inside is set to
-// the final size at once, so the app is asked to resize once, and a FLIP
-// animation scales it from the old size to follow the tile; its crossfade
-// covers the app catching up.
+// As in niri, a layout change that resizes windows is a transaction: the
+// windows are asked for their new sizes at once, and nothing moves until they
+// have drawn at new sizes (or TRANSACTION_MS passed); meanwhile a window is scaled
+// back to the size it was shown at. Then the tiles' CSS transitions, a FLIP
+// animation scaling each window from that size, and its crossfade (the same
+// duration and easing) start together.
+const TRANSACTION_MS = 300;
+let placements = [];
+let transaction = null;
+
 function placeTile(tile, x, y, w, h) {
   w = Math.max(1, Math.round(w));
   h = Math.max(1, Math.round(h));
-  tile.el.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
-  tile.el.style.width = `${w}px`;
-  tile.el.style.height = `${h}px`;
+  const placement = { tile, x: Math.round(x), y: Math.round(y), w, h };
+  // A new tile, or one being dragged, goes where it should at once.
+  if (!tile.el.style.width || tile.el.classList.contains("dragging")) applyPlacement(placement);
+  else placements.push(placement);
   if (tile.kind !== "w") return;
   const b = CONFIG.border.on ? CONFIG.border.width : 0;
   const iw = Math.max(1, w - 2 * b), ih = Math.max(1, h - 2 * b);
@@ -471,10 +481,69 @@ function placeTile(tile, x, y, w, h) {
   tile.inner = { w: iw, h: ih };
   tile.content.style.width = `${iw}px`;
   tile.content.style.height = `${ih}px`;
-  if (!old || (old.w === iw && old.h === ih) || document.body.classList.contains("noanim") ||
-      tile.el.classList.contains("dragging")) return;
-  tile.content.animate([{ transform: `scale(${old.w / iw}, ${old.h / ih})` }, { transform: "none" }],
-    { duration: ANIM.ms, easing: ANIM.easing });
+  // Wait for a window the user sees resize, if it's attached to draw it.
+  const shown = tile.shown ?? old;
+  tile.awaiting = shown && (shown.w !== iw || shown.h !== ih) &&
+    !document.body.classList.contains("noanim") && !document.body.classList.contains("overview") &&
+    !tile.el.classList.contains("dragging") && !tile.el.classList.contains("hidden") &&
+    tile.content.windowState === "attached" &&
+    x < W() && x + w > 0 && y < H() && y + h > 0;
+  if (tile.awaiting) {
+    // Asked for a new size: any other size it draws is its answer (a terminal
+    // snaps to whole cells).
+    if (!old || old.w !== iw || old.h !== ih) {
+      tile.askedAt = { w: tile.content.windowWidth, h: tile.content.windowHeight };
+    }
+    tile.shown = shown;
+    tile.content.style.transform = `scale(${shown.w / iw}, ${shown.h / ih})`;
+  } else {
+    tile.shown = null;
+    tile.content.style.transform = "";
+  }
+}
+
+function answered(tile) {
+  const { windowWidth: w, windowHeight: h } = tile.content;
+  return w !== tile.askedAt.w || h !== tile.askedAt.h ||
+    (Math.abs(w - tile.inner.w) <= 1 && Math.abs(h - tile.inner.h) <= 1);
+}
+
+// Called once render() has placed every tile.
+function placeTiles() {
+  const list = placements;
+  placements = [];
+  if (!transaction) transaction = { timer: setTimeout(() => applyPlacements(), TRANSACTION_MS) };
+  transaction.list = list;
+  completeTransaction();
+}
+
+function completeTransaction() {
+  if (!transaction) return;
+  for (const tile of tiles.values()) if (tile.awaiting && !answered(tile)) return;
+  applyPlacements();
+}
+
+function applyPlacements() {
+  if (!transaction) return;
+  clearTimeout(transaction.timer);
+  const { list } = transaction;
+  transaction = null;
+  list.forEach(applyPlacement);
+  for (const tile of tiles.values()) {
+    if (!tile.awaiting) continue;
+    tile.awaiting = false;
+    const { w, h } = tile.shown;
+    tile.shown = null;
+    tile.content.style.transform = "";
+    tile.content.animate([{ transform: `scale(${w / tile.inner.w}, ${h / tile.inner.h})` }, { transform: "none" }],
+      { duration: ANIM.ms, easing: ANIM.easing });
+  }
+}
+
+function applyPlacement({ tile, x, y, w, h }) {
+  tile.el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  tile.el.style.width = `${w}px`;
+  tile.el.style.height = `${h}px`;
 }
 
 function styleTile(tile, active) {
@@ -568,11 +637,14 @@ function render() {
     });
   });
   for (const ind of indicators.slice(nextIndicator)) ind.remove();
+  placeTiles();
 
   for (const key of openAnimation) {
     const tile = tiles.get(key);
     if (!tile || document.body.classList.contains("noanim")) continue;
-    tile.content.animate([{ transform: "scale(.5)", opacity: 0 }, { transform: "none", opacity: 1 }],
+    // The whole tile (its border and shadow with the window), from its center,
+    // as niri opens a window. `scale` composes with the tile's placement.
+    tile.el.animate([{ scale: ".5", opacity: 0 }, { scale: "1", opacity: 1 }],
       { duration: 200, easing: "cubic-bezier(.16, 1, .3, 1)" });
   }
   openAnimation.clear();
@@ -1072,6 +1144,8 @@ function bindPointer(hit, key) {
     drag.moved = true;
     const z = overview ? CONFIG.overviewZoom : 1;
     if (drag.resize) {
+      // Live, as niri resizes interactively: no transitions, no transactions.
+      document.body.classList.add("noanim");
       if (drag.float) { drag.float.w = clamp(drag.startW + dx, MIN, W()); drag.float.h = clamp(drag.startH + dy, MIN, H()); }
       else { drag.col.full = false; drag.col.width = { px: clamp(drag.startW + dx, MIN, W() - 2 * g) }; }
       render();
@@ -1091,6 +1165,7 @@ function bindPointer(hit, key) {
     const d = drag;
     drag = null;
     d.tile.el.classList.remove("dragging");
+    if (d.resize) document.body.classList.remove("noanim");
     if (!d.moved) {
       // A click: go to the window.
       overview = false;

@@ -24,7 +24,7 @@ The page is served on `127.0.0.1:8775` .
   - 12 px corner radius, with the window clipped to it;
   - niri's shadow (softness 30, spread 5, offset 0 5, `#0007`).
   The focus ring, presets and centring mode can be switched there too.
-- **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales it in from 0.5. Resizes animate too, as in niri: the tile's size eases to its new size, and the app is resized once and scaled to follow (FLIP). Its old frame, stretched, cross-fades into its frame at the new size (`WINDOW_SIZING.md`).
+- **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales its tile (border and window together) in from 0.5, from its center, and fades it in. Resizes animate as in niri. A layout change asks the windows for their new sizes and waits until they have drawn at new sizes (at most 300 ms, a niri transaction), holding each window scaled back to its old size. Then the tiles ease to their new sizes, each window is scaled along (FLIP), and its old frame cross-fades into its new one, all with the same duration and easing (`WINDOW_SIZING.md`). An interactive resize (Super+right drag) is live, without animations.
 - **The app's own maximize button** maximizes its column (Super+M), and unmaximize restores it.
 - **Launcher** (Super+D), in place of fuzzel. It searches the helper's desktop apps, with icons and recently used ones first. It can also run a command line, open a web address as a browser tab, or start Claude Code with Plutonium's MCP tools.
 - **The hotkey overlay** (Super+Shift+/) is shown at startup, as in niri.

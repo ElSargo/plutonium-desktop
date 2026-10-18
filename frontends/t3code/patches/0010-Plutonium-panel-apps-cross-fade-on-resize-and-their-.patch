@@ -8,8 +8,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014h4c1E1y66mTWH3DAr58sR
 ---
  apps/web/src/components/ChatView.tsx        | 17 ++++++++++++++++-
- apps/web/src/plutonium/PlutoniumWindows.tsx | 19 +++++++++++++++++++
- 2 files changed, 35 insertions(+), 1 deletion(-)
+ apps/web/src/plutonium/PlutoniumWindows.tsx | 20 ++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
 index c3f2e74b94..132be6c79c 100644
@@ -47,7 +47,7 @@ index c3f2e74b94..132be6c79c 100644
      (surfaces: readonly RightPanelSurface[]) => {
        if (!activeThreadRef) return;
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index b0769d963a..e4ea2954e1 100644
+index b0769d963a..6b63305c3e 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -242,6 +242,9 @@ export function PlutoniumAppsPanel({
@@ -84,12 +84,13 @@ index b0769d963a..e4ea2954e1 100644
      };
    }, [windowId]);
  
-@@ -271,6 +287,9 @@ function NativeWindowView({ windowId }: { windowId: number }) {
+@@ -271,6 +287,10 @@ function NativeWindowView({ windowId }: { windowId: number }) {
        {createElement("native-window", {
          ref,
          key: windowId,
-+        // When the panel opens, closes or is maximized, the app's frame from
-+        // before fades into its frame at the new size (drags stay live).
++        // When the panel is maximized or restored, the app fills it at once
++        // and its old frame fades into its new one (drags stay live; a newly
++        // shown app doesn't fade).
 +        crossfade: "200",
          style: { display: "block", width: "100%", height: "100%" },
        })}

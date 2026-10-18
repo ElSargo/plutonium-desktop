@@ -1,6 +1,6 @@
 # Window sizing and animation
 
-How a `<native-window>` sizes its app, what happens when the app wants another size, and how a shell animates windows. `chromium/patches/0017-*`, `0018-*` and `0019-*`. Tested on Xvfb (`plutonium run --x11`, plain and niri shells, GTK 4 apps) on 2026-10-18.
+How a `<native-window>` sizes its app, what happens when the app wants another size, and how a shell animates windows. `chromium/patches/0017-*` to `0020-*`. Tested on Xvfb (`plutonium run --x11`, plain and niri shells, GTK 4 apps and foot) on 2026-10-18.
 
 ## The page sizes the window
 
@@ -16,25 +16,34 @@ While a page shows a window, nothing else sizes it (0017):
 
 Before 0017, an app's maximize button made Ash resize the window to the work area while its element kept its size. A 1600×1000 window then drew inside a 1380×875 element.
 
-## When the frame and the box differ: `object-fit`
+## The box is where the window is
 
-The app's frame isn't always the content box's size. The app may not have redrawn after a resize yet, it may refuse the size (a minimum size, a fixed-size game), or it may snap to whole cells (terminals). `object-fit` and `object-position` place the frame, as for `<video>` (0018).
-- **Default:** `object-fit: none` at `0 0`. The frame is shown as the app drew it, at the top left. Stretching a terminal a few pixels short of the box would blur its text.
-- **Fullscreen:** `none`, centered.
-- **`contain` / `scale-down`:** for a fixed-size app the page wants scaled into its box.
+The page's content box is always where the window is drawn, as Hyprland draws a window it is resizing (0020):
+- **While the app catches up:** after the page resizes the element, until the app answers by drawing at a new size (or for at most 300 ms), its latest frame is stretched to the box. Any new size is its answer, as niri takes the commit that acks a configure: a terminal snaps to whole cells, so it rarely draws the exact size. A page that snaps its layout (T3 Code's panel), or a drag, never shows a gap or a window lagging behind the page.
+- **When the app answers with another size** (it won't take that size, or snaps to whole cells): `object-fit` and `object-position` place its frame, as for `<video>` (0018).
+  - **Default:** `object-fit: none` at `0 0`, the frame as the app drew it, at the top left. Stretching a terminal a few pixels short of the box would blur its text.
+  - **Fullscreen:** `none`, centered.
+  - **`contain` / `scale-down`:** for a fixed-size app the page wants scaled into its box.
 
-## Cross-fade: animating a window's size
+Before this, a resize showed the old frame unstretched until the app redrew, leaving a gap during a drag. The first attempt at niri's animation had the element animate its own size, which lagged behind a page that snapped its layout.
 
-`crossfade="MS"` on the element (0018) works the way niri and Hyprland animate a window:
-1. When the page resizes the element, the frame from before the resize stays on top, stretched to the new content box. That frame is the window's surface at the old size, kept alive in viz by its exact id.
-2. Once the app has drawn at the new size (or after 500 ms, if it doesn't), the old frame fades out over MS milliseconds, revealing the live window.
-3. Resizes less than 100 ms apart (a drag) show the app live instead: a stretched frame over a window that keeps up would only smear.
+## Cross-fade: niri's resize animation
 
-To animate a window's size, a shell combines it with FLIP:
-1. Set the element to its final size at once, so the app is configured once.
-2. Animate a `transform: scale()` from the old size to none (`transform-origin: 0 0`).
+`crossfade="MS"` (0018; `crossfade-easing` and the rules below, 0020) adds niri's cross-fade. On a resize the page makes, the frame from before it, stretched to the box, stays on top until the app has answered (or 300 ms passed). Then it fades out over MS milliseconds, eased by `crossfade-easing` (a CSS easing function; by default `cubic-bezier(.25, 1, .5, 1)`, close to niri's default spring). The old frame is the window's surface at the old size, kept alive in viz by its exact id.
 
-The shell's own frame (border, shadow) can animate its `width`/`height` alongside. The niri shell does this in `placeTile()`, with the crossfade set to its `--anim` duration.
+What doesn't fade:
+- **Small resizes:** 10 pixels or less either way, which niri doesn't animate.
+- **Continuous resizes:** less than 100 ms apart (a drag). The app's frame is stretched live, as Hyprland and niri show an interactive resize.
+- **A first size:** an element only fades a box it has already shown the window in. Attaching a window (or switching the element to another one), and showing an element that was hidden (`display: none`, `visibility: hidden`) or off screen, don't fade.
+
+The page owns the geometry, so animating the size is up to it. niri's animation is three things started together once the app has drawn at the new size: the size easing from old to new, the old and new frames stretched to it, and their mix. A page gets it like this:
+1. Set the element to its final size at once (the app is asked to resize once), and hold a `transform: scale()` back to the old size (`transform-origin: 0 0`). The stretched old frame then shows exactly as before.
+2. Wait for a `windowchange` where `windowWidth`/`windowHeight` differ from what they were when the size was set, or are the new size (or 300 ms), as niri's transactions wait.
+3. Animate that transform to `none` (FLIP), and its own frame (border, shadow), with the cross-fade's duration and easing. The element starts the cross-fade at the same moment.
+
+The niri shell does this for every layout change (`placeTile()`): all windows are asked for their sizes, nothing moves until they have drawn, and then the tiles' transitions, the FLIPs and the cross-fades start together. A page that snaps its layout (T3 Code) gets the window filling the new box at once and fading into the app's new frame.
+
+Hyprland doesn't cross-fade a resize. It stretches the app's latest frame to the animated size, which is what the element does while the app catches up.
 
 ## Requests: `windowrequest`
 
@@ -60,7 +69,11 @@ Only the visible shell's elements count. When the driver changes, the window tak
 |---|---|
 | App maximize/unmaximize/minimize (GTK 4, `gtk_window_maximize()` etc.) in the plain shell | configure answers at the element's size (1380×875), never maximized; three `windowrequest` events with the right `request` |
 | Same, the prebuilt image without 0017 | configure 1600×1000 maximized; window 1600×1000 in a 1380×875 element |
-| Element 1380 → 800 px, `crossfade=3000` | old frame squeezed to 800 px over the new layout, fading out |
+| Element 600×400 → 1000×700 at once, `crossfade=1500` | window fills the new box from the first frame (old frame stretched), then fades into the app's new frame |
+| Element widened 15 px every 16 ms (a drag) | window fills the box in every frame; no gap, no fade |
+| niri: maximize column, at 2 s linear | tile border and window grow together; old frame stretched and new one squeezed, mixed by the same progress |
+| Element switched from one window to another | the new window at once, no fade |
+| niri: foot (snaps to cells, answers 1560×947 for 1560×960) maximized | tiles move 6 ms after the request, when foot answers; before, the shell waited the full 300 ms for an exact size with foot's frame stretched |
 | GTK Demo in a 300×300 element (it won't go below 379 px) | `none`: clipped at the top left; `contain`: scaled to fit |
 | Second element on the same window | newest on-screen element drives (400×300); off screen → the first drives (1380×875); back → 400×300; removed → 1380×875 |
 | niri: the app's maximize | column maximized (768 → 1560 px), app configured once; FLIP plus cross-fade, captured with animations at 1/10 speed |
