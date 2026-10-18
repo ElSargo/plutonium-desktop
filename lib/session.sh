@@ -40,7 +40,7 @@ start_helper() {
   # session's own variables when this runs from one (Claude Code).
   setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') \
     node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" \
-    --shell-origin "$ORIGINS" --port "$HELPER_PORT" > "$HELPER_LOG" 2>&1 < /dev/null &
+    --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" > "$HELPER_LOG" 2>&1 < /dev/null &
   echo $! > "$pidfile"
 }
 

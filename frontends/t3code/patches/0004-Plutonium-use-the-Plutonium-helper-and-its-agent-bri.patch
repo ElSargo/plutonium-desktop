@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 10:11:22 +1300
-Subject: [PATCH 04/11] Plutonium: use the Plutonium helper and its agent
+Subject: [PATCH 04/12] Plutonium: use the Plutonium helper and its agent
  bridge
 
 The thread environment, per-thread X display and pid-to-thread resolver
@@ -15,34 +15,36 @@ boot so the pairing redirect doesn't drop it.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/server/src/http.ts                       |  14 --
- apps/server/src/plutonium.ts                  | 235 ++++++------------
- .../src/provider/Layers/ClaudeAdapter.ts      |  33 ++-
- apps/server/src/server.ts                     |   2 -
+ .../Adapters/ClaudeAdapterV2.ts               |  42 ++++-
+ apps/server/src/plutonium.ts                  |  69 -------
+ apps/server/src/server.ts                     |   1 -
  apps/web/src/main.tsx                         |   2 +
  apps/web/src/plutonium/PlutoniumWindows.tsx   |  28 ++-
- apps/web/src/plutonium/helperOrigin.ts        |  23 ++
- apps/web/src/plutonium/windowStore.ts         | 168 +++++--------
- 8 files changed, 217 insertions(+), 288 deletions(-)
+ apps/web/src/plutonium/helperOrigin.ts        |  23 +++
+ apps/web/src/plutonium/windowStore.ts         | 168 +++++++----------
+ packages/shared/src/plutonium.ts              | 177 ++++++++----------
+ 9 files changed, 226 insertions(+), 298 deletions(-)
+ delete mode 100644 apps/server/src/plutonium.ts
  create mode 100644 apps/web/src/plutonium/helperOrigin.ts
 
 diff --git a/apps/server/src/http.ts b/apps/server/src/http.ts
-index 9355bd3ed2..30b368e621 100644
+index fd2f05925a..60a5ae2297 100644
 --- a/apps/server/src/http.ts
 +++ b/apps/server/src/http.ts
-@@ -46,7 +46,6 @@ import {
-   failEnvironmentInternal,
+@@ -48,7 +48,6 @@ import {
  } from "./auth/http.ts";
  import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+ import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 -import { PLUTONIUM_WINDOW_THREADS_PATH, resolveWindowThreads } from "./plutonium.ts";
- import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+ import {
+   browserApiCorsAllowedHeaders,
+   browserApiCorsAllowedMethods,
+@@ -416,19 +415,6 @@ const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((
  
- const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
-@@ -387,19 +386,6 @@ export const untracedRequestsLayer = Layer.succeed(HttpMiddleware.TracerDisabled
-   );
- });
+ export const withUntracedRequests = Layer.provide(layerUntracedRequests);
  
 -// Plutonium: which thread started each native window's client process.
--export const plutoniumWindowThreadsRouteLayer = HttpRouter.add(
+-export const layerPlutoniumWindowThreadsRoute = HttpRouter.add(
 -  "GET",
 -  PLUTONIUM_WINDOW_THREADS_PATH,
 -  Effect.gen(function* () {
@@ -54,179 +56,101 @@ index 9355bd3ed2..30b368e621 100644
 -  }),
 -);
 -
- export const assetRouteLayer = HttpRouter.add(
+ export const layerAssetRoute = HttpRouter.add(
    "GET",
    `${ASSET_ROUTE_PREFIX}/*`,
+diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+index 106138ead4..ac89151d1b 100644
+--- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+@@ -48,7 +48,7 @@ import { parseCliArgs } from "@t3tools/shared/cliArgs";
+ import { AgentScope } from "@t3tools/shared/AgentScope";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
+-import { withPlutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
++import { plutoniumThreadSetup, withPlutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
+ import {
+   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
+   formatClaudeResumeCompactionQuestion,
+@@ -1283,6 +1283,27 @@ export function claudeMcpQueryOverrides(input: {
+   };
+ }
+ 
++// Plutonium (no-op unless enabled): the helper's agent bridge to this
++// thread's app windows, beside T3 Code's own MCP server.
++function withPlutoniumMcpServer(
++  overrides: ReturnType<typeof claudeMcpQueryOverrides>,
++  threadId: string,
++): ReturnType<typeof claudeMcpQueryOverrides> {
++  const setup = plutoniumThreadSetup(threadId);
++  if (setup === undefined) return overrides;
++  return {
++    ...overrides,
++    mcpServers: {
++      ...overrides.mcpServers,
++      plutonium: {
++        type: "stdio",
++        command: setup.mcpServer.command,
++        args: [...setup.mcpServer.args],
++      },
++    },
++  };
++}
++
+ function providerSession(input: {
+   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
+   readonly providerInstanceId: ProviderInstanceId;
+@@ -8475,14 +8496,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+           nativeThreadId: string,
+         ) {
+           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
+-          const mcpOverrides = claudeMcpQueryOverrides({
+-            mcpSession: yield* mcpSessions.read(turnInput.threadId),
+-            readOnlySandbox:
+-              sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
+-            ...(queryPolicy.allowedTools === undefined
+-              ? {}
+-              : { allowedTools: queryPolicy.allowedTools }),
+-          });
++          const mcpOverrides = withPlutoniumMcpServer(
++            claudeMcpQueryOverrides({
++              mcpSession: yield* mcpSessions.read(turnInput.threadId),
++              readOnlySandbox:
++                sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
++              ...(queryPolicy.allowedTools === undefined
++                ? {}
++                : { allowedTools: queryPolicy.allowedTools }),
++            }),
++            turnInput.threadId,
++          );
+           const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
+           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
 diff --git a/apps/server/src/plutonium.ts b/apps/server/src/plutonium.ts
-index 151ca7d0ec..b4b3b094dd 100644
+deleted file mode 100644
+index 604a4f87ad..0000000000
 --- a/apps/server/src/plutonium.ts
-+++ b/apps/server/src/plutonium.ts
-@@ -1,176 +1,89 @@
--// @effect-diagnostics nodeBuiltinImport:off - agent and terminal environments are built synchronously at spawn
-+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off - agent and terminal environments are built synchronously at spawn, outside Effect
- // Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
- // native Wayland apps that agents start show up as page elements.
- //
++++ /dev/null
+@@ -1,69 +0,0 @@
+-// Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
+-// native Wayland apps that agents start show up as page elements.
+-//
 -// Only active when the server is started with PLUTONIUM_WAYLAND_DISPLAY (the
 -// Exo socket, e.g. "wayland-cros"). Agents then get that display plus their
--// thread id in their environment, and every process they start inherits both.
--// The shell page learns each window's client pid from the browser's window
--// broker and asks this server which thread the pid belongs to.
--import { spawn, type ChildProcess } from "node:child_process";
--import { existsSync, unlinkSync, writeFileSync } from "node:fs";
--import { delimiter, join } from "node:path";
--
+-// thread id in their environment (@t3tools/shared/plutonium), and every
+-// process they start inherits both. The shell page learns each window's client
+-// pid from the browser's window broker and asks this server which thread the
+-// pid belongs to.
 -import * as Effect from "effect/Effect";
 -import * as FileSystem from "effect/FileSystem";
 -
--const THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
+-import { PLUTONIUM_THREAD_ID_VARIABLE as THREAD_ID_VARIABLE } from "@t3tools/shared/plutonium";
+-
 -// Enough to get from a GUI app through shells and wrappers to the agent.
 -const MAX_PARENT_DEPTH = 16;
 -
 -export const PLUTONIUM_WINDOW_THREADS_PATH = "/api/plutonium/window-threads";
 -
--export function plutoniumWaylandDisplay(): string | undefined {
--  return process.env.PLUTONIUM_WAYLAND_DISPLAY || undefined;
--}
--
--/** Variables that send an agent's GUI apps to Exo and tag them with the thread. */
--export function plutoniumAgentEnvironment(
--  threadId: string | undefined,
--): Readonly<Record<string, string>> {
--  const display = plutoniumWaylandDisplay();
--  if (!display || !threadId) return {};
--  const xDisplay = threadXDisplay(threadId, display);
--  return {
--    [THREAD_ID_VARIABLE]: threadId,
--    WAYLAND_DISPLAY: display,
--    GDK_BACKEND: "wayland",
--    QT_QPA_PLATFORM: "wayland",
--    MOZ_ENABLE_WAYLAND: "1",
--    // X11-only apps (e.g. games on GLFW) get the thread's own X server rather
--    // than the host desktop's.
--    ...(xDisplay ? { DISPLAY: xDisplay } : {}),
--  };
--}
--
--// X11 apps: one rootless Xwayland per thread, through xwayland-satellite,
--// which shows X windows as Wayland toplevels on Exo. Exo sees the satellite as
--// the client, so its windows resolve to the thread through the satellite's
--// own PLUTONIUM_THREAD_ID. systemd-socket-activate holds the X socket and only
--// starts the satellite (in its own process) when an X client first connects.
--const X_DISPLAY_FIRST = 200;
--const X_DISPLAY_LAST = 299;
--const xDisplays = new Map<string, { display: number; process: ChildProcess }>();
--
--function findExecutable(name: string): string | undefined {
--  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
--    if (directory && existsSync(join(directory, name))) return join(directory, name);
--  }
--  return undefined;
--}
--
--const xSocketPath = (display: number) => `/tmp/.X11-unix/X${display}`;
--const xLockPath = (display: number) => `/tmp/.X${display}-lock`;
-+// The frontend-neutral parts live in Plutonium's helper (plutoniumd, in the
-+// plutonium repo under helper/): the thread environment (Exo display, thread
-+// tag, a per-thread X display), pid → thread resolution, and the agent bridge
-+// (an MCP server). This server only asks the helper what to add to a thread's
-+// agents and terminals. The web app talks to the helper directly.
-+//
-+// Only active when the server is started with PLUTONIUM_HELPER (the helper's
-+// Unix socket) or PLUTONIUM_WAYLAND_DISPLAY (Exo's socket name, from which the
-+// helper's default socket path follows).
-+import { spawnSync } from "node:child_process";
-+import { join } from "node:path";
- 
--function releaseXDisplay(display: number): void {
--  for (const path of [xSocketPath(display), xLockPath(display)]) {
--    try {
--      unlinkSync(path);
--    } catch {
--      // Already gone.
--    }
--  }
-+export interface PlutoniumThreadSetup {
-+  /** Variables for the thread's processes (agents, terminals). */
-+  readonly env: Readonly<Record<string, string>>;
-+  /** The agent bridge as a stdio MCP server. */
-+  readonly mcpServer: { readonly command: string; readonly args: readonly string[] };
- }
- 
--function threadXDisplay(threadId: string, waylandDisplay: string): string | undefined {
--  const existing = xDisplays.get(threadId);
--  if (existing) return `:${existing.display}`;
--  if (process.platform !== "linux") return undefined;
--  const satellite =
--    process.env.PLUTONIUM_XWAYLAND_SATELLITE || findExecutable("xwayland-satellite");
--  const activate = findExecutable("systemd-socket-activate");
--  if (!satellite || !activate) return undefined;
--  for (let display = X_DISPLAY_FIRST; display <= X_DISPLAY_LAST; display++) {
--    if (existsSync(xSocketPath(display)) || existsSync(xLockPath(display))) continue;
--    try {
--      // Reserves the number; the format is what X servers write.
--      writeFileSync(xLockPath(display), `${String(process.pid).padStart(10)}\n`, { flag: "wx" });
--    } catch {
--      continue;
--    }
--    const child = spawn(
--      activate,
--      [
--        ...["XDG_RUNTIME_DIR", "PATH", "WAYLAND_DISPLAY", THREAD_ID_VARIABLE].flatMap((name) => [
--          "-E",
--          name,
--        ]),
--        "-l",
--        xSocketPath(display),
--        satellite,
--        `:${display}`,
--        "-listenfd",
--        "3",
--      ],
--      {
--        env: { ...process.env, WAYLAND_DISPLAY: waylandDisplay, [THREAD_ID_VARIABLE]: threadId },
--        stdio: "ignore",
--      },
--    );
--    xDisplays.set(threadId, { display, process: child });
--    child.once("exit", () => {
--      if (xDisplays.get(threadId)?.process === child) xDisplays.delete(threadId);
--      releaseXDisplay(display);
--    });
--    return `:${display}`;
--  }
--  return undefined;
-+function helperSocket(): string | undefined {
-+  if (process.env.PLUTONIUM_HELPER) return process.env.PLUTONIUM_HELPER;
-+  const display = process.env.PLUTONIUM_WAYLAND_DISPLAY;
-+  if (!display) return undefined;
-+  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`;
-+  return join(runtime, "plutonium", `${display}.sock`);
- }
- 
--process.once("exit", () => {
--  for (const { display, process: child } of xDisplays.values()) {
--    child.kill();
--    releaseXDisplay(display);
--  }
-+// Environments are built synchronously at spawn, so the request runs in a
-+// short-lived child (about 50 ms).
-+const REQUEST_SCRIPT = `
-+const [socketPath, path] = process.argv.slice(1);
-+require("node:http").get({ socketPath, path }, (res) => {
-+  let body = "";
-+  res.setEncoding("utf8");
-+  res.on("data", (chunk) => (body += chunk));
-+  res.on("end", () => {
-+    process.stdout.write(body);
-+    process.exit(res.statusCode === 200 ? 0 : 1);
-+  });
-+}).on("error", (error) => {
-+  process.stderr.write(error.message);
-+  process.exit(1);
- });
-+`;
- 
 -const readThreadId = (fileSystem: FileSystem.FileSystem, pid: number) =>
 -  fileSystem.readFileString(`/proc/${pid}/environ`).pipe(
 -    Effect.map((environ) => {
@@ -237,11 +161,7 @@ index 151ca7d0ec..b4b3b094dd 100644
 -    // Gone, or not ours.
 -    Effect.orElseSucceed(() => undefined),
 -  );
-+let warned = false;
-+// A session start asks for the environment and the MCP server separately.
-+const CACHE_MS = 10_000;
-+const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
- 
+-
 -const readParentPid = (fileSystem: FileSystem.FileSystem, pid: number) =>
 -  fileSystem.readFileString(`/proc/${pid}/stat`).pipe(
 -    Effect.map((stat) => {
@@ -250,19 +170,7 @@ index 151ca7d0ec..b4b3b094dd 100644
 -      return parent > 1 ? parent : undefined;
 -    }),
 -    Effect.orElseSucceed(() => undefined),
-+/** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
-+export function plutoniumThreadSetup(
-+  threadId: string | undefined,
-+): PlutoniumThreadSetup | undefined {
-+  const socket = helperSocket();
-+  if (!socket || !threadId) return undefined;
-+  const cached = cache.get(threadId);
-+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
-+  const result = spawnSync(
-+    process.execPath,
-+    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(threadId)}`],
-+    { encoding: "utf8", timeout: 5_000 },
-   );
+-  );
 -
 -/**
 - * The thread whose agent started `pid`: the process's own tag, or the nearest
@@ -275,23 +183,10 @@ index 151ca7d0ec..b4b3b094dd 100644
 -      const threadId = yield* readThreadId(fileSystem, current);
 -      if (threadId) return threadId;
 -      current = yield* readParentPid(fileSystem, current);
-+  if (result.status !== 0) {
-+    if (!warned) {
-+      warned = true;
-+      console.warn(
-+        `Plutonium: the helper at ${socket} did not answer (${(result.stderr || result.stdout || "").trim()}); ` +
-+          "thread processes won't be tagged until it does.",
-+      );
-     }
-     return undefined;
+-    }
+-    return undefined;
 -  });
-+  }
-+  warned = false;
-+  const setup = JSON.parse(result.stdout) as PlutoniumThreadSetup;
-+  cache.set(threadId, { at: Date.now(), setup });
-+  return setup;
-+}
- 
+-
 -/** pids → thread ids, for the `?pids=1,2,3` query. Unknown pids are left out. */
 -export const resolveWindowThreads = (pidsQuery: string | null) =>
 -  Effect.gen(function* () {
@@ -306,92 +201,18 @@ index 151ca7d0ec..b4b3b094dd 100644
 -    }
 -    return result;
 -  });
-+/** Variables that send a thread's GUI apps to Exo and tag them with the thread. */
-+export function plutoniumAgentEnvironment(
-+  threadId: string | undefined,
-+): Readonly<Record<string, string>> {
-+  return plutoniumThreadSetup(threadId)?.env ?? {};
-+}
-diff --git a/apps/server/src/provider/Layers/ClaudeAdapter.ts b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-index c81ccd9f35..1da4a23402 100644
---- a/apps/server/src/provider/Layers/ClaudeAdapter.ts
-+++ b/apps/server/src/provider/Layers/ClaudeAdapter.ts
-@@ -89,6 +89,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
- import { resolveAttachmentPath } from "../../attachmentStore.ts";
- import { ServerConfig } from "../../config.ts";
- import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-+import { plutoniumThreadSetup } from "../../plutonium.ts";
- import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
- import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
- import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
-@@ -4983,6 +4984,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
-         ...(input.cwd ? [input.cwd] : []),
-         serverConfig.attachmentsDir,
-       ];
-+      // Plutonium (no-op unless enabled): the helper's MCP server for this thread.
-+      const plutoniumSetup = plutoniumThreadSetup(input.threadId);
-       const queryOptions: ClaudeQueryOptions = {
-         ...(input.cwd ? { cwd: input.cwd } : {}),
-         ...(apiModelId ? { model: apiModelId } : {}),
-@@ -5026,16 +5029,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
-         ),
-         additionalDirectories,
-         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
--        ...(mcpSession
-+        ...(mcpSession || plutoniumSetup
-           ? {
-               mcpServers: {
--                "t3-code": {
--                  type: "http",
--                  url: mcpSession.endpoint,
--                  headers: {
--                    Authorization: mcpSession.authorizationHeader,
--                  },
--                },
-+                ...(mcpSession
-+                  ? {
-+                      "t3-code": {
-+                        type: "http" as const,
-+                        url: mcpSession.endpoint,
-+                        headers: {
-+                          Authorization: mcpSession.authorizationHeader,
-+                        },
-+                      },
-+                    }
-+                  : {}),
-+                // Plutonium: the agent bridge to this thread's app windows.
-+                ...(plutoniumSetup
-+                  ? {
-+                      plutonium: {
-+                        type: "stdio" as const,
-+                        command: plutoniumSetup.mcpServer.command,
-+                        args: [...plutoniumSetup.mcpServer.args],
-+                      },
-+                    }
-+                  : {}),
-               },
-             }
-           : {}),
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index fb5498e2e1..43bba34bd8 100644
+index dd5ab3e4cc..23981a932e 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -27,7 +27,6 @@ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
- import * as ServerConfig from "./config.ts";
- import {
-   otlpTracesProxyRouteLayer,
--  plutoniumWindowThreadsRouteLayer,
-   assetRouteLayer,
-   attachmentUploadRouteLayer,
-   serverEnvironmentHttpApiLayer,
-@@ -606,7 +605,6 @@ export const makeRoutesLayer = Layer.mergeAll(
-       Layer.provide(environmentAuthenticatedAuthLayer),
+@@ -711,7 +711,6 @@ const layerMakeRoutes = Layer.mergeAll(
+       Layer.provide(AuthHttp.layerAuthenticatedAuth),
      ),
-     otlpTracesProxyRouteLayer,
--    plutoniumWindowThreadsRouteLayer,
-     assetRouteLayer,
-     attachmentUploadRouteLayer,
-     deviceHubProxyRouteLayer,
+     ServerHttp.layerOtlpTracesProxyRoute,
+-    ServerHttp.layerPlutoniumWindowThreadsRoute,
+     ServerHttp.layerAssetRoute,
+     ServerHttp.layerAttachmentUploadRoute,
+     DeviceHubProxy.layer,
 diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
 index 81d1c2140a..dea4746cf0 100644
 --- a/apps/web/src/main.tsx
@@ -413,7 +234,7 @@ index 81d1c2140a..dea4746cf0 100644
  // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
  const history = isElectron ? createHashHistory() : createBrowserHistory();
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index 0975606fff..51fb12c3fa 100644
+index 72e4e2a726..4fe717d12a 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -1,14 +1,20 @@
@@ -732,3 +553,204 @@ index 7259602fb4..3b66e87831 100644
 +    .filter((entry) => entry.threadId === null)
      .toSorted((a, b) => a.id - b.id);
  }
+diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
+index 0beabc2a5e..f6805ecc0b 100644
+--- a/packages/shared/src/plutonium.ts
++++ b/packages/shared/src/plutonium.ts
+@@ -1,121 +1,94 @@
+-// @effect-diagnostics nodeBuiltinImport:off - agent and terminal environments are built synchronously at spawn
++// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off - agent and terminal environments are built synchronously at spawn, outside Effect
+ // Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
+ // native Wayland apps that agents start show up as page elements.
+ //
+-// Only active when the server is started with PLUTONIUM_WAYLAND_DISPLAY (the
+-// Exo socket, e.g. "wayland-cros"). Agents then get that display plus their
+-// thread id in their environment, and every process they start inherits both.
+-import { spawn, type ChildProcess } from "node:child_process";
+-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+-import { delimiter, join } from "node:path";
+-
+-export const PLUTONIUM_THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
++// The frontend-neutral parts live in Plutonium's helper (plutoniumd, in the
++// plutonium repo under helper/): the thread environment (Exo display, thread
++// tag, a per-thread X display), pid → thread resolution, and the agent bridge
++// (an MCP server). This server only asks the helper what to add to a thread's
++// agents and terminals. The web app talks to the helper directly.
++//
++// Only active when the server is started with PLUTONIUM_HELPER (the helper's
++// Unix socket) or PLUTONIUM_WAYLAND_DISPLAY (Exo's socket name, from which the
++// helper's default socket path follows).
++import * as NodeChildProcess from "node:child_process";
++import * as NodePath from "node:path";
+ 
+-export function plutoniumWaylandDisplay(): string | undefined {
+-  return process.env.PLUTONIUM_WAYLAND_DISPLAY || undefined;
++export interface PlutoniumThreadSetup {
++  /** Variables for the thread's processes (agents, terminals). */
++  readonly env: Readonly<Record<string, string>>;
++  /** The agent bridge as a stdio MCP server. */
++  readonly mcpServer: { readonly command: string; readonly args: readonly string[] };
+ }
+ 
+-/** Variables that send an agent's GUI apps to Exo and tag them with the thread. */
+-export function plutoniumAgentEnvironment(
+-  threadId: string | undefined,
+-): Readonly<Record<string, string>> {
+-  const display = plutoniumWaylandDisplay();
+-  if (!display || !threadId) return {};
+-  const xDisplay = threadXDisplay(threadId, display);
+-  return {
+-    [PLUTONIUM_THREAD_ID_VARIABLE]: threadId,
+-    WAYLAND_DISPLAY: display,
+-    GDK_BACKEND: "wayland",
+-    QT_QPA_PLATFORM: "wayland",
+-    MOZ_ENABLE_WAYLAND: "1",
+-    // X11-only apps (e.g. games on GLFW) get the thread's own X server rather
+-    // than the host desktop's.
+-    ...(xDisplay ? { DISPLAY: xDisplay } : {}),
+-  };
++/** The helper's Unix socket, when this server runs in a Plutonium session. */
++export function plutoniumHelperSocket(): string | undefined {
++  if (process.env.PLUTONIUM_HELPER) return process.env.PLUTONIUM_HELPER;
++  const display = process.env.PLUTONIUM_WAYLAND_DISPLAY;
++  if (!display) return undefined;
++  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`;
++  return NodePath.join(runtime, "plutonium", `${display}.sock`);
+ }
+ 
+-// X11 apps: one rootless Xwayland per thread, through xwayland-satellite,
+-// which shows X windows as Wayland toplevels on Exo. Exo sees the satellite as
+-// the client, so its windows resolve to the thread through the satellite's
+-// own PLUTONIUM_THREAD_ID. systemd-socket-activate holds the X socket and only
+-// starts the satellite (in its own process) when an X client first connects.
+-const X_DISPLAY_FIRST = 200;
+-const X_DISPLAY_LAST = 299;
+-const xDisplays = new Map<string, { display: number; process: ChildProcess }>();
+-
+-function findExecutable(name: string): string | undefined {
+-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+-    if (directory && existsSync(join(directory, name))) return join(directory, name);
+-  }
+-  return undefined;
+-}
++// Environments are built synchronously at spawn, so the request runs in a
++// short-lived child (about 50 ms).
++const REQUEST_SCRIPT = `
++const [socketPath, path] = process.argv.slice(1);
++require("node:http").get({ socketPath, path }, (res) => {
++  let body = "";
++  res.setEncoding("utf8");
++  res.on("data", (chunk) => (body += chunk));
++  res.on("end", () => {
++    process.stdout.write(body);
++    process.exit(res.statusCode === 200 ? 0 : 1);
++  });
++}).on("error", (error) => {
++  process.stderr.write(error.message);
++  process.exit(1);
++});
++`;
+ 
+-const xSocketPath = (display: number) => `/tmp/.X11-unix/X${display}`;
+-const xLockPath = (display: number) => `/tmp/.X${display}-lock`;
++let warned = false;
++// A session start asks for the environment and the MCP server separately.
++const CACHE_MS = 10_000;
++const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
+ 
+-function releaseXDisplay(display: number): void {
+-  for (const path of [xSocketPath(display), xLockPath(display)]) {
+-    try {
+-      unlinkSync(path);
+-    } catch {
+-      // Already gone.
++/** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
++export function plutoniumThreadSetup(
++  threadId: string | undefined,
++): PlutoniumThreadSetup | undefined {
++  const socket = plutoniumHelperSocket();
++  if (!socket || !threadId) return undefined;
++  const cached = cache.get(threadId);
++  if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
++  const result = NodeChildProcess.spawnSync(
++    process.execPath,
++    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(threadId)}`],
++    { encoding: "utf8", timeout: 5_000 },
++  );
++  if (result.status !== 0) {
++    if (!warned) {
++      warned = true;
++      console.warn(
++        `Plutonium: the helper at ${socket} did not answer (${(result.stderr || result.stdout || "").trim()}); ` +
++          "thread processes won't be tagged until it does.",
++      );
+     }
++    return undefined;
+   }
++  warned = false;
++  const setup = JSON.parse(result.stdout) as PlutoniumThreadSetup;
++  cache.set(threadId, { at: Date.now(), setup });
++  return setup;
+ }
+ 
+-function threadXDisplay(threadId: string, waylandDisplay: string): string | undefined {
+-  const existing = xDisplays.get(threadId);
+-  if (existing) return `:${existing.display}`;
+-  if (process.platform !== "linux") return undefined;
+-  const satellite =
+-    process.env.PLUTONIUM_XWAYLAND_SATELLITE || findExecutable("xwayland-satellite");
+-  const activate = findExecutable("systemd-socket-activate");
+-  if (!satellite || !activate) return undefined;
+-  for (let display = X_DISPLAY_FIRST; display <= X_DISPLAY_LAST; display++) {
+-    if (existsSync(xSocketPath(display)) || existsSync(xLockPath(display))) continue;
+-    try {
+-      // Reserves the number; the format is what X servers write.
+-      writeFileSync(xLockPath(display), `${String(process.pid).padStart(10)}\n`, { flag: "wx" });
+-    } catch {
+-      continue;
+-    }
+-    const child = spawn(
+-      activate,
+-      [
+-        ...["XDG_RUNTIME_DIR", "PATH", "WAYLAND_DISPLAY", PLUTONIUM_THREAD_ID_VARIABLE].flatMap((name) => [
+-          "-E",
+-          name,
+-        ]),
+-        "-l",
+-        xSocketPath(display),
+-        satellite,
+-        `:${display}`,
+-        "-listenfd",
+-        "3",
+-      ],
+-      {
+-        env: { ...process.env, WAYLAND_DISPLAY: waylandDisplay, [PLUTONIUM_THREAD_ID_VARIABLE]: threadId },
+-        stdio: "ignore",
+-      },
+-    );
+-    xDisplays.set(threadId, { display, process: child });
+-    child.once("exit", () => {
+-      if (xDisplays.get(threadId)?.process === child) xDisplays.delete(threadId);
+-      releaseXDisplay(display);
+-    });
+-    return `:${display}`;
+-  }
+-  return undefined;
++/** Variables that send a thread's GUI apps to Exo and tag them with the thread. */
++export function plutoniumAgentEnvironment(
++  threadId: string | undefined,
++): Readonly<Record<string, string>> {
++  return plutoniumThreadSetup(threadId)?.env ?? {};
+ }
+ 
+-process.once("exit", () => {
+-  for (const { display, process: child } of xDisplays.values()) {
+-    child.kill();
+-    releaseXDisplay(display);
+-  }
+-});
+-
+-
+ /** `env` with the Plutonium variables for `threadId` (`env` itself when off). */
+ export function withPlutoniumAgentEnvironment(
+   env: NodeJS.ProcessEnv | undefined,

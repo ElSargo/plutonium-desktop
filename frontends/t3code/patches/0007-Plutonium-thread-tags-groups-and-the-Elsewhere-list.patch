@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 15:10:13 +1300
-Subject: [PATCH 07/11] Plutonium: thread tags, groups and the Elsewhere list
+Subject: [PATCH 07/12] Plutonium: thread tags, groups and the Elsewhere list
 
 Threads are tagged t3:thread/<id> and described to the browser as
 groups. The Apps panel lists windows from other shells under
@@ -10,48 +10,15 @@ groups. The Apps panel lists windows from other shells under
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
 ---
- apps/server/src/plutonium.ts                | 12 ++-
  apps/web/src/plutonium/AppLauncher.tsx      |  5 +-
  apps/web/src/plutonium/PlutoniumWindows.tsx | 77 +++++++++++++---
- apps/web/src/plutonium/previewBridge.ts     |  3 +-
+ apps/web/src/plutonium/previewBridge.ts     |  4 +-
  apps/web/src/plutonium/threadTag.ts         | 16 ++++
  apps/web/src/plutonium/windowStore.ts       | 97 +++++++++++++++++++--
- 6 files changed, 184 insertions(+), 26 deletions(-)
+ packages/shared/src/plutonium.ts            | 12 ++-
+ 6 files changed, 185 insertions(+), 26 deletions(-)
  create mode 100644 apps/web/src/plutonium/threadTag.ts
 
-diff --git a/apps/server/src/plutonium.ts b/apps/server/src/plutonium.ts
-index b4b3b094dd..b63720ab21 100644
---- a/apps/server/src/plutonium.ts
-+++ b/apps/server/src/plutonium.ts
-@@ -52,17 +52,27 @@ let warned = false;
- const CACHE_MS = 10_000;
- const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
- 
-+/**
-+ * A T3 thread's Plutonium tag: what its processes carry as
-+ * PLUTONIUM_THREAD_ID, and what the windows and tabs it opens are tagged
-+ * with. Namespaced, so other shells' threads can't collide with it.
-+ */
-+export function plutoniumThreadTag(threadId: string): string {
-+  return `t3:thread/${threadId}`;
-+}
-+
- /** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
- export function plutoniumThreadSetup(
-   threadId: string | undefined,
- ): PlutoniumThreadSetup | undefined {
-   const socket = helperSocket();
-   if (!socket || !threadId) return undefined;
-+  const tag = plutoniumThreadTag(threadId);
-   const cached = cache.get(threadId);
-   if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
-   const result = spawnSync(
-     process.execPath,
--    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(threadId)}`],
-+    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(tag)}`],
-     { encoding: "utf8", timeout: 5_000 },
-   );
-   if (result.status !== 0) {
 diff --git a/apps/web/src/plutonium/AppLauncher.tsx b/apps/web/src/plutonium/AppLauncher.tsx
 index 5c1b8bb491..bd037cf0f3 100644
 --- a/apps/web/src/plutonium/AppLauncher.tsx
@@ -83,7 +50,7 @@ index 5c1b8bb491..bd037cf0f3 100644
      stop();
      toastManager.add({
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index 51fb12c3fa..17bce6eba3 100644
+index 4fe717d12a..ceb3c626cc 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -1,6 +1,8 @@
@@ -202,7 +169,7 @@ index 51fb12c3fa..17bce6eba3 100644
 +    onOpen(entry);
 +  };
    return (
-     <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
+     <div className="scrollbar-gutter-both flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
        <div className="w-full max-w-sm py-6">
 @@ -95,13 +134,23 @@ export function PlutoniumAppsPanel({
              ))}
@@ -234,18 +201,19 @@ index 51fb12c3fa..17bce6eba3 100644
            </>
          ) : null}
 diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
-index 9e519d9fd4..614aeffb5e 100644
+index 75b3bbe0b6..dd7b560f45 100644
 --- a/apps/web/src/plutonium/previewBridge.ts
 +++ b/apps/web/src/plutonium/previewBridge.ts
-@@ -18,6 +18,7 @@ import type {
+@@ -17,6 +17,8 @@ import type {
+   DesktopPreviewTabState,
  } from "@t3tools/contracts";
  
- import { PlutoniumAutomation } from "./previewAutomation";
 +import { threadTag } from "./threadTag";
- 
++
  /** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
  export interface BrokerTab {
-@@ -63,7 +64,7 @@ function tabBroker(): TabBroker | null {
+   readonly id: number;
+@@ -61,7 +63,7 @@ function tabBroker(): TabBroker | null {
  function threadOf(runtimeTabId: string): string {
    try {
      const parsed: unknown = JSON.parse(runtimeTabId);
@@ -443,3 +411,36 @@ index a45cc78400..c13812488e 100644
 +    )
      .toSorted((a, b) => a.id - b.id);
  }
+diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
+index f6805ecc0b..a02c09150c 100644
+--- a/packages/shared/src/plutonium.ts
++++ b/packages/shared/src/plutonium.ts
+@@ -53,17 +53,27 @@ let warned = false;
+ const CACHE_MS = 10_000;
+ const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
+ 
++/**
++ * A T3 thread's Plutonium tag: what its processes carry as
++ * PLUTONIUM_THREAD_ID, and what the windows and tabs it opens are tagged
++ * with. Namespaced, so other shells' threads can't collide with it.
++ */
++export function plutoniumThreadTag(threadId: string): string {
++  return `t3:thread/${threadId}`;
++}
++
+ /** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
+ export function plutoniumThreadSetup(
+   threadId: string | undefined,
+ ): PlutoniumThreadSetup | undefined {
+   const socket = plutoniumHelperSocket();
+   if (!socket || !threadId) return undefined;
++  const tag = plutoniumThreadTag(threadId);
+   const cached = cache.get(threadId);
+   if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
+   const result = NodeChildProcess.spawnSync(
+     process.execPath,
+-    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(threadId)}`],
++    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(tag)}`],
+     { encoding: "utf8", timeout: 5_000 },
+   );
+   if (result.status !== 0) {

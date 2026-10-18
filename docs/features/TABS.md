@@ -144,6 +144,28 @@ Not done for T3 (the bridge rejects or ignores these):
 - element picking (needs T3's picker preload), screenshots saved to a file, recordings, picture-in-picture windows, cookie import;
 - console and network entries in snapshots (always empty).
 
+## In T3 Code 0.1: the server drives the tabs (2026-10-18)
+
+T3 Code 0.1 moved agent browsing to the server: it drives every tab with Playwright over the DevTools protocol, and the client-side automation host above (and the RPCs it used) is gone. The desktop app renders its own server's tabs and lends the server each tab's debugger over a "desktop browser channel"; every other client watches tabs that run in a headless Chrome on the server, as a JPEG stream. The Plutonium shell now takes the desktop app's part, with the browser's real tabs, so the user still sees and uses the real tab, and agents get upstream's engine:
+
+- **T3 server** (patch 0012): its `DesktopBrowserChannel` (newline-delimited JSON: `attached`/`detached`/`cdp` from the desktop, `cdp`/`release`/`pointer` to it) also runs over the helper's Unix socket, as `GET /v1/desktop-browser` upgraded, when the server runs in a Plutonium session. It reconnects when the helper restarts, and counts as available only while connected, so with no session a new tab starts headless at once instead of waiting for one.
+- **Shell page:** `rendersServerTabNatively` is true in the Plutonium shell, so the shell shows this server's tabs as the desktop app does. When the bridge creates the tab for a server tab, it calls the shell library's `showServerTab(browserTabId, {threadId, tabId})`, which reads the tab's DevTools target id (its main frame id, from `Page.getFrameTree`) and tells the helper.
+- **Helper** (`helper/src/serverTabs.ts`, `cdp.ts`): connects to the browser's own DevTools (`--cdp-port`, the session's `--remote-debugging-port`) and gives the server one relay per tab. The relay is a port of T3's `CdpRelay`: to Playwright it looks like a browser with one page, and it answers browser-level commands itself. Page commands go to a flat session on that tab's target, with the target's child sessions (frames, workers) passed through and nothing else reachable. Downloads keep the browser's own behaviour (`Browser.setDownloadBehavior` is the whole browser's).
+- **Several shells:** each running shell page renders the panel's tabs, so the first page to show a server tab owns it, and the others show that same browser tab. When the owner's page goes away, another page that shows it takes over.
+- The agent's cursor (`pointer`) goes to the page that shows the tab, into T3's own cursor overlay. What a page opens in a new tab or window becomes another tab of its thread (T3's `onOpenLink`), as in the desktop app.
+
+The client-side engine (`previewAutomation.ts`) is gone; `sendTabDevToolsCommand` is now only used to read a tab's target id.
+
+Verified on Xvfb with the host's T3 data:
+
+| Check | Result |
+|---|---|
+| Browser tab from the panel, URL typed: loads in the real tab; title and URL reach T3 through the server | ✅ |
+| Relay by hand over the helper's socket: `Browser.getVersion`, `Target.setAutoAttach` announces the page, `Runtime.evaluate` returns the tab's URL | ✅ |
+| A T3 agent (Claude, `preview_*`): opens example.com, snapshots it, clicks "Learn more", reports "Example Domains" at iana.org | ✅ in the real tab (target type `other`); clicks relayed as `Input.dispatchMouseEvent`; no headless Chrome started |
+| Three T3 shell pages in one profile | ✅ one browser tab, attached once |
+| The agent's cursor (`pointer` from the server) | ✅ drawn by T3's overlay over the real tab |
+
 ## Limits and next steps
 - **No `Browser` behind a tab.** Some things go through a `Browser` window and are missing:
   - the context menu's Back/Forward/Reload, keyboard shortcuts (Ctrl+L, Ctrl+T…), find-in-page, printing, zoom UI;

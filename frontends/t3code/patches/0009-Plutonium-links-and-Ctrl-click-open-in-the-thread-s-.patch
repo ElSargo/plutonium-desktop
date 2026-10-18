@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 19:00:05 +1300
-Subject: [PATCH 09/11] Plutonium: links and Ctrl+click open in the thread's
+Subject: [PATCH 09/12] Plutonium: links and Ctrl+click open in the thread's
  browser panel
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -13,7 +13,7 @@ Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
  3 files changed, 68 insertions(+), 2 deletions(-)
 
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index 77da2c1d4b..b0769d963a 100644
+index 1779f2ef1e..89fa54c2a8 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -4,7 +4,7 @@
@@ -88,10 +88,10 @@ index 77da2c1d4b..b0769d963a 100644
  }
  
 diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
-index 8872ece103..6d718d7d21 100644
+index 302a030d7c..159c33ba99 100644
 --- a/apps/web/src/plutonium/previewBridge.ts
 +++ b/apps/web/src/plutonium/previewBridge.ts
-@@ -208,6 +208,11 @@ class PlutoniumPreview {
+@@ -207,6 +207,11 @@ class PlutoniumPreview {
      return id === undefined ? null : (this.tabs.get(id) ?? null);
    }
  

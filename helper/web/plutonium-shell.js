@@ -18,6 +18,11 @@
 // (tabElement() makes one). `onFocusTab` is how an agent's "show this tab"
 // reaches the UI.
 //
+// Server-driven tabs: a frontend's server can drive a tab this page shows for
+// it (T3 Code drives its browser panel's tabs with Playwright). The page shows
+// the tab and calls showServerTab(); the helper gives the server that one
+// tab's DevTools. The agent's cursor arrives as "agentpointer" events.
+//
 // Tags: every window and tab carries a list of tags, and items with the same
 // tag go together. The first is where the item came from: the thread that
 // started a window's app, or the thread a tab was created for (tabs its page
@@ -104,6 +109,10 @@ export class PlutoniumShell extends EventTarget {
     this._events = null;
     /** @type {Map<string, Promise<string | null>>} */
     this._appIcons = new Map();
+    /** This page's id with the helper (its request stream's). */
+    this._pageId = crypto.randomUUID();
+    /** @type {Map<string, { threadId: string, tabId: string, browserTabId: number, targetId: string }>} */
+    this._serverTabs = new Map();
     this.ready = this.available ? this._start() : Promise.resolve();
   }
 
@@ -128,6 +137,9 @@ export class PlutoniumShell extends EventTarget {
       this.broker.addEventListener("tabadded", onTab);
       this.broker.addEventListener("tabchanged", onTab);
       this.broker.addEventListener("tabremoved", (event) => {
+        for (const shown of [...this._serverTabs.values()]) {
+          if (shown.browserTabId === event.tabId) void this.releaseServerTab(shown);
+        }
         if (this.tabs.delete(event.tabId)) this._changed();
       });
     }
@@ -350,6 +362,67 @@ export class PlutoniumShell extends EventTarget {
     return this.broker.snapshotTab(tabId);
   }
 
+  /**
+   * Lets the frontend's server drive browser tab `browserTabId`, which this
+   * page shows as the server's tab `{threadId, tabId}` (the server's names).
+   * Resolves to the browser tab to show for it: another shell page may show
+   * the server's tab already, and then every page shows that one.
+   * @returns {Promise<number>}
+   */
+  async showServerTab(browserTabId, { threadId, tabId }) {
+    if (!this.tabsAvailable) throw new Error("this Chromium has no browser tabs");
+    const shown = { threadId, tabId, browserTabId, targetId: await this._targetId(browserTabId) };
+    this._serverTabs.set(serverTabKey(shown), shown);
+    // Otherwise the request stream announces it once it opens.
+    if (this._events?.readyState !== EventSource.OPEN) return browserTabId;
+    return this._announceServerTab(shown);
+  }
+
+  /** The server's tab `{threadId, tabId}` is no longer shown here. */
+  async releaseServerTab({ threadId, tabId }) {
+    const key = serverTabKey({ threadId, tabId });
+    if (!this._serverTabs.delete(key)) return;
+    await fetch(`${HELPER}/v1/shell/server-tabs/detach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: this._pageId, threadId, tabId }),
+    }).catch(() => {});
+  }
+
+  // A page's main frame id is its DevTools target id.
+  async _targetId(browserTabId) {
+    const tree = JSON.parse(await this.broker.sendTabDevToolsCommand(browserTabId, "Page.getFrameTree", "{}"));
+    const targetId = tree?.frameTree?.frame?.id;
+    if (typeof targetId !== "string") throw new Error(`tab ${browserTabId} has no page`);
+    return targetId;
+  }
+
+  /** Tells the helper; resolves to the browser tab every page shows for it. */
+  async _announceServerTab(shown) {
+    const tab = this.tabs.get(shown.browserTabId);
+    const response = await fetch(`${HELPER}/v1/shell/server-tabs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        page: this._pageId,
+        threadId: shown.threadId,
+        tabId: shown.tabId,
+        browserTabId: shown.browserTabId,
+        targetId: shown.targetId,
+        url: tab?.url ?? "",
+        title: tab?.title ?? "",
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `the helper refused the tab (${response.status})`);
+    if (body.browserTabId !== shown.browserTabId && typeof body.browserTabId === "number") {
+      // Another page's tab: show that one.
+      shown.browserTabId = body.browserTabId;
+      shown.targetId = await this._targetId(body.browserTabId).catch(() => shown.targetId);
+    }
+    return shown.browserTabId;
+  }
+
   /** An <embed> that shows tab `tabId` (style it like any element). */
   tabElement(tabId) {
     const element = document.createElement("embed");
@@ -463,11 +536,16 @@ export class PlutoniumShell extends EventTarget {
     // Several shells can run at once (the browser shows one): the helper
     // sends requests to the visible one, so tell it when this page is shown
     // or hidden. The id survives the EventSource's reconnects.
-    const page = crypto.randomUUID();
+    const page = this._pageId;
     const visible = () => (document.visibilityState === "visible" ? "1" : "0");
     const shell = encodeURIComponent(this.shellId);
     const events = new EventSource(`${HELPER}/v1/shell/requests?page=${page}&shell=${shell}&visible=${visible()}`);
     this._events = events;
+    // The helper knows a page's server tabs while its stream is open (and a
+    // helper that restarted knows none).
+    events.onopen = () => {
+      for (const shown of this._serverTabs.values()) this._announceServerTab(shown).catch(() => {});
+    };
     document.addEventListener("visibilitychange", () => {
       fetch(`${HELPER}/v1/shell/pages/${page}/visibility`, {
         method: "POST",
@@ -477,6 +555,16 @@ export class PlutoniumShell extends EventTarget {
     });
     events.onmessage = async (message) => {
       const { id, op, args } = JSON.parse(message.data);
+      if (id === undefined) {
+        // A notice: nothing to answer.
+        if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
+        // The page that showed a server tab went away: this one takes over if it shows it.
+        if (op === "server_tab_orphaned") {
+          const shown = this._serverTabs.get(serverTabKey(args));
+          if (shown) this._announceServerTab(shown).catch(() => {});
+        }
+        return;
+      }
       let body;
       let type = "application/json";
       try {
@@ -550,6 +638,10 @@ export class PlutoniumShell extends EventTarget {
         throw new Error(`unknown op ${op}`);
     }
   }
+}
+
+function serverTabKey({ threadId, tabId }) {
+  return `${threadId}\u0000${tabId}`;
 }
 
 function plain(entry) {

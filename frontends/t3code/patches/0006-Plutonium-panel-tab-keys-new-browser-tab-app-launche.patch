@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 11:58:21 +1300
-Subject: [PATCH 06/11] Plutonium: panel tab keys, new browser tab, app
+Subject: [PATCH 06/12] Plutonium: panel tab keys, new browser tab, app
  launcher
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -30,35 +30,35 @@ Claude-Session: https://claude.ai/code/session_01TNhRAcr4c5t15KWH3mHxTk
  create mode 100644 apps/web/src/plutonium/panelKeys.ts
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 9d544eb389..7954ac1391 100644
+index 2c8ab1d7a0..7fe8c6b625 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -217,6 +217,7 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
+@@ -294,6 +294,7 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
  import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
  import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
  import { RightPanelTabs } from "./RightPanelTabs";
 +import { usePlutoniumPanelKeys } from "../plutonium/panelKeys";
  import { PlutoniumAppSurface, PlutoniumAppsPanel } from "../plutonium/PlutoniumWindows";
  import { usePlutoniumWindowStore } from "../plutonium/windowStore";
- import { AgentsPanel } from "./AgentsPanel";
-@@ -5025,6 +5026,15 @@ export default function ChatView(props: ChatViewProps) {
-     },
-     [activeThreadRef, diffOpen, onDiffPanelOpen],
-   );
+ import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
+@@ -5955,6 +5956,15 @@ export default function ChatView(props: ChatViewProps) {
+     }
+   };
+   const activateRightPanelSurfaceStable = useStableCallback(activateRightPanelSurface);
 +  // Plutonium: Alt+1…9, Ctrl+Tab and Ctrl+T for the panel's tabs.
 +  usePlutoniumPanelKeys({
 +    threadRef: activeThreadRef,
 +    keybindings,
 +    surfaces: renderedRightPanelSurfaces,
 +    activeSurfaceId: renderedRightPanelSurface?.id ?? null,
-+    activate: activateRightPanelSurface,
-+    newBrowserTab: createBrowserSurface,
++    activate: activateRightPanelSurfaceStable,
++    newBrowserTab: createBrowserSurfaceStable,
 +  });
-   const toggleRightPanel = useCallback(() => {
+   const toggleRightPanel = () => {
      if (!activeThreadRef) return;
      if (rightPanelOpen) {
 diff --git a/apps/web/src/components/CommandPalette.logic.ts b/apps/web/src/components/CommandPalette.logic.ts
-index b75ce84d14..7dd9395bce 100644
+index 49e963f683..3067befffa 100644
 --- a/apps/web/src/components/CommandPalette.logic.ts
 +++ b/apps/web/src/components/CommandPalette.logic.ts
 @@ -58,7 +58,7 @@ export function browseInputEndPaddingClass(input: {
@@ -71,18 +71,18 @@ index b75ce84d14..7dd9395bce 100644
  export type CommandPaletteOpenIntent =
    | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
 diff --git a/apps/web/src/components/CommandPalette.tsx b/apps/web/src/components/CommandPalette.tsx
-index 95f2df5928..66549b86ae 100644
+index 6596e451e3..d6273c2188 100644
 --- a/apps/web/src/components/CommandPalette.tsx
 +++ b/apps/web/src/components/CommandPalette.tsx
-@@ -193,6 +193,7 @@ import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusI
- import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
- import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
+@@ -228,6 +228,7 @@ import {
+   type ProviderInstanceEntry,
+ } from "../providerInstances";
  import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 +import { PlutoniumAppLauncher } from "../plutonium/AppLauncher";
  import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
  import { Button } from "./ui/button";
  import { Kbd, KbdGroup } from "./ui/kbd";
-@@ -473,6 +474,7 @@ const OVERLAY_MODE_BY_COMMAND = {
+@@ -342,6 +343,7 @@ const OVERLAY_MODE_BY_COMMAND = {
    "commandPalette.toggle": "command",
    "filePicker.toggle": "files",
    "projectSearch.toggle": "content",
@@ -90,7 +90,7 @@ index 95f2df5928..66549b86ae 100644
  } as const satisfies Partial<Record<string, SearchOverlayMode>>;
  
  function overlayModeForCommand(command: string | null): SearchOverlayMode | null {
-@@ -517,7 +519,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
+@@ -406,7 +408,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
    );
  
    useEffect(() => {
@@ -99,7 +99,7 @@ index 95f2df5928..66549b86ae 100644
      const onEscapeKeyDown = (event: globalThis.KeyboardEvent) => {
        if (event.isComposing || event.key !== "Escape") return;
        event.preventDefault();
-@@ -632,7 +634,12 @@ export function CommandPalette({ children }: { children: ReactNode }) {
+@@ -521,7 +523,12 @@ export function CommandPalette({ children }: { children: ReactNode }) {
        <CommandDialog
          open={state.open}
          onOpenChange={(open, eventDetails) => {
@@ -113,7 +113,7 @@ index 95f2df5928..66549b86ae 100644
              eventDetails.cancel();
              toggleMode("command");
              return;
-@@ -672,7 +679,9 @@ function CommandPaletteDialog(props: {
+@@ -561,7 +568,9 @@ function CommandPaletteDialog(props: {
            ? "File picker"
            : props.mode === "content"
              ? "Search project contents"
@@ -124,7 +124,7 @@ index 95f2df5928..66549b86ae 100644
        }
        className={cn("overflow-hidden", props.mode === "content" && "h-105")}
        data-command-palette="true"
-@@ -690,6 +699,8 @@ function CommandPaletteDialog(props: {
+@@ -579,6 +588,8 @@ function CommandPaletteDialog(props: {
          <ProjectFilePicker setOpen={props.setOpen} />
        ) : props.mode === "content" ? (
          <ProjectContentSearchDialog onOpenChange={props.setOpen} />
@@ -697,7 +697,7 @@ index 3b66e87831..a45cc78400 100644
    );
  }
 diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
-index 076c8a9449..e20642e44f 100644
+index 04c3acab80..aded6f94a9 100644
 --- a/packages/contracts/src/keybindings.ts
 +++ b/packages/contracts/src/keybindings.ts
 @@ -34,6 +34,21 @@ export const MODEL_PICKER_JUMP_KEYBINDING_COMMANDS = [
@@ -722,17 +722,17 @@ index 076c8a9449..e20642e44f 100644
  const THREAD_KEYBINDING_COMMANDS = [
    "thread.stop",
    "thread.steerQueuedMessage",
-@@ -67,6 +82,9 @@ export const STATIC_KEYBINDING_COMMANDS = [
-   "rightPanel.toggle",
+@@ -71,6 +86,9 @@ export const STATIC_KEYBINDING_COMMANDS = [
    "rightPanel.toggleMaximized",
    "rightPanel.close",
+   "view.reopenClosed",
 +  "rightPanel.nextTab",
 +  "rightPanel.previousTab",
 +  ...RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
    "pullRequest.copyNumber",
    "diff.toggle",
    "preview.toggle",
-@@ -75,6 +93,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
+@@ -79,6 +97,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
    "preview.zoomIn",
    "preview.zoomOut",
    "preview.resetZoom",
@@ -742,7 +742,7 @@ index 076c8a9449..e20642e44f 100644
    "filePicker.toggle",
    "projectSearch.toggle",
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index a93409bb3c..62c5d99ff1 100644
+index afadd35b6a..52c90465d1 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
 @@ -5,6 +5,7 @@ import {
@@ -753,10 +753,10 @@ index a93409bb3c..62c5d99ff1 100644
    type ResolvedKeybindingRule,
    type ResolvedKeybindingsConfig,
    THREAD_JUMP_KEYBINDING_COMMANDS,
-@@ -24,6 +25,16 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
-   { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
-   { key: "mod+j", command: "terminal.toggle" },
+@@ -128,6 +129,16 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "mod+alt+b", command: "rightPanel.toggle" },
+   { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
+   { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
 +  // Right panel tabs, and the app launcher (Plutonium). These also work while
 +  // an app or browser tab in the panel has the keyboard, in the Plutonium shell.
 +  ...RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS.map((command, index) => ({

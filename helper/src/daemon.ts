@@ -6,6 +6,8 @@
 // - The agent bridge: a thread's agent lists, launches, focuses, snapshots and
 //   closes its own windows, and opens, drives, snapshots and closes its own
 //   browser tabs, relayed through the shell page.
+// - Server-driven tabs: a frontend's server drives the tabs the shell shows for
+//   it over the browser's DevTools protocol (serverTabs.ts).
 //
 // Two listeners:
 // - A Unix socket (mode 0600, in $XDG_RUNTIME_DIR) for local processes: the
@@ -16,11 +18,12 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DesktopApps } from "./apps.ts";
+import { BrowserCdp } from "./cdp.ts";
 import { type GpuReport, probeGpu } from "./gpu.ts";
 import {
   type BrowserTabEntry,
@@ -30,6 +33,7 @@ import {
   type NativeWindowEntry,
 } from "./relay.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
+import { ServerTabs } from "./serverTabs.ts";
 import { threadForPid, threadsForPids, Threads } from "./threads.ts";
 
 export interface DaemonOptions {
@@ -38,6 +42,8 @@ export interface DaemonOptions {
   readonly shellOrigins: readonly string[];
   readonly port: number;
   readonly socketPath: string;
+  /** The browser's --remote-debugging-port, for server-driven tabs (none: no such tabs). */
+  readonly cdpPort?: number | undefined;
 }
 
 const HELPER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -213,6 +219,7 @@ export class Daemon {
   readonly threads: Threads;
   readonly relay = new ShellRelay();
   readonly apps = new DesktopApps();
+  readonly serverTabs: ServerTabs | null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -223,6 +230,13 @@ export class Daemon {
   constructor(options: DaemonOptions) {
     this.options = options;
     this.threads = new Threads(options.waylandDisplay, options.socketPath);
+    this.serverTabs = options.cdpPort ? new ServerTabs(new BrowserCdp(options.cdpPort)) : null;
+    if (this.serverTabs) {
+      const serverTabs = this.serverTabs;
+      this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
+      serverTabs.onPointer = (page, pointer) => this.relay.notify(page, "pointer", { ...pointer });
+      serverTabs.onOrphaned = (key) => this.relay.notifyAll("server_tab_orphaned", { ...key });
+    }
     // Links a thread's apps open become tabs in the thread (opener.ts).
     try {
       const openers = installOpeners(join(dirname(options.socketPath), "open"), process.execPath, CLI);
@@ -521,6 +535,29 @@ export class Daemon {
         response.writeHead(204).end();
         return;
       }
+      if (method === "POST" && (path === "/v1/shell/server-tabs" || path === "/v1/shell/server-tabs/detach")) {
+        if (!this.serverTabs) throw new HttpError(409, "This helper has no DevTools port (--cdp-port).");
+        const { page, threadId, tabId, targetId, browserTabId, url, title } = await readJson(request);
+        if (typeof threadId !== "string" || !threadId || typeof tabId !== "string" || !tabId) {
+          throw new HttpError(400, "threadId and tabId are required.");
+        }
+        if (typeof page !== "string" || !page) throw new HttpError(400, "page is required.");
+        if (path.endsWith("/detach")) {
+          this.serverTabs.detach({ threadId, tabId }, page);
+          response.writeHead(204).end();
+          return;
+        }
+        if (!this.relay.has(page)) throw new HttpError(400, "page must be connected.");
+        if (typeof targetId !== "string" || !targetId) throw new HttpError(400, "targetId is required.");
+        if (typeof browserTabId !== "number") throw new HttpError(400, "browserTabId is required.");
+        const shown = { url: typeof url === "string" ? url : "", title: typeof title === "string" ? title : "" };
+        const shownTabId = this.serverTabs.attach(
+          { threadId, tabId },
+          { targetId, browserTabId, page, url: () => shown.url, title: () => shown.title },
+          (other) => this.relay.has(other),
+        );
+        return sendJson(response, 200, { browserTabId: shownTabId });
+      }
       const reply = path.match(/^\/v1\/shell\/replies\/(\w+)$/);
       if (method === "POST" && reply) {
         const body = await readBody(request);
@@ -537,6 +574,7 @@ export class Daemon {
         shellOrigins: [...new Set([...this.options.shellOrigins, ...this.reportedOrigins])],
         shellConnected: this.relay.connected,
         shells: this.relay.shells(),
+        serverTabs: this.serverTabs !== null,
         gpu: await this.gpu(),
       });
     }
@@ -682,8 +720,24 @@ export class Daemon {
         else response.end();
       });
     });
+    if (local) server.on("upgrade", (request, socket, head) => this.upgrade(request, socket as Socket, head));
     this.servers.push(server);
     return server;
+  }
+
+  // `GET /v1/desktop-browser` with `Upgrade: plutonium-desktop-browser`, on the
+  // socket: the frontend server's connection for server-driven tabs.
+  private upgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    const path = new URL(request.url ?? "/", "http://plutonium").pathname;
+    if (path !== "/v1/desktop-browser" || !this.serverTabs) {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: plutonium-desktop-browser\r\nConnection: Upgrade\r\n\r\n",
+    );
+    if (head.length > 0) socket.unshift(head);
+    this.serverTabs.serve(socket);
   }
 
   async start(): Promise<void> {
@@ -709,7 +763,8 @@ export class Daemon {
     });
     console.log(
       `plutoniumd: ${this.options.waylandDisplay}, shells ${this.options.shellOrigins.join(" ")}, ` +
-        `socket ${socketPath}, shell API http://127.0.0.1:${port}`,
+        `socket ${socketPath}, shell API http://127.0.0.1:${port}` +
+        (this.options.cdpPort ? `, server-driven tabs on DevTools ${this.options.cdpPort}` : ""),
     );
     // Ash usually starts after the helper: check the GPU once Exo is up.
     const check = setInterval(() => {

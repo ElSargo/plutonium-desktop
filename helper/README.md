@@ -8,13 +8,16 @@ What it does:
 - **Launching apps** into a thread, optionally waiting for the app's window.
 - **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
+- **Server-driven tabs.** A frontend's server can drive the tabs the shell shows for it over the DevTools protocol, as T3 Code drives its desktop app's tabs with Playwright (`src/serverTabs.ts`, `docs/features/TABS.md`). The helper connects to the browser's own DevTools (`--cdp-port`) and gives the server one relay per tab, which reaches that tab's page and nothing else.
 
 ## Running
 
 ```
 node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3774[,<origin>…] \
-  [--wayland-display wayland-plutonium] [--port 3780]
+  [--wayland-display wayland-plutonium] [--port 3780] [--cdp-port 9224]
 ```
+
+`--cdp-port` is the browser's `--remote-debugging-port`; without it there are no server-driven tabs. `PLUTONIUM_DEBUG_TABS=1` logs their traffic.
 
 A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
 
@@ -78,7 +81,9 @@ Socket only (the agent bridge; `<thread>` is the caller's thread):
 | `POST /v1/threads/<thread>/tabs/<id>/{focus,close}` | shows the tab in the shell (the frontend's `onFocusTab`) / closes it |
 | `GET /v1/threads/<thread>/tabs/<id>/snapshot` | `image/png` of the page, even while hidden |
 
-Shell only: `GET /v1/shell.js` (the library), `GET /v1/shell/requests?page=<id>&shell=<shell id>&visible=<0|1>` (EventSource of bridge requests), `POST /v1/shell/replies/<id>`, `POST /v1/shell/pages/<id>/visibility {visible}`, `POST /v1/shell/origins {origins}` (the browser's shell origins, which shell pages report so that shells added at runtime get in).
+Socket only, for server-driven tabs: `GET /v1/desktop-browser` with `Upgrade: plutonium-desktop-browser` turns the connection into T3 Code's desktop browser channel, newline-delimited JSON both ways. The helper sends `{type: "attached" | "detached", threadId, tabId}` as the shell shows or stops showing the server's tabs (all attached tabs first), and `{type: "cdp", threadId, tabId, message}` for each relay message. The server sends `cdp` (a DevTools message for that tab), `release` (it stopped driving the tab) and `pointer` (`{phase: "move" | "click", x, y}`: where its next action lands, for the shell to draw). `threadId` and `tabId` are the server's names. One server at a time: a new connection replaces the old one.
+
+Shell only: `GET /v1/shell.js` (the library), `GET /v1/shell/requests?page=<id>&shell=<shell id>&visible=<0|1>` (EventSource of bridge requests), `POST /v1/shell/replies/<id>`, `POST /v1/shell/pages/<id>/visibility {visible}`, `POST /v1/shell/origins {origins}` (the browser's shell origins, which shell pages report so that shells added at runtime get in), `POST /v1/shell/server-tabs {page, threadId, tabId, browserTabId, targetId, url?, title?}` → `{browserTabId}` (the tab to show: another page's, if one shows the server's tab already) and `POST /v1/shell/server-tabs/detach {page, threadId, tabId}`.
 
 With several shells connected, each page has its own stream (`page` is an id the library picks; a reconnect with the same id replaces it). A thread's requests go to the shell that owns the thread's group, if it's connected. Anything else goes to the visible page, else the one visible most recently. When the owner shows what an agent asked for, the library makes that shell the visible one.
 
@@ -112,6 +117,12 @@ await shell.snapshotTab(id);
 // connect({ onOpenTab: (tab) => currentThreadId }): a link this page opened in a new tab or
 // window (Ctrl+click, target=_blank, window.open) arrives untagged; return its thread, and it is
 // tagged and shown with onFocusTab.
+
+// Server-driven tabs: the frontend's server drives a tab this page shows for it. Resolves to the
+// browser tab to show (another shell page's, if it shows that server tab already).
+const shownId = await shell.showServerTab(tab.id, { threadId, tabId });  // the server's names
+await shell.releaseServerTab({ threadId, tabId });
+shell.addEventListener("agentpointer", (event) => drawCursor(event.detail));  // {threadId, tabId, phase, x, y}
 
 // Tags and groups (shell.tagsAvailable):
 shell.setGroups([{ tag: "plain:thread/abc", label: "Fix the build" }]);  // this shell's

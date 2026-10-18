@@ -6,8 +6,8 @@
 
 T3 Code is optional. The niri and plain shells need nothing from here.
 
-- **`BASE`**: the upstream T3 Code commit the patches apply to (`6c8fed35dd`, 2026-10-02).
-- **`patches/`**: the series (`git am`): 11 commits, about 3,000 lines, mostly in `apps/web/src/plutonium/` and `apps/server/src/plutonium.ts`.
+- **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
+- **`patches/`**: the series (`git am`): 12 commits, about 2,600 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
@@ -15,14 +15,15 @@ plutonium t3 build     # pnpm install, build the web app
 plutonium run t3 niri  # T3 as the desktop, niri behind it (Super+Tab)
 ```
 
-`plutonium run t3` starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`. The page passes it on to T3 only if the profile isn't paired yet, so a paired profile doesn't add a session each time.
+`plutonium run t3` starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`, with the scopes T3's desktop app gets, so the shell can pair other devices from Settings, Connections. The page passes it on to T3 only if the profile isn't paired yet, or its session lacks some of those scopes, so a paired profile doesn't add a session each time.
 
 ### The host's T3 Code
 
 The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `$T3CODE_HOME`, else `~/.t3` (`T3_HOME` overrides it). Threads, settings, and paired devices are the same in and out of Plutonium.
 
 - **One at a time:** before starting, Plutonium looks for anything else using that data: the T3 Code app, a `t3` server, a boot service. It finds them by the open database, and by T3's `server-runtime.json`. If there is one, it refuses and says what it found; quit that one first. Plutonium's own server carries `PLUTONIUM_T3=<this checkout>`, so it is told apart and restarted.
-- **The database's version:** T3 migrates its database when it opens it. Plutonium refuses a database from a newer T3 Code than the checkout. An older one is migrated, and first copied to `state.sqlite.before-migration-<n>`.
+- **The database's version:** T3 migrates its database when it opens it. Plutonium refuses a database from a newer T3 Code than the checkout. An older one is migrated, and first copied to `<database>.before-migration-<n>`. Since 0.1, T3's database is `statev2.sqlite`: on its first start T3 seeds it from a copy of `state.sqlite`, which it leaves as it was, so T3 Code before 0.1 still runs on the old data.
+- **T3 Code's own CLI on NixOS:** the `t3` npm package is a native executable since 0.1, which NixOS can't run as it comes. Point it at Nix's loader with `patchelf --set-interpreter` and an rpath to glibc and gcc's `lib` (also for `resource-monitor/linux-x64/t3-resource-monitor`), or use nix-ld. Plutonium runs T3 from its checkout and doesn't need it.
 - **Remote devices:** `plutonium t3 <command>` is T3's own CLI on the same data. `fetch` and `build` copy T3's `.env.example` to `.env`, the T3 Connect settings T3's release builds have. Without them, a source build has no T3 Connect. To pair remote devices, use one of:
   - `plutonium t3 connect link`: signs in to T3 Connect once; the server then registers with T3's relay at every start.
   - `plutonium t3 pair --tailscale`: a QR code over your tailnet.
@@ -36,18 +37,20 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 |---|---|
 | 0001–0003 | Native windows listed under the thread that started them, shown as tabs in its right panel, with pop out. Terminals are tagged with their thread. Each thread gets its own Xwayland for X11 apps |
 | 0004 | Uses the Plutonium helper (`helper/`) for the thread environment and the agent bridge, instead of T3's own code |
-| 0005 | T3's Browser panel runs on Plutonium's browser tabs. T3's agents drive them with their `preview_*` tools |
+| 0005 | T3's Browser panel runs on Plutonium's browser tabs |
 | 0006 | Panel keys (Alt+1…9, Ctrl+Tab, Ctrl+T), a new browser tab, and an app launcher (Super+Space) |
 | 0007–0008 | Thread tags and groups, and an "Elsewhere" list for importing windows and tabs from other shells |
 | 0009 | Links and Ctrl+click open in the thread's browser panel |
 | 0010 | Panel apps cross-fade when the panel is maximized or restored; an app's maximize button maximizes the panel |
-| 0011 | The shell pairs with the launcher's token only if it isn't paired yet |
+| 0011 | The shell pairs with the launcher's token only when it needs to (not paired, or missing scopes) |
+| 0012 | The server drives the panel's tabs, as it drives the desktop app's: over the helper's socket, with Playwright, through a relay to that one tab of the real browser. T3's agents use their own `preview_*` tools |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 
 ## Limits
 
-- **Thread tagging:** guaranteed for Claude threads. Codex and the other providers only get the tag when T3 gives the thread an MCP session.
+- **Thread tagging:** guaranteed for Claude and Codex threads. The other providers only get the tag when T3 gives the thread an MCP session.
+- **T3's browser tools:** agents only get T3's `preview_*` tools with "Agent browser access" on (Settings). Without them, they can still use the helper's tab tools.
 - **The agent bridge:** only Claude sessions get the helper's MCP server.
 - **New apps:** an app that is launched doesn't get a tab by itself; open it from Apps.
 

@@ -94,6 +94,8 @@ export class ShellRelay {
   private readonly connections = new Map<string, Connection>();
   private readonly pending = new Map<string, Pending>();
   private nextId = 1;
+  /** A shell page's request stream ended (it closed, reloaded or went away). */
+  onDisconnect: (key: string) => void = () => {};
 
   get connected(): boolean {
     return this.connections.size > 0;
@@ -106,7 +108,8 @@ export class ShellRelay {
 
   /** Makes `response` (an EventSource request from a shell page) `key`'s request stream. */
   attach(response: ServerResponse, key: string, origin: string, shellId: string, visible: boolean): void {
-    this.detach(key);
+    // A reconnect replaces the page's stream; the page itself is still there.
+    this.detach(key, true);
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-store",
@@ -136,7 +139,7 @@ export class ShellRelay {
     return true;
   }
 
-  private detach(key: string): void {
+  private detach(key: string, replaced = false): void {
     const connection = this.connections.get(key);
     if (!connection) return;
     this.connections.delete(key);
@@ -148,6 +151,22 @@ export class ShellRelay {
       pending.reject(new RelayError(503, "The shell disconnected."));
       this.pending.delete(id);
     }
+    if (!replaced) this.onDisconnect(key);
+  }
+
+  /** Whether page `key` is connected. */
+  has(key: string): boolean {
+    return this.connections.has(key);
+  }
+
+  /** Tells every connected page something it doesn't answer. */
+  notifyAll(op: string, args: Record<string, unknown>): void {
+    for (const key of this.connections.keys()) this.notify(key, op, args);
+  }
+
+  /** Tells page `key` something it doesn't answer (no id). */
+  notify(key: string, op: string, args: Record<string, unknown>): void {
+    this.connections.get(key)?.response.write(`data: ${JSON.stringify({ op, args })}\n\n`);
   }
 
   private pick(shellId?: string): Connection | undefined {

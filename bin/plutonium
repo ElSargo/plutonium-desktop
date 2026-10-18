@@ -263,7 +263,8 @@ t3_ours() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep -qxF "PLUTONIUM
 # The processes using T3 Code's database, and the server it says is running.
 t3_pids() {
   local state=$T3_HOME/userdata/server-runtime.json pid
-  find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state.sqlite" 2>/dev/null | cut -d/ -f3
+  # state.sqlite (T3 before 0.1) or statev2.sqlite.
+  find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state*.sqlite" 2>/dev/null | cut -d/ -f3
   pid=$(grep -o '"pid":[0-9]*' "$state" 2>/dev/null | cut -d: -f2)
   [[ -n $pid && -d /proc/$pid ]] && echo "$pid"
   true
@@ -285,11 +286,23 @@ t3_refuse_others() {
   } >&2
   exit 1
 }
+# The database this checkout's T3 Code opens: statev2.sqlite from 0.1 on, which
+# T3 seeds from state.sqlite once and migrates (state.sqlite is left as it was).
+t3_database() {
+  local name
+  name=$(grep -o 'join(stateDir, "[a-z0-9]*\.sqlite")' "$T3CODE_DIR/apps/server/src/config.ts" | head -1 | cut -d'"' -f2)
+  echo "$T3_HOME/userdata/${name:-state.sqlite}"
+}
 # T3 Code's database is migrated by whichever version opens it. Refuse one newer
 # than this checkout knows; before migrating an older one, keep a copy.
 t3_check_db() {
-  local db=$T3_HOME/userdata/state.sqlite ours have
-  [[ -f $db ]] || return 0
+  local db ours have backup
+  db=$(t3_database)
+  if [[ ! -f $db ]]; then
+    [[ -f $T3_HOME/userdata/state.sqlite ]] &&
+      echo "T3 Code starts ${db##*/} from a copy of state.sqlite; state.sqlite stays as it is"
+    return 0
+  fi
   ours=$(ls "$T3CODE_DIR/apps/server/src/persistence/Migrations" | grep -v '\.test\.ts$' | grep -o '^[0-9]*' | sort -n | tail -1)
   ours=$((10#$ours))
   have=$(node -e '
@@ -299,7 +312,11 @@ t3_check_db() {
   if (( have > ours )); then
     die "T3 Code's database ($db) is from a newer T3 Code (migration $have; this checkout has $ours). Update frontends/t3code to a newer T3 Code first."
   elif (( have < ours )); then
-    local backup=$db.before-migration-$ours
+    backup=$db.before-migration-$ours
+    if [[ -e $backup ]]; then
+      echo "T3 Code's database is at migration $have and this checkout migrates it to $ours (a copy from before is in $backup)"
+      return
+    fi
     echo "T3 Code's database is at migration $have and this checkout migrates it to $ours; keeping a copy in $backup"
     node -e '
       const db = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
@@ -322,7 +339,7 @@ t3_start() {
     fi
     t3_stop
   fi
-  curl -s -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
+  curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
   t3_check_db
   satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
   mkdir -p "$T3_HOME" "$RUN_DIR/plutonium"
@@ -336,7 +353,7 @@ t3_start() {
       > "$LOGS/t3-server.log" 2>&1 < /dev/null &
     echo $! > "$pidfile"
   )
-  for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
+  for _ in $(seq 1 30); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
   die "the T3 Code server didn't start (logs/t3-server.log)"
 }
 # T3 Code's own CLI, on the same data and settings as the server.
@@ -355,11 +372,19 @@ t3_stop() {
   rm -f "$RUN_DIR/plutonium/t3-server.pid"
 }
 # A one-time pairing token for the shell's profile, good for 5 minutes, offered
-# as #plutoniumPair: the page uses it only if the profile isn't paired yet.
+# as #plutoniumPair: the page uses it only if the profile isn't paired yet, or
+# its session lacks some of the token's scopes. The shell is the machine's own
+# desktop app, so it gets what T3 Code's desktop app gets: every scope,
+# including pairing other devices (access:write).
 t3_pair_url() {
-  local port=${T3_PORT:-3774} token
+  local port=${T3_PORT:-3774} token scopes
+  scopes=$(cd "$T3CODE_DIR" && node --input-type=module -e '
+    const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
+    console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
+  ' 2> /dev/null) || die "couldn't read T3 Code's scopes"
+  # shellcheck disable=SC2086 # one --scope=… per word
   token=$(cd "$T3CODE_DIR" && T3CODE_HOME="$T3_HOME" node apps/server/src/bin.ts auth pairing create \
-    --ttl 5m --label "Plutonium shell" --json 2> /dev/null | grep -o '"credential": *"[^"]*"' | cut -d'"' -f4)
+    $scopes --ttl 5m --label "Plutonium shell" --json 2> /dev/null | grep -o '"credential": *"[^"]*"' | cut -d'"' -f4)
   [[ -n $token ]] || die "couldn't create a T3 Code pairing token"
   echo "http://127.0.0.1:$port/#plutoniumPair=$token"
 }
@@ -402,14 +427,14 @@ t3_cmd() {
 serve_shell() {
   local dir=$1 port=$2 pidfile=$RUN_DIR/plutonium/serve-$2.pid
   mkdir -p "$RUN_DIR/plutonium"
-  if curl -s -o /dev/null "http://127.0.0.1:$port/"; then
+  if curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/"; then
     # Ours (this checkout's directory), or something else on the port.
     [[ -f $pidfile ]] && grep -qF -- "$dir" "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null && return
     die "port $port is taken by another server; stop it (e.g. an older checkout's shell server) and retry"
   fi
   setsid python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" > /dev/null 2>&1 < /dev/null &
   echo $! > "$pidfile"
-  for _ in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$port/" && return; sleep 0.2; done
+  for _ in $(seq 1 20); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 0.2; done
 }
 # A shell name → "<label>=<url>", the page told where the helper is.
 shell_entry() {
@@ -420,7 +445,7 @@ shell_entry() {
     t3|t3=*)
       local url=${1#t3}; url=${url#=}
       if [[ -z $url ]]; then t3_start "$SOCKET"; url=$(t3_pair_url)
-      else curl -s -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url"; fi
+      else curl -s -m 5 -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url"; fi
       local base=${url%%#*} fragment=
       [[ $url == *#* ]] && fragment="#${url#*#}"
       [[ $base == *\?* ]] && base+="&" || base+="?"

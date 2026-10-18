@@ -1,16 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 16:01:09 +1300
-Subject: [PATCH 11/11] Plutonium: the shell pairs with the launcher's token
- only if it isn't paired yet
+Subject: [PATCH 11/12] Plutonium: the shell pairs with the launcher's token
+ only when it needs to
 
-The launcher offers a one-time token as #plutoniumPair= on every start. It
-becomes T3's #token= only when the browser isn't paired, so a paired profile
+The launcher offers a one-time token as #plutoniumPair= on every start,
+with the desktop app's scopes (pairing other devices among them). It
+becomes T3's #token= only when the browser isn't paired, or its session
+lacks some of those scopes (a profile paired before), so a paired profile
 doesn't add a session each time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014h4c1E1y66mTWH3DAr58sR
 ---
  apps/web/src/main.tsx             |  2 ++
- apps/web/src/plutonium/pairing.ts | 21 +++++++++++++++++++++
- 2 files changed, 23 insertions(+)
+ apps/web/src/plutonium/pairing.ts | 35 +++++++++++++++++++++++++++++++
+ 2 files changed, 37 insertions(+)
  create mode 100644 apps/web/src/plutonium/pairing.ts
 
 diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
@@ -35,14 +40,17 @@ index dea4746cf0..7aad5e09bb 100644
  const history = isElectron ? createHashHistory() : createBrowserHistory();
 diff --git a/apps/web/src/plutonium/pairing.ts b/apps/web/src/plutonium/pairing.ts
 new file mode 100644
-index 0000000000..4215c41e96
+index 0000000000..45449d23e4
 --- /dev/null
 +++ b/apps/web/src/plutonium/pairing.ts
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,35 @@
 +// Plutonium: the launcher offers the shell a one-time pairing token as
 +// #plutoniumPair=<token> on every start. It becomes T3's own #token= only when
-+// this browser isn't paired yet, so a paired profile doesn't pair again (each
-+// pairing is another session in Settings, Connections).
++// this browser isn't paired yet, or its session lacks some of the scopes the
++// token brings (each pairing is another session in Settings, Connections). The
++// shell's token has the desktop app's scopes, including pairing other devices.
++import { AuthAdministrativeScopes } from "@t3tools/contracts";
++
 +export async function offerPlutoniumPairing(): Promise<void> {
 +  const url = new URL(window.location.href);
 +  const params = new URLSearchParams(url.hash.slice(1));
@@ -52,7 +60,18 @@ index 0000000000..4215c41e96
 +  let paired = false;
 +  try {
 +    const response = await fetch("/api/auth/session", { credentials: "include" });
-+    paired = response.ok && (await response.json()).authenticated === true;
++    const session = response.ok
++      ? ((await response.json()) as {
++          authenticated?: boolean;
++          scopes?: readonly string[];
++          permissions?: readonly string[];
++        })
++      : null;
++    // `permissions` is the whole grant; `scopes` only what older clients know.
++    const granted = session?.permissions ?? session?.scopes ?? [];
++    paired =
++      session?.authenticated === true &&
++      AuthAdministrativeScopes.every((scope) => granted.includes(scope));
 +  } catch {
 +    // Unknown: pair, as T3 would with the token.
 +  }

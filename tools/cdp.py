@@ -8,6 +8,7 @@ CDP=host:port picks the session (DRM 9224, X11 9223).
   cdp.py list                              targets: type, url
   cdp.py browser <method> [json-params]    a browser-level command
   cdp.py eval <url-part> <js> [--gesture]  evaluate in a page or tab (awaits promises)
+  (<url-part> can also be a target id, from /json/list)
   cdp.py shot <url-part> <out.png>         screenshot a page or tab, even while hidden
   cdp.py click <url-part> <x> <y>          click at CSS pixels (renderer input, not Ash's)
   cdp.py console <url-part> <seconds>      print console messages and exceptions
@@ -32,7 +33,7 @@ def targets():
 
 def target(part):
     for t in targets():
-        if part in t["url"]:
+        if part in t["url"] or part == t["id"]:
             return t
     sys.exit(f"no target whose URL contains {part!r}")
 

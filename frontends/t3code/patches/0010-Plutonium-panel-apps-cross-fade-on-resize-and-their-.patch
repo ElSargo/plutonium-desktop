@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 11:41:28 +1300
-Subject: [PATCH 10/11] Plutonium: panel apps cross-fade on resize, and their
+Subject: [PATCH 10/12] Plutonium: panel apps cross-fade on resize, and their
  maximize button maximizes the panel
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -12,10 +12,10 @@ Claude-Session: https://claude.ai/code/session_014h4c1E1y66mTWH3DAr58sR
  2 files changed, 36 insertions(+), 1 deletion(-)
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index c3f2e74b94..132be6c79c 100644
+index 75037ed345..23f891ebd5 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -219,7 +219,11 @@ import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavaila
+@@ -296,7 +296,11 @@ import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavaila
  import { RightPanelTabs } from "./RightPanelTabs";
  import { usePlutoniumPanelKeys } from "../plutonium/panelKeys";
  import { importBrowserTab } from "../plutonium/importTab";
@@ -26,28 +26,28 @@ index c3f2e74b94..132be6c79c 100644
 +  PlutoniumAppsPanel,
 +} from "../plutonium/PlutoniumWindows";
  import { usePlutoniumWindowStore } from "../plutonium/windowStore";
- import { AgentsPanel } from "./AgentsPanel";
  import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
-@@ -5050,6 +5054,17 @@ export default function ChatView(props: ChatViewProps) {
-       threadKey === routeThreadKey ? null : routeThreadKey,
-     );
-   }, [canMaximizeRightPanel, routeThreadKey]);
+ import { ThreadPullRequestsPanel } from "./pullRequest/ThreadPullRequestsPanel";
+@@ -5992,6 +5996,17 @@ export default function ChatView(props: ChatViewProps) {
+     useRightPanelStore.getState().setMaximized(activeThreadRef, !rightPanelMaximized);
+   };
+   const toggleRightPanelMaximizedStable = useStableCallback(toggleRightPanelMaximized);
 +  // Plutonium: an app in the panel pressed its own maximize (or restore)
 +  // button.
 +  useEffect(() => {
 +    const onRequest = (event: Event) => {
-+      if (!canMaximizeRightPanel) return;
++      if (!canMaximizeRightPanel || !activeThreadRef) return;
 +      const { maximized } = (event as CustomEvent<{ maximized: boolean }>).detail;
-+      setMaximizedRightPanelThreadKey(maximized ? routeThreadKey : null);
++      useRightPanelStore.getState().setMaximized(activeThreadRef, maximized);
 +    };
 +    document.addEventListener(PANEL_MAXIMIZE_REQUEST_EVENT, onRequest);
 +    return () => document.removeEventListener(PANEL_MAXIMIZE_REQUEST_EVENT, onRequest);
-+  }, [canMaximizeRightPanel, routeThreadKey]);
-   const cleanupRightPanelSurfaces = useCallback(
-     (surfaces: readonly RightPanelSurface[]) => {
-       if (!activeThreadRef) return;
++  }, [canMaximizeRightPanel, activeThreadRef]);
+   const cleanupRightPanelSurfaces = (surfaces: readonly RightPanelSurface[]) => {
+     if (!activeThreadRef) return;
+     for (const surface of surfaces) {
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index b0769d963a..6b63305c3e 100644
+index 89fa54c2a8..8cb186a2a6 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -242,6 +242,9 @@ export function PlutoniumAppsPanel({

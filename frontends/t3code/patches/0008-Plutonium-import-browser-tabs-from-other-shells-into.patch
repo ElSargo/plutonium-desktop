@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 16:12:46 +1300
-Subject: [PATCH 08/11] Plutonium: import browser tabs from other shells into a
+Subject: [PATCH 08/12] Plutonium: import browser tabs from other shells into a
  thread
 
 The Apps panel's Elsewhere list includes browser tabs in no T3 thread.
@@ -21,18 +21,18 @@ Claude-Session: https://claude.ai/code/session_01LcsChPspky5SrH4g8Ej5ND
  create mode 100644 apps/web/src/plutonium/importTab.ts
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 7954ac1391..c3f2e74b94 100644
+index 7fe8c6b625..75037ed345 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -218,6 +218,7 @@ import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
+@@ -295,6 +295,7 @@ import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
  import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
  import { RightPanelTabs } from "./RightPanelTabs";
  import { usePlutoniumPanelKeys } from "../plutonium/panelKeys";
 +import { importBrowserTab } from "../plutonium/importTab";
  import { PlutoniumAppSurface, PlutoniumAppsPanel } from "../plutonium/PlutoniumWindows";
  import { usePlutoniumWindowStore } from "../plutonium/windowStore";
- import { AgentsPanel } from "./AgentsPanel";
-@@ -9663,6 +9664,10 @@ export default function ChatView(props: ChatViewProps) {
+ import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
+@@ -10957,6 +10958,10 @@ export default function ChatView(props: ChatViewProps) {
                .getState()
                .openApp(activeThreadRef, { windowId: entry.id, appId: entry.appId });
          }}
@@ -44,7 +44,7 @@ index 7954ac1391..c3f2e74b94 100644
      ) : renderedRightPanelSurface?.kind === "app" ? (
        <PlutoniumAppSurface
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index 17bce6eba3..77da2c1d4b 100644
+index ceb3c626cc..1779f2ef1e 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -1,12 +1,12 @@
@@ -191,10 +191,10 @@ index 0000000000..0a78dc56b3
 +  return result;
 +}
 diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
-index 614aeffb5e..8872ece103 100644
+index dd7b560f45..302a030d7c 100644
 --- a/apps/web/src/plutonium/previewBridge.ts
 +++ b/apps/web/src/plutonium/previewBridge.ts
-@@ -8,9 +8,12 @@
+@@ -8,16 +8,19 @@
  // (PlutoniumBrowserHost). This file implements the DesktopPreviewBridge
  // contract on top of the broker, so the rest of the preview UI is unchanged.
  //
@@ -210,16 +210,15 @@ index 614aeffb5e..8872ece103 100644
  import type {
    DesktopPreviewBridge,
    DesktopPreviewNavStatus,
-@@ -18,7 +21,7 @@ import type {
+   DesktopPreviewTabState,
  } from "@t3tools/contracts";
  
- import { PlutoniumAutomation } from "./previewAutomation";
 -import { threadTag } from "./threadTag";
 +import { threadIdOfTag, threadTag } from "./threadTag";
  
  /** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
  export interface BrokerTab {
-@@ -32,6 +35,8 @@ export interface BrokerTab {
+@@ -31,6 +34,8 @@ export interface BrokerTab {
    readonly embedded: boolean;
    readonly focused: boolean;
    readonly tag: string;
@@ -228,7 +227,7 @@ index 614aeffb5e..8872ece103 100644
    readonly openerId: number;
    readonly openedBy: "shell" | "page";
    readonly dialogType: "" | "alert" | "confirm" | "prompt" | "beforeunload";
-@@ -52,25 +57,42 @@ interface TabBroker extends EventTarget {
+@@ -51,25 +56,42 @@ interface TabBroker extends EventTarget {
    answerTabDialog(tabId: number, accept: boolean, text?: string): void;
    snapshotTab(tabId: number): Promise<Blob>;
    sendTabDevToolsCommand?(tabId: number, method: string, paramsJson?: string): Promise<string>;
@@ -276,7 +275,7 @@ index 614aeffb5e..8872ece103 100644
  export const isBlank = (url: string) => url === "" || url === "about:blank";
  
  // Which broker tab backs which preview tab. Tabs outlive a reload of the
-@@ -98,6 +120,12 @@ class PlutoniumPreview {
+@@ -97,6 +119,12 @@ class PlutoniumPreview {
      (tabId: string, state: DesktopPreviewTabState) => void
    >();
    private readonly tabListeners = new Set<() => void>();
@@ -289,7 +288,7 @@ index 614aeffb5e..8872ece103 100644
  
    constructor(broker: TabBroker) {
      this.broker = broker;
-@@ -121,6 +149,11 @@ class PlutoniumPreview {
+@@ -120,6 +148,11 @@ class PlutoniumPreview {
        }
        this.notifyTabs();
      });
@@ -301,7 +300,7 @@ index 614aeffb5e..8872ece103 100644
    }
  
    private update(entry: BrokerTab): void {
-@@ -152,6 +185,20 @@ class PlutoniumPreview {
+@@ -151,6 +184,20 @@ class PlutoniumPreview {
    }
  
    private notifyTabs(): void {
@@ -322,7 +321,7 @@ index 614aeffb5e..8872ece103 100644
      for (const listener of this.tabListeners) listener();
    }
  
-@@ -161,6 +208,29 @@ class PlutoniumPreview {
+@@ -160,6 +207,29 @@ class PlutoniumPreview {
      return id === undefined ? null : (this.tabs.get(id) ?? null);
    }
  
@@ -352,7 +351,7 @@ index 614aeffb5e..8872ece103 100644
    /** Called whenever any preview tab's broker tab changes. */
    onTabs(listener: () => void): () => void {
      this.tabListeners.add(listener);
-@@ -189,11 +259,40 @@ class PlutoniumPreview {
+@@ -188,11 +258,40 @@ class PlutoniumPreview {
    async createTab(runtimeTabId: string): Promise<void> {
      if (this.ids.has(runtimeTabId)) return;
      const tag = threadOf(runtimeTabId);
@@ -395,7 +394,7 @@ index 614aeffb5e..8872ece103 100644
      if (this.ids.has(runtimeTabId)) return;
      const entry = adopted ?? (await this.broker.createTab("about:blank", tag));
      this.ids.set(runtimeTabId, entry.id);
-@@ -208,7 +307,23 @@ class PlutoniumPreview {
+@@ -207,7 +306,23 @@ class PlutoniumPreview {
      this.ids.delete(runtimeTabId);
      this.runtimeIds.delete(id);
      this.storeIds();

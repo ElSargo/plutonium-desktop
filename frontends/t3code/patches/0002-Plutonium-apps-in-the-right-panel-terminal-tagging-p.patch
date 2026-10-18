@@ -1,64 +1,62 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 08:38:42 +1300
-Subject: [PATCH 02/11] Plutonium: apps in the right panel, terminal tagging,
+Subject: [PATCH 02/12] Plutonium: apps in the right panel, terminal tagging,
  pop out
 
 Thread terminals are tagged like agents, so GUI apps started there belong to the thread. Native windows move from the sidebar into the right panel: an Apps surface lists them and each opens as a tab, with a button that pops it out to the desktop.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- apps/server/src/terminal/Manager.ts           |   7 +-
+ apps/server/src/terminal/Manager.ts           |   3 +
  apps/web/src/components/AppSidebarLayout.tsx  |   4 +-
- apps/web/src/components/ChatView.tsx          |  29 +++
+ apps/web/src/components/ChatView.tsx          |  30 +++
+ .../RightPanelTabs.keyboard.test.tsx          |   2 +
  .../src/components/RightPanelTabs.test.tsx    |   2 +
- apps/web/src/components/RightPanelTabs.tsx    |  48 ++++-
- apps/web/src/components/Sidebar.tsx           | 190 +++++++++---------
- apps/web/src/plutonium/PlutoniumWindows.tsx   | 170 +++++++++++-----
- apps/web/src/plutonium/windowStore.ts         |  57 ++++--
- apps/web/src/rightPanelStore.ts               |  58 +++++-
+ apps/web/src/components/RightPanelTabs.tsx    |  42 ++++
+ apps/web/src/components/Sidebar.tsx           | 205 +++++++++---------
+ apps/web/src/plutonium/PlutoniumWindows.tsx   | 170 ++++++++++-----
+ apps/web/src/plutonium/windowStore.ts         |  57 +++--
+ apps/web/src/reopenClosedView.ts              |   3 +
+ apps/web/src/rightPanelStore.ts               |  58 ++++-
  apps/web/src/routes/_chat.pull-requests.tsx   |   2 +
- 10 files changed, 392 insertions(+), 175 deletions(-)
+ 12 files changed, 399 insertions(+), 179 deletions(-)
 
 diff --git a/apps/server/src/terminal/Manager.ts b/apps/server/src/terminal/Manager.ts
-index 43d6a0750e..49e9f514f5 100644
+index 4f79d07ff4..fb30542294 100644
 --- a/apps/server/src/terminal/Manager.ts
 +++ b/apps/server/src/terminal/Manager.ts
-@@ -71,6 +71,7 @@ import {
+@@ -76,6 +76,7 @@ import {
  } from "../observability/Metrics.ts";
- import { expandHomePath } from "../pathExpansion.ts";
+ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
  import * as ProcessRunner from "../processRunner.ts";
-+import { plutoniumAgentEnvironment } from "../plutonium.ts";
++import { plutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
  import * as PortScanner from "../preview/PortScanner.ts";
  import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
- import * as PtyAdapter from "./PtyAdapter.ts";
-@@ -2237,7 +2238,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
-         Effect.andThen(
-           Effect.gen(function* () {
-             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
--            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
-+            const terminalEnv = {
-+              ...createTerminalSpawnEnv(baseEnv, session.runtimeEnv),
-+              // Plutonium: GUI apps started from the terminal belong to its thread.
-+              ...plutoniumAgentEnvironment(session.threadId),
-+            };
+ import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+@@ -2303,6 +2304,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
+                 }
+               }
+             }
++            // Plutonium: GUI apps started from the terminal belong to its thread.
++            Object.assign(terminalEnv, plutoniumAgentEnvironment(session.threadId));
              const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
              ptyProcess = spawnResult.process;
              startedShell = spawnResult.shellLabel;
 diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
-index dfe6f8d982..b94d474a0d 100644
+index 6b1abce558..a1eb647a53 100644
 --- a/apps/web/src/components/AppSidebarLayout.tsx
 +++ b/apps/web/src/components/AppSidebarLayout.tsx
-@@ -32,7 +32,7 @@ import {
-   usePanelNavigationSuppression,
+@@ -33,7 +33,7 @@ import {
  } from "../panelAnimations";
  import LegacyThreadSidebar from "./LegacySidebar";
+ import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 -import { PlutoniumAppPane } from "../plutonium/PlutoniumWindows";
 +import { PlutoniumWindowsStarter } from "../plutonium/PlutoniumWindows";
  import ThreadSidebar from "./Sidebar";
  import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
- import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
-@@ -333,7 +333,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+ import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+@@ -356,7 +356,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
          <SidebarControl />
          <NavigationHistoryShortcuts />
          <MainAppLocationTracker />
@@ -68,35 +66,36 @@ index dfe6f8d982..b94d474a0d 100644
      </PanelAnimationSuppressionProvider>
    );
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index a32c1473cd..9d544eb389 100644
+index f87663989a..2c8ab1d7a0 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -217,6 +217,8 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
+@@ -294,6 +294,8 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
  import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
  import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
  import { RightPanelTabs } from "./RightPanelTabs";
 +import { PlutoniumAppSurface, PlutoniumAppsPanel } from "../plutonium/PlutoniumWindows";
 +import { usePlutoniumWindowStore } from "../plutonium/windowStore";
- import { AgentsPanel } from "./AgentsPanel";
  import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
  import { ThreadPullRequestsPanel } from "./pullRequest/ThreadPullRequestsPanel";
-@@ -4566,6 +4568,12 @@ export default function ChatView(props: ChatViewProps) {
-     if (!activeThreadRef) return;
-     useRightPanelStore.getState().open(activeThreadRef, "agents");
-   }, [activeThreadRef]);
+ import { useDeviceState } from "~/state/device";
+@@ -5413,6 +5415,13 @@ export default function ChatView(props: ChatViewProps) {
+     useRightPanelStore.getState().open(activeThreadRef, "device");
+   };
+   const addDeviceSurfaceStable = useStableCallback(addDeviceSurface);
 +  // Plutonium: native windows, only when this page is the shell.
 +  const appsSurfaceAvailable = usePlutoniumWindowStore((state) => state.available);
-+  const addAppsSurface = useCallback(() => {
++  const addAppsSurface = () => {
 +    if (!activeThreadRef) return;
 +    useRightPanelStore.getState().open(activeThreadRef, "apps");
-+  }, [activeThreadRef]);
-   const supportsThreadPullRequests =
-     serverConfig?.environment.capabilities.threadPullRequests === true;
-   const visiblePullRequests = visibleThreadPullRequests(
-@@ -9636,6 +9644,23 @@ export default function ChatView(props: ChatViewProps) {
-         environmentId={activeThreadRef?.environmentId ?? null}
-         threadId={activeThreadRef?.threadId ?? null}
++  };
++  const addAppsSurfaceStable = useStableCallback(addAppsSurface);
+   // A device the agent opens floats over chat like an agent-driven browser,
+   // or becomes a panel tab when floating previews are off. Sessions opened by
+   // another client arrive the same way; sheet layouts get neither. The first
+@@ -10929,6 +10938,23 @@ export default function ChatView(props: ChatViewProps) {
        />
+     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
+       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
 +    ) : renderedRightPanelSurface?.kind === "apps" ? (
 +      <PlutoniumAppsPanel
 +        threadId={activeThreadRef?.threadId ?? null}
@@ -117,139 +116,158 @@ index a32c1473cd..9d544eb389 100644
      ) : renderedRightPanelSurface?.kind === "device" ? (
        <Suspense fallback={null}>
          <DevicePanel
-@@ -10293,6 +10318,7 @@ export default function ChatView(props: ChatViewProps) {
-           onAddPullRequests={addPullRequestsSurface}
-           onAddAgents={addAgentsSurface}
-           onAddDevice={addDeviceSurface}
-+          onAddApps={addAppsSurface}
-           browserAvailable={isPreviewSupportedInRuntime()}
-           terminalAvailable={activeProject !== null}
+@@ -11850,6 +11876,7 @@ export default function ChatView(props: ChatViewProps) {
+           onAddPullRequest={addPullRequestSurfaceStable}
+           onAddPullRequests={addPullRequestsSurfaceStable}
+           onAddDevice={addDeviceSurfaceStable}
++          onAddApps={addAppsSurfaceStable}
+           browserAvailable={canOperatePreview && browserAvailable}
+           terminalAvailable={activeProject !== null && canOperateTerminal}
            diffAvailable={isServerThread && isGitRepo}
-@@ -10301,6 +10327,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -11857,6 +11884,7 @@ export default function ChatView(props: ChatViewProps) {
+           pullRequestAvailable={pullRequestSurfaceAvailable}
            pullRequestsAvailable={pullRequestsSurfaceAvailable}
-           agentsAvailable
            deviceAvailable={activeThreadRef !== null}
 +          appsAvailable={appsSurfaceAvailable}
-           liveAgentCount={agentPanelModel.liveCount}
          >
            {rightPanelContent}
-@@ -10350,6 +10377,7 @@ export default function ChatView(props: ChatViewProps) {
-             onAddPullRequests={addPullRequestsSurface}
-             onAddAgents={addAgentsSurface}
-             onAddDevice={addDeviceSurface}
-+            onAddApps={addAppsSurface}
-             browserAvailable={isPreviewSupportedInRuntime()}
-             terminalAvailable={activeProject !== null}
+         </RightPanelTabs>
+@@ -11909,6 +11937,7 @@ export default function ChatView(props: ChatViewProps) {
+             onAddPullRequest={addPullRequestSurfaceStable}
+             onAddPullRequests={addPullRequestsSurfaceStable}
+             onAddDevice={addDeviceSurfaceStable}
++            onAddApps={addAppsSurfaceStable}
+             browserAvailable={canOperatePreview && browserAvailable}
+             terminalAvailable={activeProject !== null && canOperateTerminal}
              diffAvailable={isServerThread && isGitRepo}
-@@ -10358,6 +10386,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -11916,6 +11945,7 @@ export default function ChatView(props: ChatViewProps) {
+             pullRequestAvailable={pullRequestSurfaceAvailable}
              pullRequestsAvailable={pullRequestsSurfaceAvailable}
-             agentsAvailable
              deviceAvailable={activeThreadRef !== null}
 +            appsAvailable={appsSurfaceAvailable}
-             liveAgentCount={agentPanelModel.liveCount}
            >
              {rightPanelContent}
+           </RightPanelTabs>
+diff --git a/apps/web/src/components/RightPanelTabs.keyboard.test.tsx b/apps/web/src/components/RightPanelTabs.keyboard.test.tsx
+index e7a952ba43..0093d1db9f 100644
+--- a/apps/web/src/components/RightPanelTabs.keyboard.test.tsx
++++ b/apps/web/src/components/RightPanelTabs.keyboard.test.tsx
+@@ -84,6 +84,7 @@ async function renderPanel(overrides: Partial<ComponentProps<typeof RightPanelTa
+         onAddPullRequest={noop}
+         onAddPullRequests={noop}
+         onAddDevice={noop}
++        onAddApps={noop}
+         browserAvailable={false}
+         terminalAvailable={false}
+         diffAvailable={false}
+@@ -91,6 +92,7 @@ async function renderPanel(overrides: Partial<ComponentProps<typeof RightPanelTa
+         pullRequestAvailable={false}
+         pullRequestsAvailable={false}
+         deviceAvailable={false}
++        appsAvailable={false}
+         {...overrides}
+       >
+         content
 diff --git a/apps/web/src/components/RightPanelTabs.test.tsx b/apps/web/src/components/RightPanelTabs.test.tsx
-index dfaaf171c4..6f5969d53c 100644
+index 823028eddf..ca92f5bb5e 100644
 --- a/apps/web/src/components/RightPanelTabs.test.tsx
 +++ b/apps/web/src/components/RightPanelTabs.test.tsx
-@@ -124,6 +124,8 @@ function renderTabs(
+@@ -133,6 +133,8 @@ function renderTabs(
+       onAddDiff={() => undefined}
        onAddFiles={() => undefined}
-       onAddAgents={() => undefined}
        onAddDevice={() => undefined}
 +      onAddApps={() => undefined}
 +      appsAvailable={false}
-       liveAgentCount={0}
        browserAvailable
        terminalAvailable={false}
+       diffAvailable={false}
 diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
-index 001342e482..dd3cce3017 100644
+index 5c8323a7ae..b5fda46d0c 100644
 --- a/apps/web/src/components/RightPanelTabs.tsx
 +++ b/apps/web/src/components/RightPanelTabs.tsx
-@@ -14,7 +14,9 @@ import type {
- } from "@t3tools/contracts";
- import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
+@@ -26,6 +26,8 @@ import { restrictToFirstScrollableAncestor, restrictToHorizontalAxis } from "@dn
+ import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
+ import { CSS } from "@dnd-kit/utilities";
  import {
 +  AppWindow,
-   Bot,
 +  LayoutGrid,
    Smartphone,
    ChevronDown,
    ChevronLeft,
-@@ -78,6 +80,8 @@ import { previewBridge } from "./preview/previewBridge";
- import { PierreEntryIcon } from "./chat/PierreEntryIcon";
+@@ -94,6 +96,8 @@ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
  import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
  import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+ import { observeResize } from "~/lib/observeResize";
 +import { windowLabel } from "~/plutonium/PlutoniumWindows";
 +import { type NativeWindowEntry, usePlutoniumWindowStore } from "~/plutonium/windowStore";
  
  interface RightPanelTabsProps {
    mode: PreviewPanelMode;
-@@ -123,6 +127,7 @@ interface RightPanelTabsProps {
+@@ -143,6 +147,7 @@ interface RightPanelTabsProps {
+   onAddPullRequest: () => void;
    onAddPullRequests: () => void;
-   onAddAgents: () => void;
    onAddDevice: () => void;
 +  onAddApps: () => void;
    browserAvailable: boolean;
    terminalAvailable: boolean;
    diffAvailable: boolean;
-@@ -131,6 +136,7 @@ interface RightPanelTabsProps {
+@@ -150,6 +155,7 @@ interface RightPanelTabsProps {
+   pullRequestAvailable: boolean;
    pullRequestsAvailable: boolean;
-   agentsAvailable: boolean;
    deviceAvailable: boolean;
 +  appsAvailable: boolean;
    pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
-   /** Running + waiting subagents; badges the Agents card in the empty state. */
-   liveAgentCount: number;
-@@ -162,6 +168,7 @@ const SURFACE_DISABLED_REASONS = {
+   children: ReactNode;
+ }
+@@ -178,6 +184,7 @@ const SURFACE_DISABLED_REASONS = {
+   pullRequest: "This thread's branch has no pull request yet.",
    pullRequests: "No linked pull requests are available for this thread.",
-   agents: "Agents are only available from a thread.",
    device: "Devices are only available from a thread.",
 +  apps: "Apps are only available in the Plutonium shell.",
  } as const;
  
  /** Overlays that must win over the launcher's letter shortcuts. */
-@@ -186,6 +193,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
+@@ -201,6 +208,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
+   pullRequest: "No pull request on this branch yet.",
    pullRequests: "No linked pull requests available.",
-   agents: "Available from a thread.",
    device: "Available from a thread.",
 +  apps: "Only available in the Plutonium shell.",
  } as const;
  
  type TabContextMenuAction =
-@@ -326,6 +334,7 @@ function RightPanelEmptyState(props: {
+@@ -341,6 +349,7 @@ function RightPanelEmptyState(props: {
+   onAddPullRequest: () => void;
    onAddPullRequests: () => void;
-   onAddAgents: () => void;
    onAddDevice: () => void;
 +  onAddApps: () => void;
    browserAvailable: boolean;
    terminalAvailable: boolean;
    diffAvailable: boolean;
-@@ -334,6 +343,7 @@ function RightPanelEmptyState(props: {
+@@ -348,6 +357,7 @@ function RightPanelEmptyState(props: {
+   pullRequestAvailable: boolean;
    pullRequestsAvailable: boolean;
-   agentsAvailable: boolean;
    deviceAvailable: boolean;
 +  appsAvailable: boolean;
-   liveAgentCount: number;
  }) {
    // -1 means no highlight: it only appears on hover or arrow use.
-@@ -413,6 +423,15 @@ function RightPanelEmptyState(props: {
+   const [highlight, setHighlight] = useState(-1);
+@@ -410,6 +420,15 @@ function RightPanelEmptyState(props: {
+       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
        onClick: props.onAddDevice,
-       badgeCount: 0,
      },
 +    {
 +      label: "Apps",
++      description: "Show the windows this thread's apps opened.",
 +      icon: LayoutGrid,
 +      shortcut: "W",
 +      available: props.appsAvailable,
 +      disabledReason: SURFACE_UNAVAILABLE_HINTS.apps,
 +      onClick: props.onAddApps,
-+      badgeCount: 0,
 +    },
    ] as const;
  
    type SurfaceAction = (typeof actions)[number];
-@@ -609,6 +628,7 @@ function surfaceTitle(
+@@ -599,6 +618,7 @@ function surfaceTitle(
    surface: RightPanelSurface,
    sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
    terminalLabelsById: ReadonlyMap<string, string>,
@@ -257,8 +275,8 @@ index 001342e482..dd3cce3017 100644
  ): string {
    switch (surface.kind) {
      case "diff":
-@@ -632,6 +652,12 @@ function surfaceTitle(
-       return "Agents";
+@@ -620,6 +640,12 @@ function surfaceTitle(
+       return "Pull requests";
      case "device":
        return surface.title ?? surface.target?.name ?? "Device";
 +    case "apps":
@@ -270,10 +288,10 @@ index 001342e482..dd3cce3017 100644
      case "preview": {
        const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
        if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
-@@ -715,6 +741,10 @@ function SurfaceIcon({
+@@ -701,6 +727,10 @@ function SurfaceIcon({
+       );
+     case "pull-requests":
        return <PullRequestGlyph.link className="size-3 shrink-0" />;
-     case "agents":
-       return <Bot className="size-3 shrink-0" />;
 +    case "apps":
 +      return <LayoutGrid className="size-3 shrink-0" />;
 +    case "app":
@@ -281,15 +299,15 @@ index 001342e482..dd3cce3017 100644
      case "device":
        return surface.target?.platform === "ios" ? (
          <AppleIcon className="size-3 shrink-0" />
-@@ -828,6 +858,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -869,6 +899,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
    const ownsDesktopTitleBar = isElectron && props.mode === "inline";
    const browserProfiles = useBrowserDefaults().profiles;
    const { resolvedTheme } = useTheme();
 +  const nativeWindows = usePlutoniumWindowStore((state) => state.windows);
    const tabListRef = useRef<HTMLDivElement>(null);
+   const addSurfaceTriggerRef = useRef<HTMLButtonElement>(null);
    const [renamingDevice, setRenamingDevice] = useState<string | null>(null);
-   const [addSurfaceMenuOpen, setAddSurfaceMenuOpen] = useState(false);
-@@ -933,6 +964,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -991,6 +1022,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
        disabledReason: SURFACE_DISABLED_REASONS.device,
        onClick: props.onAddDevice,
      },
@@ -304,41 +322,35 @@ index 001342e482..dd3cce3017 100644
    ] as const;
  
    const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-@@ -1131,7 +1170,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
-             {props.surfaces.map((surface) => {
-               const active = surface.id === props.activeSurfaceId;
-               const pending = props.pendingSurfaceIds.has(surface.id);
--              const title = surfaceTitle(surface, props.previewSessions, props.terminalLabelsById);
-+              const title = surfaceTitle(
-+                surface,
-+                props.previewSessions,
-+                props.terminalLabelsById,
-+                nativeWindows,
-+              );
-               const previewTabId = previewTabIdOf(surface, props.previewSessions);
-               // Desktop state is keyed by the session id, but desktop actions
-               // must be addressed with the runtime id.
-@@ -1416,6 +1460,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1196,6 +1235,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+                   surface,
+                   props.previewSessions,
+                   props.terminalLabelsById,
++                  nativeWindows,
+                 );
+                 const previewTabId = previewTabIdOf(surface, props.previewSessions);
+                 // Desktop state is keyed by the session id, but desktop actions
+@@ -1483,6 +1523,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             onAddPullRequest={props.onAddPullRequest}
              onAddPullRequests={props.onAddPullRequests}
-             onAddAgents={props.onAddAgents}
              onAddDevice={props.onAddDevice}
 +            onAddApps={props.onAddApps}
              browserAvailable={props.browserAvailable}
              terminalAvailable={props.terminalAvailable}
              diffAvailable={props.diffAvailable}
-@@ -1424,6 +1469,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1490,6 +1531,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             pullRequestAvailable={props.pullRequestAvailable}
              pullRequestsAvailable={props.pullRequestsAvailable}
-             agentsAvailable={props.agentsAvailable}
              deviceAvailable={props.deviceAvailable}
 +            appsAvailable={props.appsAvailable}
-             liveAgentCount={props.liveAgentCount}
            />
          ) : (
+           props.children
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index a86a8fd212..29849561ef 100644
+index ac8ad36d1c..65c00d70e3 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -68,7 +68,6 @@ import {
+@@ -90,7 +90,6 @@ import {
    XIcon,
  } from "lucide-react";
  import {
@@ -346,15 +358,15 @@ index a86a8fd212..29849561ef 100644
    memo,
    useCallback,
    useEffect,
-@@ -81,7 +80,6 @@ import {
-   type MouseEvent as ReactMouseEvent,
+@@ -104,7 +103,6 @@ import {
+   type PointerEvent as ReactPointerEvent,
    type ReactNode,
  } from "react";
 -import { PlutoniumThreadWindows } from "../plutonium/PlutoniumWindows";
  import { useParams, useRouter } from "@tanstack/react-router";
  
  import { useRightPanelStore } from "../rightPanelStore";
-@@ -4858,103 +4856,97 @@ export default function Sidebar() {
+@@ -5273,109 +5271,106 @@ export default function Sidebar() {
                            section === "active" || section === "pinned" || section === "working";
                          const rowVariant = isCard ? "card" : "slim";
                          return (
@@ -389,14 +401,14 @@ index a86a8fd212..29849561ef 100644
 -                              sortable={sortable}
 -                              dropVerb={
 -                                dragState?.activeKey === threadKey
--                                  ? resolveSidebarDropVerb(
--                                      dragState.activeSection,
--                                      dragTargetSection,
--                                    )
+-                                  ? resolveSidebarDropVerb(dragState.activeSection, dragTargetSection)
 -                                  : null
 -                              }
 -                              dragOverPinned={
 -                                dragState?.activeKey === threadKey && dragTargetSection === "pinned"
+-                              }
+-                              sweepAction={
+-                                actionSweep?.keys.has(threadKey) ? actionSweep.action : null
 -                              }
 -                              snoozeWakeLabelText={
 -                                section === "snoozed" && thread.snoozedUntil != null
@@ -413,7 +425,7 @@ index a86a8fd212..29849561ef 100644
 -                              isActive={routeThreadKey === threadKey}
 -                              openPullRequestsInRightPanel={routeThreadRef !== null}
 -                              jumpLabel={
--                                showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
+-                                showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
 -                              }
 -                              currentEnvironmentId={primaryEnvironmentId}
 -                              environmentLabel={
@@ -422,6 +434,7 @@ index a86a8fd212..29849561ef 100644
 -                              environmentMachine={
 -                                environmentMachineById.get(thread.environmentId) ?? "server"
 -                              }
+-                              scratchMachineLabel={scratchMachineLabelFor(thread)}
 -                              project={
 -                                projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
 -                                null
@@ -446,12 +459,17 @@ index a86a8fd212..29849561ef 100644
 -                              renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
 -                              onContextMenu={handleThreadContextMenu}
 -                              onSettle={attemptSettle}
+-                              onActionSweepStart={startActionSweep}
 -                              onUnsettle={attemptUnsettle}
 -                              onSnooze={attemptSnooze}
 -                              onUnsnooze={attemptUnsnooze}
 -                              onUnpin={attemptUnpin}
 -                              onAcknowledgeWoke={acknowledgeWoke}
 -                              onFileDropThreads={handleThreadFileDrop}
+-                              changeRequestSnapshot={
+-                                changeRequestSnapshotByKey.get(threadKey) ?? null
+-                              }
+-                              onChangeRequestSnapshot={setThreadChangeRequestSnapshot}
 -                            />
 -                            <PlutoniumThreadWindows threadId={thread.id} />
 -                          </Fragment>
@@ -491,6 +509,9 @@ index a86a8fd212..29849561ef 100644
 +                            dragOverPinned={
 +                              dragState?.activeKey === threadKey && dragTargetSection === "pinned"
 +                            }
++                            sweepAction={
++                              actionSweep?.keys.has(threadKey) ? actionSweep.action : null
++                            }
 +                            snoozeWakeLabelText={
 +                              section === "snoozed" && thread.snoozedUntil != null
 +                                ? snoozeWakeLabel(thread.snoozedUntil, {
@@ -506,7 +527,7 @@ index a86a8fd212..29849561ef 100644
 +                            isActive={routeThreadKey === threadKey}
 +                            openPullRequestsInRightPanel={routeThreadRef !== null}
 +                            jumpLabel={
-+                              showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
++                              showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
 +                            }
 +                            currentEnvironmentId={primaryEnvironmentId}
 +                            environmentLabel={
@@ -515,6 +536,7 @@ index a86a8fd212..29849561ef 100644
 +                            environmentMachine={
 +                              environmentMachineById.get(thread.environmentId) ?? "server"
 +                            }
++                            scratchMachineLabel={scratchMachineLabelFor(thread)}
 +                            project={
 +                              projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
 +                              null
@@ -539,18 +561,23 @@ index a86a8fd212..29849561ef 100644
 +                            renamingTitle={renamingThreadKey === threadKey ? renamingTitle : ""}
 +                            onContextMenu={handleThreadContextMenu}
 +                            onSettle={attemptSettle}
++                            onActionSweepStart={startActionSweep}
 +                            onUnsettle={attemptUnsettle}
 +                            onSnooze={attemptSnooze}
 +                            onUnsnooze={attemptUnsnooze}
 +                            onUnpin={attemptUnpin}
 +                            onAcknowledgeWoke={acknowledgeWoke}
 +                            onFileDropThreads={handleThreadFileDrop}
++                            changeRequestSnapshot={
++                              changeRequestSnapshotByKey.get(threadKey) ?? null
++                            }
++                            onChangeRequestSnapshot={setThreadChangeRequestSnapshot}
 +                          />
                          );
                        };
                        const renderThreadRow = (
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
-index bea426eb14..0975606fff 100644
+index bea426eb14..72e4e2a726 100644
 --- a/apps/web/src/plutonium/PlutoniumWindows.tsx
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
 @@ -1,42 +1,86 @@
@@ -639,7 +666,7 @@ index bea426eb14..0975606fff 100644
 +  const threadWindows = useThreadWindows(threadId);
 +  const untaggedWindows = useUntaggedWindows();
 +  return (
-+    <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
++    <div className="scrollbar-gutter-both flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
 +      <div className="w-full max-w-sm py-6">
 +        <h3 className="mb-3 text-center font-medium text-foreground text-sm">Apps</h3>
 +        {threadWindows.length === 0 ? (
@@ -869,25 +896,39 @@ index 7ebeca7f69..7259602fb4 100644
 +    .filter((entry) => !(entry.pid in threadByPid) && (entry.pid <= 0 || entry.pid in resolvedPids))
 +    .toSorted((a, b) => a.id - b.id);
 +}
+diff --git a/apps/web/src/reopenClosedView.ts b/apps/web/src/reopenClosedView.ts
+index 551119a178..87c16e7725 100644
+--- a/apps/web/src/reopenClosedView.ts
++++ b/apps/web/src/reopenClosedView.ts
+@@ -143,6 +143,9 @@ export async function reopenClosedView(
+     case "pull-request":
+       panels.openPullRequest(ref, surface);
+       break;
++    case "app":
++      panels.openApp(ref, surface);
++      break;
+     default:
+       panels.open(ref, surface.kind);
+   }
 diff --git a/apps/web/src/rightPanelStore.ts b/apps/web/src/rightPanelStore.ts
-index 75f6d2ffe2..9bb354b64d 100644
+index fa417786a0..301fe604a3 100644
 --- a/apps/web/src/rightPanelStore.ts
 +++ b/apps/web/src/rightPanelStore.ts
-@@ -29,6 +29,8 @@ const RIGHT_PANEL_KINDS = [
+@@ -30,6 +30,8 @@ const RIGHT_PANEL_KINDS = [
+   "terminal",
    "pull-request",
    "pull-requests",
-   "agents",
 +  "apps",
 +  "app",
  ] as const;
  export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
  
 @@ -85,7 +87,17 @@ export type RightPanelSurface =
+       url?: string;
      }
    /** The thread's linked pull requests, one singleton tab beside any number of `pull-request` tabs. */
-   | { id: "pull-requests"; kind: "pull-requests" }
--  | { id: "agents"; kind: "agents" };
-+  | { id: "agents"; kind: "agents" }
+-  | { id: "pull-requests"; kind: "pull-requests" };
++  | { id: "pull-requests"; kind: "pull-requests" }
 +  /** Plutonium: the native windows this thread started, and one tab per window shown. */
 +  | { id: "apps"; kind: "apps" }
 +  | {
@@ -901,7 +942,7 @@ index 75f6d2ffe2..9bb354b64d 100644
  
  const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
  // v9 removed the "plan" surface kind (plans render inline in the transcript).
-@@ -129,7 +141,7 @@ interface RightPanelStoreState {
+@@ -146,7 +158,7 @@ interface RightPanelStoreState {
    ) => boolean;
    open: (
      ref: ScopedThreadRef,
@@ -910,7 +951,7 @@ index 75f6d2ffe2..9bb354b64d 100644
    ) => void;
    openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
    renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
-@@ -148,6 +160,9 @@ interface RightPanelStoreState {
+@@ -165,6 +177,9 @@ interface RightPanelStoreState {
      },
    ) => void;
    openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
@@ -920,16 +961,16 @@ index 75f6d2ffe2..9bb354b64d 100644
    splitTerminal: (
      ref: ScopedThreadRef,
      surfaceId: string,
-@@ -168,7 +183,7 @@ interface RightPanelStoreState {
+@@ -191,7 +206,7 @@ interface RightPanelStoreState {
    toggleVisibility: (ref: ScopedThreadRef) => void;
    toggle: (
      ref: ScopedThreadRef,
 -    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
 +    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "app">,
    ) => void;
-   removeThread: (ref: ScopedThreadRef) => void;
- }
-@@ -180,7 +195,7 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
+   setThreadPanelOpen: (
+     ref: ScopedThreadRef,
+@@ -214,7 +229,7 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
  };
  
  const singletonSurface = (
@@ -938,16 +979,16 @@ index 75f6d2ffe2..9bb354b64d 100644
  ): RightPanelSurface => {
    switch (kind) {
      case "diff":
-@@ -191,6 +206,8 @@ const singletonSurface = (
+@@ -223,6 +238,8 @@ const singletonSurface = (
+       return { id: "files", kind };
+     case "pull-requests":
        return { id: "pull-requests", kind };
-     case "agents":
-       return { id: "agents", kind };
 +    case "apps":
 +      return { id: "apps", kind };
      case "device":
        return { id: "device", kind };
    }
-@@ -627,6 +644,39 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+@@ -759,6 +776,39 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
              upsertSurface(current, terminalSurface(terminalId)),
            ),
          ),
@@ -961,7 +1002,7 @@ index 75f6d2ffe2..9bb354b64d 100644
 +        set((state) => {
 +          let byThreadKey = state.byThreadKey;
 +          for (const threadKey of Object.keys(state.byThreadKey)) {
-+            byThreadKey = updateThread(byThreadKey, threadKey, (current) => {
++            byThreadKey = updateThreadStateMap(byThreadKey, threadKey, (current) => {
 +              const surfaces = current.surfaces.filter(
 +                (surface) => surface.kind !== "app" || isLive(surface.windowId, surface.appId),
 +              );
@@ -988,12 +1029,12 @@ index 75f6d2ffe2..9bb354b64d 100644
          set((state) =>
            userAction(state, scopedThreadKey(ref), (current) => ({
 diff --git a/apps/web/src/routes/_chat.pull-requests.tsx b/apps/web/src/routes/_chat.pull-requests.tsx
-index 1b7239a0be..b20d35d288 100644
+index cb97e39f1d..15377f2c15 100644
 --- a/apps/web/src/routes/_chat.pull-requests.tsx
 +++ b/apps/web/src/routes/_chat.pull-requests.tsx
-@@ -2115,6 +2115,8 @@ function PullRequestsRouteView() {
+@@ -2302,6 +2302,8 @@ function PullRequestsRouteView() {
+             onAddPullRequest={() => undefined}
              onAddPullRequests={() => undefined}
-             onAddAgents={() => undefined}
              onAddDevice={() => undefined}
 +            onAddApps={() => undefined}
 +            appsAvailable={false}

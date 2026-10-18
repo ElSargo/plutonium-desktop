@@ -2,6 +2,7 @@
 // Plutonium helper CLI (Node 24+, no dependencies).
 //
 //   plutonium.ts daemon [--wayland-display wayland-plutonium] --shell-origin http://127.0.0.1:3774[,<origin>…] [--port 3780]
+//     [--cdp-port 9222]
 //   plutonium.ts thread-setup <thread-id>   JSON {env, mcpServer} for a thread's processes
 //   plutonium.ts launch <thread-id> <argv>…  start an app in a thread
 //   plutonium.ts mcp                        the agent bridge as a stdio MCP server
@@ -29,6 +30,7 @@ const { values, positionals } = parseArgs({
     "shell-origin": { type: "string" },
     port: { type: "string" },
     socket: { type: "string" },
+    "cdp-port": { type: "string" },
   },
 });
 
@@ -38,6 +40,7 @@ const socketPath = values.socket ?? process.env[HELPER_VARIABLE] ?? defaultSocke
 function usage(): never {
   console.error(
     "usage: plutonium.ts daemon --shell-origin <origin>[,<origin>…] [--wayland-display <name>] [--port <n>]\n" +
+      "         [--cdp-port <n>]   (the browser's DevTools port, for server-driven tabs)\n" +
       "       plutonium.ts thread-setup <thread-id>\n" +
       "       plutonium.ts launch <thread-id> <program> [args…]\n" +
       "       plutonium.ts mcp\n" +
@@ -60,6 +63,7 @@ switch (command) {
       shellOrigins,
       port: Number(values.port ?? process.env.PLUTONIUM_HELPER_PORT ?? 3780),
       socketPath,
+      cdpPort: Number(values["cdp-port"] ?? process.env.PLUTONIUM_CDP_PORT ?? 0) || undefined,
     });
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
       process.once(signal, () => {
