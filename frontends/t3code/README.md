@@ -7,7 +7,7 @@
 T3 Code is optional. The niri and plain shells need nothing from here.
 
 - **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
-- **`patches/`**: the series (`git am`): 12 commits, about 2,600 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`patches/`**: the series (`git am`): 13 commits, about 2,600 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
@@ -44,6 +44,7 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0010 | Panel apps cross-fade when the panel is maximized or restored; an app's maximize button maximizes the panel |
 | 0011 | The shell pairs with the launcher's token only when it needs to (not paired, or missing scopes) |
 | 0012 | The server drives the panel's tabs, as it drives the desktop app's: over the helper's socket, with Playwright, through a relay to that one tab of the real browser. T3's agents use their own `preview_*` tools |
+| 0013 | A page's popup (an OAuth sign-in window) is shown as a new panel tab that keeps `window.opener`, and closes with it |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 
