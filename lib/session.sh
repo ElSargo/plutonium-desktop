@@ -77,8 +77,13 @@ if [[ $MODE == x11 ]]; then
           --use-system-clipboard "--ash-host-window-bounds=${BOUNDS:-0+0-1600x1000}")
   # shellcheck disable=SC2206
   FLAGS+=(${EXTRA_FLAGS:-})
-  if [[ $XDISP == :99 ]]; then
-    on_ash sh -c '[ -S /tmp/.X11-unix/X99 ] || (setsid Xvfb :99 -screen 0 1600x1000x24 +extension XInputExtension </dev/null >/dev/null 2>&1 &)'
+  if [[ $XDISP == :99 ]] && ! on_ash test -S /tmp/.X11-unix/X99; then
+    # Detached: a background process of an attached exec keeps its session
+    # (and pm's systemd-run --wait) from ever ending.
+    xvfb=(Xvfb :99 -screen 0 1600x1000x24 +extension XInputExtension)
+    if [[ -n ${HOST:-} ]]; then setsid "${xvfb[@]}" </dev/null >/dev/null 2>&1 &
+    else pm exec -d "$CONTAINER" "${xvfb[@]}" > /dev/null; fi
+    for _ in $(seq 1 20); do on_ash test -S /tmp/.X11-unix/X99 && break; sleep 0.5; done
   fi
   # The container sees the runtime dir, not the rest of $HOME.
   if [[ -z ${HOST:-} && -n ${XAUTHORITY:-} && $XAUTHORITY != "$RUN_DIR"/* && -f $XAUTHORITY ]]; then
