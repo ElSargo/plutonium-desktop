@@ -388,13 +388,38 @@ t3_pair_url() {
   [[ -n $token ]] || die "couldn't create a T3 Code pairing token"
   echo "http://127.0.0.1:$port/#plutoniumPair=$token"
 }
+# T3's release builds stamp the release's version into these (the source keeps
+# an older one); so does `t3 build`, for a BASE that is a release tag. The
+# stamp stays out of git's way (skip-worktree), and `t3 fetch` takes it out.
+T3_VERSION_FILES=(apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json)
+t3_stamp_version() {
+  local tag
+  tag=$(git -C "$T3CODE_DIR" describe --tags --exact-match "$1" 2> /dev/null) || return 0
+  [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+  (cd "$T3CODE_DIR" && node scripts/update-release-package-versions.ts "${tag#v}" > /dev/null) ||
+    die "couldn't stamp T3 Code's version $tag"
+  git -C "$T3CODE_DIR" update-index --skip-worktree "${T3_VERSION_FILES[@]}"
+  echo "T3 Code version: ${tag#v}"
+}
+t3_unstamp_version() {
+  local file
+  for file in "${T3_VERSION_FILES[@]}"; do
+    [[ -f $T3CODE_DIR/$file ]] || continue
+    git -C "$T3CODE_DIR" update-index --no-skip-worktree "$file"
+    # Only a stamp: every changed line is a "version".
+    if ! git -C "$T3CODE_DIR" diff -U0 -- "$file" | grep '^[-+][^-+]' | grep -qv '"version":'; then
+      git -C "$T3CODE_DIR" checkout -q -- "$file"
+    fi
+  done
+}
 t3_cmd() {
   local base
   base=$(cat "$ROOT/frontends/t3code/BASE")
   case "${1:-}" in
     fetch)
       [[ -d $T3CODE_DIR/.git ]] || git clone https://github.com/pingdotgg/t3code.git "$T3CODE_DIR"
-      git -C "$T3CODE_DIR" rev-parse -q --verify "$base^{commit}" > /dev/null || git -C "$T3CODE_DIR" fetch origin
+      git -C "$T3CODE_DIR" rev-parse -q --verify "$base^{commit}" > /dev/null || git -C "$T3CODE_DIR" fetch --tags origin
+      t3_unstamp_version
       [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "$T3CODE_DIR has uncommitted changes"
       git -C "$T3CODE_DIR" checkout -q -B plutonium "$base"
       committer git -C "$T3CODE_DIR" am -q --3way "$ROOT"/frontends/t3code/patches/*.patch
@@ -404,7 +429,9 @@ t3_cmd() {
     build)
       [[ -d $T3CODE_DIR ]] || die "no T3 Code checkout at $T3CODE_DIR (plutonium t3 fetch)"
       [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
-      (cd "$T3CODE_DIR" && t3_pnpm install && cd apps/web && t3_pnpm exec vp build) ;;
+      (cd "$T3CODE_DIR" && t3_pnpm install) || die "pnpm install failed"
+      t3_stamp_version "$base"
+      (cd "$T3CODE_DIR/apps/web" && t3_pnpm exec vp build) ;;
     server)
       local socket=wayland-plutonium
       [[ ${2:-} == --x11 ]] && socket=wayland-plutonium-x11
