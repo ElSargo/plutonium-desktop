@@ -1,0 +1,2184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Mon, 19 Oct 2026 09:04:02 +1300
+Subject: [PATCH 22/22] Plutonium: Chrome's own UI in the shell (DevTools,
+ context menus, keys)
+
+In shell mode the page is the desktop, so Chrome's browser-window UI
+stays out of it (EXO-CHROME):
+
+- DevTools: a shell's window docks its page's DevTools at the side. A
+  shell tab's DevTools, with no browser window to dock in, becomes a tab
+  of its own (opened by "devtools", the inspected tab's tags) that the
+  shell shows beside it; it can't be navigated or automated. Shell tabs
+  are "page" DevTools targets.
+- Context menus: a shell page's and a tab's menu lose the browser-window
+  items (Cast, Print, Save as, Inspect, Exit full screen, ...). The
+  visible shell gets them as navigator.windowBroker's cancelable
+  "contextmenurequest" and answers with closeContextMenu(); otherwise
+  Chrome shows its own, filtered. Reload works in tabs.
+- Keys: a shell's window runs only DevTools and clipboard commands (no F1
+  help window, Ctrl+N, Ctrl+W closing the shell, ...). Tabs get DevTools
+  keys, Alt+Left/Right and F5/Ctrl+R. Of Ash's accelerators only hardware
+  keys stay (no UI scaling on Ctrl+Shift+plus, IME switching on
+  Ctrl+Space, clipboard history on Search+V, accessibility toggles).
+- No link status bubble.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6om1snsq3fUBJ3KL9ASFL
+---
+ .../accelerator_controller_impl.cc            |  66 +++
+ chrome/browser/BUILD.gn                       |   4 +
+ .../chrome_devtools_manager_delegate.cc       |   9 +
+ .../devtools/devtools_ui_controller.cc        |   6 +-
+ chrome/browser/devtools/devtools_window.cc    |  36 +-
+ chrome/browser/devtools/devtools_window.h     |  13 +
+ .../browser/devtools/devtools_window_views.cc |  20 +
+ chrome/browser/plutonium_context_menu.cc      | 431 ++++++++++++++++++
+ chrome/browser/plutonium_context_menu.h       |  46 ++
+ chrome/browser/plutonium_keys.cc              |  24 +
+ chrome/browser/plutonium_keys.h               |   6 +
+ chrome/browser/plutonium_shell.cc             |  69 +++
+ chrome/browser/plutonium_shell.h              |  25 +-
+ chrome/browser/plutonium_tabs.cc              | 192 +++++++-
+ chrome/browser/plutonium_tabs.h               |  29 +-
+ .../render_view_context_menu.cc               |  11 +
+ .../browser/ui/browser_command_controller.cc  |   7 +
+ .../browser_ui_controller.cc                  |   4 +-
+ ...chrome_web_contents_view_delegate_views.cc |   7 +
+ .../render_view_context_menu_base.cc          |  24 +
+ .../render_view_context_menu_base.h           |   4 +
+ .../surface_embed_connector_impl.h            |   2 +-
+ .../public/browser/surface_embed_connector.h  |   4 +
+ .../mojom/native_window/window_broker.mojom   |  57 +++
+ .../renderer/bindings/generated_in_core.gni   |   4 +
+ .../blink/renderer/bindings/idl_in_core.gni   |   2 +
+ .../core/events/event_type_names.json5        |   2 +
+ .../blink/renderer/core/html/build.gni        |   2 +
+ .../renderer/core/html/context_menu_item.idl  |  17 +
+ .../core/html/context_menu_request_event.cc   |  79 ++++
+ .../core/html/context_menu_request_event.h    |  55 +++
+ .../core/html/context_menu_request_event.idl  |  29 ++
+ .../core/html/native_window_broker.cc         |  46 +-
+ .../renderer/core/html/native_window_broker.h |  16 +-
+ .../core/html/native_window_broker.idl        |   8 +
+ 35 files changed, 1328 insertions(+), 28 deletions(-)
+ create mode 100644 chrome/browser/plutonium_context_menu.cc
+ create mode 100644 chrome/browser/plutonium_context_menu.h
+ create mode 100644 third_party/blink/renderer/core/html/context_menu_item.idl
+ create mode 100644 third_party/blink/renderer/core/html/context_menu_request_event.cc
+ create mode 100644 third_party/blink/renderer/core/html/context_menu_request_event.h
+ create mode 100644 third_party/blink/renderer/core/html/context_menu_request_event.idl
+
+diff --git a/ash/accelerators/accelerator_controller_impl.cc b/ash/accelerators/accelerator_controller_impl.cc
+index 5497f10e39..cdf84a07c8 100644
+--- a/ash/accelerators/accelerator_controller_impl.cc
++++ b/ash/accelerators/accelerator_controller_impl.cc
+@@ -35,6 +35,7 @@
+ #include "ash/wm/screen_pinning_controller.h"
+ #include "ash/wm/window_state.h"
+ #include "base/check.h"
++#include "base/command_line.h"
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+@@ -66,6 +67,66 @@ namespace ash {
+ 
+ namespace {
+ 
++// PLUTONIUM (EXO-CHROME): Chrome's shell mode (--plutonium-shell-url, see
++// chrome/browser/plutonium_shell.h), where a web page is the desktop.
++bool IsPlutoniumShellMode() {
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  return shell_mode;
++}
++
++// In shell mode the shell is the desktop, as a Wayland compositor's is: of
++// Ash's own keys only the hardware ones stay (brightness, volume, media,
++// power, the Caps Lock key), and the debug ones when they're turned on. The
++// rest (screen scaling and rotation, switching input methods, accessibility
++// toggles, clipboard history, Shift ending Caps Lock) reach the app or page.
++bool IsAllowedInPlutoniumShell(AcceleratorAction action,
++                               const ui::Accelerator& accelerator) {
++  switch (action) {
++    case AcceleratorAction::kBrightnessDown:
++    case AcceleratorAction::kBrightnessUp:
++    case AcceleratorAction::kKeyboardBacklightToggle:
++    case AcceleratorAction::kKeyboardBrightnessDown:
++    case AcceleratorAction::kKeyboardBrightnessUp:
++    case AcceleratorAction::kMediaFastForward:
++    case AcceleratorAction::kMediaNextTrack:
++    case AcceleratorAction::kMediaPause:
++    case AcceleratorAction::kMediaPlay:
++    case AcceleratorAction::kMediaPlayPause:
++    case AcceleratorAction::kMediaPrevTrack:
++    case AcceleratorAction::kMediaRewind:
++    case AcceleratorAction::kMediaStop:
++    case AcceleratorAction::kMicrophoneMuteToggle:
++    case AcceleratorAction::kPowerPressed:
++    case AcceleratorAction::kPowerReleased:
++    case AcceleratorAction::kPrivacyScreenToggle:
++    case AcceleratorAction::kVolumeDown:
++    case AcceleratorAction::kVolumeMute:
++    case AcceleratorAction::kVolumeUp:
++      return true;
++    case AcceleratorAction::kToggleCapsLock:
++      // Not Alt+Search.
++      return accelerator.key_code() == ui::VKEY_CAPITAL;
++    default:
++      break;
++  }
++  if (debug::DebugAcceleratorsEnabled()) {
++    for (const AcceleratorData& data : kDebugAcceleratorData) {
++      if (data.action == action) {
++        return true;
++      }
++    }
++  }
++  if (debug::DeveloperAcceleratorsEnabled()) {
++    for (const AcceleratorData& data : kDeveloperAcceleratorData) {
++      if (data.action == action) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ using ::base::UserMetricsAction;
+ using ::chromeos::WindowStateType;
+ using input_method::InputMethodManager;
+@@ -761,6 +822,11 @@ bool AcceleratorControllerImpl::CanPerformAction(
+   if (accelerator.IsRepeat() && !repeatable_actions_.contains(action))
+     return false;
+ 
++  if (IsPlutoniumShellMode() &&
++      !IsAllowedInPlutoniumShell(action, accelerator)) {
++    return false;
++  }
++
+   AcceleratorProcessingRestriction restriction =
+       GetAcceleratorProcessingRestriction(action);
+   if (restriction != RESTRICTION_NONE)
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 8bc7da18fc..87ed85a7b8 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -777,6 +777,7 @@ if (is_chromeos) {
+       "exo_embedder.h",
+       "exo_parts.h",
+       "exo_window_broker.h",
++      "plutonium_context_menu.h",
+       "plutonium_groups.h",
+       "plutonium_keys.h",
+       "plutonium_shell.h",
+@@ -787,6 +788,7 @@ if (is_chromeos) {
+       "exo_embedder.cc",
+       "exo_parts.cc",
+       "exo_window_broker.cc",
++      "plutonium_context_menu.cc",
+       "plutonium_groups.cc",
+       "plutonium_keys.cc",
+       "plutonium_shell.cc",
+@@ -803,9 +805,11 @@ if (is_chromeos) {
+       "//ash",
+       "//ash/constants",
+       "//base",
++      "//chrome/app:command_ids",
+       "//chrome/browser/ash/exo",
+       "//chrome/browser/profiles:profile",
+       "//chromeos/ash/experiences/arc",
++      "//components/renderer_context_menu",
+       "//components/prefs",
+       "//components/exo",
+       "//components/surface_embed/browser",
+diff --git a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+index 34e568267b..be116a0c2e 100644
+--- a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
++++ b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+@@ -30,6 +30,7 @@
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/policy/developer_tools_policy_handler.h"
+ #include "chrome/browser/policy/profile_policy_connector.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -319,6 +320,14 @@ std::string ChromeDevToolsManagerDelegate::GetTargetType(
+     return DevToolsAgentHost::kTypePage;
+   }
+ 
++  // PLUTONIUM (EXO-CHROME): a shell's browser tab is a page too; DevTools
++  // for it (now a tab itself) shows nothing for an "other" target.
++  if (std::optional<PlutoniumTabs::TabInfo> tab =
++          PlutoniumTabs::Get()->GetTabFor(web_contents);
++      tab && tab->opened_by != "devtools") {
++    return DevToolsAgentHost::kTypePage;
++  }
++
+   std::string extension_name;
+   std::string extension_type;
+   if (GetExtensionInfo(web_contents, &extension_name, &extension_type)) {
+diff --git a/chrome/browser/devtools/devtools_ui_controller.cc b/chrome/browser/devtools/devtools_ui_controller.cc
+index f2a3fe25fe..cf6319e52d 100644
+--- a/chrome/browser/devtools/devtools_ui_controller.cc
++++ b/chrome/browser/devtools/devtools_ui_controller.cc
+@@ -7,6 +7,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
+ #include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/views/frame/contents_container_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+@@ -19,8 +20,11 @@ DevtoolsUIController::DevtoolsUIController(
+     BrowserWindowInterface* browser,
+     const std::vector<raw_ptr<ContentsContainerView, DanglingUntriaged>>&
+         contents_container_views)
++    // PLUTONIUM (EXO-CHROME): a shell's window docks its page's DevTools,
++    // as a browser window does, rather than opening a window of its own.
+     : can_dock_devtools_(browser->GetType() ==
+-                         BrowserWindowInterface::Type::TYPE_NORMAL),
++                             BrowserWindowInterface::Type::TYPE_NORMAL ||
++                         plutonium_shell::IsShellBrowser(browser)),
+       scoped_data_holder_(browser->GetUnownedUserDataHost(), *this) {
+   for (ContentsContainerView* contents_container_view :
+        contents_container_views) {
+diff --git a/chrome/browser/devtools/devtools_window.cc b/chrome/browser/devtools/devtools_window.cc
+index e9803277ee..ec9b76585d 100644
+--- a/chrome/browser/devtools/devtools_window.cc
++++ b/chrome/browser/devtools/devtools_window.cc
+@@ -37,6 +37,8 @@
+ #include "chrome/browser/infobars/browser_infobar_manager.h"
+ #include "chrome/browser/infobars/confirm_infobar_creator.h"
+ #include "chrome/browser/infobars/infobar_features.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/policy/chrome_policy_blocklist_service_factory.h"
+ #include "chrome/browser/policy/developer_tools_policy_checker.h"
+ #include "chrome/browser/policy/developer_tools_policy_checker_factory.h"
+@@ -1100,6 +1102,12 @@ void DevToolsWindow::Show(const DevToolsToggleAction& action) {
+   bool should_show_window =
+       !browser_ || (action.type() != DevToolsToggleAction::kInspect);
+ 
++  if (ShowInShellTab(/*activate=*/!in_shell_tab_ ||
++                     action.type() != DevToolsToggleAction::kInspect)) {
++    DoAction(action);
++    return;
++  }
++
+   if (!browser_) {
+     CreateDevToolsBrowser();
+   }
+@@ -1727,6 +1735,8 @@ void DevToolsWindow::ActivateWindow() {
+ #else
+   if (is_docked_ && GetInspectedBrowserWindow()) {
+     main_web_contents_->Focus();
++  } else if (in_shell_tab_) {
++    PlutoniumTabs::Get()->RequestShow(main_web_contents_);
+   } else if (!is_docked_ && browser_ && !browser_->GetWindow()->IsActive()) {
+     browser_->GetWindow()->Activate();
+   }
+@@ -1736,6 +1746,9 @@ void DevToolsWindow::ActivateWindow() {
+ void DevToolsWindow::CloseWindow() {
+   if (is_docked_) {
+     Close(DevToolsClosedByAction::kCloseButton);
++  } else if (in_shell_tab_) {
++    life_stage_ = kClosing;
++    main_web_contents_->DispatchBeforeUnload(false /* auto_cancel */);
+   } else {
+ #if BUILDFLAG(IS_ANDROID)
+     main_web_contents_->Close();
+@@ -1969,7 +1982,7 @@ void DevToolsWindow::RenderProcessGone(bool crashed) {
+   // Docked DevToolsWindow owns its main_web_contents_ and must delete it.
+   // Undocked main_web_contents_ are owned and handled by browser.
+   // see crbug.com/40363970
+-  if (is_docked_) {
++  if (is_docked_ || in_shell_tab_) {
+     CloseContents(main_web_contents_);
+   } else {
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -2064,6 +2077,27 @@ void DevToolsWindow::SetOpenNewWindowForPopups(bool value) {
+   open_new_window_for_popups_ = value;
+ }
+ 
++bool DevToolsWindow::ShowInShellTab(bool activate) {
++  if (in_shell_tab_) {
++    if (activate) {
++      PlutoniumTabs::Get()->RequestShow(main_web_contents_);
++    }
++    return true;
++  }
++  content::WebContents* inspected_web_contents = GetInspectedWebContents();
++  if (!plutonium_shell::IsShellMode() || browser_ ||
++      !owned_main_web_contents_ || !inspected_web_contents ||
++      !PlutoniumTabs::Get()->IsTab(inspected_web_contents)) {
++    return false;
++  }
++  in_shell_tab_ = true;
++  main_web_contents_->SetDelegate(this);
++  OverrideAndSyncDevToolsRendererPrefs();
++  PlutoniumTabs::Get()->AddDevToolsTab(main_web_contents_,
++                                       inspected_web_contents);
++  return true;
++}
++
+ void DevToolsWindow::CreateDevToolsBrowser() {
+   PrefService* prefs = profile_->GetPrefs();
+   bool resetPrefs = false;
+diff --git a/chrome/browser/devtools/devtools_window.h b/chrome/browser/devtools/devtools_window.h
+index b2fd119f42..03e0e0f2fc 100644
+--- a/chrome/browser/devtools/devtools_window.h
++++ b/chrome/browser/devtools/devtools_window.h
+@@ -147,6 +147,10 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   static DevToolsWindow* AsDevToolsWindow(BrowserWindowInterface* browser);
+   static DevToolsWindow* FindDevToolsWindow(content::DevToolsAgentHost*);
+ 
++  // PLUTONIUM (EXO-CHROME): closes DevTools shown as a shell's tab (the
++  // shell closed the tab, see ShowInShellTab()).
++  void CloseShellTab() { CloseWindow(); }
++
+   // Open or reveal DevTools window, and perform the specified action.
+   // How to get pointer to the created window see comments for
+   // ToggleDevToolsWindow().
+@@ -522,6 +526,13 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   void LoadCompleted();
+   void UpdateBrowserToolbar();
+   void UpdateBrowserWindow();
++  // PLUTONIUM (EXO-CHROME): in shell mode, the DevTools of a shell's browser
++  // tab (plutonium_tabs.h), which has no Browser to dock in, isn't a window
++  // either: its page is a tab of its own, which the shell shows beside the
++  // one it inspects. Owned and driven as when docked. False if the inspected
++  // page isn't such a tab (DevTools is a window); otherwise adds the tab, or
++  // asks the shell to show it (if |activate|).
++  bool ShowInShellTab(bool activate);
+ 
+   // Registers a WebContentsModalDialogManager for our WebContents in order to
+   // display web modal dialogs triggered by it.
+@@ -587,6 +598,8 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   std::unique_ptr<OwnedMainWebContents> owned_main_web_contents_;
+ 
+   const bool can_dock_;
++  // PLUTONIUM: see ShowInShellTab().
++  bool in_shell_tab_ = false;
+   bool close_on_detach_;
+   LifeStage life_stage_;
+   DevToolsToggleAction action_on_load_;
+diff --git a/chrome/browser/devtools/devtools_window_views.cc b/chrome/browser/devtools/devtools_window_views.cc
+index 937debfe3f..94870e76ab 100644
+--- a/chrome/browser/devtools/devtools_window_views.cc
++++ b/chrome/browser/devtools/devtools_window_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/devtools/devtools_ui_controller.h"
+ #include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/plutonium_keys.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -80,6 +82,13 @@ DevToolsWindow* DevToolsWindow::AsDevToolsWindow(
+ content::KeyboardEventProcessingResult DevToolsWindow::PreHandleKeyboardEvent(
+     WebContents* source,
+     const input::NativeWebKeyboardEvent& event) {
++  // PLUTONIUM (EXO-KEYS): a DevTools tab is a tab: the shell's shortcuts are
++  // the shell's.
++  if (in_shell_tab_) {
++    return PlutoniumTabs::Get()->ForwardShellShortcut(event)
++               ? content::KeyboardEventProcessingResult::HANDLED
++               : content::KeyboardEventProcessingResult::NOT_HANDLED;
++  }
+   BrowserWindow* inspected_window = GetInspectedBrowserWindow();
+   if (inspected_window) {
+     return inspected_window->PreHandleKeyboardEvent(event);
+@@ -94,6 +103,17 @@ bool DevToolsWindow::HandleKeyboardEvent(
+     // Do not navigate back in history on Windows (http://crbug.com/40529649).
+     return true;
+   }
++  // PLUTONIUM (EXO-CHROME): F12 and Ctrl+Shift+I close a DevTools tab, as
++  // they close a DevTools window.
++  if (in_shell_tab_) {
++    if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
++        plutonium_keys::GetDevToolsKey(event) ==
++            plutonium_keys::DevToolsKey::kToggle) {
++      CloseWindow();
++      return true;
++    }
++    return false;
++  }
+   BrowserWindow* inspected_window = GetInspectedBrowserWindow();
+   return inspected_window && inspected_window->HandleKeyboardEvent(event);
+ }
+diff --git a/chrome/browser/plutonium_context_menu.cc b/chrome/browser/plutonium_context_menu.cc
+new file mode 100644
+index 0000000000..d3a98b7273
+--- /dev/null
++++ b/chrome/browser/plutonium_context_menu.cc
+@@ -0,0 +1,431 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_context_menu.h"
++
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/app/chrome_command_ids.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/renderer_context_menu/render_view_context_menu_base.h"
++#include "content/public/browser/context_menu_params.h"
++#include "content/public/browser/surface_embed_connector.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "third_party/blink/public/mojom/context_menu/context_menu.mojom-shared.h"
++#include "third_party/blink/public/mojom/native_window/window_broker.mojom.h"
++#include "ui/gfx/text_utils.h"
++#include "ui/menus/simple_menu_model.h"
++
++namespace plutonium_context_menu {
++
++namespace {
++
++using blink::mojom::ContextMenuItemType;
++
++// Whether a shell page's (|tab| false) or a tab's menu keeps command |id|.
++bool Keeps(int id, bool tab) {
++  // The page's own items (<menu>, plugins).
++  if (RenderViewContextMenuBase::IsContentCustomCommandId(id)) {
++    return true;
++  }
++  // Spelling suggestions, then the spell-check languages (their last ids
++  // are RenderViewContextMenu's own).
++  if (id >= IDC_SPELLCHECK_SUGGESTION_0 &&
++      id < IDC_CHECK_SPELLING_WHILE_TYPING) {
++    return true;
++  }
++  switch (id) {
++    // A shell page isn't somewhere to go back from or reload: it's the
++    // desktop.
++    case IDC_BACK:
++    case IDC_FORWARD:
++    case IDC_RELOAD:
++    case IDC_CONTENT_CONTEXT_RELOADFRAME:
++      return tab;
++    // Links and media open as tabs (plutonium_tabs.h). "New window",
++    // incognito and other profiles would be Chrome windows.
++    case IDC_CONTENT_CONTEXT_OPENLINKNEWTAB:
++    case IDC_CONTENT_CONTEXT_COPYLINKLOCATION:
++    case IDC_CONTENT_CONTEXT_COPYLINKTEXT:
++    case IDC_CONTENT_CONTEXT_OPENIMAGENEWTAB:
++    case IDC_CONTENT_CONTEXT_OPEN_ORIGINAL_IMAGE_NEW_TAB:
++    case IDC_CONTENT_CONTEXT_LOAD_IMAGE:
++    case IDC_CONTENT_CONTEXT_COPYIMAGE:
++    case IDC_CONTENT_CONTEXT_COPYIMAGELOCATION:
++    case IDC_CONTENT_CONTEXT_OPENAVNEWTAB:
++    case IDC_CONTENT_CONTEXT_COPYAVLOCATION:
++    case IDC_CONTENT_CONTEXT_COPYVIDEOFRAME:
++    case IDC_CONTENT_CONTEXT_LOOP:
++    case IDC_CONTENT_CONTEXT_CONTROLS:
++    case IDC_CONTENT_CONTEXT_ROTATECW:
++    case IDC_CONTENT_CONTEXT_ROTATECCW:
++    // Editing.
++    case IDC_CONTENT_CONTEXT_UNDO:
++    case IDC_CONTENT_CONTEXT_REDO:
++    case IDC_CONTENT_CONTEXT_CUT:
++    case IDC_CONTENT_CONTEXT_COPY:
++    case IDC_CONTENT_CONTEXT_PASTE:
++    case IDC_CONTENT_CONTEXT_PASTE_AND_MATCH_STYLE:
++    case IDC_CONTENT_CONTEXT_DELETE:
++    case IDC_CONTENT_CONTEXT_SELECTALL:
++    case IDC_WRITING_DIRECTION_MENU:
++    case IDC_WRITING_DIRECTION_DEFAULT:
++    case IDC_WRITING_DIRECTION_LTR:
++    case IDC_WRITING_DIRECTION_RTL:
++    // A selection.
++    case IDC_CONTENT_CONTEXT_SEARCHWEBFOR:
++    case IDC_CONTENT_CONTEXT_SEARCHWEBFORNEWTAB:
++    case IDC_CONTENT_CONTEXT_GOTOURL:
++    case IDC_CONTENT_CONTEXT_COPYLINKTOTEXT:
++    case IDC_CONTENT_CONTEXT_RESHARELINKTOTEXT:
++    case IDC_CONTENT_CONTEXT_REMOVELINKTOTEXT:
++    // Spelling, but not its settings page.
++    case IDC_SPELLCHECK_MENU:
++    case IDC_SPELLCHECK_ADD_TO_DICTIONARY:
++    case IDC_SPELLCHECK_REMOVE_FROM_DICTIONARY:
++    case IDC_CHECK_SPELLING_WHILE_TYPING:
++    case IDC_SPELLCHECK_MULTI_LINGUAL:
++      return true;
++    default:
++      return false;
++  }
++}
++
++ContextMenuItemType TypeOf(ui::MenuModel::ItemType type) {
++  switch (type) {
++    case ui::MenuModel::TYPE_CHECK:
++      return ContextMenuItemType::kCheckbox;
++    case ui::MenuModel::TYPE_RADIO:
++      return ContextMenuItemType::kRadio;
++    case ui::MenuModel::TYPE_SEPARATOR:
++      return ContextMenuItemType::kSeparator;
++    case ui::MenuModel::TYPE_SUBMENU:
++    case ui::MenuModel::TYPE_ACTIONABLE_SUBMENU:
++      return ContextMenuItemType::kSubmenu;
++    case ui::MenuModel::TYPE_TITLE:
++      return ContextMenuItemType::kTitle;
++    default:
++      return ContextMenuItemType::kCommand;
++  }
++}
++
++std::string MediaTypeOf(blink::mojom::ContextMenuDataMediaType type) {
++  switch (type) {
++    case blink::mojom::ContextMenuDataMediaType::kImage:
++      return "image";
++    case blink::mojom::ContextMenuDataMediaType::kVideo:
++      return "video";
++    case blink::mojom::ContextMenuDataMediaType::kAudio:
++      return "audio";
++    case blink::mojom::ContextMenuDataMediaType::kCanvas:
++      return "canvas";
++    case blink::mojom::ContextMenuDataMediaType::kFile:
++      return "file";
++    case blink::mojom::ContextMenuDataMediaType::kPlugin:
++      return "plugin";
++    default:
++      return std::string();
++  }
++}
++
++// An item the shell can choose: where it is in the menu's models.
++struct Target {
++  raw_ptr<ui::MenuModel> model;
++  size_t index;
++};
++
++struct Node {
++  blink::mojom::ContextMenuItemPtr item;
++  std::vector<Node> children;
++};
++
++// |model|'s items as the shell gets them; submenus' are filtered too.
++std::vector<Node> Collect(ui::MenuModel* model,
++                          bool tab,
++                          std::vector<Target>& targets) {
++  std::vector<Node> nodes;
++  for (size_t i = 0; i < model->GetItemCount(); ++i) {
++    if (!model->IsVisibleAt(i)) {
++      continue;
++    }
++    const ContextMenuItemType type = TypeOf(model->GetTypeAt(i));
++    Node node;
++    node.item = blink::mojom::ContextMenuItem::New();
++    node.item->type = type;
++    if (type == ContextMenuItemType::kSeparator) {
++      // Doubled or at either end: dropped below.
++      if (!nodes.empty() &&
++          nodes.back().item->type != ContextMenuItemType::kSeparator) {
++        nodes.push_back(std::move(node));
++      }
++      continue;
++    }
++    if (type != ContextMenuItemType::kTitle &&
++        !Keeps(model->GetCommandIdAt(i), tab)) {
++      continue;
++    }
++    node.item->label = base::UTF16ToUTF8(
++        gfx::RemoveAccelerator(model->GetLabelAt(i)));
++    node.item->enabled = model->IsEnabledAt(i);
++    node.item->checked = model->IsItemCheckedAt(i);
++    if (type != ContextMenuItemType::kTitle) {
++      targets.push_back({model, i});
++      node.item->id = static_cast<int32_t>(targets.size());
++    }
++    if (type == ContextMenuItemType::kSubmenu) {
++      ui::MenuModel* submenu = model->GetSubmenuModelAt(i);
++      if (!submenu) {
++        continue;
++      }
++      submenu->MenuWillShow();
++      node.children = Collect(submenu, tab, targets);
++      if (node.children.empty()) {
++        continue;
++      }
++    }
++    nodes.push_back(std::move(node));
++  }
++  if (!nodes.empty() &&
++      nodes.back().item->type == ContextMenuItemType::kSeparator) {
++    nodes.pop_back();
++  }
++  return nodes;
++}
++
++void Flatten(std::vector<Node>& nodes,
++             int32_t parent_id,
++             std::vector<blink::mojom::ContextMenuItemPtr>& items) {
++  for (Node& node : nodes) {
++    const int32_t id = node.item->id;
++    node.item->parent_id = parent_id;
++    items.push_back(std::move(node.item));
++    Flatten(node.children, id, items);
++  }
++}
++
++// Runs |on_gone| when |contents| goes or shows another page.
++class GoneObserver : public content::WebContentsObserver {
++ public:
++  GoneObserver(content::WebContents* contents, base::OnceClosure on_gone)
++      : content::WebContentsObserver(contents), on_gone_(std::move(on_gone)) {}
++
++  void WebContentsDestroyed() override { Gone(); }
++  void PrimaryPageChanged(content::Page& page) override { Gone(); }
++
++ private:
++  void Gone() {
++    Observe(nullptr);
++    if (on_gone_) {
++      std::move(on_gone_).Run();
++    }
++  }
++
++  base::OnceClosure on_gone_;
++};
++
++// The menu the shell was last asked to show.
++class Pending {
++ public:
++  Pending(int32_t id,
++          content::WebContents* source,
++          content::WebContents* shell,
++          std::unique_ptr<RenderViewContextMenuBase> menu,
++          std::vector<Target> targets)
++      : id_(id),
++        source_(source),
++        shell_(shell),
++        menu_(std::move(menu)),
++        targets_(std::move(targets)),
++        source_gone_(source,
++                     base::BindOnce(&Pending::OnSourceGone,
++                                    base::Unretained(this))),
++        shell_gone_(shell,
++                    base::BindOnce(&Pending::OnShellGone,
++                                   base::Unretained(this))) {}
++
++  int32_t id() const { return id_; }
++  content::WebContents* shell() const { return shell_; }
++
++  // The shell's answer to the request (whether it shows the menu).
++  void OnRequestAnswered(bool handled) {
++    if (!menu_ || native_) {
++      return;
++    }
++    if (handled) {
++      // Shown, as far as the page is concerned (until MenuClosed()).
++      shown_ = true;
++      menu_->OnMenuWillShow(
++          const_cast<ui::SimpleMenuModel*>(&menu_->menu_model()));
++      // A tab's menu: the keyboard is the shell's while it shows it.
++      if (source_ != shell_) {
++        if (content::SurfaceEmbedConnector* connector =
++                source_->GetSurfaceEmbedConnector()) {
++          connector->ClearFocusOnInnerWebContents();
++        }
++        shell_->Focus();
++      }
++      return;
++    }
++    VLOG(1) << "EXO-CHROME menu #" << id_
++            << ": the shell doesn't show it, Chrome does";
++    ShowNatively();
++  }
++
++  void ShowNatively() {
++    native_ = true;
++    menu_->Show();
++  }
++
++  // Runs |item_id| (if not 0) and closes the menu. Destroys this.
++  static void Close(int32_t item_id) {
++    std::unique_ptr<Pending> self = std::move(Current());
++    if (!self || self->native_ || !self->menu_) {
++      return;
++    }
++    if (item_id > 0 && static_cast<size_t>(item_id) <= self->targets_.size()) {
++      const Target& target = self->targets_[item_id - 1];
++      if (target.model->IsEnabledAt(target.index) &&
++          TypeOf(target.model->GetTypeAt(target.index)) !=
++              ContextMenuItemType::kSubmenu) {
++        VLOG(1) << "EXO-CHROME menu #" << self->id_ << ": running "
++                << target.model->GetCommandIdAt(target.index);
++        target.model->ActivatedAt(target.index, /*event_flags=*/0);
++      }
++    }
++    // Running it may have closed the page.
++    if (self->menu_ && self->shown_) {
++      self->menu_->MenuClosed(
++          const_cast<ui::SimpleMenuModel*>(&self->menu_->menu_model()));
++    }
++  }
++
++  static std::unique_ptr<Pending>& Current() {
++    static base::NoDestructor<std::unique_ptr<Pending>> current;
++    return *current;
++  }
++
++ private:
++  // The menu points into its page: it goes with it, now.
++  void OnSourceGone() {
++    menu_.reset();
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
++        FROM_HERE, std::move(Current()));
++  }
++
++  // Nobody can answer any more.
++  void OnShellGone() {
++    if (!native_) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(
++                         [](int32_t id) {
++                           if (Current() && Current()->id() == id) {
++                             Close(0);
++                           }
++                         },
++                         id_));
++    }
++  }
++
++  const int32_t id_;
++  const raw_ptr<content::WebContents> source_;
++  const raw_ptr<content::WebContents> shell_;
++  std::unique_ptr<RenderViewContextMenuBase> menu_;
++  const std::vector<Target> targets_;
++  bool native_ = false;
++  // The shell took it.
++  bool shown_ = false;
++  GoneObserver source_gone_;
++  GoneObserver shell_gone_;
++};
++
++}  // namespace
++
++bool MaybeShow(content::WebContents* source,
++               std::unique_ptr<RenderViewContextMenuBase>& menu) {
++  if (!plutonium_shell::IsShellMode() || !source || !menu) {
++    return false;
++  }
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  std::optional<PlutoniumTabs::TabInfo> tab =
++      PlutoniumTabs::Get()->GetTabFor(source);
++  content::WebContents* shell = nullptr;
++  if (tab) {
++    shell = PlutoniumTabs::Get()->shell();
++  } else if (shells && shells->GetShellFor(source)) {
++    shell = source;
++  } else {
++    return false;
++  }
++
++  const bool is_tab = tab.has_value();
++  menu->FilterMenuItems([is_tab](int id) { return Keeps(id, is_tab); });
++
++  // A new menu replaces one the shell still shows.
++  if (Pending::Current()) {
++    Pending::Close(0);
++  }
++
++  std::vector<Target> targets;
++  std::vector<Node> nodes = Collect(
++      const_cast<ui::SimpleMenuModel*>(&menu->menu_model()), is_tab, targets);
++  static int32_t next_id = 1;
++  auto request = blink::mojom::ContextMenuRequest::New();
++  request->id = next_id++;
++  request->tab_id = is_tab ? tab->id : 0;
++  const content::ContextMenuParams& params = menu->params();
++  request->x = params.x;
++  request->y = params.y;
++  Flatten(nodes, 0, request->items);
++  if (params.link_url.is_valid()) {
++    request->link_url = params.link_url.spec();
++  }
++  request->selection_text = base::UTF16ToUTF8(params.selection_text);
++  request->editable = params.is_editable;
++  request->media_type = MediaTypeOf(params.media_type);
++  if (request->items.empty() || !shell) {
++    // Nothing left (Chrome shows no empty menu either), or no shell to ask
++    // (none visible): Chrome's.
++    Pending::Current() = std::make_unique<Pending>(
++        request->id, source, source, std::move(menu), std::move(targets));
++    Pending::Current()->ShowNatively();
++    return true;
++  }
++
++  const int32_t id = request->id;
++  Pending::Current() = std::make_unique<Pending>(id, source, shell,
++                                                 std::move(menu),
++                                                 std::move(targets));
++  const bool asked = plutonium_shell::RequestContextMenu(
++      shell, std::move(request), base::BindOnce([](int32_t id, bool handled) {
++        if (Pending::Current() && Pending::Current()->id() == id) {
++          Pending::Current()->OnRequestAnswered(handled);
++        }
++      }, id));
++  if (!asked) {
++    Pending::Current()->ShowNatively();
++  }
++  return true;
++}
++
++void OnClosedByShell(content::WebContents* shell,
++                     int32_t menu_id,
++                     int32_t item_id) {
++  if (!Pending::Current() || Pending::Current()->id() != menu_id ||
++      Pending::Current()->shell() != shell) {
++    return;
++  }
++  Pending::Close(item_id);
++}
++
++}  // namespace plutonium_context_menu
+diff --git a/chrome/browser/plutonium_context_menu.h b/chrome/browser/plutonium_context_menu.h
+new file mode 100644
+index 0000000000..fc3f0e57c8
+--- /dev/null
++++ b/chrome/browser/plutonium_context_menu.h
+@@ -0,0 +1,46 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_CONTEXT_MENU_H_
++#define CHROME_BROWSER_PLUTONIUM_CONTEXT_MENU_H_
++
++#include <cstdint>
++#include <memory>
++
++class RenderViewContextMenuBase;
++
++namespace content {
++class WebContents;
++}
++
++// EXO-CHROME: Chrome's context menu in shell mode (plutonium_shell.h).
++//
++// A shell page's own context menu and a browser tab's (plutonium_tabs.h) are
++// Chrome's RenderViewContextMenu without the items that belong to a browser
++// window: Cast, Print, Save as, Inspect, Exit full screen, translation,
++// QR codes and the like. What stays is what a page's menu needs on a
++// desktop: editing, links, images, media and spelling, and for a tab Back,
++// Forward and Reload.
++//
++// The shell shows it, in its own style: the visible shell page gets a
++// "contextmenurequest" event (navigator.windowBroker) with the items, and
++// answers with closeContextMenu(menuId, itemId). A shell that doesn't take
++// the event (preventDefault()) gets Chrome's own menu, with the same items.
++namespace plutonium_context_menu {
++
++// If |source| is a shell page or a tab, filters |menu| (built and Init()ed
++// for |source|) and shows it the shell's way, taking it; true. Otherwise
++// false, and |menu| is left alone.
++bool MaybeShow(content::WebContents* source,
++               std::unique_ptr<RenderViewContextMenuBase>& menu);
++
++// Shell page |shell| closed menu |menu_id|, choosing item |item_id| (0 for
++// nothing). Ignored unless it is the menu |shell| was asked to show.
++void OnClosedByShell(content::WebContents* shell,
++                     int32_t menu_id,
++                     int32_t item_id);
++
++}  // namespace plutonium_context_menu
++
++#endif  // CHROME_BROWSER_PLUTONIUM_CONTEXT_MENU_H_
+diff --git a/chrome/browser/plutonium_keys.cc b/chrome/browser/plutonium_keys.cc
+index 2d709d2894..d444d145a1 100644
+--- a/chrome/browser/plutonium_keys.cc
++++ b/chrome/browser/plutonium_keys.cc
+@@ -270,6 +270,30 @@ bool IsShellShortcut(const input::NativeWebKeyboardEvent& event) {
+   return IsShellShortcut(static_cast<ui::DomCode>(event.dom_code), flags);
+ }
+ 
++DevToolsKey GetDevToolsKey(const input::NativeWebKeyboardEvent& event) {
++  constexpr int kAll =
++      blink::WebInputEvent::kControlKey | blink::WebInputEvent::kAltKey |
++      blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kMetaKey;
++  const int modifiers = event.GetModifiers() & kAll;
++  if (event.windows_key_code == ui::VKEY_F12 && modifiers == 0) {
++    return DevToolsKey::kToggle;
++  }
++  if (modifiers !=
++      (blink::WebInputEvent::kControlKey | blink::WebInputEvent::kShiftKey)) {
++    return DevToolsKey::kNone;
++  }
++  switch (event.windows_key_code) {
++    case ui::VKEY_I:
++      return DevToolsKey::kToggle;
++    case ui::VKEY_J:
++      return DevToolsKey::kConsole;
++    case ui::VKEY_C:
++      return DevToolsKey::kInspect;
++    default:
++      return DevToolsKey::kNone;
++  }
++}
++
+ void ToggleFullscreen() {
+   ExoEmbedder* embedder = ExoEmbedder::Get();
+   if (int32_t window_id = exo::EmbeddedWindows::Get()->focused_window_id();
+diff --git a/chrome/browser/plutonium_keys.h b/chrome/browser/plutonium_keys.h
+index b7ec9e81c9..1c7d7d9288 100644
+--- a/chrome/browser/plutonium_keys.h
++++ b/chrome/browser/plutonium_keys.h
+@@ -59,6 +59,12 @@ bool IsShellShortcut(const input::NativeWebKeyboardEvent& event);
+ // What Super+F does.
+ void ToggleFullscreen();
+ 
++// EXO-CHROME: DevTools' keys, for pages without a browser window (tabs, and a
++// tab's DevTools): F12 and Ctrl+Shift+I toggle DevTools, Ctrl+Shift+J opens
++// its console and Ctrl+Shift+C inspects an element.
++enum class DevToolsKey { kNone, kToggle, kConsole, kInspect };
++DevToolsKey GetDevToolsKey(const input::NativeWebKeyboardEvent& event);
++
+ }  // namespace plutonium_keys
+ 
+ #endif  // CHROME_BROWSER_PLUTONIUM_KEYS_H_
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index 7c179b164b..f402eb0ea8 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -18,12 +18,15 @@
+ #include "base/scoped_observation.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
++#include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/exo_embedder.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_context_menu.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/plutonium_tabs.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "components/exo/embedded_windows.h"
+ #include "components/surface_embed/browser/surface_embed_host.h"
+ #include "content/public/browser/document_service.h"
+@@ -32,6 +35,8 @@
+ #include "content/public/browser/navigation_throttle_registry.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents.h"
++#include "mojo/public/cpp/bindings/associated_remote.h"
++#include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "mojo/public/cpp/bindings/pending_associated_remote.h"
+ #include "mojo/public/cpp/bindings/remote_set.h"
+ #include "mojo/public/cpp/base/big_buffer.h"
+@@ -254,6 +259,19 @@ class WindowBrokerImpl
+     }
+     return true;
+   }
++  // EXO-CHROME: false if this document doesn't listen for context menus.
++  bool RequestContextMenu(
++      blink::mojom::ContextMenuRequestPtr& request,
++      base::OnceCallback<void(bool handled)>& callback) {
++    if (!context_menu_observer_.is_bound() || !StillShell()) {
++      return false;
++    }
++    context_menu_observer_->OnContextMenuRequested(
++        std::move(request), mojo::WrapCallbackWithDefaultInvokeIfNotRun(
++                                std::move(callback), false));
++    return true;
++  }
++
+   bool RequestShowTab(const PlutoniumTabs::TabInfo& tab) {
+     if (tab_observers_.empty() || !StillShell()) {
+       return false;
+@@ -521,6 +539,23 @@ class WindowBrokerImpl
+     std::move(callback).Run(CurrentShells());
+   }
+ 
++  // EXO-CHROME:
++  void AddContextMenuObserver(
++      mojo::PendingAssociatedRemote<blink::mojom::ContextMenuObserver>
++          observer) override {
++    if (!StillShell()) {
++      return;
++    }
++    context_menu_observer_.reset();
++    context_menu_observer_.Bind(std::move(observer));
++  }
++
++  void CloseContextMenu(int32_t menu_id, int32_t item_id) override {
++    if (StillShell()) {
++      plutonium_context_menu::OnClosedByShell(contents(), menu_id, item_id);
++    }
++  }
++
+   // PlutoniumShells::Observer:
+   void OnShellsDestroying() override { shells_observation_.Reset(); }
+   void OnShellsChanged() override {
+@@ -630,6 +665,8 @@ class WindowBrokerImpl
+   base::ScopedObservation<PlutoniumGroups, PlutoniumGroups::Observer>
+       groups_observation_{this};
+   mojo::AssociatedRemoteSet<blink::mojom::ShellObserver> shell_observers_;
++  mojo::AssociatedRemote<blink::mojom::ContextMenuObserver>
++      context_menu_observer_;
+   base::ScopedObservation<PlutoniumShells, PlutoniumShells::Observer>
+       shells_observation_{this};
+ };
+@@ -780,6 +817,38 @@ bool RequestShowTab(content::WebContents* shell, int32_t tab_id) {
+   return requested;
+ }
+ 
++bool RequestContextMenu(content::WebContents* shell,
++                        blink::mojom::ContextMenuRequestPtr request,
++                        base::OnceCallback<void(bool handled)> callback) {
++  for (WindowBrokerImpl* impl : WindowBrokerImpl::Instances()) {
++    if (impl->contents() == shell &&
++        impl->RequestContextMenu(request, callback)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool IsShellBrowser(BrowserWindowInterface* browser) {
++  return IsShellMode() && browser &&
++         browser->GetType() == BrowserWindowInterface::TYPE_APP;
++}
++
++bool IsCommandAllowedInShell(int command_id) {
++  switch (command_id) {
++    case IDC_DEV_TOOLS:
++    case IDC_DEV_TOOLS_CONSOLE:
++    case IDC_DEV_TOOLS_INSPECT:
++    case IDC_DEV_TOOLS_TOGGLE:
++    case IDC_CUT:
++    case IDC_COPY:
++    case IDC_PASTE:
++      return true;
++    default:
++      return false;
++  }
++}
++
+ void MaybeAddNavigationThrottle(content::NavigationThrottleRegistry& registry) {
+   if (GetShellOrigins().empty() ||
+       !registry.GetNavigationHandle().IsInPrimaryMainFrame()) {
+diff --git a/chrome/browser/plutonium_shell.h b/chrome/browser/plutonium_shell.h
+index ef10f40fe0..6645377e66 100644
+--- a/chrome/browser/plutonium_shell.h
++++ b/chrome/browser/plutonium_shell.h
+@@ -9,13 +9,18 @@
+ #include <vector>
+ 
+ #include "base/command_line.h"
++#include "base/functional/callback_forward.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/struct_ptr.h"
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
++class BrowserWindowInterface;
++
+ namespace blink::mojom {
++class ContextMenuRequest;
+ class WindowBroker;
+-}
++}  // namespace blink::mojom
+ 
+ namespace content {
+ class NavigationThrottleRegistry;
+@@ -68,6 +73,17 @@ inline bool IsShellMode() {
+   return base::CommandLine::ForCurrentProcess()->HasSwitch(kShellUrlSwitch);
+ }
+ 
++// EXO-CHROME: Chrome's own UI in shell mode. A shell is the desktop, not a
++// browser window: Chrome shouldn't show through it.
++//
++// Whether |browser| is a shell's window (in shell mode, every app window).
++bool IsShellBrowser(BrowserWindowInterface* browser);
++// Whether a shell's window runs browser command |command_id| (IDC_*, from a
++// key or a menu). Only DevTools and the clipboard: F1 (help), Ctrl+N (a new
++// window), Ctrl+W (close the shell), Ctrl+P, Ctrl+S, F5 and the like do
++// nothing, and the key is the page's alone.
++bool IsCommandAllowedInShell(int command_id);
++
+ // In shell mode, opens the shell URL at startup (as --app=<url> with
+ // --start-fullscreen). Call before the startup browser is created.
+ void SetUpShellMode();
+@@ -107,6 +123,13 @@ void OnVisibleShellChanged(content::WebContents* previous,
+ bool RequestShowWindow(content::WebContents* shell, int32_t window_id);
+ bool RequestShowTab(content::WebContents* shell, int32_t tab_id);
+ 
++// EXO-CHROME: asks |shell|'s page to show a context menu
++// (plutonium_context_menu.h). False if it doesn't listen; otherwise
++// |callback| gets whether it took the menu (false if it went away).
++bool RequestContextMenu(content::WebContents* shell,
++                        mojo::StructPtr<blink::mojom::ContextMenuRequest> request,
++                        base::OnceCallback<void(bool handled)> callback);
++
+ // Adds a throttle that exposes the shell API to navigations that will commit
+ // the shell (the renderer side only; IsShellDocument() is what's enforced).
+ void MaybeAddNavigationThrottle(content::NavigationThrottleRegistry& registry);
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 5990127b94..d6945315fc 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -23,6 +23,8 @@
+ #include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+ #include "base/values.h"
++#include "chrome/browser/devtools/devtools_toggle_action.h"
++#include "chrome/browser/devtools/devtools_window.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_keys.h"
+@@ -305,22 +307,28 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+                            public content::WebContentsObserver,
+                            public content::JavaScriptDialogManager {
+  public:
++  // A tab owns its page (|owned|), unless it's someone else's (|borrowed|,
++  // EXO-CHROME: DevTools'), which keeps its own delegate.
+   Tab(PlutoniumTabs* tabs,
+       int32_t id,
+-      std::unique_ptr<content::WebContents> contents,
++      std::unique_ptr<content::WebContents> owned,
++      content::WebContents* borrowed,
+       std::string tag,
+       std::vector<std::string> tags,
+       int32_t opener_id,
+       const std::string& opened_by)
+-      : content::WebContentsObserver(contents.get()),
++      : content::WebContentsObserver(owned ? owned.get() : borrowed),
+         tabs_(tabs),
+-        contents_(std::move(contents)) {
++        owned_contents_(std::move(owned)),
++        contents_(owned_contents_ ? owned_contents_.get() : borrowed) {
+     info_.id = id;
+     info_.tag = std::move(tag);
+     info_.tags = std::move(tags);
+     info_.opener_id = opener_id;
+     info_.opened_by = opened_by;
+-    contents_->SetDelegate(this);
++    if (owned_contents_) {
++      contents_->SetDelegate(this);
++    }
+     info_.content_id =
+         surface_embed::SurfaceEmbedHandle::CreateForWebContents(contents_.get())
+             ->id();
+@@ -330,10 +338,14 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   ~Tab() override {
+     CancelDialog();
+     Observe(nullptr);
+-    contents_->SetDelegate(nullptr);
++    if (owned_contents_) {
++      contents_->SetDelegate(nullptr);
++    }
+   }
+ 
+-  content::WebContents* contents() const { return contents_.get(); }
++  content::WebContents* contents() const { return contents_; }
++  // EXO-CHROME: a page this tab doesn't own (DevTools').
++  bool borrowed() const { return !owned_contents_; }
+   void Changed() { tabs_->TabChanged(this); }
+ 
+   TabDevTools* devtools() {
+@@ -472,14 +484,8 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
+       content::WebContents* source,
+       const input::NativeWebKeyboardEvent& event) override {
+-    if (plutonium_keys::IsShellShortcut(event)) {
+-      if (content::WebContents* shell = tabs_->shell()) {
+-        if (content::RenderWidgetHost* widget =
+-                shell->GetPrimaryMainFrame()->GetRenderWidgetHost()) {
+-          widget->ForwardKeyboardEvent(event);
+-          return content::KeyboardEventProcessingResult::HANDLED;
+-        }
+-      }
++    if (tabs_->ForwardShellShortcut(event)) {
++      return content::KeyboardEventProcessingResult::HANDLED;
+     }
+     if (page_fullscreen_ &&
+         event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
+@@ -490,6 +496,69 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     return content::KeyboardEventProcessingResult::NOT_HANDLED;
+   }
+ 
++  // EXO-CHROME: the browser keys a page has without a browser window, once
++  // the page has let them through: DevTools, and back, forward and reload.
++  bool HandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override {
++    if (event.GetType() != blink::WebInputEvent::Type::kRawKeyDown) {
++      return false;
++    }
++    switch (plutonium_keys::GetDevToolsKey(event)) {
++      case plutonium_keys::DevToolsKey::kToggle:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::Show(),
++            DevToolsOpenedByAction::kToggleShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kConsole:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::ShowConsolePanel(),
++            DevToolsOpenedByAction::kConsoleShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kInspect:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::Inspect(),
++            DevToolsOpenedByAction::kInspectorModeShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kNone:
++        break;
++    }
++    constexpr int kModifiers =
++        blink::WebInputEvent::kControlKey | blink::WebInputEvent::kAltKey |
++        blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kMetaKey;
++    const int modifiers = event.GetModifiers() & kModifiers;
++    const int key = event.windows_key_code;
++    content::NavigationController& controller = contents_->GetController();
++    if (key == ui::VKEY_BROWSER_BACK ||
++        (key == ui::VKEY_LEFT && modifiers == blink::WebInputEvent::kAltKey)) {
++      if (controller.CanGoBack()) {
++        controller.GoBack();
++      }
++      return true;
++    }
++    if (key == ui::VKEY_BROWSER_FORWARD ||
++        (key == ui::VKEY_RIGHT && modifiers == blink::WebInputEvent::kAltKey)) {
++      if (controller.CanGoForward()) {
++        controller.GoForward();
++      }
++      return true;
++    }
++    const bool reload =
++        key == ui::VKEY_BROWSER_REFRESH ||
++        (key == ui::VKEY_F5 && (modifiers & ~blink::WebInputEvent::kShiftKey) ==
++                                   0) ||
++        (key == ui::VKEY_R && (modifiers & ~blink::WebInputEvent::kShiftKey) ==
++                                  blink::WebInputEvent::kControlKey);
++    if (reload) {
++      controller.Reload(modifiers & blink::WebInputEvent::kShiftKey
++                            ? content::ReloadType::BYPASSING_CACHE
++                            : content::ReloadType::NORMAL,
++                        /*check_for_repost=*/true);
++      return true;
++    }
++    return false;
++  }
++
+   // EXO-FULLSCREEN: the page's own fullscreen (e.g. a video's) makes the
+   // <embed> fullscreen, so the page gets the whole screen.
+   bool CanEnterFullscreenModeForTab(
+@@ -629,6 +698,13 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     tabs_->TabChanged(this);
+   }
+ 
++  // Only a borrowed page goes before its tab (its owner closed it).
++  void WebContentsDestroyed() override {
++    Observe(nullptr);
++    contents_ = nullptr;
++    tabs_->RemoveTab(info_.id);
++  }
++
+   void OnVisibilityChanged(content::Visibility visibility) override {
+     // An <embed> attaching or detaching the tab changes its visibility. On
+     // detach that happens before the connector goes: look once it's done.
+@@ -678,7 +754,8 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   }
+ 
+   const raw_ptr<PlutoniumTabs> tabs_;
+-  std::unique_ptr<content::WebContents> contents_;
++  std::unique_ptr<content::WebContents> owned_contents_;
++  raw_ptr<content::WebContents> contents_;
+   TabInfo info_;
+   // The size the page is laid out at while no <embed> shows it.
+   gfx::Size size_ = kDefaultTabSize;
+@@ -780,6 +857,50 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::GetTab(
+   return std::nullopt;
+ }
+ 
++std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::GetTabFor(
++    const content::WebContents* contents) const {
++  if (Tab* tab = FindTab(contents)) {
++    return tab->info();
++  }
++  return std::nullopt;
++}
++
++void PlutoniumTabs::AddDevToolsTab(content::WebContents* devtools,
++                                   content::WebContents* inspected) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  Tab* inspected_tab = FindTab(inspected);
++  if (!inspected_tab || FindTab(devtools)) {
++    return;
++  }
++  if (devtools->GetContainerBounds().IsEmpty()) {
++    devtools->Resize(gfx::Rect(kDefaultTabSize));
++  }
++  const TabInfo inspected_info = inspected_tab->info();
++  AddTab(nullptr, devtools, inspected_info.tag, inspected_info.tags,
++         inspected_info.id, "devtools")
++      ->Refresh();
++}
++
++void PlutoniumTabs::RequestShow(content::WebContents* contents) {
++  if (Tab* tab = FindTab(contents); tab && shell()) {
++    plutonium_shell::RequestShowTab(shell(), tab->info().id);
++  }
++}
++
++bool PlutoniumTabs::ForwardShellShortcut(
++    const input::NativeWebKeyboardEvent& event) {
++  if (!plutonium_keys::IsShellShortcut(event) || !shell()) {
++    return false;
++  }
++  content::RenderWidgetHost* widget =
++      shell()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  if (!widget) {
++    return false;
++  }
++  widget->ForwardKeyboardEvent(event);
++  return true;
++}
++
+ // static
+ GURL PlutoniumTabs::ToLoadableUrl(const std::string& text) {
+   GURL url = url_formatter::FixupURL(text);
+@@ -911,7 +1032,7 @@ bool PlutoniumTabs::UpdateTags(int32_t tab_id,
+ bool PlutoniumTabs::Navigate(int32_t tab_id, const std::string& url_text) {
+   Tab* tab = FindTab(tab_id);
+   GURL url = ToLoadableUrl(url_text);
+-  if (!tab || !url.is_valid()) {
++  if (!tab || tab->borrowed() || !url.is_valid()) {
+     return false;
+   }
+   content::NavigationController::LoadURLParams load(url);
+@@ -926,6 +1047,19 @@ void PlutoniumTabs::RunCommand(int32_t tab_id, Command command) {
+   if (!tab) {
+     return;
+   }
++  // EXO-CHROME: DevTools closes as DevTools; its page stays its own.
++  if (tab->borrowed()) {
++    if (command == Command::kClose) {
++      if (DevToolsWindow* devtools =
++              DevToolsWindow::AsDevToolsWindow(tab->contents())) {
++        devtools->CloseShellTab();
++      }
++    } else if (command == Command::kReload) {
++      tab->contents()->GetController().Reload(content::ReloadType::NORMAL,
++                                              /*check_for_repost=*/false);
++    }
++    return;
++  }
+   content::NavigationController& controller = tab->contents()->GetController();
+   switch (command) {
+     case Command::kBack:
+@@ -968,6 +1102,11 @@ void PlutoniumTabs::SendDevToolsCommand(int32_t tab_id,
+     std::move(callback).Run(false, "No such tab");
+     return;
+   }
++  // EXO-CHROME: DevTools' own page is privileged: not for automation.
++  if (tab->borrowed()) {
++    std::move(callback).Run(false, "DevTools can't be automated");
++    return;
++  }
+   tab->devtools()->Send(method, params_json, std::move(callback));
+ }
+ 
+@@ -1021,7 +1160,19 @@ PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
+     const std::vector<std::string>& inherited_tags,
+     int32_t opener_id,
+     const std::string& opened_by) {
++  return AddTab(std::move(contents), nullptr, tag_text, inherited_tags,
++                opener_id, opened_by);
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
++    std::unique_ptr<content::WebContents> owned,
++    content::WebContents* borrowed,
++    const std::string& tag_text,
++    const std::vector<std::string>& inherited_tags,
++    int32_t opener_id,
++    const std::string& opened_by) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  content::WebContents* contents = owned ? owned.get() : borrowed;
+   // EXO-TAGS: the origin tag first, then (for a page's new tab) the
+   // opener's other tags.
+   const std::string tag =
+@@ -1035,10 +1186,11 @@ PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
+     profile_observations_.AddObservation(profile);
+   }
+   int32_t id = next_id_++;
+-  auto owned = std::make_unique<Tab>(this, id, std::move(contents), tag,
+-                                     std::move(tags), opener_id, opened_by);
+-  Tab* tab = owned.get();
+-  tabs_[id] = std::move(owned);
++  auto new_tab =
++      std::make_unique<Tab>(this, id, std::move(owned), borrowed, tag,
++                            std::move(tags), opener_id, opened_by);
++  Tab* tab = new_tab.get();
++  tabs_[id] = std::move(new_tab);
+   VLOG(1) << "EXO-TABS tab #" << id << " added (opened by " << opened_by
+           << (opener_id ? " #" + base::NumberToString(opener_id) : "")
+           << ", tag \"" << tag << "\")";
+diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
+index d89c3b5e5d..a4240227f5 100644
+--- a/chrome/browser/plutonium_tabs.h
++++ b/chrome/browser/plutonium_tabs.h
+@@ -27,6 +27,10 @@ class Profile;
+ class SkBitmap;
+ struct NavigateParams;
+ 
++namespace input {
++struct NativeWebKeyboardEvent;
++}
++
+ namespace content {
+ class BrowserContext;
+ class NavigationHandle;
+@@ -75,7 +79,8 @@ class PlutoniumTabs : public ProfileObserver {
+     // page's new tabs start with its opener's).
+     std::vector<std::string> tags;
+     int32_t opener_id = 0;
+-    // "shell" or "page".
++    // "shell", "shell:<shell id>" (a link a shell page opened), "page" or
++    // "devtools" (EXO-CHROME: the DevTools of tab |opener_id|).
+     std::string opened_by;
+     // The dialog the page waits on ("alert", "confirm", "prompt",
+     // "beforeunload"), or empty.
+@@ -107,6 +112,21 @@ class PlutoniumTabs : public ProfileObserver {
+   // if it shows the shell's URL.
+   bool IsTab(const content::WebContents* contents) const;
+   std::optional<TabInfo> GetTab(int32_t tab_id) const;
++  // The tab |contents| is, if it is one.
++  std::optional<TabInfo> GetTabFor(const content::WebContents* contents) const;
++
++  // EXO-CHROME: |devtools| (owned by its DevToolsWindow) is the DevTools of
++  // tab |inspected|: it becomes a tab too, with |inspected|'s tags, opened by
++  // "devtools", so the shell shows it beside it. It goes when DevTools closes;
++  // closing the tab closes DevTools. It can't be navigated or automated.
++  void AddDevToolsTab(content::WebContents* devtools,
++                      content::WebContents* inspected);
++  // Asks the visible shell to show the tab |contents| is
++  // ("tabfocusrequest").
++  void RequestShow(content::WebContents* contents);
++  // EXO-KEYS: sends |event| to the visible shell's page if it is one of its
++  // shortcuts (plutonium_keys.h); true if it did.
++  bool ForwardShellShortcut(const input::NativeWebKeyboardEvent& event);
+ 
+   // The URL CreateTab() and Navigate() would load for |text|, or an invalid
+   // GURL if they would refuse it.
+@@ -181,6 +201,13 @@ class PlutoniumTabs : public ProfileObserver {
+               const std::vector<std::string>& tags,
+               int32_t opener_id,
+               const std::string& opened_by);
++  // The same for a page someone else owns (|owned| null) or the tab owns.
++  Tab* AddTab(std::unique_ptr<content::WebContents> owned,
++              content::WebContents* borrowed,
++              const std::string& tag,
++              const std::vector<std::string>& tags,
++              int32_t opener_id,
++              const std::string& opened_by);
+   // Destroys tab |tab_id| (later, if a call into it is on the stack).
+   void RemoveTab(int32_t tab_id);
+   void TabChanged(Tab* tab);
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 2e79af6cd9..610b7504b0 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -88,6 +88,7 @@
+ #include "chrome/browser/predictors/loading_predictor_factory.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/preloading/preloading_prefs.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_attributes_entry.h"
+ #include "chrome/browser/profiles/profile_attributes_storage.h"
+@@ -4181,6 +4182,11 @@ void RenderViewContextMenu::ExecuteCommand(int id, int event_flags) {
+     }
+ 
+     case IDC_RELOAD:
++      if (!GetBrowser()) {
++        embedder_web_contents_->GetController().Reload(
++            content::ReloadType::NORMAL, /*check_for_repost=*/true);
++        break;
++      }
+       chrome::Reload(GetBrowser(), WindowOpenDisposition::CURRENT_TAB);
+       break;
+ 
+@@ -4563,6 +4569,11 @@ bool RenderViewContextMenu::ShouldOpenTextQueryInLens() const {
+ // Controller functions --------------------------------------------------------
+ 
+ bool RenderViewContextMenu::IsReloadEnabled() const {
++  // PLUTONIUM (EXO-CHROME): a page with no browser window (a shell's tab)
++  // reloads itself.
++  if (!GetBrowser() && plutonium_shell::IsShellMode()) {
++    return true;
++  }
+   CoreTabHelper* core_tab_helper =
+       CoreTabHelper::FromWebContents(embedder_web_contents_);
+   return core_tab_helper && chrome::CanReload(GetBrowser());
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 0a440ff813..3000d60b52 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -41,6 +41,7 @@
+ #include "chrome/browser/glic/public/glic_keyed_service_factory.h"
+ #include "chrome/browser/glic/public/service/glic_instance_coordinator.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -644,6 +645,12 @@ bool BrowserCommandController::SupportsCommand(int id) const {
+ }
+ 
+ bool BrowserCommandController::IsCommandEnabled(int id) const {
++  // PLUTONIUM (EXO-CHROME): a shell's window is the desktop, not a browser:
++  // no new windows, help, printing, closing or reloading it from a key.
++  if (plutonium_shell::IsShellBrowser(browser_) &&
++      !plutonium_shell::IsCommandAllowedInShell(id)) {
++    return false;
++  }
+   return command_updater_->IsCommandEnabled(id);
+ }
+ 
+diff --git a/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc b/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
+index f68bbcc884..70d3c0c0f6 100644
+--- a/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
++++ b/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
+@@ -13,6 +13,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_event.h"
+ #include "chrome/browser/app_mode/app_mode_utils.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
+ #include "chrome/browser/ui/browser_window.h"
+@@ -274,7 +275,8 @@ void BrowserUiController::NotifyTabUIChanged(tabs::TabInterface* tab,
+ 
+ std::vector<StatusBubble*> BrowserUiController::GetStatusBubbles() {
+   // For kiosk and exclusive app mode we want to always hide the status bubble.
+-  if (IsRunningInAppMode()) {
++  // So does Plutonium's shell mode (EXO-CHROME): the desktop shows no URLs.
++  if (IsRunningInAppMode() || plutonium_shell::IsShellMode()) {
+     return {};
+   }
+ 
+diff --git a/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc b/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
+index fdefbf534e..469061cab7 100644
+--- a/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
++++ b/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
+@@ -15,6 +15,7 @@
+ #include "chrome/browser/ui/sad_tab_helper.h"
+ #include "chrome/browser/ui/tab_contents/chrome_web_contents_menu_helper.h"
+ #include "chrome/browser/ui/tab_contents/chrome_web_contents_view_handle_drop.h"
++#include "chrome/browser/plutonium_context_menu.h"
+ #include "chrome/browser/ui/views/renderer_context_menu/render_view_context_menu_views.h"
+ #include "chrome/browser/ui/views/sad_tab_view.h"
+ #include "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_focus_helper.h"
+@@ -98,6 +99,12 @@ void ChromeWebContentsViewDelegateViews::ShowMenu(
+     return;
+   }
+ 
++  // PLUTONIUM (EXO-CHROME): a shell page's or a tab's menu is the shell's to
++  // show, without Chrome's browser-window items.
++  if (plutonium_context_menu::MaybeShow(web_contents_, context_menu_)) {
++    return;
++  }
++
+   context_menu_->Show();
+ }
+ 
+diff --git a/components/renderer_context_menu/render_view_context_menu_base.cc b/components/renderer_context_menu/render_view_context_menu_base.cc
+index 2b2fe5f40b..87927bc131 100644
+--- a/components/renderer_context_menu/render_view_context_menu_base.cc
++++ b/components/renderer_context_menu/render_view_context_menu_base.cc
+@@ -347,6 +347,30 @@ void RenderViewContextMenuBase::RemoveAdjacentSeparators() {
+     toolkit_delegate_->RebuildMenu();
+ }
+ 
++void RenderViewContextMenuBase::FilterMenuItems(
++    base::FunctionRef<bool(int command_id)> keep) {
++  for (size_t index = menu_model_.GetItemCount(); index > 0; --index) {
++    if (menu_model_.GetTypeAt(index - 1) !=
++            ui::MenuModel::ItemType::TYPE_SEPARATOR &&
++        !keep(menu_model_.GetCommandIdAt(index - 1))) {
++      menu_model_.RemoveItemAt(index - 1);
++    }
++  }
++  for (size_t index = menu_model_.GetItemCount(); index > 0; --index) {
++    const bool separator = menu_model_.GetTypeAt(index - 1) ==
++                           ui::MenuModel::ItemType::TYPE_SEPARATOR;
++    if (separator &&
++        (index == 1 || index == menu_model_.GetItemCount() ||
++         menu_model_.GetTypeAt(index - 2) ==
++             ui::MenuModel::ItemType::TYPE_SEPARATOR)) {
++      menu_model_.RemoveItemAt(index - 1);
++    }
++  }
++  if (toolkit_delegate_) {
++    toolkit_delegate_->RebuildMenu();
++  }
++}
++
+ void RenderViewContextMenuBase::RemoveSeparatorBeforeMenuItem(int command_id) {
+   std::optional<size_t> index = menu_model_.GetIndexOfCommandId(command_id);
+   // Ignore if command not found or if it's the first menu item.
+diff --git a/components/renderer_context_menu/render_view_context_menu_base.h b/components/renderer_context_menu/render_view_context_menu_base.h
+index 39771cae5b..1ab61c30f4 100644
+--- a/components/renderer_context_menu/render_view_context_menu_base.h
++++ b/components/renderer_context_menu/render_view_context_menu_base.h
+@@ -13,6 +13,7 @@
+ #include <vector>
+ 
+ #include "base/functional/callback.h"
++#include "base/functional/function_ref.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/observer_list.h"
+ #include "components/renderer_context_menu/context_menu_content_type.h"
+@@ -122,6 +123,9 @@ class RenderViewContextMenuBase : public ui::SimpleMenuModel::Delegate,
+   void RemoveMenuItem(int command_id) override;
+   void RemoveAdjacentSeparators() override;
+   void RemoveSeparatorBeforeMenuItem(int command_id) override;
++  // PLUTONIUM (EXO-CHROME): removes the items whose command id |keep|
++  // rejects, then the separators that leaves at either end or side by side.
++  void FilterMenuItems(base::FunctionRef<bool(int command_id)> keep);
+   content::WebContents* GetWebContents() const override;
+   content::BrowserContext* GetBrowserContext() const override;
+ 
+diff --git a/content/browser/surface_embed/surface_embed_connector_impl.h b/content/browser/surface_embed/surface_embed_connector_impl.h
+index d91a8f6369..9875858118 100644
+--- a/content/browser/surface_embed/surface_embed_connector_impl.h
++++ b/content/browser/surface_embed/surface_embed_connector_impl.h
+@@ -165,7 +165,7 @@ class CONTENT_EXPORT SurfaceEmbedConnectorImpl
+   // WebContents.
+   FrameTree* GetFocusFrameTreeIfContainsFocus();
+   void SetFocusedFrameTree(FrameTree* frame_tree_to_focus);
+-  void ClearFocusOnInnerWebContents();
++  void ClearFocusOnInnerWebContents() override;
+ 
+   // Returns true if any WebContents in the parent chain has a pointer lock
+   // widget.
+diff --git a/content/public/browser/surface_embed_connector.h b/content/public/browser/surface_embed_connector.h
+index fe7f4aaf61..dcff47efce 100644
+--- a/content/public/browser/surface_embed_connector.h
++++ b/content/public/browser/surface_embed_connector.h
+@@ -101,6 +101,10 @@ class CONTENT_EXPORT SurfaceEmbedConnector {
+ 
+   virtual Delegate* GetDelegate() = 0;
+ 
++  // PLUTONIUM (EXO-CHROME): if the child WebContents has focus, moves it to
++  // the root WebContents (the embedder's page keeps its focused element).
++  virtual void ClearFocusOnInnerWebContents() = 0;
++
+   // Called when the visibility of the parent frame changes.
+   virtual void OnVisibilityChanged(
+       blink::mojom::FrameVisibility visibility) = 0;
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 929bf9c092..3737aecbeb 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -138,6 +138,55 @@ interface BrowserTabObserver {
+   OnTabFocusRequested(BrowserTabEntry tab);
+ };
+ 
++// EXO-CHROME (chrome/browser/plutonium_context_menu.h): Chrome's context menu
++// for the shell page itself or one of its tabs, for the shell to show in its
++// own style. Only what makes sense on a desktop is in it: editing, links,
++// images, media, spelling, and for a tab back, forward and reload. Not Cast,
++// Print, Save as, Inspect, Exit full screen and other browser-window items.
++enum ContextMenuItemType {
++  kCommand,
++  kCheckbox,
++  kRadio,
++  kSeparator,
++  kSubmenu,
++  kTitle,
++};
++
++struct ContextMenuItem {
++  // What CloseContextMenu() names it by; 0 for separators and titles.
++  int32 id;
++  // The submenu item it is in, or 0.
++  int32 parent_id;
++  ContextMenuItemType type;
++  string label;
++  bool enabled;
++  bool checked;
++};
++
++struct ContextMenuRequest {
++  int32 id;
++  // The tab whose page asked for the menu, or 0 for this document itself.
++  int32 tab_id;
++  // Where it was asked for, in this document's CSS pixels.
++  float x;
++  float y;
++  // The items, a submenu's after it, in order.
++  array<ContextMenuItem> items;
++  // What was under the pointer.
++  string link_url;
++  string selection_text;
++  bool editable;
++  // "image", "video", "audio", "canvas", "file", "plugin" or "".
++  string media_type;
++};
++
++interface ContextMenuObserver {
++  // Surfaced as a cancelable "contextmenurequest" event. |handled|: the page
++  // called preventDefault(), so it shows the menu and answers with
++  // CloseContextMenu(); otherwise Chrome shows its own (the same items).
++  OnContextMenuRequested(ContextMenuRequest request) => (bool handled);
++};
++
+ enum BrowserTabCommand {
+   kBack,
+   kForward,
+@@ -247,4 +296,12 @@ interface WindowBroker {
+   // Makes this document's shell the visible one (e.g. to show something an
+   // agent asked for). Does nothing outside shell mode.
+   ShowShell();
++
++  // EXO-CHROME: context menus (ContextMenuRequest) for this document and,
++  // while it is the visible shell, for its tabs, through |observer|.
++  AddContextMenuObserver(
++      pending_associated_remote<ContextMenuObserver> observer);
++  // Closes menu |menu_id| (one this document took), running item |item_id|
++  // first unless it is 0.
++  CloseContextMenu(int32 menu_id, int32 item_id);
+ };
+diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
+index 470f772596..2d2b3071de 100644
+--- a/third_party/blink/renderer/bindings/generated_in_core.gni
++++ b/third_party/blink/renderer/bindings/generated_in_core.gni
+@@ -125,6 +125,8 @@ generated_callback_interface_sources_in_core = [
+ 
+ generated_dictionary_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_tab_entry.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_context_menu_item.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_context_menu_item.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_tab_entry.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_item_group.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_item_group.h",
+@@ -1103,6 +1105,8 @@ generated_interface_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_request_event.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_request_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_tab_event.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_context_menu_request_event.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_context_menu_request_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_tab_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.h",
+diff --git a/third_party/blink/renderer/bindings/idl_in_core.gni b/third_party/blink/renderer/bindings/idl_in_core.gni
+index 6ab26fdb1d..6a14064a6f 100644
+--- a/third_party/blink/renderer/bindings/idl_in_core.gni
++++ b/third_party/blink/renderer/bindings/idl_in_core.gni
+@@ -493,6 +493,8 @@ static_idl_files_in_core = [
+   "//third_party/blink/renderer/core/html/navigator_native_window_broker.idl",
+   "//third_party/blink/renderer/core/html/browser_tab_entry.idl",
+   "//third_party/blink/renderer/core/html/browser_tab_event.idl",
++  "//third_party/blink/renderer/core/html/context_menu_item.idl",
++  "//third_party/blink/renderer/core/html/context_menu_request_event.idl",
+   "//third_party/blink/renderer/core/html/item_group.idl",
+   "//third_party/blink/renderer/core/html/shell_entry.idl",
+   "//third_party/blink/renderer/core/html/html_object_element.idl",
+diff --git a/third_party/blink/renderer/core/events/event_type_names.json5 b/third_party/blink/renderer/core/events/event_type_names.json5
+index 8ed3eb4c4e..c1c15d8657 100644
+--- a/third_party/blink/renderer/core/events/event_type_names.json5
++++ b/third_party/blink/renderer/core/events/event_type_names.json5
+@@ -361,6 +361,8 @@
+     "webkitspeechchange",
+     "webkitvisibilitychange",
+     "wheel",
++    // EXO-CHROME: navigator.windowBroker.
++    "contextmenurequest",
+     // EXO-TAGS: navigator.windowBroker.
+     "groupschanged",
+     // EXO-SHELLS: navigator.windowBroker.
+diff --git a/third_party/blink/renderer/core/html/build.gni b/third_party/blink/renderer/core/html/build.gni
+index b447a2c782..94ac064562 100644
+--- a/third_party/blink/renderer/core/html/build.gni
++++ b/third_party/blink/renderer/core/html/build.gni
+@@ -404,6 +404,8 @@ blink_core_sources_html = [
+   "navigator_native_window_broker.h",
+   "browser_tab_event.cc",
+   "browser_tab_event.h",
++  "context_menu_request_event.cc",
++  "context_menu_request_event.h",
+   "html_no_embed_element.cc",
+   "html_no_embed_element.h",
+   "html_no_script_element.cc",
+diff --git a/third_party/blink/renderer/core/html/context_menu_item.idl b/third_party/blink/renderer/core/html/context_menu_item.idl
+new file mode 100644
+index 0000000000..15ac82b17a
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/context_menu_item.idl
+@@ -0,0 +1,17 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// EXO-CHROME: an item of Chrome's context menu, as the shell shows it
++// (ContextMenuRequestEvent.items).
++dictionary ContextMenuItem {
++    // What closeContextMenu() names it by; 0 for separators and titles.
++    required long id;
++    // The submenu item it is in, or 0.
++    required long parentId;
++    // "command", "checkbox", "radio", "separator", "submenu" or "title".
++    required DOMString type;
++    DOMString label = "";
++    boolean enabled = true;
++    boolean checked = false;
++};
+diff --git a/third_party/blink/renderer/core/html/context_menu_request_event.cc b/third_party/blink/renderer/core/html/context_menu_request_event.cc
+new file mode 100644
+index 0000000000..26c2e86441
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/context_menu_request_event.cc
+@@ -0,0 +1,79 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/html/context_menu_request_event.h"
++
++#include "third_party/blink/renderer/bindings/core/v8/idl_types.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_context_menu_item.h"
++#include "third_party/blink/renderer/core/event_interface_names.h"
++#include "third_party/blink/renderer/core/event_type_names.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++
++namespace blink {
++
++namespace {
++
++String TypeName(mojom::blink::ContextMenuItemType type) {
++  switch (type) {
++    case mojom::blink::ContextMenuItemType::kCommand:
++      return "command";
++    case mojom::blink::ContextMenuItemType::kCheckbox:
++      return "checkbox";
++    case mojom::blink::ContextMenuItemType::kRadio:
++      return "radio";
++    case mojom::blink::ContextMenuItemType::kSeparator:
++      return "separator";
++    case mojom::blink::ContextMenuItemType::kSubmenu:
++      return "submenu";
++    case mojom::blink::ContextMenuItemType::kTitle:
++      return "title";
++  }
++  return "command";
++}
++
++}  // namespace
++
++ContextMenuRequestEvent::ContextMenuRequestEvent(
++    const mojom::blink::ContextMenuRequest& request,
++    float scale)
++    : Event(event_type_names::kContextmenurequest,
++            Bubbles::kNo,
++            Cancelable::kYes),
++      menu_id_(request.id),
++      tab_id_(request.tab_id),
++      x_(request.x * scale),
++      y_(request.y * scale),
++      link_url_(request.link_url),
++      selection_text_(request.selection_text),
++      editable_(request.editable),
++      media_type_(request.media_type) {
++  for (const auto& item : request.items) {
++    auto* entry = ContextMenuItem::Create();
++    entry->setId(item->id);
++    entry->setParentId(item->parent_id);
++    entry->setType(TypeName(item->type));
++    entry->setLabel(item->label);
++    entry->setEnabled(item->enabled);
++    entry->setChecked(item->checked);
++    items_.push_back(entry);
++  }
++}
++
++ScriptValue ContextMenuRequestEvent::items(ScriptState* script_state) const {
++  return ScriptValue(script_state->GetIsolate(),
++                     ToV8Traits<IDLSequence<ContextMenuItem>>::ToV8(
++                         script_state, items_));
++}
++
++const AtomicString& ContextMenuRequestEvent::InterfaceName() const {
++  return event_interface_names::kContextMenuRequestEvent;
++}
++
++void ContextMenuRequestEvent::Trace(Visitor* visitor) const {
++  visitor->Trace(items_);
++  Event::Trace(visitor);
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/context_menu_request_event.h b/third_party/blink/renderer/core/html/context_menu_request_event.h
+new file mode 100644
+index 0000000000..79360b031b
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/context_menu_request_event.h
+@@ -0,0 +1,55 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_CONTEXT_MENU_REQUEST_EVENT_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_CONTEXT_MENU_REQUEST_EVENT_H_
++
++#include "third_party/blink/public/mojom/native_window/window_broker.mojom-blink.h"
++#include "third_party/blink/renderer/bindings/core/v8/script_value.h"
++#include "third_party/blink/renderer/core/dom/events/event.h"
++#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
++#include "third_party/blink/renderer/platform/heap/member.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++
++namespace blink {
++
++class ContextMenuItem;
++class ScriptState;
++
++class ContextMenuRequestEvent final : public Event {
++  DEFINE_WRAPPERTYPEINFO();
++
++ public:
++  // |scale| converts the request's DIPs to this document's CSS pixels.
++  ContextMenuRequestEvent(const mojom::blink::ContextMenuRequest& request,
++                          float scale);
++
++  int32_t menuId() const { return menu_id_; }
++  int32_t tabId() const { return tab_id_; }
++  double x() const { return x_; }
++  double y() const { return y_; }
++  ScriptValue items(ScriptState*) const;
++  const String& linkUrl() const { return link_url_; }
++  const String& selectionText() const { return selection_text_; }
++  bool editable() const { return editable_; }
++  const String& mediaType() const { return media_type_; }
++
++  const AtomicString& InterfaceName() const override;
++  void Trace(Visitor*) const override;
++
++ private:
++  const int32_t menu_id_;
++  const int32_t tab_id_;
++  const double x_;
++  const double y_;
++  HeapVector<Member<ContextMenuItem>> items_;
++  const String link_url_;
++  const String selection_text_;
++  const bool editable_;
++  const String media_type_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_CONTEXT_MENU_REQUEST_EVENT_H_
+diff --git a/third_party/blink/renderer/core/html/context_menu_request_event.idl b/third_party/blink/renderer/core/html/context_menu_request_event.idl
+new file mode 100644
+index 0000000000..baae0d9771
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/context_menu_request_event.idl
+@@ -0,0 +1,29 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// EXO-CHROME: navigator.windowBroker's "contextmenurequest": Chrome would
++// show its context menu for this document or one of its tabs. Calling
++// preventDefault() takes it: the shell shows the items and answers with
++// closeContextMenu(menuId, itemId). Otherwise Chrome shows its own menu.
++[
++    Exposed=Window,
++    RuntimeEnabled=PlutoniumShell,
++    SecureContext
++] interface ContextMenuRequestEvent : Event {
++    readonly attribute long menuId;
++    // The tab whose page asked, or 0 for this document.
++    readonly attribute long tabId;
++    // Where, in this document's CSS pixels (as clientX and clientY).
++    readonly attribute double x;
++    readonly attribute double y;
++    // The items as ContextMenuItem dictionaries (a fresh array on every
++    // read), each submenu's after it.
++    [CallWith=ScriptState] readonly attribute any items;
++    // What was under the pointer.
++    readonly attribute DOMString linkUrl;
++    readonly attribute DOMString selectionText;
++    readonly attribute boolean editable;
++    // "image", "video", "audio", "canvas", "file", "plugin" or "".
++    readonly attribute DOMString mediaType;
++};
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 62857b68b5..17eb7e5f7d 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -19,7 +19,11 @@
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/fileapi/blob.h"
++#include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/html/browser_tab_event.h"
++#include "third_party/blink/renderer/core/html/context_menu_request_event.h"
++#include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "third_party/blink/renderer/core/html/native_window_event.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ 
+@@ -92,7 +96,8 @@ NativeWindowBroker::NativeWindowBroker(ExecutionContext* context)
+       observer_receiver_(this, context),
+       tab_observer_receiver_(this, context),
+       group_observer_receiver_(this, context),
+-      shell_observer_receiver_(this, context) {}
++      shell_observer_receiver_(this, context),
++      context_menu_observer_receiver_(this, context) {}
+ 
+ bool NativeWindowBroker::BindRemote() {
+   ExecutionContext* context = GetExecutionContext();
+@@ -141,6 +146,43 @@ void NativeWindowBroker::AddedEventListener(
+   if (event_type == event_type_names::kShellschanged) {
+     SubscribeShells();
+   }
++  if (event_type == event_type_names::kContextmenurequest) {
++    SubscribeContextMenus();
++  }
++}
++
++void NativeWindowBroker::SubscribeContextMenus() {
++  if (context_menu_observer_receiver_.is_bound() || !BindRemote()) {
++    return;
++  }
++  remote_->AddContextMenuObserver(
++      context_menu_observer_receiver_.BindNewEndpointAndPassRemote(
++          GetExecutionContext()->GetTaskRunner(TaskType::kInternalDefault)));
++}
++
++void NativeWindowBroker::OnContextMenuRequested(
++    mojom::blink::ContextMenuRequestPtr request,
++    OnContextMenuRequestedCallback callback) {
++  auto* window = DynamicTo<LocalDOMWindow>(GetExecutionContext());
++  LocalFrame* frame = window ? window->GetFrame() : nullptr;
++  if (!frame) {
++    std::move(callback).Run(false);
++    return;
++  }
++  // The browser's point is in DIPs; script works in CSS pixels.
++  const float scale =
++      frame->GetChromeClient().WindowToViewportScalar(frame, 1.0f) /
++      frame->LayoutZoomFactor();
++  auto* event = MakeGarbageCollected<ContextMenuRequestEvent>(*request, scale);
++  DispatchEvent(*event);
++  std::move(callback).Run(event->defaultPrevented());
++}
++
++void NativeWindowBroker::closeContextMenu(int32_t menu_id, int32_t item_id) {
++  if (!BindRemote()) {
++    return;
++  }
++  remote_->CloseContextMenu(menu_id, item_id);
+ }
+ 
+ void NativeWindowBroker::SubscribeShells() {
+@@ -292,6 +334,7 @@ void NativeWindowBroker::OnDisconnected() {
+   tab_observer_receiver_.reset();
+   group_observer_receiver_.reset();
+   shell_observer_receiver_.reset();
++  context_menu_observer_receiver_.reset();
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending;
+   pending.swap(pending_);
+   for (ScriptPromiseResolverBase* resolver : pending) {
+@@ -738,6 +781,7 @@ void NativeWindowBroker::Trace(Visitor* visitor) const {
+   visitor->Trace(tab_observer_receiver_);
+   visitor->Trace(group_observer_receiver_);
+   visitor->Trace(shell_observer_receiver_);
++  visitor->Trace(context_menu_observer_receiver_);
+   visitor->Trace(pending_);
+   EventTarget::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index fdc6af243f..ac06e22e59 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -49,7 +49,8 @@ class CORE_EXPORT NativeWindowBroker final
+       public mojom::blink::WindowBrokerObserver,
+       public mojom::blink::BrowserTabObserver,
+       public mojom::blink::GroupObserver,
+-      public mojom::blink::ShellObserver {
++      public mojom::blink::ShellObserver,
++      public mojom::blink::ContextMenuObserver {
+   DEFINE_WRAPPERTYPEINFO();
+ 
+  public:
+@@ -99,6 +100,10 @@ class CORE_EXPORT NativeWindowBroker final
+   void showShell();
+   ScriptPromise<IDLSequence<ShellEntry>> getShells(ScriptState*);
+ 
++  // EXO-CHROME:
++  void closeContextMenu(int32_t menu_id, int32_t item_id);
++
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(contextmenurequest, kContextmenurequest)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(groupschanged, kGroupschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(shellschanged, kShellschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(windowadded, kWindowadded)
+@@ -137,6 +142,11 @@ class CORE_EXPORT NativeWindowBroker final
+   // mojom::blink::ShellObserver:
+   void OnShellsChanged(Vector<mojom::blink::ShellEntryPtr> shells) override;
+ 
++  // mojom::blink::ContextMenuObserver:
++  void OnContextMenuRequested(
++      mojom::blink::ContextMenuRequestPtr request,
++      OnContextMenuRequestedCallback callback) override;
++
+   void Trace(Visitor*) const override;
+ 
+  protected:
+@@ -155,6 +165,7 @@ class CORE_EXPORT NativeWindowBroker final
+   void OnTabSnapshot(Vector<mojom::blink::BrowserTabEntryPtr> tabs);
+   void SubscribeGroups();
+   void SubscribeShells();
++  void SubscribeContextMenus();
+   ScriptPromise<IDLUndefined> UpdateTags(ScriptState*,
+                                          bool tab,
+                                          int32_t id,
+@@ -173,6 +184,9 @@ class CORE_EXPORT NativeWindowBroker final
+       group_observer_receiver_;
+   HeapMojoAssociatedReceiver<mojom::blink::ShellObserver, NativeWindowBroker>
+       shell_observer_receiver_;
++  HeapMojoAssociatedReceiver<mojom::blink::ContextMenuObserver,
++                             NativeWindowBroker>
++      context_menu_observer_receiver_;
+   bool disconnected_ = false;
+   // Calls in flight, rejected if the pipe closes.
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending_;
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index 906e64c7d4..e96c0eee00 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -107,6 +107,14 @@
+     // adding the first listener does); read them with getShells().
+     attribute EventHandler onshellschanged;
+ 
++    // EXO-CHROME: Chrome's context menu for this document, or (while this
++    // is the visible shell) for one of its tabs: a cancelable
++    // ContextMenuRequestEvent. preventDefault() takes it; then show the
++    // items and answer with closeContextMenu(). Listening subscribes.
++    attribute EventHandler oncontextmenurequest;
++    // Closes menu |menuId|, running item |itemId| first unless it is 0.
++    undefined closeContextMenu(long menuId, optional long itemId = 0);
++
+     // BrowserTabEvents. Adding the first listener for any of these
+     // subscribes; the current tabs then arrive as "tabadded" events.
+     attribute EventHandler ontabadded;

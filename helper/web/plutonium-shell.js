@@ -29,6 +29,14 @@
 // the tab and calls showServerTab(); the helper gives the server that one
 // tab's DevTools. The agent's cursor arrives as "agentpointer" events.
 //
+// Context menus: Chrome's menu for this page or one of its tabs (editing,
+// links, images, spelling; not Chrome's browser-window items) is drawn here,
+// in the page's style, as a popover with the class "plutonium-menu". Its
+// look comes from CSS custom properties the page sets (--plutonium-menu-bg,
+// -fg, -border, -radius, -shadow, -backdrop, -font, -hover-bg, -hover-fg,
+// -separator); see MENU_STYLE. connect({ contextMenu: false }) leaves the
+// menus to Chrome; a function draws them itself (see ConnectOptions).
+//
 // Tags: every window and tab carries a list of tags, and items with the same
 // tag go together. The first is where the item came from: the thread that
 // started a window's app, or the thread a tab was created for (tabs its page
@@ -62,12 +70,21 @@ const HELPER = new URL(import.meta.url).origin;
  *   dialog (answer it with answerTabDialog()), else "".
  * @typedef {{ id: string, name: string, genericName: string, comment: string,
  *   keywords: string[], categories: string[], hasIcon: boolean, terminal: boolean }} DesktopApp
+ * @typedef {{ id: number, parentId: number, type: "command" | "checkbox" | "radio" | "separator" |
+ *   "submenu" | "title", label: string, enabled: boolean, checked: boolean }} ContextMenuItem
+ *   id: what closeContextMenu() takes (0 for separators and titles); parentId: its submenu's id, or 0.
+ * @typedef {{ menuId: number, tabId: number, x: number, y: number, items: ContextMenuItem[],
+ *   linkUrl: string, selectionText: string, editable: boolean, mediaType: string }} ContextMenuRequest
+ *   tabId: the tab whose page asked (0: this page); x, y: where, in this page's CSS pixels.
  * @typedef {{ onFocus?: (window: ShellWindow) => boolean | Promise<boolean>,
  *   onFocusTab?: (tab: BrowserTab) => boolean | Promise<boolean>,
- *   onOpenTab?: (tab: BrowserTab) => string | null | undefined | Promise<string | null | undefined> }} ConnectOptions
+ *   onOpenTab?: (tab: BrowserTab) => string | null | undefined | Promise<string | null | undefined>,
+ *   contextMenu?: false | ((request: ContextMenuRequest) => boolean) }} ConnectOptions
  *   onOpenTab: a link this page opened in a new tab or window (Ctrl+click, target=_blank,
  *   window.open) arrived as a tab, untagged. Return the thread to put it in (it is then tagged
  *   and shown with onFocusTab), or nothing to leave it alone.
+ *   contextMenu: false leaves Chrome's context menus to Chrome. A function draws them itself:
+ *   it returns true if it shows `request`, then answers with closeContextMenu(menuId, itemId).
  */
 
 /** The <embed> type that shows a browser tab. */
@@ -83,6 +100,10 @@ export class PlutoniumShell extends EventTarget {
     this.onFocusTab = options.onFocusTab;
     /** @type {ConnectOptions["onOpenTab"]} */
     this.onOpenTab = options.onOpenTab;
+    /** @type {ConnectOptions["contextMenu"]} */
+    this.contextMenu = options.contextMenu;
+    /** The context menu shown now. */
+    this._menu = null;
     /** Link tabs this page opened that were already handed to onOpenTab. */
     this._openedTabs = new Set();
     this.helper = HELPER;
@@ -194,6 +215,10 @@ export class PlutoniumShell extends EventTarget {
         const tab = this.tabs.get(event.tabId) ?? plainTab(event.entry);
         if (this.onFocusTab) await this.onFocusTab(tab);
       });
+    }
+    // Chrome's context menus, drawn in this page's style.
+    if (typeof this.broker.closeContextMenu === "function") {
+      this.broker.addEventListener("contextmenurequest", (event) => this._onContextMenuRequest(event));
     }
     this._serveBridge();
     const windows = await this.broker.getWindows();
@@ -476,6 +501,41 @@ export class PlutoniumShell extends EventTarget {
     return shown.browserTabId;
   }
 
+  // Chrome would show its context menu: take it (preventDefault(), while the
+  // event is dispatched) unless the frontend leaves menus to Chrome.
+  _onContextMenuRequest(event) {
+    if (this.contextMenu === false) return;
+    /** @type {ContextMenuRequest} */
+    const request = {
+      menuId: event.menuId,
+      tabId: event.tabId,
+      x: event.x,
+      y: event.y,
+      items: event.items,
+      linkUrl: event.linkUrl,
+      selectionText: event.selectionText,
+      editable: event.editable,
+      mediaType: event.mediaType,
+    };
+    if (typeof this.contextMenu === "function") {
+      if (this.contextMenu(request)) event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    this.showContextMenu(request);
+  }
+
+  /** Draws `request` (Chrome's context menu) here; the choice goes back to Chrome. */
+  showContextMenu(request) {
+    this._menu?.close(0);
+    this._menu = new ContextMenu(this, request);
+  }
+
+  /** Closes context menu `menuId`, running item `itemId` unless it is 0. */
+  closeContextMenu(menuId, itemId = 0) {
+    this.broker?.closeContextMenu?.(menuId, itemId);
+  }
+
   /** An <embed> that shows tab `tabId` (style it like any element). */
   tabElement(tabId) {
     const element = document.createElement("embed");
@@ -695,6 +755,292 @@ export class PlutoniumShell extends EventTarget {
   }
 }
 
+// The context menu's look. Pages set the custom properties (or style the
+// classes: these rules are in a layer, so the page's win).
+const MENU_STYLE = `@layer plutonium {
+  .plutonium-menu {
+    position: fixed; inset: auto; margin: 0; box-sizing: border-box;
+    min-width: 200px; max-width: min(380px, calc(100vw - 8px)); max-height: calc(100vh - 8px); overflow-y: auto;
+    padding: var(--plutonium-menu-padding, 4px);
+    background: var(--plutonium-menu-bg, Canvas); color: var(--plutonium-menu-fg, CanvasText);
+    border: var(--plutonium-menu-border, 1px solid color-mix(in srgb, currentColor 18%, transparent));
+    border-radius: var(--plutonium-menu-radius, 8px);
+    box-shadow: var(--plutonium-menu-shadow, 0 8px 28px #0006);
+    backdrop-filter: var(--plutonium-menu-backdrop, none);
+    font: var(--plutonium-menu-font, 13px/1.3 system-ui, sans-serif);
+    user-select: none; outline: none; cursor: default;
+  }
+  .plutonium-menu-item {
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+    padding: var(--plutonium-menu-item-padding, 6px 10px); border-radius: var(--plutonium-menu-item-radius, 5px);
+  }
+  .plutonium-menu-item > .check { flex: none; width: 1em; text-align: center; }
+  .plutonium-menu-item > .label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .plutonium-menu-item > .more { flex: none; opacity: .6; }
+  .plutonium-menu-item.active { background: var(--plutonium-menu-hover-bg, Highlight); color: var(--plutonium-menu-hover-fg, HighlightText); }
+  .plutonium-menu-item[aria-disabled="true"] { opacity: .45; }
+  .plutonium-menu-title { padding: 4px 10px; font-size: .85em; opacity: .65; }
+  .plutonium-menu-separator {
+    height: 1px; margin: 4px 6px;
+    background: var(--plutonium-menu-separator, color-mix(in srgb, currentColor 15%, transparent));
+  }
+}`;
+
+let menuStyle = null;
+
+// Chrome's context menu, drawn by the page: a popover (in the top layer, so
+// over fullscreen elements too) per open (sub)menu. The choice goes back to
+// Chrome with closeContextMenu(); so does dismissing it.
+class ContextMenu {
+  constructor(shell, request) {
+    if (!menuStyle) {
+      menuStyle = document.createElement("style");
+      menuStyle.textContent = MENU_STYLE;
+      document.head.append(menuStyle);
+    }
+    this.shell = shell;
+    this.request = request;
+    /** @type {Map<number, ContextMenuItem[]>} items by the submenu they're in */
+    this.children = new Map();
+    for (const item of request.items) {
+      if (!this.children.has(item.parentId)) this.children.set(item.parentId, []);
+      this.children.get(item.parentId).push(item);
+    }
+    /** Where focus was (a tab's <embed>, an input): it goes back there. */
+    this.opener = document.activeElement;
+    /** @type {{ element: HTMLElement, rows: { item: ContextMenuItem, row: HTMLElement }[], active: number }[]} */
+    this.panels = [];
+    this.closed = false;
+    this.opened = { x: request.x, y: request.y };
+    this._listeners = [];
+    const on = (target, type, handler, options) => {
+      target.addEventListener(type, handler, options);
+      this._listeners.push(() => target.removeEventListener(type, handler, options));
+    };
+    on(window, "pointerdown", (event) => {
+      if (!this._inMenu(event.target)) this.close(0);
+    }, true);
+    on(window, "keydown", (event) => this._onKey(event), true);
+    on(window, "resize", () => this.close(0));
+    on(window, "blur", () => this.close(0));
+    on(document, "visibilitychange", () => this.close(0));
+    // A click into an app or a tab gives it the keyboard: the menu is done.
+    const onFocused = (event) => {
+      if (event.entry?.focused) this.close(0);
+    };
+    on(shell.broker, "windowchanged", onFocused);
+    on(shell.broker, "tabchanged", onFocused);
+    const top = this._panel(0);
+    if (!top) {
+      this.close(0);
+      return;
+    }
+    this._place(top.element, { left: request.x, right: request.x, top: request.y, bottom: request.y });
+    top.element.focus({ preventScroll: true });
+  }
+
+  close(itemId) {
+    if (this.closed) return;
+    this.closed = true;
+    for (const remove of this._listeners) remove();
+    for (const panel of this.panels) panel.element.remove();
+    this.panels = [];
+    if (this.opener?.isConnected && document.activeElement !== this.opener) {
+      this.opener.focus?.({ preventScroll: true });
+    }
+    if (this.shell._menu === this) this.shell._menu = null;
+    this.shell.closeContextMenu(this.request.menuId, itemId);
+  }
+
+  _inMenu(node) {
+    return this.panels.some((panel) => panel.element.contains(node));
+  }
+
+  // A panel for the items in submenu `parentId` (0: the menu itself).
+  _panel(parentId) {
+    const items = this.children.get(parentId) ?? [];
+    if (!items.length) return null;
+    const element = document.createElement("div");
+    element.className = "plutonium-menu";
+    element.popover = "manual";
+    element.tabIndex = -1;
+    element.setAttribute("role", "menu");
+    const checks = items.some((item) => item.type === "checkbox" || item.type === "radio");
+    const panel = { element, rows: [], active: -1, parentId };
+    const depth = this.panels.length;
+    for (const item of items) {
+      if (item.type === "separator") {
+        const line = document.createElement("div");
+        line.className = "plutonium-menu-separator";
+        line.setAttribute("role", "separator");
+        element.append(line);
+        continue;
+      }
+      if (item.type === "title") {
+        const title = document.createElement("div");
+        title.className = "plutonium-menu-title";
+        title.textContent = item.label;
+        element.append(title);
+        continue;
+      }
+      const row = document.createElement("div");
+      row.className = "plutonium-menu-item";
+      row.setAttribute(
+        "role",
+        item.type === "checkbox" ? "menuitemcheckbox" : item.type === "radio" ? "menuitemradio" : "menuitem",
+      );
+      if (!item.enabled) row.setAttribute("aria-disabled", "true");
+      if (checks) {
+        const check = document.createElement("span");
+        check.className = "check";
+        check.textContent = item.checked ? (item.type === "radio" ? "•" : "✓") : "";
+        if (item.type !== "command") row.setAttribute("aria-checked", String(item.checked));
+        row.append(check);
+      }
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = item.label;
+      row.append(label);
+      if (item.type === "submenu") {
+        row.setAttribute("aria-haspopup", "menu");
+        const more = document.createElement("span");
+        more.className = "more";
+        more.textContent = "›";
+        row.append(more);
+      }
+      element.append(row);
+      const index = panel.rows.length;
+      panel.rows.push({ item, row });
+      row.addEventListener("pointermove", () => {
+        if (panel.active !== index) this._setActive(depth, index, { open: true });
+      });
+      row.addEventListener("click", (event) => {
+        if (event.button === 0) this._activate(depth, index);
+      });
+      // Press, drag onto an item, release: as in a native menu, but not the
+      // release of the press that opened the menu.
+      row.addEventListener("pointerup", (event) => {
+        if (event.button === 2 && Math.hypot(event.clientX - this.opened.x, event.clientY - this.opened.y) > 5) {
+          this._activate(depth, index);
+        }
+      });
+    }
+    element.addEventListener("contextmenu", (event) => event.preventDefault());
+    document.body.append(element);
+    element.showPopover();
+    this.panels.push(panel);
+    return panel;
+  }
+
+  // Puts `element` at `anchor` (a point, or a submenu item's row), inside the
+  // viewport: below and right of it, else above or left.
+  _place(element, anchor, submenu = false) {
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    const pad = 4;
+    let left = anchor.right;
+    if (left + width > innerWidth - pad) left = submenu ? anchor.left - width : innerWidth - pad - width;
+    let top = submenu ? anchor.top - parseFloat(getComputedStyle(element).paddingTop) : anchor.top;
+    if (top + height > innerHeight - pad) top = submenu ? innerHeight - pad - height : anchor.top - height;
+    element.style.left = `${Math.max(pad, left)}px`;
+    element.style.top = `${Math.max(pad, top)}px`;
+  }
+
+  _setActive(depth, index, { open = false } = {}) {
+    const panel = this.panels[depth];
+    if (!panel) return;
+    // Deeper submenus belong to another item now.
+    while (this.panels.length > depth + 1) this.panels.pop().element.remove();
+    panel.rows[panel.active]?.row.classList.remove("active");
+    panel.active = index;
+    const entry = panel.rows[index];
+    if (!entry) return;
+    entry.row.classList.add("active");
+    entry.row.scrollIntoView({ block: "nearest" });
+    if (open && entry.item.type === "submenu" && entry.item.enabled) this._openSubmenu(depth);
+  }
+
+  _openSubmenu(depth) {
+    const panel = this.panels[depth];
+    const entry = panel?.rows[panel.active];
+    if (!entry || entry.item.type !== "submenu" || this.panels.length > depth + 1) return null;
+    const sub = this._panel(entry.item.id);
+    if (sub) this._place(sub.element, entry.row.getBoundingClientRect(), true);
+    return sub;
+  }
+
+  _activate(depth, index) {
+    const entry = this.panels[depth]?.rows[index];
+    if (!entry || !entry.item.enabled) return;
+    if (entry.item.type === "submenu") {
+      this._setActive(depth, index);
+      const sub = this._openSubmenu(depth);
+      if (sub) this._move(depth + 1, 1);
+      return;
+    }
+    this.close(entry.item.id);
+  }
+
+  // Moves the selection in panel `depth` by `step` (skipping disabled items).
+  _move(depth, step, from) {
+    const panel = this.panels[depth];
+    if (!panel || !panel.rows.length) return;
+    const count = panel.rows.length;
+    let index = from ?? panel.active;
+    for (let i = 0; i < count; i++) {
+      index = index < 0 ? (step > 0 ? 0 : count - 1) : (index + step + count) % count;
+      if (panel.rows[index].item.enabled) break;
+    }
+    this._setActive(depth, index);
+    panel.element.focus({ preventScroll: true });
+  }
+
+  _onKey(event) {
+    if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+    const depth = this.panels.length - 1;
+    const panel = this.panels[depth];
+    let handled = true;
+    switch (event.key) {
+      case "ArrowDown":
+        this._move(depth, 1);
+        break;
+      case "ArrowUp":
+        this._move(depth, -1);
+        break;
+      case "Home":
+        this._move(depth, 1, -1);
+        break;
+      case "End":
+        this._move(depth, -1, -1);
+        break;
+      case "ArrowRight":
+        if (this._openSubmenu(depth)) this._move(depth + 1, 1);
+        break;
+      case "ArrowLeft":
+        if (depth > 0) {
+          this.panels.pop().element.remove();
+          this.panels[depth - 1].element.focus({ preventScroll: true });
+        }
+        break;
+      case "Escape":
+        this.close(0);
+        break;
+      case "Enter":
+      case " ":
+        if (panel && panel.active >= 0) this._activate(depth, panel.active);
+        break;
+      default:
+        // Any other key is for the page: the menu is done.
+        handled = false;
+        this.close(0);
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+}
+
 function serverTabKey({ threadId, tabId }) {
   return `${threadId}\u0000${tabId}`;
 }
@@ -767,6 +1113,7 @@ export function connect(options = {}) {
     if (options.onFocus) shell.onFocus = options.onFocus;
     if (options.onFocusTab) shell.onFocusTab = options.onFocusTab;
     if (options.onOpenTab) shell.onOpenTab = options.onOpenTab;
+    if (options.contextMenu !== undefined) shell.contextMenu = options.contextMenu;
   }
   return shell;
 }
