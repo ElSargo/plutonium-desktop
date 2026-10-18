@@ -11,6 +11,18 @@ import { delimiter, join } from "node:path";
 export const THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
 /** Where a thread's processes find the helper (its Unix socket). */
 export const HELPER_VARIABLE = "PLUTONIUM_HELPER";
+/**
+ * Set ("1") on processes the user started (a terminal, a launcher): their
+ * windows and links are brought to the front. An agent's processes go without
+ * it, so what they open waits in the thread until someone asks for it.
+ */
+export const SHOW_VARIABLE = "PLUTONIUM_SHOW";
+
+/** Whether an environment asks for its windows and links to be shown. */
+export function wantsShow(environment: NodeJS.ProcessEnv): boolean {
+  const value = environment[SHOW_VARIABLE];
+  return value !== undefined && value !== "" && value !== "0";
+}
 // Enough to get from a GUI app through shells and wrappers to the agent.
 const MAX_PARENT_DEPTH = 16;
 
@@ -54,12 +66,16 @@ export class Threads {
     this.helperSocket = helperSocket;
   }
 
-  /** Variables that send a thread's GUI apps to Exo and tag them with the thread. */
-  environment(threadId: string): Record<string, string> {
+  /**
+   * Variables that send a thread's GUI apps to Exo and tag them with the
+   * thread. With `show`, the user started them: their windows are shown.
+   */
+  environment(threadId: string, { show = false } = {}): Record<string, string> {
     const xDisplay = this.xDisplay(threadId);
     return {
       ...this.openerVariables,
       [THREAD_ID_VARIABLE]: threadId,
+      ...(show ? { [SHOW_VARIABLE]: "1" } : {}),
       [HELPER_VARIABLE]: this.helperSocket,
       WAYLAND_DISPLAY: this.waylandDisplay,
       GDK_BACKEND: "wayland",
@@ -134,13 +150,16 @@ export class Threads {
   }
 }
 
-function readThreadId(pid: number): string | undefined {
+/** A process's own thread tag and show flag (as at its exec). */
+function readOrigin(pid: number): { threadId: string | undefined; show: boolean } | undefined {
   try {
-    const prefix = `${THREAD_ID_VARIABLE}=`;
-    const entry = readFileSync(`/proc/${pid}/environ`, "latin1")
-      .split("\0")
-      .find((line) => line.startsWith(prefix));
-    return entry?.slice(prefix.length) || undefined;
+    const environment: NodeJS.ProcessEnv = {};
+    for (const line of readFileSync(`/proc/${pid}/environ`, "latin1").split("\0")) {
+      const equals = line.indexOf("=");
+      const name = line.slice(0, equals);
+      if (name === THREAD_ID_VARIABLE || name === SHOW_VARIABLE) environment[name] = line.slice(equals + 1);
+    }
+    return { threadId: environment[THREAD_ID_VARIABLE] || undefined, show: wantsShow(environment) };
   } catch {
     // Gone, or not ours.
     return undefined;
@@ -159,18 +178,24 @@ function readParentPid(pid: number): number | undefined {
 }
 
 /**
- * The thread that started `pid`: the process's own tag, or the nearest tagged
- * ancestor (for apps that clear their environment).
+ * The thread that started `pid` and whether that start asked to show its
+ * windows: from the process's own environment, or the nearest ancestor with a
+ * thread tag (for apps that clear their environment).
  */
-export function threadForPid(pid: number): string | undefined {
+function originForPid(pid: number): { threadId: string; show: boolean } | undefined {
   if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 1) return undefined;
   let current: number | undefined = pid;
   for (let depth = 0; current !== undefined && depth < MAX_PARENT_DEPTH; depth++) {
-    const threadId = readThreadId(current);
-    if (threadId) return threadId;
+    const origin = readOrigin(current);
+    if (origin?.threadId) return { threadId: origin.threadId, show: origin.show };
     current = readParentPid(current);
   }
   return undefined;
+}
+
+/** The thread that started `pid`. */
+export function threadForPid(pid: number): string | undefined {
+  return originForPid(pid)?.threadId;
 }
 
 /** pids → thread ids. Pids that no thread started are left out. */
@@ -179,6 +204,15 @@ export function threadsForPids(pids: readonly number[]): Record<string, string> 
   for (const pid of pids.slice(0, 256)) {
     const threadId = threadForPid(pid);
     if (threadId) result[String(pid)] = threadId;
+  }
+  return result;
+}
+
+/** The pids whose start asked to show their windows (PLUTONIUM_SHOW), as `{"<pid>": true}`. */
+export function showsForPids(pids: readonly number[]): Record<string, true> {
+  const result: Record<string, true> = {};
+  for (const pid of pids.slice(0, 256)) {
+    if (originForPid(pid)?.show) result[String(pid)] = true;
   }
   return result;
 }

@@ -34,7 +34,7 @@ import {
 } from "./relay.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ServerTabs } from "./serverTabs.ts";
-import { threadForPid, threadsForPids, Threads } from "./threads.ts";
+import { showsForPids, threadForPid, threadsForPids, Threads } from "./threads.ts";
 
 export interface DaemonOptions {
   readonly waylandDisplay: string;
@@ -324,13 +324,15 @@ export class Daemon {
 
   /**
    * Starts `argv` as one of the thread's processes. With `waitMs`, waits that
-   * long for the thread's first new window(s).
+   * long for the thread's first new window(s). With `show`, the shell brings
+   * its windows to the front (PLUTONIUM_SHOW).
    */
   async launch(
     threadId: string,
     argv: readonly string[],
     cwd: string | undefined,
     waitMs: number,
+    show = false,
   ): Promise<{ pid: number; windows: ThreadWindow[] }> {
     const before = this.relay.connected
       ? new Set((await this.threadWindows(threadId)).map((entry) => entry.id))
@@ -338,7 +340,7 @@ export class Daemon {
     void this.gpu();
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd: cwd || process.env.HOME,
-      env: { ...process.env, ...this.threads.environment(threadId) },
+      env: { ...process.env, ...this.threads.environment(threadId, { show }) },
       detached: true,
       stdio: "ignore",
     });
@@ -467,10 +469,14 @@ export class Daemon {
     }
   }
 
-  /** What a frontend's server adds to a thread's agents and terminals. */
+  /**
+   * What a frontend's server adds to a thread's agents (`env`) and to the
+   * terminals the user types in (`terminalEnv`: their windows are shown).
+   */
   threadSetup(threadId: string) {
     return {
       env: this.threads.environment(threadId),
+      terminalEnv: this.threads.environment(threadId, { show: true }),
       // The agent bridge, for agents that take MCP servers.
       mcpServer: { command: process.execPath, args: [CLI, "mcp"] },
     };
@@ -583,6 +589,9 @@ export class Daemon {
     if (method === "GET" && path === "/v1/window-threads") {
       return sendJson(response, 200, threadsForPids(pidsParameter(url)));
     }
+    if (method === "GET" && path === "/v1/window-shows") {
+      return sendJson(response, 200, showsForPids(pidsParameter(url)));
+    }
     if (method === "GET" && path === "/v1/thread-setup") {
       const thread = url.searchParams.get("thread");
       if (!thread) throw new HttpError(400, "thread is required.");
@@ -600,7 +609,7 @@ export class Daemon {
       return;
     }
     if (method === "POST" && path === "/v1/apps/launch") {
-      const { thread, id, waitMs } = await readJson(request);
+      const { thread, id, waitMs, show } = await readJson(request);
       if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread is required.");
       if (typeof id !== "string" || !id) throw new HttpError(400, "id is required.");
       let command;
@@ -614,12 +623,13 @@ export class Daemon {
       return sendJson(
         response,
         200,
-        await this.launch(thread, command.argv, command.cwd, waitMsOf(waitMs)),
+        // Launchers start apps for the user to see.
+        await this.launch(thread, command.argv, command.cwd, waitMsOf(waitMs), show !== false),
       );
     }
     if (method === "POST" && path === "/v1/launch") {
       const body = await readJson(request);
-      const { thread, argv, cwd, waitMs } = body;
+      const { thread, argv, cwd, waitMs, show } = body;
       if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread is required.");
       if (!Array.isArray(argv) || argv.length === 0 || !argv.every((arg) => typeof arg === "string")) {
         throw new HttpError(400, "argv must be a non-empty array of strings.");
@@ -632,6 +642,7 @@ export class Daemon {
           argv,
           typeof cwd === "string" ? cwd : undefined,
           typeof waitMs === "number" ? Math.min(waitMs, 60_000) : 0,
+          show === true,
         ),
       );
     }

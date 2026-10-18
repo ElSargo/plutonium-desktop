@@ -11,6 +11,10 @@
 //     look the browser up by id, so they find this one.
 // Anything that isn't a web link goes to the real xdg-open with the thread's
 // environment, so the app it starts belongs to the thread too.
+//
+// A tab is brought to the front only when the user started the caller
+// (PLUTONIUM_SHOW, as on a terminal's processes); an agent's links wait in
+// the thread.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -18,6 +22,7 @@ import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { helperJson } from "./client.ts";
+import { wantsShow } from "./threads.ts";
 
 /** Where a thread's processes find the opener scripts (to step around them). */
 export const OPENERS_VARIABLE = "PLUTONIUM_OPENERS";
@@ -173,7 +178,7 @@ export async function runOpen(args: readonly string[], socketPath: string): Prom
       try {
         await helperJson(socketPath, "POST", `/v1/threads/${encodeURIComponent(thread)}/tabs`, {
           url,
-          focus: true,
+          focus: wantsShow(process.env),
           waitMs: 0,
         });
         continue;

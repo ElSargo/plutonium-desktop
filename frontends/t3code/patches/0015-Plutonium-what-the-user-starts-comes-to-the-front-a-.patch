@@ -1,0 +1,697 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sun, 18 Oct 2026 20:41:25 +1300
+Subject: [PATCH 15/15] Plutonium: what the user starts comes to the front; a
+ toast for the rest
+
+Windows from a terminal the user types in, or from the app launcher, open
+in their thread's panel with the keyboard (in another thread, they wait in
+its panel and a toast offers them). Terminals get the helper's terminalEnv
+(PLUTONIUM_SHOW); setup and settle scripts, which run by themselves, don't.
+What an agent opens waits in its thread, with a toast while that thread is
+open. Windows and tabs that close within a second get none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/terminal/Manager.ts         |  13 +-
+ apps/web/src/plutonium/AppLauncher.tsx      |   6 +-
+ apps/web/src/plutonium/PlutoniumWindows.tsx |  83 ++++---
+ apps/web/src/plutonium/openedItems.test.ts  | 176 ++++++++++++++
+ apps/web/src/plutonium/openedItems.ts       | 255 ++++++++++++++++++++
+ apps/web/src/plutonium/windowStore.ts       |   2 +
+ packages/shared/src/plutonium.ts            |  16 +-
+ 7 files changed, 508 insertions(+), 43 deletions(-)
+ create mode 100644 apps/web/src/plutonium/openedItems.test.ts
+ create mode 100644 apps/web/src/plutonium/openedItems.ts
+
+diff --git a/apps/server/src/terminal/Manager.ts b/apps/server/src/terminal/Manager.ts
+index fb30542294..0642b27665 100644
+--- a/apps/server/src/terminal/Manager.ts
++++ b/apps/server/src/terminal/Manager.ts
+@@ -76,7 +76,7 @@ import {
+ } from "../observability/Metrics.ts";
+ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+ import * as ProcessRunner from "../processRunner.ts";
+-import { plutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
++import { plutoniumTerminalEnvironment } from "@t3tools/shared/plutonium";
+ import * as PortScanner from "../preview/PortScanner.ts";
+ import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
+ import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+@@ -2304,8 +2304,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
+                 }
+               }
+             }
+-            // Plutonium: GUI apps started from the terminal belong to its thread.
+-            Object.assign(terminalEnv, plutoniumAgentEnvironment(session.threadId));
++            // Plutonium: GUI apps started from the terminal belong to its thread,
++            // and are shown, except from the project's setup and settle scripts,
++            // which run by themselves (ProjectSetupScriptRunner's terminal ids).
++            Object.assign(
++              terminalEnv,
++              plutoniumTerminalEnvironment(session.threadId, {
++                userStarted: !/^(setup|settle)-/.test(session.terminalId),
++              }),
++            );
+             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+             ptyProcess = spawnResult.process;
+             startedShell = spawnResult.shellLabel;
+diff --git a/apps/web/src/plutonium/AppLauncher.tsx b/apps/web/src/plutonium/AppLauncher.tsx
+index bd037cf0f3..4de12eccd3 100644
+--- a/apps/web/src/plutonium/AppLauncher.tsx
++++ b/apps/web/src/plutonium/AppLauncher.tsx
+@@ -95,7 +95,11 @@ function AppIcon({ app }: { app: DesktopApp }) {
+   );
+ }
+ 
+-/** Launches `app` into `threadRef`'s thread and opens its first new window there. */
++/**
++ * Launches `app` into `threadRef`'s thread and opens its first new window there.
++ * Its windows are announced as shown (openedItems.ts opens them), except an
++ * X11 app's, which Plutonium sees as the thread's X server's: hence the wait.
++ */
+ async function launchApp(app: DesktopApp, threadRef: ScopedThreadRef): Promise<void> {
+   const shell = await plutoniumShell();
+   if (!shell) return;
+diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
+index 8cb186a2a6..8cf1333593 100644
+--- a/apps/web/src/plutonium/PlutoniumWindows.tsx
++++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
+@@ -3,7 +3,7 @@
+ // opens as its own tab, shown live as a <native-window> element. Below them,
+ // "Elsewhere" lists windows and browser tabs in no T3 thread (another shell's,
+ // or nobody's); opening one adds it to the thread.
+-import { ThreadId } from "@t3tools/contracts";
++import { ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+ import { useParams, useRouter } from "@tanstack/react-router";
+ import { AppWindowIcon, GlobeIcon, SquareArrowOutUpRightIcon } from "lucide-react";
+ import { createElement, useEffect, useRef, useState, useSyncExternalStore } from "react";
+@@ -18,6 +18,8 @@ import { useAtomCommand } from "~/state/use-atom-command";
+ import { buildThreadRouteParams, resolveThreadRouteTarget } from "~/threadRoutes";
+ 
+ import { importBrowserTab } from "./importTab";
++import { setOpenedItemContext, startOpenedItems } from "./openedItems";
++import { openAndFocusApp } from "./panelKeys";
+ 
+ import { plutoniumPreview, tabTags, type BrokerTab } from "./previewBridge";
+ import {
+@@ -38,8 +40,8 @@ import {
+ } from "./windowStore";
+ 
+ /**
+- * Connects to the Plutonium helper for the whole app, and opens a window's tab
+- * in its thread when the thread's agent asks to show it. Renders nothing.
++ * Connects to the Plutonium helper for the whole app, shows a window or tab in
++ * its thread when someone asks to, and handles new ones. Renders nothing.
+  */
+ export function PlutoniumWindowsStarter() {
+   const router = useRouter();
+@@ -54,58 +56,63 @@ export function PlutoniumWindowsStarter() {
+         .map((thread) => ({ id: thread.id, title: thread.title })),
+     );
+   }, [threads, environmentId]);
+-  useEffect(() => {
+-    if (environmentId === null) return;
+-    // Plutonium threads run on this machine: the primary environment.
+-    setPlutoniumFocusHandler((window) => {
+-      // The first T3 thread it is in (started by, or added to).
+-      const threadId = windowTags(window)
+-        .map(threadIdOfTag)
+-        .find((id) => id !== null);
+-      if (!threadId) return false;
+-      const ref = { environmentId, threadId: ThreadId.make(threadId) };
+-      useRightPanelStore.getState().openApp(ref, { windowId: window.id, appId: window.appId });
+-      void router.navigate({
+-        to: "/$environmentId/$threadId",
+-        params: buildThreadRouteParams(ref),
+-      });
+-      return true;
+-    });
+-    return () => setPlutoniumFocusHandler(null);
+-  }, [environmentId, router]);
+   // Browser tabs: a link this page opened goes into the open thread, as a
+   // browser panel tab; a thread's tab someone asks to show (an agent, the
+-  // overlay, xdg-open in the thread's terminal) opens in its thread.
++  // overlay, xdg-open in the thread's terminal) opens in its thread. So does
++  // a window an agent or the overlay asks to show. New windows and tabs go by
++  // openedItems.ts.
+   const routeTarget = useParams({
+     strict: false,
+     select: (params) => resolveThreadRouteTarget(params),
+   });
+   const activeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
+   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
++  useEffect(startOpenedItems, []);
+   useEffect(() => {
++    if (environmentId === null) return;
++    // Plutonium threads run on this machine: the primary environment. An
++    // item's thread is the first T3 thread it is in (started by, or added to).
++    const threadRefOf = (tags: readonly string[]): ScopedThreadRef | null => {
++      const threadId = tags.map(threadIdOfTag).find((id) => id !== null);
++      return threadId ? { environmentId, threadId: ThreadId.make(threadId) } : null;
++    };
++    const goTo = (ref: ScopedThreadRef) =>
++      void router.navigate({
++        to: "/$environmentId/$threadId",
++        params: buildThreadRouteParams(ref),
++      });
++    const showWindow = (ref: ScopedThreadRef, window: NativeWindowEntry) => {
++      openAndFocusApp(ref, { windowId: window.id, appId: window.appId });
++      goTo(ref);
++    };
++    const showTab = (ref: ScopedThreadRef, tab: BrokerTab) => {
++      const shown = plutoniumPreview()?.runtimeTabIdOf(tab.id) ?? null;
++      if (shown) useRightPanelStore.getState().openBrowser(ref, shown);
++      else void importBrowserTab({ threadRef: ref, tab, openPreview });
++      goTo(ref);
++    };
++    setPlutoniumFocusHandler((window) => {
++      const ref = threadRefOf(windowTags(window));
++      if (ref) showWindow(ref, window);
++      return ref !== null;
++    });
+     setPlutoniumTabHandlers({
+       onOpen: (tab) => {
+         if (activeThreadRef)
+           void importBrowserTab({ threadRef: activeThreadRef, tab, openPreview });
+       },
+       onFocus: (tab) => {
+-        if (environmentId === null) return false;
+-        const threadId = tabTags(tab)
+-          .map(threadIdOfTag)
+-          .find((id) => id !== null);
+-        if (!threadId) return false;
+-        const ref = { environmentId, threadId: ThreadId.make(threadId) };
+-        const shown = plutoniumPreview()?.runtimeTabIdOf(tab.id) ?? null;
+-        if (shown) useRightPanelStore.getState().openBrowser(ref, shown);
+-        else void importBrowserTab({ threadRef: ref, tab, openPreview });
+-        void router.navigate({
+-          to: "/$environmentId/$threadId",
+-          params: buildThreadRouteParams(ref),
+-        });
+-        return true;
++        const ref = threadRefOf(tabTags(tab));
++        if (ref) showTab(ref, tab);
++        return ref !== null;
+       },
+     });
+-    return () => setPlutoniumTabHandlers(null);
++    setOpenedItemContext({ environmentId, activeThreadRef, showWindow, showTab });
++    return () => {
++      setPlutoniumFocusHandler(null);
++      setPlutoniumTabHandlers(null);
++      setOpenedItemContext(null);
++    };
+   }, [activeThreadRef, environmentId, openPreview, router]);
+   return null;
+ }
+diff --git a/apps/web/src/plutonium/openedItems.test.ts b/apps/web/src/plutonium/openedItems.test.ts
+new file mode 100644
+index 0000000000..7f02b7dc8b
+--- /dev/null
++++ b/apps/web/src/plutonium/openedItems.test.ts
+@@ -0,0 +1,176 @@
++import { EnvironmentId, ThreadId } from "@t3tools/contracts";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
++
++type FakeShell = EventTarget & { tabs: Map<number, unknown> };
++const newShell = () => Object.assign(new EventTarget(), { tabs: new Map() }) as FakeShell;
++
++const fake = vi.hoisted(() => {
++  return {
++    shell: null as unknown as FakeShell,
++    windows: {} as Record<number, unknown>,
++    shownTabs: new Set<number>(),
++    toast: { add: vi.fn(() => "toast-1"), update: vi.fn(), close: vi.fn() },
++    openApp: vi.fn(),
++    openAndFocusApp: vi.fn(),
++  };
++});
++
++vi.mock("~/components/ui/toast", () => ({
++  toastManager: fake.toast,
++  stackedThreadToast: (options: object) => options,
++}));
++vi.mock("~/rightPanelStore", () => ({
++  useRightPanelStore: { getState: () => ({ openApp: fake.openApp }) },
++}));
++vi.mock("./panelKeys", () => ({ openAndFocusApp: fake.openAndFocusApp }));
++vi.mock("./previewBridge", () => ({
++  isBlank: (url: string) => url === "" || url === "about:blank",
++  plutoniumPreview: () => ({
++    runtimeTabIdOf: (id: number) => (fake.shownTabs.has(id) ? `runtime-${id}` : null),
++  }),
++  tabTags: (tab: { tags: string[] }) => tab.tags,
++}));
++vi.mock("./windowStore", () => ({
++  plutoniumShell: () => Promise.resolve(fake.shell),
++  usePlutoniumWindowStore: {
++    getState: () => ({
++      windows: fake.windows,
++      groups: { "t3:thread/other": { tag: "t3:thread/other", label: "Other thread" } },
++    }),
++  },
++  windowTags: (entry: { tags: string[] }) => entry.tags,
++  labelOfTag: (groups: Record<string, { label: string }>, tag: string) => groups[tag]?.label ?? tag,
++}));
++
++const environmentId = EnvironmentId.make("env");
++const here = { environmentId, threadId: ThreadId.make("here") };
++const other = { environmentId, threadId: ThreadId.make("other") };
++
++function window(id: number, thread: string, title = `Window ${id}`) {
++  const entry = {
++    id,
++    appId: "app",
++    title,
++    embedded: false,
++    pid: 100 + id,
++    threadId: `t3:thread/${thread}`,
++    tags: [`t3:thread/${thread}`],
++  };
++  fake.windows[id] = entry;
++  return entry;
++}
++
++function openWindow(entry: ReturnType<typeof window>, show: boolean) {
++  fake.shell.dispatchEvent(new CustomEvent("windowopened", { detail: { window: entry, show } }));
++}
++
++function closeWindow(id: number) {
++  delete fake.windows[id];
++  fake.shell.dispatchEvent(new Event("change"));
++}
++
++type ToastOptions = {
++  title: string;
++  description?: string;
++  data: { threadRef?: unknown };
++  actionProps: { onClick: () => void };
++};
++const lastToast = (): ToastOptions => {
++  const calls = [...fake.toast.add.mock.calls, ...fake.toast.update.mock.calls] as unknown[][];
++  return calls.at(-1)?.at(-1) as ToastOptions;
++};
++
++type Context = import("./openedItems").OpenedItemContext;
++let showWindow: ReturnType<typeof vi.fn<Context["showWindow"]>>;
++let showTab: ReturnType<typeof vi.fn<Context["showTab"]>>;
++
++beforeEach(async () => {
++  vi.useFakeTimers();
++  vi.resetModules();
++  vi.clearAllMocks();
++  for (const id of Object.keys(fake.windows)) delete fake.windows[Number(id)];
++  // Earlier tests' copies of the module still listen on their shells.
++  fake.shell = newShell();
++  fake.shownTabs.clear();
++  const items = await import("./openedItems");
++  showWindow = vi.fn<Context["showWindow"]>();
++  showTab = vi.fn<Context["showTab"]>();
++  items.setOpenedItemContext({ environmentId, activeThreadRef: here, showWindow, showTab });
++  items.startOpenedItems();
++  await Promise.resolve();
++});
++
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe("opened windows", () => {
++  it("brings a window the user started in the open thread to the front", () => {
++    openWindow(window(1, "here"), true);
++    expect(fake.openAndFocusApp).toHaveBeenCalledWith(here, { windowId: 1, appId: "app" });
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++  });
++
++  it("keeps a window the user started in another thread there, and offers it", () => {
++    openWindow(window(1, "other"), true);
++    expect(fake.openAndFocusApp).not.toHaveBeenCalled();
++    expect(fake.openApp).toHaveBeenCalledWith(other, { windowId: 1, appId: "app" });
++    vi.advanceTimersByTime(1000);
++    expect(lastToast()).toMatchObject({ title: "Window 1 opened", description: "In Other thread" });
++    expect(lastToast().data.threadRef).toBeUndefined();
++    lastToast().actionProps.onClick();
++    expect(showWindow).toHaveBeenCalledWith(other, fake.windows[1]);
++  });
++
++  it("mentions an agent's window in the open thread after a moment, without showing it", () => {
++    openWindow(window(1, "here"), false);
++    expect(fake.openAndFocusApp).not.toHaveBeenCalled();
++    vi.advanceTimersByTime(999);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++    vi.advanceTimersByTime(1);
++    expect(lastToast().data.threadRef).toEqual(here);
++  });
++
++  it("says nothing about an agent's window in another thread", () => {
++    openWindow(window(1, "other"), false);
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++    expect(fake.openApp).not.toHaveBeenCalled();
++  });
++
++  it("says nothing about a window that closes at once", () => {
++    openWindow(window(1, "here"), false);
++    closeWindow(1);
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++  });
++
++  it("collects a thread's windows in one toast, and lets them go as they close", () => {
++    openWindow(window(1, "here"), false);
++    openWindow(window(2, "here", "Second"), false);
++    vi.advanceTimersByTime(1000);
++    expect(fake.toast.add).toHaveBeenCalledTimes(1);
++    expect(lastToast()).toMatchObject({ title: "2 windows opened", description: "Newest: Second" });
++    lastToast().actionProps.onClick();
++    expect(showWindow).toHaveBeenCalledWith(here, fake.windows[2]);
++    expect(lastToast()).toMatchObject({ title: "Window 1 opened" });
++    closeWindow(1);
++    expect(fake.toast.close).toHaveBeenCalledWith("toast-1");
++  });
++});
++
++describe("opened tabs", () => {
++  it("mentions an agent's tab in the open thread until it is shown", () => {
++    const tab = { id: 7, url: "https://example.com/", title: "Example", embedded: false };
++    fake.shell.tabs.set(7, { ...tab, tags: ["t3:thread/here"] });
++    fake.shell.dispatchEvent(
++      new CustomEvent("tabopened", { detail: { tab: { ...tab, tags: ["t3:thread/here"] } } }),
++    );
++    vi.advanceTimersByTime(1000);
++    expect(lastToast()).toMatchObject({ title: "Example opened" });
++    fake.shownTabs.add(7);
++    fake.shell.dispatchEvent(new Event("change"));
++    expect(fake.toast.close).toHaveBeenCalledWith("toast-1");
++  });
++});
+diff --git a/apps/web/src/plutonium/openedItems.ts b/apps/web/src/plutonium/openedItems.ts
+new file mode 100644
+index 0000000000..720579de8a
+--- /dev/null
++++ b/apps/web/src/plutonium/openedItems.ts
+@@ -0,0 +1,255 @@
++// Plutonium: what happens when a window or browser tab opens.
++//
++// A window the user started (from a terminal, the app launcher: the shell
++// library's `show`) opens in its thread's panel with the keyboard when that
++// thread is open. In another thread, it waits in that thread's panel, and a
++// toast offers to show it. What an agent opens waits in its thread, and a
++// toast says so while that thread is open (in other threads, nothing).
++//
++// Toasts wait a moment, so windows and tabs that close at once (a test run, a
++// splash) never get one. One toast per thread collects what opened there, and
++// drops what closes or the user opens some other way.
++import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
++import { ThreadId } from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++
++import { stackedThreadToast, toastManager } from "~/components/ui/toast";
++import { useRightPanelStore } from "~/rightPanelStore";
++
++import { openAndFocusApp } from "./panelKeys";
++import { isBlank, plutoniumPreview, tabTags, type BrokerTab } from "./previewBridge";
++import { threadIdOfTag, threadTag } from "./threadTag";
++import {
++  labelOfTag,
++  plutoniumShell,
++  type NativeWindowEntry,
++  usePlutoniumWindowStore,
++  windowTags,
++} from "./windowStore";
++
++/** How long a new item has to stay (and stay unseen) before a toast mentions it. */
++const NOTICE_DELAY_MS = 1000;
++const NOTICE_TIMEOUT_MS = 8000;
++
++/** What the app is showing, and how to show an item there. Set by PlutoniumWindowsStarter. */
++export interface OpenedItemContext {
++  readonly environmentId: EnvironmentId;
++  readonly activeThreadRef: ScopedThreadRef | null;
++  /** Goes to `ref`'s thread and shows the window there, with the keyboard. */
++  readonly showWindow: (ref: ScopedThreadRef, window: NativeWindowEntry) => void;
++  /** Goes to `ref`'s thread and shows the tab in its browser panel. */
++  readonly showTab: (ref: ScopedThreadRef, tab: BrokerTab) => void;
++}
++
++type Item =
++  | { readonly kind: "window"; readonly id: number }
++  | { readonly kind: "tab"; readonly id: number };
++
++interface Notice {
++  readonly ref: ScopedThreadRef;
++  /** In the open thread when it started: the toast is shown only there. */
++  readonly scoped: boolean;
++  readonly items: Item[];
++  toastId: string | null;
++  rendered: string;
++}
++
++let context: OpenedItemContext | null = null;
++const notices = new Map<string, Notice>();
++
++export function setOpenedItemContext(next: OpenedItemContext | null): void {
++  context = next;
++}
++
++function threadOf(tags: readonly string[]): ThreadId | null {
++  const threadId = tags.map(threadIdOfTag).find((id) => id !== null);
++  return threadId ? ThreadId.make(threadId) : null;
++}
++
++function isActive(ref: ScopedThreadRef): boolean {
++  const active = context?.activeThreadRef;
++  return !!active && active.environmentId === ref.environmentId && active.threadId === ref.threadId;
++}
++
++function windowOf(id: number): NativeWindowEntry | undefined {
++  return usePlutoniumWindowStore.getState().windows[id];
++}
++
++let shellTabs: ReadonlyMap<number, BrokerTab> | null = null;
++
++function tabOf(id: number): BrokerTab | undefined {
++  return shellTabs?.get(id);
++}
++
++/** Still there, and not in front of the user (nor in a panel, for tabs). */
++function isWaiting(item: Item): boolean {
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    return window !== undefined && !window.embedded;
++  }
++  const tab = tabOf(item.id);
++  return (
++    tab !== undefined &&
++    !tab.embedded &&
++    !isBlank(tab.url) &&
++    (plutoniumPreview()?.runtimeTabIdOf(tab.id) ?? null) === null
++  );
++}
++
++function labelOf(item: Item): string {
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    return window?.title || window?.appId || "A window";
++  }
++  const tab = tabOf(item.id);
++  return tab?.title || tab?.url || "A tab";
++}
++
++function show(notice: Notice, item: Item): void {
++  if (!context) return;
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    if (window) context.showWindow(notice.ref, window);
++  } else {
++    const tab = tabOf(item.id);
++    if (tab) context.showTab(notice.ref, tab);
++  }
++}
++
++function noticeKey(ref: ScopedThreadRef, scoped: boolean): string {
++  return `${scopedThreadKey(ref)}\u0000${scoped ? "here" : "elsewhere"}`;
++}
++
++function closeNotice(key: string): void {
++  const notice = notices.get(key);
++  notices.delete(key);
++  if (notice?.toastId) toastManager.close(notice.toastId);
++}
++
++/** Adds, updates or closes `key`'s toast to match what is still waiting. */
++function render(key: string): void {
++  const notice = notices.get(key);
++  if (!notice) return;
++  const waiting = notice.items.filter(isWaiting);
++  notice.items.splice(0, notice.items.length, ...waiting);
++  const newest = waiting.at(-1);
++  if (!newest) {
++    closeNotice(key);
++    return;
++  }
++  const kinds = new Set(waiting.map((item) => item.kind));
++  const noun = kinds.size > 1 ? "windows and tabs" : newest.kind === "window" ? "windows" : "tabs";
++  const title =
++    waiting.length === 1 ? `${labelOf(newest)} opened` : `${waiting.length} ${noun} opened`;
++  const thread = labelOfTag(
++    usePlutoniumWindowStore.getState().groups,
++    threadTag(notice.ref.threadId),
++  );
++  const description = notice.scoped
++    ? waiting.length === 1
++      ? "Opened in the background."
++      : `Newest: ${labelOf(newest)}`
++    : `In ${thread}`;
++  const rendered = JSON.stringify([title, description]);
++  if (notice.toastId && rendered === notice.rendered) return;
++  notice.rendered = rendered;
++  const options = {
++    ...stackedThreadToast({
++      type: "info",
++      title,
++      description,
++      timeout: notice.scoped ? 0 : NOTICE_TIMEOUT_MS,
++      actionProps: {
++        children: "Show",
++        onClick: () => {
++          const current = notices.get(key);
++          const item = current?.items.at(-1);
++          if (!current || !item) return;
++          current.items.pop();
++          show(current, item);
++          render(key);
++        },
++      },
++      data: {
++        hideCopyButton: true,
++        // Only counts while the thread is open, as the toast is only shown then.
++        ...(notice.scoped
++          ? { threadRef: notice.ref, dismissAfterVisibleMs: NOTICE_TIMEOUT_MS }
++          : {}),
++      },
++    }),
++    onClose: () => {
++      if (notices.get(key) === notice) notices.delete(key);
++    },
++  };
++  if (notice.toastId) toastManager.update(notice.toastId, options);
++  else notice.toastId = toastManager.add(options);
++}
++
++/** Tells the user about `item` in `ref`'s thread, unless it closes or they see it first. */
++function notify(ref: ScopedThreadRef, scoped: boolean, item: Item): void {
++  setTimeout(() => {
++    if (!isWaiting(item)) return;
++    const key = noticeKey(ref, scoped);
++    let notice = notices.get(key);
++    if (!notice) {
++      notice = { ref, scoped, items: [], toastId: null, rendered: "" };
++      notices.set(key, notice);
++    }
++    if (!notice.items.some((entry) => entry.kind === item.kind && entry.id === item.id)) {
++      notice.items.push(item);
++    }
++    render(key);
++  }, NOTICE_DELAY_MS);
++}
++
++function onWindowOpened(window: NativeWindowEntry, shown: boolean): void {
++  const threadId = threadOf(windowTags(window));
++  if (!context || !threadId) return;
++  const ref = { environmentId: context.environmentId, threadId };
++  const active = isActive(ref);
++  if (shown && active) {
++    openAndFocusApp(ref, { windowId: window.id, appId: window.appId });
++  } else if (shown) {
++    // It waits as a tab of its own thread; the toast goes there.
++    useRightPanelStore.getState().openApp(ref, { windowId: window.id, appId: window.appId });
++    notify(ref, false, { kind: "window", id: window.id });
++  } else if (active) {
++    notify(ref, true, { kind: "window", id: window.id });
++  }
++}
++
++function onTabOpened(tab: BrokerTab): void {
++  // Tabs the user asks for (links, xdg-open from a terminal) are shown as
++  // they open; this is for the rest, such as an agent's.
++  const threadId = threadOf(tabTags(tab));
++  if (!context || !threadId) return;
++  const ref = { environmentId: context.environmentId, threadId };
++  if (isActive(ref)) notify(ref, true, { kind: "tab", id: tab.id });
++}
++
++let started = false;
++
++/** Listens for new windows and tabs, once per document. */
++export function startOpenedItems(): void {
++  if (started) return;
++  started = true;
++  void plutoniumShell().then((shell) => {
++    if (!shell) return;
++    shellTabs = shell.tabs ?? null;
++    shell.addEventListener("windowopened", (event) => {
++      const { window, show: shown } = (
++        event as CustomEvent<{ window: NativeWindowEntry; show: boolean }>
++      ).detail;
++      onWindowOpened(window, shown);
++    });
++    shell.addEventListener("tabopened", (event) => {
++      onTabOpened((event as CustomEvent<{ tab: BrokerTab }>).detail.tab);
++    });
++    // What closed, or was opened some other way, leaves its toast.
++    const refresh = () => {
++      for (const key of notices.keys()) render(key);
++    };
++    shell.addEventListener("change", refresh);
++  });
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 7dc9fd919c..d95bca64da 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -68,6 +68,8 @@ interface PlutoniumShell extends EventTarget {
+   readonly available: boolean;
+   readonly ready: Promise<void>;
+   readonly windows: ReadonlyMap<number, NativeWindowEntry>;
++  /** Browser tabs, by id (older libraries: missing). */
++  readonly tabs?: ReadonlyMap<number, BrokerTab>;
+   onFocus: ((window: NativeWindowEntry) => boolean | Promise<boolean>) | undefined;
+   grantFor(windowId: number): Promise<string>;
+   showOnDesktop(windowId: number): void;
+diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
+index a02c09150c..1b9f679371 100644
+--- a/packages/shared/src/plutonium.ts
++++ b/packages/shared/src/plutonium.ts
+@@ -15,8 +15,10 @@ import * as NodeChildProcess from "node:child_process";
+ import * as NodePath from "node:path";
+ 
+ export interface PlutoniumThreadSetup {
+-  /** Variables for the thread's processes (agents, terminals). */
++  /** Variables for the thread's agents' processes. */
+   readonly env: Readonly<Record<string, string>>;
++  /** Variables for its terminals: what the user starts there is shown (older helpers: missing). */
++  readonly terminalEnv?: Readonly<Record<string, string>>;
+   /** The agent bridge as a stdio MCP server. */
+   readonly mcpServer: { readonly command: string; readonly args: readonly string[] };
+ }
+@@ -99,6 +101,18 @@ export function plutoniumAgentEnvironment(
+   return plutoniumThreadSetup(threadId)?.env ?? {};
+ }
+ 
++/**
++ * As plutoniumAgentEnvironment(), for a terminal. With `userStarted`, the user
++ * types in it, so the windows and links its commands open are shown.
++ */
++export function plutoniumTerminalEnvironment(
++  threadId: string | undefined,
++  { userStarted }: { readonly userStarted: boolean },
++): Readonly<Record<string, string>> {
++  const setup = plutoniumThreadSetup(threadId);
++  return (userStarted ? setup?.terminalEnv : undefined) ?? setup?.env ?? {};
++}
++
+ /** `env` with the Plutonium variables for `threadId` (`env` itself when off). */
+ export function withPlutoniumAgentEnvironment(
+   env: NodeJS.ProcessEnv | undefined,

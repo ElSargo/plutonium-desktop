@@ -6,7 +6,7 @@ Links open as Plutonium tabs in the thread they came from, not in Chromium or an
 
 | From | How | Where it goes |
 |---|---|---|
-| A native app in a thread: a terminal's link, a GTK, Qt or Electron app, a CLI tool | `xdg-open`, `$BROWSER`, GIO or KIO | a tab tagged with the app's `PLUTONIUM_THREAD_ID`, in the shell that owns that thread (else the visible one), shown there |
+| A native app in a thread: a terminal's link, a GTK, Qt or Electron app, a CLI tool | `xdg-open`, `$BROWSER`, GIO or KIO | a tab tagged with the app's `PLUTONIUM_THREAD_ID`, in the shell that owns that thread (else the visible one), shown there if the user started the app (`PLUTONIUM_SHOW`: a terminal's, a launcher's); an agent's waits in the thread |
 | A file or other non-web target from such an app | the real `xdg-open` | the app that handles it, started with the thread's environment, so its window is the thread's |
 | A shell page: Ctrl+click, middle click, `target=_blank`, `window.open` (T3's "open in system browser") | Chrome's `Navigate()` | a tab the shell puts in its current thread (`onOpenTab`) and shows |
 | A tab: the same | the tab's `WebContentsDelegate` (already, since the tabs work) | a tab with the opener's tags |
@@ -20,7 +20,7 @@ The helper writes the openers to `$XDG_RUNTIME_DIR/plutonium/open/` at startup, 
 - **`XDG_DATA_DIRS`** starts with `open/share`. It holds a desktop file with the same id as the user's default browser, as named in `mimeapps.list` (`[Default Applications]`, http/https/html) and in kdeglobals' `BrowserApplication`. Here that's `chromium-browser.desktop`, and its `Exec` is `plutonium-open`. GIO (GTK, Firefox's link handling) and KIO (Qt/KDE apps, which ask kdeglobals first) look the browser up by id, and this copy is found before the system's. Nothing in `~/.config` changes.
 
 `plutonium.ts open` then works as follows:
-- **Web links** (http, https) go to `POST /v1/threads/<thread>/tabs` on the helper's socket. The helper asks the shell owning the thread to open the tab and show it (`focus_tab`).
+- **Web links** (http, https) go to `POST /v1/threads/<thread>/tabs` on the helper's socket. The helper asks the shell owning the thread to open the tab, and to show it (`focus_tab`) if the caller has `PLUTONIUM_SHOW`. T3 tells the user about one it doesn't show (a toast with Show); niri and the plain shell list it with the thread's other tabs.
 - **As the browser** (`plutonium-open`, `$BROWSER`, the desktop file), local pages and `file://` URLs also become tabs. That is what happens when the user's default HTML viewer is the browser.
 - **Anything else** goes to the real `xdg-open`, with the thread's environment.
 - **With no helper or shell,** web links go to the real `xdg-open` with the openers taken out of the environment, so the user's browser opens as before.

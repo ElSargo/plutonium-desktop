@@ -492,7 +492,8 @@ async function launch(argv) {
   const threadId = state.current;
   setStatus(`starting ${argv[0]}…`);
   try {
-    const { windows } = await shell.launch(threadId, argv, { waitMs: 8000 });
+    // The user's: links its apps open come to the front (PLUTONIUM_SHOW).
+    const { windows } = await shell.launch(threadId, argv, { waitMs: 8000, show: true });
     setStatus(windows.length ? "" : `${argv[0]} started, no window yet`);
     if (windows[0]) { openTab(threadId, windows[0].id); render(); }
   } catch (error) {

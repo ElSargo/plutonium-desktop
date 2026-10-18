@@ -59,7 +59,7 @@ Hidden tabs needed two fixes:
   - `tabElement(id)`, which makes the `<embed>`;
   - an `onFocusTab` hook, and bridge ops for all of these.
 - **Daemon:** `/v1/threads/<thread>/tabs[/<id>/{navigate,back,forward,reload,stop,dialog,focus,close,snapshot}]` on the socket. Agents only reach tabs tagged with their thread.
-- **MCP tools:** `list_tabs`, `open_tab` (waits for the load and shows the tab unless `focus: false`), `navigate_tab`, `tab_action`, `answer_dialog`, `snapshot_tab`, `focus_tab`, `close_tab`.
+- **MCP tools:** `list_tabs`, `open_tab` (waits for the load; shows the tab only with `focus: true`), `navigate_tab`, `tab_action`, `answer_dialog`, `snapshot_tab`, `focus_tab`, `close_tab`.
 - **Plain shell:**
   - The header's **Open tab** button opens the address as a tab of the current thread.
   - Web tabs sit in the tab strip next to app tabs (◍; a dot marks a waiting dialog), with an address bar (back, forward, reload/stop).
