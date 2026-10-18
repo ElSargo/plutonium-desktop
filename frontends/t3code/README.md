@@ -7,7 +7,7 @@
 T3 Code is optional. The niri and plain shells need nothing from here.
 
 - **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
-- **`patches/`**: the series (`git am`): 12 commits, about 2,600 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`patches/`**: the series (`git am`): 13 commits, about 2,700 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
@@ -26,7 +26,8 @@ The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `
 - **T3 Code's own CLI on NixOS:** the `t3` npm package is a native executable since 0.1, which NixOS can't run as it comes. Point it at Nix's loader with `patchelf --set-interpreter` and an rpath to glibc and gcc's `lib` (also for `resource-monitor/linux-x64/t3-resource-monitor`), or use nix-ld. Plutonium runs T3 from its checkout and doesn't need it.
 - **Remote devices:** `plutonium t3 <command>` is T3's own CLI on the same data. `fetch` and `build` copy T3's `.env.example` to `.env`, the T3 Connect settings T3's release builds have. Without them, a source build has no T3 Connect. To pair remote devices, use one of:
   - `plutonium t3 connect link`: signs in to T3 Connect once; the server then registers with T3's relay at every start.
-  - `plutonium t3 pair --tailscale`: a QR code over your tailnet.
+  - `T3_TAILSCALE=1` (in `plutonium.env`): Tailscale Serve publishes the server at `https://<machine>.<tailnet>.ts.net` while it runs (on 443; slot N on 8443 + 100 × N, or `T3_TAILSCALE_PORT`). The server stays on loopback, and Settings, Connections shows the pairing link's QR code for that address. It needs tailscaled running, and `sudo tailscale set --operator=$USER` so the server can configure Serve.
+  - `plutonium t3 pair --tailscale`: a QR code over your tailnet, in the terminal.
   - `T3_HOST=0.0.0.0` with `plutonium t3 pair`: a QR code on your network.
 
 The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
@@ -44,6 +45,7 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0010 | Panel apps cross-fade when the panel is maximized or restored; an app's maximize button maximizes the panel |
 | 0011 | The shell pairs with the launcher's token only when it needs to (not paired, or missing scopes) |
 | 0012 | The server drives the panel's tabs, as it drives the desktop app's: over the helper's socket, with Playwright, through a relay to that one tab of the real browser. T3's agents use their own `preview_*` tools |
+| 0013 | In a browser, Settings, Connections pairs over the addresses the server reports (its tailnet and LAN addresses, and its Tailscale Serve name), so the shell on loopback can show a QR code |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

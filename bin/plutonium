@@ -507,6 +507,8 @@ t3_check_db() {
 # ours is reused if it serves that socket.
 t3_start() {
   local socket=$1 restart=${2:-} port=$T3_PORT satellite pid pidfile=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid
+  local tailscale=()
+  [[ -n ${T3_TAILSCALE:-} ]] && tailscale=(--tailscale-serve --tailscale-serve-port "$T3_TAILSCALE_PORT")
   [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
   t3_refuse_others
   pid=$(cat "$pidfile" 2>/dev/null || true)
@@ -528,7 +530,7 @@ t3_start() {
     [[ -f .env ]] && { set -a; . ./.env; set +a; }
     setsid env PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
       ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
-      node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host "${T3_HOST:-127.0.0.1}" --no-browser \
+      node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host "${T3_HOST:-127.0.0.1}" "${tailscale[@]}" --no-browser \
       > "$LOGS/t3-server.log" 2>&1 < /dev/null &
     echo $! > "$pidfile"
   )
