@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sun, 18 Oct 2026 20:36:04 +1300
+Subject: [PATCH 14/14] Plutonium: a page's popup keeps its opener, so OAuth
+ sign-in works
+
+What a preview's page opened was closed and its URL opened again in a fresh
+tab. That tab had no window.opener, so a sign-in popup couldn't post its
+result back, and the flow never finished.
+
+- The tab the page opened now backs the new preview tab itself: the thread's
+  next new preview tab adopts it instead of opening a blank one and loading
+  the URL again.
+- When it closes itself (window.close(), as sign-in popups do once they have
+  reported back), its preview tab closes too and the opener's comes back to
+  the front, as the popup window does in the Electron build.
+- With several shell pages, only one asks for the preview tab (and closes
+  it), through a Web Lock; before, each page opened one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/plutonium/PlutoniumBrowserHost.tsx    |  27 ++++-
+ apps/web/src/plutonium/previewBridge.ts       | 101 ++++++++++++++++--
+ 2 files changed, 120 insertions(+), 8 deletions(-)
+
+diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+index f6efa993f9..3a0264f288 100644
+--- a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
++++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+@@ -32,7 +32,8 @@ import {
+ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
+ import { useClientSettingsHydrated } from "~/hooks/useSettings";
+-import { useActivePreviewSessions } from "~/previewStateStore";
++import { beginPreviewSessionClose, useActivePreviewSessions } from "~/previewStateStore";
++import { selectSelectedRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+ import { previewEnvironment } from "~/state/preview";
+ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+ import { useAtomCommand } from "~/state/use-atom-command";
+@@ -98,6 +99,30 @@ export function PlutoniumBrowserHost() {
+     });
+   }, [openPreview, sessions]);
+ 
++  // A tab a page opened closed itself (a sign-in popup that reported back):
++  // its preview tab closes too, and its opener's comes back to the front.
++  const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
++  useEffect(() => {
++    const byRuntimeTabId = new Map(sessions.map((session) => [session.runtimeTabId, session]));
++    return plutoniumPreview()?.onPopupClosed(({ tabId, openerTabId }) => {
++      const popup = byRuntimeTabId.get(tabId);
++      if (!popup) return;
++      const { threadRef } = popup;
++      const opener = openerTabId === null ? undefined : byRuntimeTabId.get(openerTabId);
++      const panel = useRightPanelStore.getState();
++      const showing =
++        selectSelectedRightPanelSurface(panel.byThreadKey, threadRef)?.id ===
++        `browser:${popup.tabId}`;
++      panel.closeSurface(threadRef, `browser:${popup.tabId}`);
++      if (showing && opener) panel.openBrowser(threadRef, opener.tabId);
++      beginPreviewSessionClose(threadRef, popup.tabId);
++      void closePreview({
++        environmentId: threadRef.environmentId,
++        input: { threadId: threadRef.threadId, tabId: popup.tabId },
++      });
++    });
++  }, [closePreview, sessions]);
++
+   if (!plutoniumPreview()) return null;
+   return (
+     <div className="contents" data-plutonium-browser-host>
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+index 4ed53a417f..2d26ded039 100644
+--- a/apps/web/src/plutonium/previewBridge.ts
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -17,7 +17,9 @@
+ // or nobody's) can be imported: it gets the thread's tag and backs a new
+ // preview tab, and closing that preview takes the tag off again. What a tab's
+ // page opens in a new tab or window opens as another tab of its thread, as
+-// in the Electron build.
++// in the Electron build. That tab is the page's own new one, so a sign-in
++// popup keeps `window.opener` to report back through, and closes its preview
++// tab when it closes itself.
+ import type {
+   DesktopPreviewBridge,
+   DesktopPreviewNavStatus,
+@@ -103,6 +105,15 @@ function threadOf(runtimeTabId: string): string {
+ /** How long an imported tab whose preview closed waits to be taken back. */
+ const REIMPORT_MS = 2000;
+ 
++/** How long a tab a page opened waits for its preview tab before it closes. */
++const POPUP_ADOPT_MS = 15_000;
++
++/** A popup's preview tab and its opener's (null if that is gone), by runtime tab id. */
++export interface PopupClosedEvent {
++  readonly tabId: string;
++  readonly openerTabId: string | null;
++}
++
+ export const isBlank = (url: string) => url === "" || url === "about:blank";
+ 
+ // Which broker tab backs which preview tab. Tabs outlive a reload of the
+@@ -126,6 +137,15 @@ class PlutoniumPreview {
+   private readonly tabs = new Map<number, BrokerTab>();
+   /** Tabs a page opened that haven't got a URL yet: their opener's broker id. */
+   private readonly pendingPopups = new Map<number, number>();
++  /**
++   * Tabs a page opened, waiting for the preview tab that will show them, by
++   * thread tag, oldest first: the next new preview tab of the thread adopts
++   * one instead of opening a blank tab and loading its URL again.
++   */
++  private readonly popups = new Map<string, number[]>();
++  /** Opened tabs, waiting or shown: their opener's broker id. */
++  private readonly popupOpeners = new Map<number, number>();
++  private readonly popupClosedListeners = new Set<(event: PopupClosedEvent) => void>();
+   private readonly stateListeners = new Set<
+     (tabId: string, state: DesktopPreviewTabState) => void
+   >();
+@@ -155,13 +175,26 @@ class PlutoniumPreview {
+       const { tabId } = event as BrowserTabEvent;
+       this.tabs.delete(tabId);
+       this.pendingPopups.delete(tabId);
++      this.dropWaitingPopup(tabId);
++      const openerId = this.popupOpeners.get(tabId);
++      this.popupOpeners.delete(tabId);
+       const runtimeTabId = this.runtimeIds.get(tabId);
+       if (runtimeTabId !== undefined) {
+-        // The page closed itself (window.close()). The preview tab stays, idle.
++        // The page closed itself (window.close()). The preview tab stays,
++        // idle, unless a page opened it: then it closes, as a popup window.
+         this.runtimeIds.delete(tabId);
+         this.ids.delete(runtimeTabId);
+         this.storeIds();
+         this.emit(runtimeTabId, null);
++        if (openerId !== undefined) {
++          const event = {
++            tabId: runtimeTabId,
++            openerTabId: this.runtimeIds.get(openerId) ?? null,
++          };
++          this.once(`closed:${tabId}`, () => {
++            for (const listener of this.popupClosedListeners) listener(event);
++          });
++        }
+       }
+       this.notifyTabs();
+     });
+@@ -183,15 +216,28 @@ class PlutoniumPreview {
+     if (opener !== undefined && !this.runtimeIds.has(entry.id)) {
+       if (isBlank(entry.url)) {
+         this.pendingPopups.set(entry.id, opener);
+-      } else {
++      } else if (!this.popupOpeners.has(entry.id)) {
+         this.pendingPopups.delete(entry.id);
+-        this.broker.tabCommand(entry.id, "close");
+         const source = this.runtimeIds.get(opener);
+-        if (source !== undefined) {
++        const tag = source === undefined ? "" : threadOf(source);
++        if (source === undefined || !tag) {
++          this.broker.tabCommand(entry.id, "close");
++          return;
++        }
++        // The thread's next preview tab (the one this asks for) shows it.
++        this.popupOpeners.set(entry.id, opener);
++        this.popups.set(tag, [...(this.popups.get(tag) ?? []), entry.id]);
++        let asked = false;
++        this.once(`opened:${entry.id}`, () => {
++          asked = true;
+           for (const listener of this.openLinkListeners) {
+             listener({ tabId: source, url: entry.url, background: false });
+           }
+-        }
++        });
++        // Unshown by then, the page that asked for its preview tab closes it.
++        window.setTimeout(() => {
++          if (this.dropWaitingPopup(entry.id) && asked) this.broker.tabCommand(entry.id, "close");
++        }, POPUP_ADOPT_MS);
+       }
+       return;
+     }
+@@ -200,6 +246,39 @@ class PlutoniumPreview {
+     this.notifyTabs();
+   }
+ 
++  /**
++   * Runs `run` in one shell page only: every page that shows a tab sees what
++   * happens to it, and each would otherwise open (or close) a preview tab.
++   */
++  private once(event: string, run: () => void): void {
++    if (typeof navigator.locks?.request !== "function") {
++      run();
++      return;
++    }
++    void navigator.locks.request(
++      `t3code:plutonium-preview:${event}`,
++      { ifAvailable: true },
++      (lock) => {
++        if (!lock) return;
++        run();
++        // Held while the other pages hear of the same event.
++        return new Promise((resolve) => window.setTimeout(resolve, POPUP_ADOPT_MS));
++      },
++    );
++  }
++
++  /** Takes broker tab `tabId` off the popups waiting for a preview tab; true if it was. */
++  private dropWaitingPopup(tabId: number): boolean {
++    for (const [tag, queue] of this.popups) {
++      if (!queue.includes(tabId)) continue;
++      const rest = queue.filter((id) => id !== tabId);
++      if (rest.length > 0) this.popups.set(tag, rest);
++      else this.popups.delete(tag);
++      return true;
++    }
++    return false;
++  }
++
+   private emit(runtimeTabId: string, entry: BrokerTab | null): void {
+     const state = toState(runtimeTabId, entry);
+     for (const listener of this.stateListeners) listener(runtimeTabId, state);
+@@ -341,8 +420,10 @@ class PlutoniumPreview {
+       if (entry) this.update(entry);
+       return;
+     }
+-    const storedId = loadStoredIds()[runtimeTabId] ?? imported;
++    const popup = this.popups.get(tag)?.[0];
++    const storedId = loadStoredIds()[runtimeTabId] ?? imported ?? popup;
+     if (imported !== undefined && imported === storedId) this.imports.delete(tag);
++    if (popup !== undefined && popup === storedId) this.dropWaitingPopup(popup);
+     const adopted =
+       storedId === undefined
+         ? undefined
+@@ -430,6 +511,12 @@ class PlutoniumPreview {
+     return () => this.openLinkListeners.delete(listener);
+   }
+ 
++  /** A preview tab whose page a preview page opened has closed itself (window.close()). */
++  onPopupClosed(listener: (event: PopupClosedEvent) => void): () => void {
++    this.popupClosedListeners.add(listener);
++    return () => this.popupClosedListeners.delete(listener);
++  }
++
+   onPointerEvent(listener: (event: DesktopPreviewPointerEvent) => void): () => void {
+     if (!this.listeningForPointer) {
+       this.listeningForPointer = true;

@@ -153,6 +153,7 @@ T3 Code 0.1 moved agent browsing to the server: it drives every tab with Playwri
 - **Helper** (`helper/src/serverTabs.ts`, `cdp.ts`): connects to the browser's own DevTools (`--cdp-port`, the session's `--remote-debugging-port`) and gives the server one relay per tab. The relay is a port of T3's `CdpRelay`: to Playwright it looks like a browser with one page, and it answers browser-level commands itself. Page commands go to a flat session on that tab's target, with the target's child sessions (frames, workers) passed through and nothing else reachable. Downloads keep the browser's own behaviour (`Browser.setDownloadBehavior` is the whole browser's).
 - **Several shells:** each running shell page renders the panel's tabs, so the first page to show a server tab owns it, and the others show that same browser tab. When the owner's page goes away, another page that shows it takes over.
 - The agent's cursor (`pointer`) goes to the page that shows the tab, into T3's own cursor overlay. What a page opens in a new tab or window becomes another tab of its thread (T3's `onOpenLink`), as in the desktop app.
+- **Popups keep their opener** (patch 0014, 2026-10-18). At first the bridge closed what a page opened and opened its URL again in a fresh tab. That tab had no `window.opener`, so OAuth sign-in popups couldn't post their result back, and sign-in never finished. Now the tab the page opened backs the new panel tab itself: the thread's next new preview tab adopts it, without loading it again. When it closes itself (`window.close()`, as sign-in popups do), its panel tab closes too and the opener's comes back, as the desktop app's popup window does. With several shell pages, one of them (a Web Lock) asks for the preview tab; before, each page opened one.
 
 The client-side engine (`previewAutomation.ts`) is gone; `sendTabDevToolsCommand` is now only used to read a tab's target id.
 
@@ -165,6 +166,7 @@ Verified on Xvfb with the host's T3 data:
 | A T3 agent (Claude, `preview_*`): opens example.com, snapshots it, clicks "Learn more", reports "Example Domains" at iana.org | ✅ in the real tab (target type `other`); clicks relayed as `Input.dispatchMouseEvent`; no headless Chrome started |
 | Three T3 shell pages in one profile | ✅ one browser tab, attached once |
 | The agent's cursor (`pointer` from the server) | ✅ drawn by T3's overlay over the real tab |
+| A popup from a click (`window.open(url, "auth", "width=500,…")`, cross-origin), with two T3 shell pages | ✅ one new panel tab, `window.opener` set; its `postMessage` reaches the opener; its `window.close()` closes the panel tab and brings the opener back |
 
 ## Limits and next steps
 - **No `Browser` behind a tab.** Some things go through a `Browser` window and are missing:
