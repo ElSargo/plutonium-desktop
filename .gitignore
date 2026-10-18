@@ -1,5 +1,9 @@
 # Local settings
 /plutonium.env
+/plutonium.local.env
+# Worktrees (plutonium worktree add) and a worktree's slot
+/.worktrees/
+/.plutonium-slot
 # Run logs
 /logs/
 # T3 Code checkout (plutonium t3 fetch)

@@ -23,7 +23,30 @@ The patch series in `chromium/patches/` is the source of truth. The checkout's `
 3. Run `gclient sync -D` in the container (`plutonium container shell`), then build.
 4. Run `plutonium chromium export`.
 
+**Applying a series is cheap.** `plutonium chromium patch` applies the patches to a scratch index and then moves the checkout to the result, so it writes only the files that differ from what the checkout has. Moving between two series rebuilds only what differs between them, not everything the patches touch. A series it has applied before takes under a second.
+
 **Running anything inside the container:** `plutonium container shell` opens a shell there with depot_tools on `PATH`, for example to run `gn args`, `autoninja` or a unit test. Exo's tests are `autoninja -C out/Plutonium exo_unittests`.
+
+## Working in parallel
+
+Several checkouts (git worktrees) can be worked on at once, by people or agents, each with its own sessions.
+
+**A worktree:** `plutonium worktree add <name> [<start>]` makes one in `.worktrees/<name>` (on branch `<name>`), links the main checkout's `plutonium.env` into it, and gives it a **slot**. In slot N, a session's ports are 100 × N higher (DevTools, helper, the niri and plain shells' servers, T3 Code) and its socket, profile and Xvfb display have their own names (`wayland-plutonium-x11-s1`, `profile-x11-s1`, `:100`). `plutonium worktree info` lists them. The main checkout is slot 0, with the usual names. For a worktree made some other way (T3 Code makes its own), run `plutonium worktree setup` in it.
+
+Settings for one worktree go in its `plutonium.local.env`, which is read after `plutonium.env`. For example, `T3_HOME=…` to run T3 Code there: Plutonium won't run two T3 Code servers on the same data.
+
+Worktrees inside the main checkout are visible in the container, at the same path. Ones elsewhere work too, except that `plutonium cdp` runs the main checkout's `tools/cdp.py`.
+
+**One Chromium checkout for all of them.** There's one `$CHROMIUM_DIR/src` and one out dir, so:
+- **Taking turns.** `chromium patch`, `build`, `ensure` and `export` take a lock, and wait for whoever has it (`plutonium status` says who).
+- **In the background.** Add `--bg` to `patch`, `build` or `ensure`, and the command runs as a systemd user unit, outlasting your shell and an agent's command timeout. Its output goes to `logs/chromium.log`. `plutonium chromium wait [seconds]` waits for it and exits with its status, or with 124 if it's still running after that many seconds.
+- **A build per series.** A dev build of a checkout's own series, as it is, is kept in `$BUILDS_DIR/<key>`. The key is a hash of `BASE`, `args.gn` and the patches. It's a copy of what chrome runs with, made with reflinks on btrfs, so it costs almost nothing. That checkout's sessions run it, so they keep working while someone else's build changes the out dir. The newest `BUILDS_KEEP` (6) are kept, plus any that a session is running.
+- **`plutonium chromium ensure`** gets a checkout its build. It reuses the kept one if there is one. Otherwise it moves the Chromium checkout to the series (detached, so no branch moves), builds it, keeps it, and moves the checkout back. It refuses if the Chromium checkout has uncommitted changes, since someone is working in it.
+- **Which build a session runs** (without `PREBUILT=1`): the out dir if it holds more work on top of this checkout's series (you're working in the Chromium checkout); else this series' kept build; else the out dir, whatever it holds. `plutonium status` names it.
+
+A worktree that doesn't change `chromium/patches` doesn't need any of this with `PREBUILT=1`: the prebuilt image's tag is a hash of the same files, so it runs the same image as the main checkout. To run a dev build in a worktree that does change them, put `PREBUILT=` and `CONTAINER=plutonium` (the build container) in its `plutonium.local.env`.
+
+**ccache.** With `CCACHE=1`, the compiler runs through ccache, and coming back to a series built before costs a fraction of the build. The cost is Chromium's clang modules, which ccache can't cache and so are turned off. Building `//base`: 61 s with modules; 99 s without, cold; 28 s with every compile from the cache. Turning it on or off rebuilds everything once. The build container needs ccache (in the Containerfile since this change; `plutonium container build`, then create it again).
 
 ## Publishing the prebuilt image
 
@@ -41,7 +64,7 @@ Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium conta
 ## Testing a session
 
 **Launching sessions:**
-- **X11** (`plutonium run --x11 [:0]`) is the quickest loop. It needs no console switching and runs beside a DRM session: they use different sockets (`wayland-plutonium-x11` and `wayland-plutonium`), DevTools ports (9223 and 9224), helper ports (3781 and 3782) and profiles.
+- **X11** (`plutonium run --x11 [:0]`) is the quickest loop. It needs no console switching and runs beside a DRM session: they use different sockets (`wayland-plutonium-x11` and `wayland-plutonium`), DevTools ports (9223 and 9224), helper ports (3781 and 3782) and profiles. Those are slot 0's; a worktree's are higher (Working in parallel, above).
 - **DRM**, unattended or from an agent: someone stays logged in on a text console, and you run `plutonium run --vt tty2 [--hold N] …`.
 
 **Inspecting and driving it:**

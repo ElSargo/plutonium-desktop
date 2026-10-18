@@ -12,7 +12,7 @@
 #   drm:  VT (run against ttyN through sudo), HOLD_S (stop after N seconds),
 #         NO_KILLSWITCH, WAIT_S (with HOLD_S: wait for the graphical session to
 #         go inactive first)
-#   x11:  XDISP (:99 starts a private Xvfb), BOUNDS
+#   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
 #   EXTRA_FLAGS  more Chromium flags, VMODULE
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -69,7 +69,7 @@ rm -f "$RUN_DIR/$SOCKET" "$RUN_DIR/$SOCKET.lock"
 [[ -f $ASH_LOG ]] && mv "$ASH_LOG" "${ASH_LOG%.log}.prev.log"
 
 if [[ $MODE == x11 ]]; then
-  XDISP=${XDISP:-:99}
+  XDISP=${XDISP:-$PRIVATE_XDISP}
   # GPU path (docs/features/GPU_X11.md): Skia and ANGLE on Vulkan sharing one
   # device, native GPU memory buffers, so Exo offers dmabufs with the render node.
   FLAGS+=(--enable-native-gpu-memory-buffers --use-angle=vulkan
@@ -77,13 +77,14 @@ if [[ $MODE == x11 ]]; then
           --use-system-clipboard "--ash-host-window-bounds=${BOUNDS:-0+0-1600x1000}")
   # shellcheck disable=SC2206
   FLAGS+=(${EXTRA_FLAGS:-})
-  if [[ $XDISP == :99 ]] && ! on_ash test -S /tmp/.X11-unix/X99; then
+  if [[ $XDISP == "$PRIVATE_XDISP" ]] && ! on_ash test -S "/tmp/.X11-unix/X${XDISP#:}"; then
     # Detached: a background process of an attached exec keeps its session
-    # (and pm's systemd-run --wait) from ever ending.
-    xvfb=(Xvfb :99 -screen 0 1600x1000x24 +extension XInputExtension)
+    # (and pm's systemd-run --wait) from ever ending. Under a shell: as the
+    # detached exec's own process, Xvfb dies within a second.
+    xvfb=(sh -c '"$@" > /dev/null 2>&1' sh Xvfb "$XDISP" -screen 0 1600x1000x24 +extension XInputExtension)
     if [[ -n ${HOST:-} ]]; then setsid "${xvfb[@]}" </dev/null >/dev/null 2>&1 &
     else pm exec -d "$CONTAINER" "${xvfb[@]}" > /dev/null; fi
-    for _ in $(seq 1 20); do on_ash test -S /tmp/.X11-unix/X99 && break; sleep 0.5; done
+    for _ in $(seq 1 20); do on_ash test -S "/tmp/.X11-unix/X${XDISP#:}" && break; sleep 0.5; done
   fi
   # The container sees the runtime dir, not the rest of $HOME.
   if [[ -z ${HOST:-} && -n ${XAUTHORITY:-} && $XAUTHORITY != "$RUN_DIR"/* && -f $XAUTHORITY ]]; then

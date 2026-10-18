@@ -16,6 +16,7 @@ Setup (INSTALL.md walks through these in order):
   chromium fetch             depot_tools and a Chromium checkout at chromium/BASE (~100 GB, hours)
   chromium patch             apply chromium/patches on a branch 'plutonium'
   chromium build [--release] gn gen with chromium/args.gn (or args.release.gn), then build chrome
+                             from the checkout as it is (a dev build of this checkout's patches is kept)
   t3 fetch                   clone T3 Code at frontends/t3code/BASE and apply its patches
   t3 build                   install its dependencies and build its web app
   image pull                 PREBUILT=1: download the prebuilt Chromium instead of building it
@@ -38,8 +39,15 @@ Development:
   helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
   cdp <args>                 DevTools, where Ash runs: tools/cdp.py --help
   chromium export            rewrite chromium/patches from the checkout's commits since BASE
+  chromium ensure            a dev build of this checkout's patches for its sessions: kept already,
+                             or built in the Chromium checkout, which then goes back to what it had
+  chromium wait [seconds]    wait for this checkout's --bg command: patch, build and ensure take
+                             --bg to run as a user unit. They queue on one lock across checkouts
   t3 export                  rewrite frontends/t3code/patches the same way
   image build|push|login|tag the prebuilt image, from the release build (chromium build --release)
+  worktree add <name> [ref]  a git worktree in .worktrees/<name> with its own slot (ports, sockets)
+  worktree setup             give a worktree made elsewhere its slot and plutonium.env
+  worktree info|list         this checkout's slot and ports / every worktree's slot
 
 Settings: plutonium.env (see plutonium.env.example).
 EOF
@@ -54,7 +62,8 @@ the host's T3 Code data; started and paired as needed), or <name>=<url> for
 any page. The first one is the desktop; the others run behind it (Super+Tab).
 
 Where:
-  --x11 [display]   Ash in a window on an X11 display (default :99, a private Xvfb)
+  --x11 [display]   Ash in a window on an X11 display (default: a private Xvfb, :99
+                    in slot 0)
   --drm             Ash on KMS/DRM. Run it from a text VT (Ctrl+Alt+F2, log in)
                     while your desktop session is inactive. This is the default.
   --vt ttyN         DRM against ttyN from any other shell (needs passwordless sudo
@@ -196,17 +205,161 @@ host_cmd() {
 }
 
 # --- Chromium ----------------------------------------------------------------
+# One Chromium checkout serves every checkout of this repository (worktrees
+# too), so whatever changes it or builds in it takes a lock, and waits for
+# whoever holds it.
+chromium_lock() {
+  local lock=$RUN_DIR/plutonium/chromium.lock
+  mkdir -p "$RUN_DIR/plutonium"
+  exec 9>> "$lock"
+  if ! flock -n 9; then
+    echo "waiting for the Chromium checkout: $(cat "$lock.who" 2>/dev/null || echo "another command has it")" >&2
+    flock 9
+  fi
+  echo "chromium $1 from $ROOT (since $(date +%T))" > "$lock.who"
+}
+src_clean() { [[ -z $(git -C "$CHROMIUM_DIR/src" status --porcelain --untracked-files=no) ]]; }
+
+# This checkout's patch series as a commit on BASE, made without touching the
+# checkout's files: each patch is applied to a scratch index (what git am
+# does, with the same author, date and message), so `chromium export` gives
+# the same patches back. Kept by BUILD_KEY.
+patch_commit() (
+  set -e
+  src=$CHROMIUM_DIR/src cache=$BUILDS_DIR/.commits/$BUILD_KEY
+  if commit=$(cat "$cache" 2>/dev/null) && git -C "$src" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    echo "$commit"; exit 0
+  fi
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export GIT_INDEX_FILE=$tmp/index
+  commit=$(cat "$ROOT/chromium/BASE")
+  git -C "$src" read-tree "$commit"
+  for patch in "$ROOT"/chromium/patches/*.patch; do
+    git -C "$src" mailinfo "$tmp/msg" "$tmp/diff" < "$patch" > "$tmp/info"
+    git -C "$src" apply --cached --3way "$tmp/diff" 2> "$tmp/err" ||
+      { cat "$tmp/err" >&2; echo "plutonium: ${patch##*/} does not apply" >&2; exit 1; }
+    field() { sed -n "s/^$1: //p" "$tmp/info"; }
+    { field Subject; [[ -s $tmp/msg ]] && { echo; cat "$tmp/msg"; }; } > "$tmp/message"
+    commit=$(GIT_AUTHOR_NAME=$(field Author) GIT_AUTHOR_EMAIL=$(field Email) GIT_AUTHOR_DATE=$(field Date) \
+      committer git -C "$src" commit-tree "$(git -C "$src" write-tree)" -p "$commit" -F "$tmp/message")
+  done
+  mkdir -p "${cache%/*}"
+  echo "$commit" > "$cache"
+  echo "$commit"
+)
+
+# The build's args.gn: chromium/args.gn (or args.release.gn), and with CCACHE=1
+# the compiler through ccache. Chromium's clang modules can't be cached, so
+# they're off then.
+chromium_args() {
+  cat "$1"
+  [[ -n ${CCACHE:-} ]] && printf '%s\n' "" "# CCACHE=1 (plutonium.env)" 'cc_wrapper = "ccache"' "use_clang_modules = false"
+  true
+}
+# Build chrome in the out dir (the release one with --release), from the
+# Chromium checkout as it is. A dev build of this checkout's own series is kept.
+chromium_build() {
+  local release=${1:-} src=$CHROMIUM_DIR/src outdir=$CHROMIUM_OUT args=$ROOT/chromium/args.gn env=()
+  container_running "$BUILD_CONTAINER" ||
+    die "the build container '$BUILD_CONTAINER' is not running (plutonium container create, without PREBUILT=1; or set BUILD_CONTAINER)"
+  [[ -n $release ]] && outdir=$CHROMIUM_RELEASE_OUT args=$ROOT/chromium/args.release.gn
+  mkdir -p "$src/$outdir"
+  cmp -s <(chromium_args "$args") "$src/$outdir/args.gn" || chromium_args "$args" > "$src/$outdir/args.gn"
+  if [[ -n ${CCACHE:-} ]]; then
+    in_build_container sh -c 'command -v ccache' > /dev/null ||
+      die "CCACHE=1, but the build container has no ccache (plutonium container build, then create it again)"
+    env=(-e "CCACHE_DIR=$CCACHE_DIR" -e "CCACHE_MAXSIZE=$CCACHE_SIZE" -e "CCACHE_BASEDIR=$src"
+         -e CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime)
+  fi
+  in_build_container "${env[@]}" sh -c "cd src && gn gen $outdir && autoninja -C $outdir chrome"
+  [[ -n $release ]] || record_build "$src/$outdir"
+}
+# Say in the out dir what it holds, and keep a build of this checkout's series
+# where a session can run it while the out dir moves on.
+record_build() {
+  local out=$1 src=$CHROMIUM_DIR/src mine
+  mine=$(patch_commit) || return 0
+  if src_clean && [[ $(git -C "$src" rev-parse 'HEAD^{tree}') == $(git -C "$src" rev-parse "$mine^{tree}") ]]; then
+    echo "key $BUILD_KEY" > "$out/.plutonium-build"
+    keep_build "$out"
+  elif git -C "$src" merge-base --is-ancestor "$mine" HEAD; then
+    echo "custom $BUILD_KEY" > "$out/.plutonium-build"   # more work on top of this series
+  else
+    echo "other" > "$out/.plutonium-build"
+  fi
+}
+# Copy what chrome runs with (reflinks, where the filesystem has them) to
+# BUILDS_DIR/<key>, and drop the oldest kept builds that no session runs.
+keep_build() {
+  local out=$1 dest=$BUILDS_DIR/$BUILD_KEY tmp=$BUILDS_DIR/.$BUILD_KEY.$$ f dir n=0
+  mkdir -p "$tmp"
+  for f in "$out"/*; do
+    case ${f##*/} in
+      obj|gen|clang_*|local_rustc_sysroot|pyproto|jsproto|args.gn|siso*|*.TOC|*.runtime_deps|*.ninja|*.ninja.*|*_unittest_exes.txt) continue ;;
+    esac
+    cp -a --reflink=auto "$f" "$tmp/"
+  done
+  rm -rf "$dest"
+  mv "$tmp" "$dest"
+  echo "kept this build as $dest"
+  for dir in $(ls -1dt "$BUILDS_DIR"/*/ 2> /dev/null); do
+    dir=${dir%/}
+    n=$((n + 1))
+    (( n <= BUILDS_KEEP )) && continue
+    pgrep -f "^$dir/chrome " > /dev/null && continue
+    rm -rf "$dir"
+  done
+}
+
+# --bg: run a chromium command as a systemd user unit, so it outlives the
+# shell (and an agent's command timeout). One per checkout; the lock queues
+# them across checkouts. `chromium wait` waits for it.
+CHROMIUM_UNIT=plutonium-chromium-$(echo "$ROOT" | sha256sum | cut -c1-8)
+chromium_bg() {
+  local log=$LOGS/chromium.log status=$LOGS/chromium.status
+  [[ $(systemctl --user is-active "$CHROMIUM_UNIT" 2> /dev/null) == @(active|activating) ]] &&
+    die "this checkout's background command is still running (plutonium chromium wait)"
+  systemctl --user reset-failed "$CHROMIUM_UNIT" 2> /dev/null || true
+  rm -f "$status"
+  : > "$log"
+  systemd-run --user --quiet --collect --unit="$CHROMIUM_UNIT" --setenv=PATH="$PATH" \
+    sh -c 'log=$1 status=$2; shift 2; "$@" >> "$log" 2>&1; echo $? > "$status"' \
+    sh "$log" "$status" "$ROOT/bin/plutonium" chromium "$@"
+  echo "chromium $* runs in the background (log logs/chromium.log); plutonium chromium wait"
+}
+chromium_wait() {
+  local limit=${1:-} start=$SECONDS log=$LOGS/chromium.log status=$LOGS/chromium.status
+  while [[ $(systemctl --user is-active "$CHROMIUM_UNIT" 2> /dev/null) == @(active|activating|deactivating) ]]; do
+    if [[ -n $limit ]] && (( SECONDS - start >= limit )); then
+      echo "still running: $(tail -n 1 "$log" | cut -c1-160)"
+      return 124
+    fi
+    sleep 5
+  done
+  [[ -f $status ]] || die "this checkout has no background chromium command"
+  tail -n 3 "$log"
+  return "$(cat "$status")"
+}
+
 chromium_cmd() {
-  local base src=$CHROMIUM_DIR/src
+  local base src=$CHROMIUM_DIR/src arg args=() bg=
   base=$(cat "$ROOT/chromium/BASE")
+  for arg in "$@"; do [[ $arg == --bg ]] && bg=1 || args+=("$arg"); done
+  set -- "${args[@]}"
+  if [[ -n $bg ]]; then
+    [[ ${1:-} == @(patch|build|ensure) ]] || die "--bg is for chromium patch, build and ensure"
+    chromium_bg "$@"
+    return
+  fi
   case "${1:-}" in
     fetch)
-      need_container
+      container_running "$BUILD_CONTAINER" || die "the build container '$BUILD_CONTAINER' is not running"
       [[ -d $DEPOT_TOOLS/.git ]] ||
         git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS"
       # What `fetch chromium` writes, plus the ChromeOS target; then one sync
       # straight to BASE (fetch would first sync to the newest revision).
-      [[ -f $CHROMIUM_DIR/.gclient ]] || cat > "$CHROMIUM_DIR/.gclient" <<'EOF'
+      [[ -f $CHROMIUM_DIR/.gclient ]] || cat > "$CHROMIUM_DIR/.gclient" <<'GCLIENT'
 solutions = [
   {
     "name": "src",
@@ -216,31 +369,57 @@ solutions = [
   },
 ]
 target_os = ['chromeos']
-EOF
+GCLIENT
       # googlesource rate-limits gclient's default parallelism (HTTP 429).
-      in_container gclient sync --revision "src@$base" --nohooks --no-history -D -j 4
-      in_container gclient runhooks
+      in_build_container gclient sync --revision "src@$base" --nohooks --no-history -D -j 4
+      in_build_container gclient runhooks
       echo "Chromium is at $base. Next: plutonium chromium patch" ;;
     patch)
+      # Branch plutonium, at this checkout's series. Only files that differ
+      # from what the checkout has are written, so the next build redoes no more
+      # than it must.
       [[ -d $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
-      if git -C "$src" rev-parse -q --verify refs/heads/plutonium > /dev/null &&
-         [[ ${2:-} != --force ]]; then
-        die "branch 'plutonium' exists in $src; --force resets it to BASE and re-applies the patches"
+      chromium_lock patch
+      src_clean || die "$src has uncommitted changes"
+      local commit tip last
+      commit=$(patch_commit) || exit 1
+      last=$(cat "$CHROMIUM_DIR/.plutonium-branch" 2> /dev/null || true)
+      if tip=$(git -C "$src" rev-parse -q --verify refs/heads/plutonium) &&
+         [[ $tip != "$commit" && $tip != "$last" && ${2:-} != --force ]]; then
+        die "branch 'plutonium' in $src has commits that aren't in chromium/patches (chromium export them); --force moves it anyway (the old tip stays in its reflog)"
       fi
-      [[ -z $(git -C "$src" status --porcelain --untracked-files=no) ]] || die "$src has uncommitted changes"
-      git -C "$src" checkout -q -B plutonium "$base"
-      committer git -C "$src" am -q --3way "$ROOT"/chromium/patches/*.patch
-      echo "$(git -C "$src" rev-list --count "$base"..HEAD) patches applied on branch plutonium" ;;
+      git -C "$src" checkout -q -B plutonium "$commit"
+      echo "$commit" > "$CHROMIUM_DIR/.plutonium-branch"
+      echo "$(git -C "$src" rev-list --count "$base"..HEAD) patches on branch plutonium" ;;
     build)
-      need_container
-      local outdir=$CHROMIUM_OUT args=$ROOT/chromium/args.gn
-      if [[ ${2:-} == --release ]]; then outdir=$CHROMIUM_RELEASE_OUT; args=$ROOT/chromium/args.release.gn; fi
-      mkdir -p "$src/$outdir"
-      cmp -s "$args" "$src/$outdir/args.gn" || cp "$args" "$src/$outdir/args.gn"
-      in_container sh -c "cd src && gn gen $outdir && autoninja -C $outdir chrome" ;;
+      chromium_lock build
+      chromium_build "$([[ ${2:-} == --release ]] && echo 1)" ;;
+    ensure)
+      # A dev build of this checkout's series, for its sessions: the one kept
+      # already, or the series built in the Chromium checkout, which then goes
+      # back to what it had.
+      [[ -d $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
+      chromium_lock ensure
+      if [[ -x $BUILDS_DIR/$BUILD_KEY/chrome ]]; then
+        echo "built already: $BUILDS_DIR/$BUILD_KEY"
+      else
+        src_clean || die "$src has uncommitted changes (someone is working in it); commit or stash them first"
+        local commit prev
+        commit=$(patch_commit) || exit 1
+        prev=$(git -C "$src" symbolic-ref -q --short HEAD || git -C "$src" rev-parse HEAD)
+        # shellcheck disable=SC2064 # $prev is local: expand it now
+        trap "git -C '$src' checkout -q '$prev' && echo 'the Chromium checkout is back on $prev'" EXIT
+        git -C "$src" checkout -q --detach "$commit"
+        chromium_build
+      fi
+      [[ -n ${PREBUILT:-} ]] &&
+        echo "note: this checkout's sessions run the prebuilt image (PREBUILT=1). To run this build, put PREBUILT= and CONTAINER=$BUILD_CONTAINER in plutonium.local.env"
+      true ;;
+    wait) chromium_wait "${2:-}" ;;
     export)
       [[ -d $src/.git ]] || die "no checkout at $src"
-      [[ -z $(git -C "$src" status --porcelain --untracked-files=no) ]] || die "commit your changes in $src first"
+      chromium_lock export
+      src_clean || die "commit your changes in $src first"
       rm -f "$ROOT"/chromium/patches/*.patch
       git -C "$src" format-patch -q --zero-commit --no-signature -o "$ROOT/chromium/patches" "$base"..HEAD
       ls "$ROOT/chromium/patches" | wc -l | xargs echo "patches written to chromium/patches:" ;;
@@ -327,14 +506,14 @@ t3_check_db() {
 # Start the server for a session's socket: "restart" restarts ours, otherwise
 # ours is reused if it serves that socket.
 t3_start() {
-  local socket=$1 restart=${2:-} port=${T3_PORT:-3774} satellite pid pidfile=$RUN_DIR/plutonium/t3-server.pid
+  local socket=$1 restart=${2:-} port=$T3_PORT satellite pid pidfile=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid
   [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
   t3_refuse_others
   pid=$(cat "$pidfile" 2>/dev/null || true)
   if [[ -n $pid ]] && t3_ours "$pid"; then
     if [[ -z $restart ]]; then
       tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF "PLUTONIUM_WAYLAND_DISPLAY=$socket" && return
-      local flag=; [[ $socket == *-x11 ]] && flag=" --x11"
+      local flag=; [[ $socket == *-x11* ]] && flag=" --x11"
       die "the T3 Code server is serving the other session; restart it for this one (plutonium t3 server$flag)"
     fi
     t3_stop
@@ -366,10 +545,10 @@ t3_cli() {
 # the database.
 t3_stop() {
   local pid
-  pid=$(cat "$RUN_DIR/plutonium/t3-server.pid" 2>/dev/null) && t3_ours "$pid" || return 1
+  pid=$(cat "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid" 2>/dev/null) && t3_ours "$pid" || return 1
   kill "$pid"
   for _ in $(seq 1 50); do [[ -z $(t3_pids) ]] && break; sleep 0.2; done
-  rm -f "$RUN_DIR/plutonium/t3-server.pid"
+  rm -f "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid"
 }
 # A one-time pairing token for the shell's profile, good for 5 minutes, offered
 # as #plutoniumPair: the page uses it only if the profile isn't paired yet, or
@@ -377,7 +556,7 @@ t3_stop() {
 # desktop app, so it gets what T3 Code's desktop app gets: every scope,
 # including pairing other devices (access:write).
 t3_pair_url() {
-  local port=${T3_PORT:-3774} token scopes
+  local port=$T3_PORT token scopes
   scopes=$(cd "$T3CODE_DIR" && node --input-type=module -e '
     const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
     console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
@@ -433,10 +612,11 @@ t3_cmd() {
       t3_stamp_version "$base"
       (cd "$T3CODE_DIR/apps/web" && t3_pnpm exec vp build) ;;
     server)
-      local socket=wayland-plutonium
-      [[ ${2:-} == --x11 ]] && socket=wayland-plutonium-x11
-      t3_start "$socket" restart
-      echo "T3 Code server on http://127.0.0.1:${T3_PORT:-3774} for $socket, data in $T3_HOME (log logs/t3-server.log)" ;;
+      local mode=drm
+      [[ ${2:-} == --x11 ]] && mode=x11
+      session_vars "$mode"
+      t3_start "$SOCKET" restart
+      echo "T3 Code server on http://127.0.0.1:$T3_PORT for $SOCKET, data in $T3_HOME (log logs/t3-server.log)" ;;
     stop)
       t3_stop || echo "no T3 Code server from this checkout is running" ;;
     export)
@@ -467,8 +647,8 @@ serve_shell() {
 shell_entry() {
   local helper=http://127.0.0.1:$HELPER_PORT
   case "$1" in
-    niri) serve_shell "$ROOT/shells/niri" 8775; echo "niri=http://127.0.0.1:8775/?helper=$helper" ;;
-    plain) serve_shell "$ROOT/shells/plain" 8770; echo "Plain=http://127.0.0.1:8770/?helper=$helper" ;;
+    niri) serve_shell "$ROOT/shells/niri" "$(slot_port 8775)"; echo "niri=http://127.0.0.1:$(slot_port 8775)/?helper=$helper" ;;
+    plain) serve_shell "$ROOT/shells/plain" "$(slot_port 8770)"; echo "Plain=http://127.0.0.1:$(slot_port 8770)/?helper=$helper" ;;
     t3|t3=*)
       local url=${1#t3}; url=${url#=}
       if [[ -z $url ]]; then t3_start "$SOCKET"; url=$(t3_pair_url)
@@ -503,12 +683,9 @@ run_cmd() {
   [[ ${#shells[@]} -gt 0 ]] || shells=(niri plain)
   [[ -n $VT && -n $HOLD_S ]] && WAIT_S=120
   # DRM and X11 sessions have their own socket and ports, so both can run.
-  if [[ $mode == drm ]]; then
-    export SOCKET=wayland-plutonium CDP_PORT=9224 HELPER_PORT=3782
-  else
-    export SOCKET=wayland-plutonium-x11 CDP_PORT=9223 HELPER_PORT=3781 XDISP=${XDISP:-:99}
-  fi
-  export MODE=$mode PROFILE=$DATA_DIR/profile-$mode
+  session_vars "$mode"
+  [[ $mode == x11 ]] && XDISP=${XDISP:-$PRIVATE_XDISP}
+  export MODE=$mode SOCKET CDP_PORT HELPER_PORT PROFILE XDISP PRIVATE_XDISP
   local entries=() entry origins=() rest=()
   for entry in "${shells[@]}"; do entries+=("$(shell_entry "$entry")"); done
   for entry in "${entries[@]}"; do origins+=("$(origin_of "${entry#*=}")"); done
@@ -523,11 +700,10 @@ stop_cmd() {
   local which=${1:---all} mode
   for mode in drm x11; do
     [[ $which == --all || $which == "--$mode" ]] || continue
-    on_ash pkill -TERM -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" 2>/dev/null &&
+    session_vars "$mode"
+    on_ash pkill -TERM -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)" 2>/dev/null &&
       echo "stopped the $mode session" || true
-    local socket=wayland-plutonium pidfile
-    [[ $mode == x11 ]] && socket=wayland-plutonium-x11
-    pidfile=$RUN_DIR/plutonium/helper-$socket.pid
+    local pidfile=$RUN_DIR/plutonium/helper-$SOCKET.pid
     [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" || true
   done
 }
@@ -541,14 +717,20 @@ status_cmd() {
   chrome_built && echo "chrome: $CHROME_BIN$from" || echo "chrome: missing ($CHROME_BIN)"
   local mode
   for mode in drm x11; do
-    pgrep -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$DATA_DIR/profile-$mode( |\$)" > /dev/null &&
-      echo "$mode session: running" || echo "$mode session: not running"
+    session_vars "$mode"
+    pgrep -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)" > /dev/null &&
+      echo "$mode session: running ($SOCKET, DevTools $CDP_PORT)" || echo "$mode session: not running"
   done
   local sock
   for sock in "$RUN_DIR"/plutonium/*.sock; do
     [[ -S $sock ]] && curl -s --max-time 2 --unix-socket "$sock" http://helper/v1/status > /dev/null &&
       echo "helper: $sock"
   done
+  local lock=$RUN_DIR/plutonium/chromium.lock
+  if [[ -f $lock ]] && ! flock -n "$lock" true; then echo "Chromium checkout: busy, $(cat "$lock.who" 2>/dev/null)"; fi
+  [[ $(systemctl --user is-active "$CHROMIUM_UNIT" 2>/dev/null) == active ]] &&
+    echo "background chromium command: running (plutonium chromium wait)"
+  (( SLOT )) && echo "slot $SLOT (plutonium worktree info)"
   [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
     echo "kill switch: active" || echo "kill switch: not installed or not running"
 }
@@ -580,6 +762,57 @@ EOF
       sleep 2
       journalctl --user -u plutonium-killswitch -o cat --no-pager -n 3 ;;
     test) python3 "$ROOT/killswitch/killswitch.py" --fire --dry-run ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+# --- Worktrees ---------------------------------------------------------------
+# Parallel checkouts: each worktree gets a free slot and the main checkout's
+# plutonium.env, so its sessions run beside everyone else's.
+worktree_slots() {
+  local dir
+  git -C "$MAIN_ROOT" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r dir; do
+    [[ $dir == "$1" ]] || cat "$dir/.plutonium-slot" 2> /dev/null || true
+  done
+}
+worktree_setup() {
+  local dir=$1 slot=1 used
+  if [[ ! -f $dir/.plutonium-slot ]]; then
+    used=$(worktree_slots "$dir")
+    while grep -qx "$slot" <<< "$used"; do slot=$((slot + 1)); done
+    echo "$slot" > "$dir/.plutonium-slot"
+  fi
+  [[ -e $dir/plutonium.env || ! -f $MAIN_ROOT/plutonium.env ]] || ln -s "$MAIN_ROOT/plutonium.env" "$dir/plutonium.env"
+  (cd "$dir" && "$dir/bin/plutonium" worktree info)
+}
+worktree_cmd() {
+  case "${1:-}" in
+    add)
+      local name=${2:-} start=${3:-HEAD} dir
+      [[ -n $name ]] || die "usage: plutonium worktree add <name> [<start>]"
+      dir=$MAIN_ROOT/.worktrees/$name
+      if git -C "$MAIN_ROOT" rev-parse -q --verify "refs/heads/$name" > /dev/null; then
+        git -C "$MAIN_ROOT" worktree add -q "$dir" "$name"
+      else
+        git -C "$MAIN_ROOT" worktree add -q -b "$name" "$dir" "$start"
+      fi
+      worktree_setup "$dir" ;;
+    setup)
+      [[ $ROOT != "$MAIN_ROOT" ]] || die "this is the main checkout (slot 0); run this in a worktree"
+      worktree_setup "$ROOT" ;;
+    info)
+      session_vars x11
+      echo "$ROOT: slot $SLOT"
+      echo "  X11 sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT, Xvfb $PRIVATE_XDISP"
+      session_vars drm
+      echo "  DRM sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT"
+      echo "  shells: niri $(slot_port 8775), plain $(slot_port 8770), T3 Code $T3_PORT"
+      echo "  Chromium: $CHROME_BIN" ;;
+    list)
+      local dir
+      git -C "$MAIN_ROOT" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r dir; do
+        echo "slot $(cat "$dir/.plutonium-slot" 2> /dev/null || echo "0 (unset)")  $dir"
+      done ;;
     *) usage; exit 2 ;;
   esac
 }
@@ -639,8 +872,10 @@ case "$cmd" in
   stop) stop_cmd "$@" ;;
   status) status_cmd ;;
   killswitch) killswitch_cmd "$@" ;;
-  helper) PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-wayland-plutonium} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
-  cdp) need_ash_runtime; on_ash -e "CDP=${CDP:-localhost:9224}" python3 "$ROOT/tools/cdp.py" "$@" ;;
+  worktree) worktree_cmd "$@" ;;
+  helper) session_vars drm; PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-$SOCKET} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
+  # tools/cdp.py from the main checkout, which the container mounts.
+  cdp) need_ash_runtime; session_vars drm; on_ash -e "CDP=${CDP:-localhost:$CDP_PORT}" python3 "$MAIN_ROOT/tools/cdp.py" "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac
