@@ -45,10 +45,10 @@ Everything it starts is in the thread `niri:desktop`. The full list of binds is 
 ## Agents
 
 An agent running in a thread gets the helper's MCP tools for that thread:
-- **Windows:** `list_windows`, `launch_app`, `snapshot_window`, `focus_window`, `close_window`.
-- **Tabs:** open, navigate, snapshot, focus and close them, and answer their dialogs.
+- **Windows:** list, launch, snapshot, focus and close them, and use them: `click_window`, `hover_window`, `drag_window`, `scroll_window`, `type_window`, `press_window`, `resize_window`. Points are the snapshot's pixels.
+- **Tabs:** open, navigate, snapshot, focus and close them, and answer their dialogs. `read_tab` gives the page as an accessibility tree with element refs, for `click_tab`, `type_tab`, `select_tab`, `press_tab`, `hover_tab`, `scroll_tab`, `evaluate_tab` and `wait_for_tab`.
 
-It can only reach windows and tabs tagged with its own thread. INSTALL.md §9 shows how to start one.
+The agent works in the background: your pointer and keyboard stay where they are, and what it drives needn't be on screen. It can only reach windows and tabs tagged with its own thread. In T3 Code every provider's agents get the window tools, and drive tabs with T3's own browser tools ([features/AGENT_CONTROL.md](features/AGENT_CONTROL.md)). INSTALL.md §9 shows how to start one.
 
 ## Writing a shell
 

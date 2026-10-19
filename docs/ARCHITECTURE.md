@@ -55,7 +55,7 @@
 - **Thread environment:** gives each thread's processes `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, a per-thread `DISPLAY`, toolkit backend variables, and link openers (`xdg-open`, `$BROWSER`) that open tabs in the thread.
 - **pid → thread:** maps a pid to its thread, for browsers that can't read `/proc`.
 - **Launching:** lists and launches desktop apps.
-- **Agent bridge:** an agent's MCP server (`plutonium.ts mcp`) calls the helper's Unix socket. The helper relays each call over SSE to the shell that owns the agent's thread, and that shell carries it out with the window broker. Agents only reach items tagged with their own thread.
+- **Agent bridge:** an agent's MCP server (`plutonium.ts mcp`, or T3 Code's own, which forwards the window tools) calls the helper's Unix socket. With a browser that has the `Plutonium` DevTools domain, the helper does the work itself, on the session's debugging port: it lists, captures and opens windows and tabs, sends windows mouse and keys, and drives pages with Playwright. Showing something to the user, and everything with an older browser, it relays over SSE to the shell that owns the agent's thread, and that shell carries it out with the window broker. Agents only reach items tagged with their own thread ([features/AGENT_CONTROL.md](features/AGENT_CONTROL.md)).
 - **Shell library:** shell pages load `/v1/shell.js` from it, which wraps all of the above.
 
 **The container.**

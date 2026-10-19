@@ -32,9 +32,24 @@ ash_pattern="^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)"
 ash_running() { pgrep -f "$ash_pattern" > /dev/null; }
 stop_ash() { on_ash pkill "-${1:-TERM}" -f "$ash_pattern" 2>/dev/null; }
 
+# The helper's one dependency (playwright-core, for agents' page automation),
+# installed into helper/node_modules the first time, and again when the lock
+# file changes.
+ensure_helper_deps() {
+  local lock=$ROOT/helper/package-lock.json stamp=$ROOT/helper/node_modules/.plutonium-lock
+  [[ -f $stamp ]] && cmp -s "$lock" "$stamp" && return
+  log "installing the helper's dependencies (npm ci in helper/)"
+  if (cd "$ROOT/helper" && npm ci --omit=dev --no-audit --no-fund --loglevel=error) >> "$HELPER_LOG" 2>&1; then
+    cp "$lock" "$stamp"
+  else
+    log "WARNING: npm ci failed in helper/ ($HELPER_LOG): agents can't drive pages"
+  fi
+}
+
 start_helper() {
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
   mkdir -p "$RUN_DIR/plutonium"
+  ensure_helper_deps
   [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && sleep 1
   # Apps the helper launches inherit its environment: leave out an agent
   # session's own variables when this runs from one (Claude Code).

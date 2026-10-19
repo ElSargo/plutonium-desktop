@@ -1,0 +1,598 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Mon, 19 Oct 2026 17:59:18 +1300
+Subject: [PATCH 17/17] Plutonium: agents drive windows and tabs
+
+- T3's MCP server offers the Plutonium helper's native window tools
+  (launch_app, snapshot_window, click_window, type_window, press_window,
+  scroll_window, drag_window, ...) to every provider. The helper defines
+  them (GET /v1/mcp/tools?set=windows) and runs them for the calling
+  thread's tag (POST /v1/threads/<tag>/mcp/call). Tabs stay T3's preview
+  tools. Claude no longer gets the helper's stdio MCP server as well.
+- The desktop browser channel's `open` and `close`: a server tab no shell
+  page shows is opened by the helper (tagged with its thread) and attached
+  at once, instead of a 10 s wait and a headless tab; the helper closes it
+  when its preview closes. A shell page that shows the thread adopts it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../desktop/src/preview/DesktopBrowserHost.ts |   2 +
+ apps/server/src/mcp/McpHttpServer.ts          |   3 +
+ .../Adapters/ClaudeAdapterV2.ts               |  42 +----
+ apps/server/src/plutonium/windowTools.test.ts | 167 ++++++++++++++++++
+ apps/server/src/plutonium/windowTools.ts      | 163 +++++++++++++++++
+ .../src/preview/DesktopBrowserChannel.ts      |  17 +-
+ apps/server/src/preview/ServerBrowser.test.ts |   2 +
+ apps/server/src/preview/ServerBrowser.ts      |  18 +-
+ packages/contracts/src/desktopBrowser.ts      |   8 +
+ 9 files changed, 382 insertions(+), 40 deletions(-)
+ create mode 100644 apps/server/src/plutonium/windowTools.test.ts
+ create mode 100644 apps/server/src/plutonium/windowTools.ts
+
+diff --git a/apps/desktop/src/preview/DesktopBrowserHost.ts b/apps/desktop/src/preview/DesktopBrowserHost.ts
+index cfb1ff753c..bc849c5a27 100644
+--- a/apps/desktop/src/preview/DesktopBrowserHost.ts
++++ b/apps/desktop/src/preview/DesktopBrowserHost.ts
+@@ -203,6 +203,8 @@ export const make = Effect.gen(function* () {
+         tab.relay = null;
+         return;
+       }
++      // Plutonium's helper opens and closes tabs; the desktop app's are its own.
++      if (command.value.type === "open" || command.value.type === "close") return;
+       if (AGENT_INPUT_COMMAND.test(command.value.message)) tab.agentInputAt = performance.now();
+       relayFor(tab).receive(command.value.message);
+     });
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index 64e8a344cd..7f4ffd6635 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -57,6 +57,7 @@ import {
+   DeviceStandardToolkit,
+ } from "./toolkits/device/tools.ts";
+ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
++import * as PlutoniumWindowTools from "../plutonium/windowTools.ts";
+ import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+ 
+ /** Where an MCP client discovers how to sign in (RFC 9728), at this request's own origin. */
+@@ -878,4 +879,6 @@ export const layer = Layer.mergeAll(
+   layerPullRequestsToolkit,
+   layerDeviceToolkit,
+   layerHtmlToolkit,
++  // Plutonium: the helper's native window tools (no-op outside a session).
++  PlutoniumWindowTools.layer,
+ ).pipe(Layer.provideMerge(layerMcpTransport));
+diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+index ac89151d1b..106138ead4 100644
+--- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+@@ -48,7 +48,7 @@ import { parseCliArgs } from "@t3tools/shared/cliArgs";
+ import { AgentScope } from "@t3tools/shared/AgentScope";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
+-import { plutoniumThreadSetup, withPlutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
++import { withPlutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
+ import {
+   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
+   formatClaudeResumeCompactionQuestion,
+@@ -1283,27 +1283,6 @@ export function claudeMcpQueryOverrides(input: {
+   };
+ }
+ 
+-// Plutonium (no-op unless enabled): the helper's agent bridge to this
+-// thread's app windows, beside T3 Code's own MCP server.
+-function withPlutoniumMcpServer(
+-  overrides: ReturnType<typeof claudeMcpQueryOverrides>,
+-  threadId: string,
+-): ReturnType<typeof claudeMcpQueryOverrides> {
+-  const setup = plutoniumThreadSetup(threadId);
+-  if (setup === undefined) return overrides;
+-  return {
+-    ...overrides,
+-    mcpServers: {
+-      ...overrides.mcpServers,
+-      plutonium: {
+-        type: "stdio",
+-        command: setup.mcpServer.command,
+-        args: [...setup.mcpServer.args],
+-      },
+-    },
+-  };
+-}
+-
+ function providerSession(input: {
+   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
+   readonly providerInstanceId: ProviderInstanceId;
+@@ -8496,17 +8475,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+           nativeThreadId: string,
+         ) {
+           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
+-          const mcpOverrides = withPlutoniumMcpServer(
+-            claudeMcpQueryOverrides({
+-              mcpSession: yield* mcpSessions.read(turnInput.threadId),
+-              readOnlySandbox:
+-                sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
+-              ...(queryPolicy.allowedTools === undefined
+-                ? {}
+-                : { allowedTools: queryPolicy.allowedTools }),
+-            }),
+-            turnInput.threadId,
+-          );
++          const mcpOverrides = claudeMcpQueryOverrides({
++            mcpSession: yield* mcpSessions.read(turnInput.threadId),
++            readOnlySandbox:
++              sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
++            ...(queryPolicy.allowedTools === undefined
++              ? {}
++              : { allowedTools: queryPolicy.allowedTools }),
++          });
+           const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
+           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
+diff --git a/apps/server/src/plutonium/windowTools.test.ts b/apps/server/src/plutonium/windowTools.test.ts
+new file mode 100644
+index 0000000000..17358ee064
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTools.test.ts
+@@ -0,0 +1,167 @@
++// @effect-diagnostics nodeBuiltinImport:off - a fake Plutonium helper on a Unix socket
++import { expect, it } from "@effect/vitest";
++import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import { McpSchema, McpServer } from "effect/ai";
++import * as NodeFs from "node:fs";
++import * as NodeHttp from "node:http";
++import * as NodeOs from "node:os";
++import * as NodePath from "node:path";
++
++import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
++import * as PlutoniumWindowTools from "./windowTools.ts";
++
++const threadId = ThreadId.make("thread-windows-test");
++const invocation = (thread: boolean) => ({
++  environmentId: EnvironmentId.make("environment-windows-test"),
++  requestNamespace: "provider-session-windows-test",
++  thread: thread
++    ? {
++        threadId,
++        providerSessionId: "provider-session-windows-test",
++        providerInstanceId: ProviderInstanceId.make("codex"),
++      }
++    : undefined,
++  client: thread
++    ? undefined
++    : { sessionId: "client", label: "client", access: "read-only" as const },
++  capabilities: new Set<McpInvocationContext.McpCapability>(),
++  issuedAt: 1,
++});
++const client = McpSchema.McpServerClient.of({
++  clientId: 1,
++  clientCapabilities: {},
++  clientInfo: { name: "mcp-test", version: "1.0.0" },
++  protocolVersion: "2025-06-18",
++  initializePayload: {
++    protocolVersion: "2025-06-18",
++    capabilities: {},
++    clientInfo: { name: "mcp-test", version: "1.0.0" },
++  },
++  getClient: Effect.die("unused"),
++});
++
++/** A helper that lists two window tools and answers calls with what it was asked. */
++const fakeHelper = Effect.acquireRelease(
++  Effect.promise(async () => {
++    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-plutonium-windows-"));
++    const socketPath = NodePath.join(dir, "helper.sock");
++    const calls: Array<{ readonly path: string; readonly body: unknown }> = [];
++    const server = NodeHttp.createServer((request, response) => {
++      let body = "";
++      request.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
++      request.on("end", () => {
++        response.setHeader("Content-Type", "application/json");
++        if (request.method === "GET" && request.url === "/v1/mcp/tools?set=windows") {
++          response.end(
++            JSON.stringify({
++              tools: [
++                {
++                  name: "list_windows",
++                  description: "List windows.",
++                  inputSchema: { type: "object", properties: {} },
++                },
++                {
++                  name: "snapshot_window",
++                  description: "Snapshot a window.",
++                  inputSchema: {
++                    type: "object",
++                    properties: { window_id: { type: "integer" } },
++                    required: ["window_id"],
++                  },
++                },
++              ],
++            }),
++          );
++          return;
++        }
++        calls.push({ path: request.url ?? "", body: JSON.parse(body) });
++        const { name } = JSON.parse(body) as { name: string };
++        response.end(
++          JSON.stringify(
++            name === "snapshot_window"
++              ? { content: [{ type: "image", data: "iVBORw0K", mimeType: "image/png" }] }
++              : { content: [{ type: "text", text: "[]" }] },
++          ),
++        );
++      });
++    });
++    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
++    return { dir, server, socketPath, calls };
++  }),
++  ({ dir, server }) =>
++    Effect.promise(
++      () =>
++        new Promise<void>((resolve) =>
++          server.close(() => {
++            NodeFs.rmSync(dir, { recursive: true, force: true });
++            resolve();
++          }),
++        ),
++    ),
++);
++
++it.effect("offers the helper's window tools and runs them for the calling thread", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const helper = yield* fakeHelper;
++      const previous = process.env.PLUTONIUM_HELPER;
++      process.env.PLUTONIUM_HELPER = helper.socketPath;
++      yield* Effect.addFinalizer(() =>
++        Effect.sync(() => {
++          if (previous === undefined) delete process.env.PLUTONIUM_HELPER;
++          else process.env.PLUTONIUM_HELPER = previous;
++        }),
++      );
++      const server = yield* Effect.provide(
++        McpServer.McpServer,
++        PlutoniumWindowTools.layer.pipe(Layer.provideMerge(McpServer.McpServer.layer)),
++      );
++      expect(server.tools.map(({ tool }) => tool.name).toSorted()).toEqual([
++        "list_windows",
++        "snapshot_window",
++      ]);
++
++      const call = (name: string, args: Record<string, unknown>, thread = true) =>
++        server
++          .callTool({ name, arguments: args })
++          .pipe(
++            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(thread)),
++            Effect.provideService(McpSchema.McpServerClient, client),
++          );
++
++      const shot = yield* call("snapshot_window", { window_id: 3 });
++      expect(shot.isError).toBe(false);
++      expect(shot.content.map((entry) => entry.type)).toEqual(["image"]);
++      expect(helper.calls).toEqual([
++        {
++          path: `/v1/threads/${encodeURIComponent(`t3:thread/${threadId}`)}/mcp/call`,
++          body: { name: "snapshot_window", arguments: { window_id: 3 } },
++        },
++      ]);
++
++      const refused = yield* call("list_windows", {}, false);
++      expect(refused.isError).toBe(true);
++      expect(helper.calls).toHaveLength(1);
++    }),
++  ),
++);
++
++it.effect("offers nothing outside a Plutonium session", () =>
++  Effect.gen(function* () {
++    const previous = {
++      helper: process.env.PLUTONIUM_HELPER,
++      display: process.env.PLUTONIUM_WAYLAND_DISPLAY,
++    };
++    delete process.env.PLUTONIUM_HELPER;
++    delete process.env.PLUTONIUM_WAYLAND_DISPLAY;
++    const server = yield* Effect.provide(
++      McpServer.McpServer,
++      PlutoniumWindowTools.layer.pipe(Layer.provideMerge(McpServer.McpServer.layer)),
++    );
++    if (previous.helper !== undefined) process.env.PLUTONIUM_HELPER = previous.helper;
++    if (previous.display !== undefined) process.env.PLUTONIUM_WAYLAND_DISPLAY = previous.display;
++    expect(server.tools).toEqual([]);
++  }),
++);
+diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
+new file mode 100644
+index 0000000000..4ca9930d0d
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTools.ts
+@@ -0,0 +1,163 @@
++// @effect-diagnostics nodeBuiltinImport:off - requests go to the Plutonium helper's Unix socket
++/**
++ * Plutonium: the helper's native window tools (launch_app, snapshot_window,
++ * click_window, type_window, ...) on T3 Code's own MCP server, so every
++ * provider's agents can use the apps of their thread, not only those that
++ * take the helper's stdio MCP server. Tabs are T3's preview tools' already.
++ *
++ * The helper defines the tools (GET /v1/mcp/tools?set=windows) and runs them
++ * for a thread (POST /v1/threads/:tag/mcp/call); this file only registers
++ * them when the server runs in a Plutonium session, and forwards each call
++ * with the calling thread's tag. A client caller has no thread, and no
++ * windows.
++ */
++import * as Context from "effect/Context";
++import * as Data from "effect/Data";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Schema from "effect/Schema";
++import { McpSchema, McpServer } from "effect/ai";
++import * as NodeHttp from "node:http";
++
++import { plutoniumHelperSocket, plutoniumThreadTag } from "@t3tools/shared/plutonium";
++
++import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
++
++interface HelperTool {
++  readonly name: string;
++  readonly description: string;
++  readonly inputSchema: Record<string, unknown>;
++}
++
++type HelperContent =
++  | { readonly type: "text"; readonly text: string }
++  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
++
++const READ_ONLY = new Set(["list_windows", "snapshot_window"]);
++const REQUEST_TIMEOUT_MS = 120_000;
++
++const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
++
++class PlutoniumHelperError extends Data.TaggedError("PlutoniumHelperError")<{
++  readonly message: string;
++}> {}
++
++const helperRequest = (socketPath: string, method: string, path: string, body?: unknown) =>
++  Effect.tryPromise({
++    try: () =>
++      new Promise<{ readonly status: number; readonly text: string }>((resolve, reject) => {
++        const payload = body === undefined ? undefined : JSON.stringify(body);
++        const request = NodeHttp.request(
++          {
++            socketPath,
++            method,
++            path,
++            timeout: REQUEST_TIMEOUT_MS,
++            headers: payload === undefined ? {} : { "Content-Type": "application/json" },
++          },
++          (response) => {
++            let text = "";
++            response.setEncoding("utf8");
++            response.on("data", (chunk: string) => (text += chunk));
++            response.on("end", () => resolve({ status: response.statusCode ?? 500, text }));
++          },
++        );
++        request.on("timeout", () => request.destroy());
++        request.on("error", reject);
++        request.end(payload);
++      }),
++    catch: () => new PlutoniumHelperError({ message: "The Plutonium helper didn't answer." }),
++  }).pipe(
++    Effect.flatMap(({ status, text }) =>
++      decodeJson(text).pipe(
++        Effect.mapError(
++          () => new PlutoniumHelperError({ message: `The Plutonium helper said ${status}.` }),
++        ),
++        Effect.filterOrFail(
++          () => status < 400,
++          (value) =>
++            new PlutoniumHelperError({
++              message:
++                (value as { readonly error?: string } | null)?.error ??
++                `The Plutonium helper said ${status}.`,
++            }),
++        ),
++      ),
++    ),
++  );
++
++const textResult = (text: string, isError: boolean) =>
++  new McpSchema.CallToolResult({ isError, content: [{ type: "text", text }] });
++
++const register = Effect.gen(function* () {
++  const socketPath = plutoniumHelperSocket();
++  if (socketPath === undefined) return;
++  const listed = yield* helperRequest(socketPath, "GET", "/v1/mcp/tools?set=windows").pipe(
++    Effect.timeout("5 seconds"),
++    Effect.catchCause((cause) =>
++      Effect.logWarning("Plutonium: no window tools (the helper didn't list them)", { cause }).pipe(
++        Effect.as(undefined),
++      ),
++    ),
++  );
++  const tools = (listed as { readonly tools?: readonly HelperTool[] } | undefined)?.tools ?? [];
++  const server = yield* McpServer.McpServer;
++  for (const tool of tools) {
++    yield* server.addTool({
++      tool: new McpSchema.Tool({
++        name: tool.name,
++        description: tool.description,
++        inputSchema: tool.inputSchema,
++        annotations: {
++          readOnlyHint: READ_ONLY.has(tool.name),
++          destructiveHint: tool.name === "close_window",
++          openWorldHint: true,
++        },
++      }),
++      annotations: Context.empty(),
++      handle: (payload) =>
++        Effect.withFiber((fiber) => {
++          const invocation = Context.getUnsafe(
++            fiber.context,
++            McpInvocationContext.McpInvocationContext,
++          );
++          if (invocation.thread === undefined) {
++            return Effect.succeed(
++              textResult(
++                "Native windows belong to threads: only a thread's agent can use them.",
++                true,
++              ),
++            );
++          }
++          const tag = encodeURIComponent(plutoniumThreadTag(invocation.thread.threadId));
++          return helperRequest(socketPath, "POST", `/v1/threads/${tag}/mcp/call`, {
++            name: tool.name,
++            arguments: payload ?? {},
++          }).pipe(
++            Effect.map((value) => {
++              const { content, isError } = value as {
++                readonly content: readonly HelperContent[];
++                readonly isError?: boolean;
++              };
++              return new McpSchema.CallToolResult({
++                isError: isError === true,
++                content: content.map((part) =>
++                  part.type === "image"
++                    ? {
++                        type: "image" as const,
++                        data: new Uint8Array(Buffer.from(part.data, "base64")),
++                        mimeType: part.mimeType,
++                      }
++                    : { type: "text" as const, text: part.text },
++                ),
++              });
++            }),
++            Effect.catch((error) => Effect.succeed(textResult(error.message, true))),
++          );
++        }),
++    });
++  }
++});
++
++/** Registers the helper's window tools on `/mcp` in a Plutonium session; nothing otherwise. */
++export const layer = Layer.effectDiscard(register);
+diff --git a/apps/server/src/preview/DesktopBrowserChannel.ts b/apps/server/src/preview/DesktopBrowserChannel.ts
+index 7337d6e41e..c11577e711 100644
+--- a/apps/server/src/preview/DesktopBrowserChannel.ts
++++ b/apps/server/src/preview/DesktopBrowserChannel.ts
+@@ -10,6 +10,7 @@
+  * Plutonium: in a Plutonium session the same messages travel over the
+  * Plutonium helper's socket instead (`GET /v1/desktop-browser`, upgraded), and
+  * the helper relays each tab the shell shows to that tab of the real browser.
++ * A tab no shell page shows the helper opens itself (`open`).
+  */
+ import * as NodeStream from "@effect/platform-node/NodeStream";
+ import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
+@@ -34,7 +35,7 @@ import * as Ndjson from "effect/encoding/Ndjson";
+ import * as NodeCrypto from "node:crypto";
+ import * as NodeNet from "node:net";
+ 
+-import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++import { plutoniumHelperSocket, plutoniumThreadTag } from "@t3tools/shared/plutonium";
+ 
+ import * as ServerConfig from "../config.ts";
+ import { writeAllToFileDescriptor } from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+@@ -69,6 +70,13 @@ export class DesktopBrowserChannel extends Context.Service<
+      * releases the tab on the desktop and stops the endpoint.
+      */
+     readonly endpoint: (key: DesktopTabKey) => Effect.Effect<string, never, Scope.Scope>;
++    /**
++     * Plutonium: asks the helper to open the tab itself when no shell page
++     * shows it, so it attaches without one. A no-op for a desktop app.
++     */
++    readonly open: (key: DesktopTabKey) => Effect.Effect<void>;
++    /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
++    readonly close: (key: DesktopTabKey) => Effect.Effect<void>;
+     /** Draws the agent's cursor over a tab the desktop renders. */
+     readonly pointer: (
+       key: DesktopTabKey,
+@@ -138,6 +146,8 @@ const make = Effect.gen(function* () {
+       attached: Stream.empty,
+       isAttached: () => Effect.succeed(false),
+       endpoint: () => Effect.die("No desktop app is attached to this server."),
++      open: () => Effect.void,
++      close: () => Effect.void,
+       pointer: () => Effect.void,
+     });
+   }
+@@ -325,6 +335,11 @@ const make = Effect.gen(function* () {
+     ),
+     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
+     endpoint,
++    open: (key) =>
++      helperSocket === undefined
++        ? Effect.void
++        : command({ type: "open", ...key, tag: plutoniumThreadTag(key.threadId) }),
++    close: (key) => (helperSocket === undefined ? Effect.void : command({ type: "close", ...key })),
+     pointer: (key, pointer) => command({ type: "pointer", ...key, ...pointer }),
+   });
+ });
+diff --git a/apps/server/src/preview/ServerBrowser.test.ts b/apps/server/src/preview/ServerBrowser.test.ts
+index dec1e52d4c..826391b381 100644
+--- a/apps/server/src/preview/ServerBrowser.test.ts
++++ b/apps/server/src/preview/ServerBrowser.test.ts
+@@ -262,6 +262,8 @@ const dependencies = Layer.mergeAll(
+       Effect.acquireRelease(Effect.succeed(`ws://desktop/${key.tabId}`), () =>
+         Effect.sync(() => releasedDesktopTabs.push(key.tabId)),
+       ),
++    open: () => Effect.void,
++    close: () => Effect.void,
+     pointer: () => Effect.void,
+   }),
+ ).pipe(
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index 87789692eb..88505f7a89 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -717,15 +717,17 @@ const make = Effect.gen(function* () {
+    * With a desktop app attached, every tab of this server renders there, so a
+    * new tab waits for its `<webview>` instead of launching headless.
+    */
+-  const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
+-    desktopChannel.available
++  const desktopRenders = (snapshot: PreviewSessionSnapshot) => {
++    const key = { threadId: snapshot.threadId, tabId: snapshot.tabId };
++    return desktopChannel.available
+       ? Effect.runPromise(
+-          desktopChannel.awaitAttached(
+-            { threadId: snapshot.threadId, tabId: snapshot.tabId },
+-            DESKTOP_ATTACH_TIMEOUT,
+-          ),
++          // Plutonium: the helper opens the tab if no shell page shows it.
++          desktopChannel
++            .open(key)
++            .pipe(Effect.andThen(desktopChannel.awaitAttached(key, DESKTOP_ATTACH_TIMEOUT))),
+         )
+       : Promise.resolve(false);
++  };
+ 
+   /** Connects to the desktop's page for a tab, which it renders and the server drives. */
+   const connectDesktop = async (snapshot: PreviewSessionSnapshot) => {
+@@ -2080,6 +2082,10 @@ const make = Effect.gen(function* () {
+       const key = tabKey(event.threadId, event.tabId);
+       const tab = tabs.get(key);
+       if (event.type === "closed" && !tab && pendingTabs.has(key)) closedPendingTabs.add(key);
++      // Plutonium: a tab the helper opened for it closes with the session.
++      if (event.type === "closed") {
++        runFork(desktopChannel.close({ threadId: event.threadId, tabId: event.tabId }));
++      }
+       if (!tab) return;
+       if (event.type === "closed") {
+         closedSessions.add(key);
+diff --git a/packages/contracts/src/desktopBrowser.ts b/packages/contracts/src/desktopBrowser.ts
+index caac5f473d..04f79e2127 100644
+--- a/packages/contracts/src/desktopBrowser.ts
++++ b/packages/contracts/src/desktopBrowser.ts
+@@ -42,5 +42,13 @@ export const DesktopBrowserCommand = Schema.Union([
+     x: Schema.Finite,
+     y: Schema.Finite,
+   }),
++  /**
++   * Plutonium: no page shows this tab yet, so the helper opens one itself,
++   * tagged `tag` (the thread's Plutonium tag), rather than the server waiting
++   * for a shell page.
++   */
++  Schema.Struct({ type: Schema.Literal("open"), ...TabKey, tag: TrimmedNonEmptyString }),
++  /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
++  Schema.Struct({ type: Schema.Literal("close"), ...TabKey }),
+ ]);
+ export type DesktopBrowserCommand = typeof DesktopBrowserCommand.Type;

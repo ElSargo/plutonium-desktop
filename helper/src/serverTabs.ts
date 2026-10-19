@@ -11,7 +11,17 @@
 //   server → helper  {type: "cdp", threadId, tabId, message}
 //                    {type: "release", threadId, tabId}
 //                    {type: "pointer", threadId, tabId, phase, x, y}
+//                    {type: "open", threadId, tabId, tag}   (Plutonium's own)
+//                    {type: "close", threadId, tabId}       (Plutonium's own)
 // (threadId and tabId are the server's names for the tab.)
+//
+// "open": the server has a tab no shell page shows (none is open, or none
+// shows the thread). The helper opens one itself, tagged `tag` (the thread's
+// Plutonium tag), and attaches it as the page HELPER_PAGE: the server drives
+// it at once instead of waiting for a page and then going headless. A shell
+// page that shows the tab later adopts it, as it would another page's.
+// "close": the server's tab closed; the helper closes the tab if it opened it
+// (a shell page closes its own).
 //
 // Each tab's CDP connection only reaches that tab's page: the relay below
 // presents it as a browser with one page, the way T3 Code's desktop app does
@@ -65,6 +75,8 @@ const isCommand = (value: unknown): value is CdpCommand =>
 
 const BROWSER_CONTEXT_ID = "plutonium-tab";
 const ANNOUNCE = Symbol("announce");
+/** The page name of tabs the helper opened for the server ("open"). */
+export const HELPER_PAGE = "plutoniumd";
 /** The page's root session id, as the server sees it. */
 const PAGE_SESSION_ID = "plutonium-tab-page";
 
@@ -237,18 +249,22 @@ export class ServerTabs {
   onPointer: (page: string, pointer: Pointer) => void = () => {};
   /** A page that showed `key` went away: another page that shows it may take over. */
   onOrphaned: (key: ServerTabKey) => void = () => {};
+  /** The server wants a tab for `key`, tagged `tag`, and no page shows one. */
+  onOpen: (key: ServerTabKey, tag: string) => void = () => {};
+  /** The server's tab `key` closed; it was the helper's (HELPER_PAGE). */
+  onClose: (key: ServerTabKey, browserTabId: number) => void = () => {};
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
-    cdp.onEvent = (event) => this.browserEvent(event);
-    cdp.onClose = () => {
+    cdp.addEventListener((event) => this.browserEvent(event));
+    cdp.addCloseListener(() => {
       for (const tab of this.tabs.values()) {
         tab.session = null;
         tab.sessionId = null;
         tab.children.clear();
       }
       this.version = null;
-    };
+    });
   }
 
   private emit(event: Record<string, unknown>): void {
@@ -290,6 +306,13 @@ export class ServerTabs {
       this.detach(tab.key);
       this.onOrphaned(tab.key);
     }
+  }
+
+  /** The tabs page `page` showed first, with their browser tab ids. */
+  pageTabs(page: string): { readonly key: ServerTabKey; readonly browserTabId: number }[] {
+    return [...this.tabs.values()]
+      .filter((tab) => tab.info.page === page)
+      .map((tab) => ({ key: tab.key, browserTabId: tab.info.browserTabId }));
   }
 
   attachedTabs(): ServerTabKey[] {
@@ -421,16 +444,35 @@ export class ServerTabs {
 
   private command(line: string): void {
     debug("<", line.slice(0, 300));
-    let command: { type?: string; threadId?: string; tabId?: string; message?: string; phase?: string; x?: number; y?: number };
+    let command: {
+      type?: string;
+      threadId?: string;
+      tabId?: string;
+      message?: string;
+      phase?: string;
+      x?: number;
+      y?: number;
+      tag?: string;
+    };
     try {
       command = JSON.parse(line);
     } catch {
       return;
     }
     if (typeof command.threadId !== "string" || typeof command.tabId !== "string") return;
-    const tab = this.tabs.get(keyOf({ threadId: command.threadId, tabId: command.tabId }));
+    const key = { threadId: command.threadId, tabId: command.tabId };
+    const tab = this.tabs.get(keyOf(key));
+    if (command.type === "open") {
+      if (!tab && typeof command.tag === "string" && command.tag) this.onOpen(key, command.tag);
+      return;
+    }
     if (!tab) return;
     switch (command.type) {
+      case "close":
+        if (tab.info.page !== HELPER_PAGE) return;
+        this.detach(tab.key);
+        this.onClose(tab.key, tab.info.browserTabId);
+        return;
       case "cdp":
         if (typeof command.message === "string") this.relayFor(tab).receive(command.message);
         return;
