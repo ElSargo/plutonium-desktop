@@ -10,3 +10,5 @@
 /frontends/t3code/checkout/
 __pycache__/
 *.pyc
+# The helper's dependencies (npm ci, at session start)
+/helper/node_modules/

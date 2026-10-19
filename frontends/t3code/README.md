@@ -50,6 +50,7 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0014 | A page's popup (an OAuth sign-in window) is shown as a new panel tab that keeps `window.opener`, and closes with it |
 | 0015 | What the user starts comes to the front: apps from a terminal (not setup or settle scripts) or the launcher open in the thread's panel with the keyboard. In another thread, they wait in its panel. What agents open waits, and a toast with Show says so while its thread is open |
 | 0016 | Network access from the shell's Settings, Connections: the server, in a Plutonium session, saves the choice and restarts under the launcher's supervisor on the other host; the session cookie keeps its name |
+| 0017 | Agents drive windows and tabs: T3's MCP server offers the helper's native window tools to every provider (listed from and forwarded to the helper, with the caller's thread), instead of Claude alone getting the helper's stdio server; the desktop browser channel's `open` and `close`, so the helper opens a server tab no page shows, instead of a 10 s wait and a headless tab ([AGENT_CONTROL](../../docs/features/AGENT_CONTROL.md#in-t3-code)) |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

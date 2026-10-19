@@ -97,8 +97,12 @@ Socket only (the agent bridge; `<thread>` is the caller's thread):
 | `POST /v1/threads/<thread>/tabs/<id>/dialog {accept, text?}` | answers the page's pending dialog |
 | `POST /v1/threads/<thread>/tabs/<id>/{focus,close}` | shows the tab in the shell (the frontend's `onFocusTab`) / closes it |
 | `GET /v1/threads/<thread>/tabs/<id>/snapshot` | `image/png` of the page, even while hidden |
+| `POST /v1/threads/<thread>/windows/<id>/input {action, ...}` | input for the window (needs the browser's Plutonium domain, else 501): `move`, `click {x, y, button?, count?}`, `drag {from, to}`, `scroll {x, y, dx?, dy?}`, `type {text}`, `press {keys}`, `resize {width, height}`; points in snapshot pixels |
+| `POST /v1/threads/<thread>/tabs/<id>/page {action, ...}` | Playwright on the tab: `snapshot` (`{url, title, snapshot}`), `click`, `hover`, `type`, `select`, `press`, `scroll`, `evaluate`, `wait_for`; elements by `ref` or `selector`; Playwright's errors are 409 |
+| `GET /v1/mcp/tools?set=windows` | the MCP tools (`windows`: only the window tools), for a frontend's own MCP server |
+| `POST /v1/threads/<thread>/mcp/call {name, arguments}` | runs an MCP tool for the thread: `{content, isError?}` |
 
-Socket only, for server-driven tabs: `GET /v1/desktop-browser` with `Upgrade: plutonium-desktop-browser` turns the connection into T3 Code's desktop browser channel, newline-delimited JSON both ways. The helper sends `{type: "attached" | "detached", threadId, tabId}` as the shell shows or stops showing the server's tabs (all attached tabs first), and `{type: "cdp", threadId, tabId, message}` for each relay message. The server sends `cdp` (a DevTools message for that tab), `release` (it stopped driving the tab) and `pointer` (`{phase: "move" | "click", x, y}`: where its next action lands, for the shell to draw). `threadId` and `tabId` are the server's names. One server at a time: a new connection replaces the old one.
+Socket only, for server-driven tabs: `GET /v1/desktop-browser` with `Upgrade: plutonium-desktop-browser` turns the connection into T3 Code's desktop browser channel, newline-delimited JSON both ways. The helper sends `{type: "attached" | "detached", threadId, tabId}` as the shell shows or stops showing the server's tabs (all attached tabs first), and `{type: "cdp", threadId, tabId, message}` for each relay message. The server sends `cdp` (a DevTools message for that tab), `release` (it stopped driving the tab), `pointer` (`{phase: "move" | "click", x, y}`: where its next action lands, for the shell to draw), `open` (`{tag}`: no page shows the tab, so the helper opens one tagged `tag` and attaches it itself) and `close` (the tab's preview closed; the helper closes a tab it opened). `threadId` and `tabId` are the server's names. One server at a time: a new connection replaces the old one.
 
 Shell only: `GET /v1/shell.js` (the library), `GET /v1/shell/requests?page=<id>&shell=<shell id>&visible=<0|1>` (EventSource of bridge requests), `POST /v1/shell/replies/<id>`, `POST /v1/shell/pages/<id>/visibility {visible}`, `POST /v1/shell/origins {origins}` (the browser's shell origins, which shell pages report so that shells added at runtime get in), `POST /v1/shell/server-tabs {page, threadId, tabId, browserTabId, targetId, url?, title?}` → `{browserTabId}` (the tab to show: another page's, if one shows the server's tab already) and `POST /v1/shell/server-tabs/detach {page, threadId, tabId}`.
 
@@ -163,7 +167,11 @@ It keeps the window, tab and group lists from `navigator.windowBroker` events an
 
 ## MCP tools
 
-`list_windows`, `launch_app {argv, cwd?, wait_seconds?, focus?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`. What an agent launches or opens waits in its thread unless it passes `focus: true` (`launch_app`, `open_tab`).
+Windows: `list_windows`, `launch_app {argv, cwd?, wait_seconds?, focus?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`, and, with a browser that has the Plutonium DevTools domain, `click_window {window_id, x, y, button?, count?}`, `hover_window {window_id, x, y}`, `drag_window {window_id, from, to, button?}`, `scroll_window {window_id, x, y, dy?, dx?}`, `type_window {window_id, text}`, `press_window {window_id, keys}` and `resize_window {window_id, width, height}`. Points are `snapshot_window`'s pixels.
+
+Tabs: `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab`, and (Playwright) `read_tab {tab_id}` (the page as an accessibility tree with `[ref=eN]`), `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab {key}`, `select_tab {values}`, `scroll_tab`, `evaluate_tab {expression}` and `wait_for_tab {text? | text_gone? | selector? | load?}`, each element by `ref` or `selector`.
+
+What an agent launches or opens waits in its thread unless it passes `focus: true` (`launch_app`, `open_tab`). See [docs/features/AGENT_CONTROL.md](../docs/features/AGENT_CONTROL.md).
 
 For example, Claude Code:
 

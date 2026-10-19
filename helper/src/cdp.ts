@@ -1,6 +1,7 @@
 // The browser's DevTools protocol, from its --remote-debugging-port: one
 // WebSocket to the browser target, with flat sessions for the pages the
-// helper drives (serverTabs.ts). Node's own WebSocket client; no dependencies.
+// helper drives (serverTabs.ts, pages.ts), and the browser's Plutonium domain
+// (desktop.ts). Node's own WebSocket client; no dependencies.
 
 export interface CdpEvent {
   readonly method: string;
@@ -23,10 +24,8 @@ export class BrowserCdp {
   private opening: Promise<WebSocket> | null = null;
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
-  /** Every event from the browser, whatever session it is for. */
-  onEvent: (event: CdpEvent) => void = () => {};
-  /** The connection to the browser closed (it restarted, or quit). */
-  onClose: () => void = () => {};
+  private readonly eventListeners = new Set<(event: CdpEvent) => void>();
+  private readonly closeListeners = new Set<() => void>();
 
   constructor(port: number) {
     this.port = port;
@@ -51,7 +50,7 @@ export class BrowserCdp {
       this.socket = null;
       for (const pending of this.pending.values()) pending.reject(new CdpError("The browser went away."));
       this.pending.clear();
-      this.onClose();
+      for (const listener of this.closeListeners) listener();
     });
     return socket;
   }
@@ -88,8 +87,24 @@ export class BrowserCdp {
       return;
     }
     if (typeof message.method === "string") {
-      this.onEvent({ method: message.method, params: message.params, sessionId: message.sessionId });
+      const event = { method: message.method, params: message.params, sessionId: message.sessionId };
+      for (const listener of this.eventListeners) listener(event);
     }
+  }
+
+  /** Every event from the browser, whatever session it is for. */
+  addEventListener(listener: (event: CdpEvent) => void): void {
+    this.eventListeners.add(listener);
+  }
+
+  /** The connection to the browser closed (it restarted, or quit). */
+  addCloseListener(listener: () => void): void {
+    this.closeListeners.add(listener);
+  }
+
+  /** Whether the connection is open (it opens on the first send()). */
+  get connected(): boolean {
+    return this.socket !== null;
   }
 
   /** Sends `method` to the browser, or to `sessionId`'s target. */

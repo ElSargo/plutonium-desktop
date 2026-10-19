@@ -106,10 +106,19 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 
 - [x] **Agent bridge and snapshots.** Done in Phase 3 (helper + MCP).
 - [ ] **Per-thread Exo servers/sockets, tabs per thread.** L · Phase 5.
-- [ ] **Bridge: driving windows.** M · Agents can list, launch, snapshot,
-  focus and close, but not type or click into a window.
-- [ ] **Bridge: MCP for Codex and other T3 providers.** S · Only Claude
-  sessions get the helper's MCP server.
+- [x] **Bridge: driving windows.** Click, type, keys, scroll and drag in
+  windows, and Playwright on tabs, without a shell page
+  (`features/AGENT_CONTROL.md`).
+- [x] **Bridge: MCP for Codex and other T3 providers.** T3's own MCP server
+  offers the helper's window tools to every provider.
+- [ ] **Remote clients see native windows.** M · A T3 client away from the
+  desktop has no Apps panel content. The helper has window screencasts
+  (`Plutonium.startWindowScreencast`) and input; T3 would stream them
+  (`/api/window-stream`) and draw them in the Apps panel.
+- [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
+  snapshots and agent clicks don't reach them.
+- [ ] **Agent typing beyond a US layout.** S · Map text through the
+  session's keymap (xkb) instead of assuming US keycodes.
 - [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
   the browser.

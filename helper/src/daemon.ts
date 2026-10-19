@@ -3,9 +3,13 @@
 // - Threads: the environment for a thread's processes (Exo display, thread tag,
 //   per-thread X display) and pid → thread resolution for windows.
 // - Launching apps into a thread.
-// - The agent bridge: a thread's agent lists, launches, focuses, snapshots and
-//   closes its own windows, and opens, drives, snapshots and closes its own
-//   browser tabs, relayed through the shell page.
+// - The agent bridge: a thread's agent lists, launches, focuses, snapshots,
+//   types and clicks into, and closes its own windows, and opens, drives
+//   (Playwright, pages.ts), snapshots and closes its own browser tabs. With the
+//   browser's DevTools port (--cdp-port), straight from the browser
+//   (desktop.ts); without, or with a browser from before its Plutonium domain,
+//   relayed through the shell page. Showing things to the user is always the
+//   shell's.
 // - Server-driven tabs: a frontend's server drives the tabs the shell shows for
 //   it over the browser's DevTools protocol (serverTabs.ts).
 //
@@ -24,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { DesktopApps } from "./apps.ts";
 import { BrowserCdp } from "./cdp.ts";
+import { Desktop, type DesktopTab, type DesktopWindow } from "./desktop.ts";
 import { type GpuReport, probeGpu } from "./gpu.ts";
 import {
   type BrowserTabEntry,
@@ -32,8 +37,11 @@ import {
   ShellRelay,
   type NativeWindowEntry,
 } from "./relay.ts";
+import { comboKeys, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
-import { ServerTabs } from "./serverTabs.ts";
+import { ThreadPages } from "./pages.ts";
+import { callTool, mcpTools } from "./mcp.ts";
+import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import { showsForPids, threadForPid, threadsForPids, Threads } from "./threads.ts";
 
@@ -43,7 +51,11 @@ export interface DaemonOptions {
   readonly shellOrigins: readonly string[];
   readonly port: number;
   readonly socketPath: string;
-  /** The browser's --remote-debugging-port, for server-driven tabs (none: no such tabs). */
+  /**
+   * The browser's --remote-debugging-port: windows and tabs straight from the
+   * browser, agents' page automation, and server-driven tabs (none: the shell
+   * relays what it can, and there are no such tabs).
+   */
   readonly cdpPort?: number | undefined;
 }
 
@@ -64,6 +76,10 @@ const TERMINAL_FILES: Record<string, readonly [string, string]> = {
 const MAX_BODY = 1 << 26;
 // How long a group list from the browser is used for routing.
 const GROUPS_TTL_MS = 2_000;
+// How long a window snapshot waits after input, for the app to draw.
+const INPUT_SETTLE_MS = 200;
+// How long a window an agent drove stays at full frame rate (setWindowAwake).
+const AWAKE_MS = 60_000;
 
 const runtimeDir = () => process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`;
 
@@ -135,6 +151,23 @@ function threadTab(entry: BrowserTabEntry): ThreadTab {
   };
 }
 
+/** A window from the browser, as the shell relay reports one. */
+function windowEntry(window: DesktopWindow): NativeWindowEntry {
+  return { ...window, tag: window.tags[0] ?? "" };
+}
+
+/** A tab from the browser, as the shell relay reports one. */
+function tabEntry(tab: DesktopTab): BrowserTabEntry {
+  return {
+    ...tab,
+    contentId: "",
+    tag: tab.tags[0] ?? "",
+    dialogType: tab.dialogType ?? "",
+    dialogMessage: tab.dialogMessage ?? "",
+    dialogDefaultPrompt: tab.dialogDefaultPrompt ?? "",
+  };
+}
+
 export const TAB_COMMANDS = ["back", "forward", "reload", "stop"] as const;
 
 class HttpError extends Error {
@@ -151,6 +184,10 @@ function waitMsOf(value: unknown): number {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// type_window: key events per batch, and the pause between batches.
+const TYPE_BATCH = 64;
+const TYPE_BATCH_GAP_MS = 25;
 
 // The uid owning the local end of a loopback TCP connection, from the kernel's
 // socket table (the peer is on this host: we only listen on 127.0.0.1).
@@ -233,6 +270,13 @@ export class Daemon {
   readonly apps = new DesktopApps();
   readonly terminals: Terminals;
   readonly serverTabs: ServerTabs | null;
+  /** The browser's windows and tabs, if it has the Plutonium DevTools domain. */
+  readonly desktop: Desktop | null;
+  readonly pages: ThreadPages | null;
+  /** When each window last got input (windowInput). */
+  private readonly lastInput = new Map<number, number>();
+  /** Windows kept awake after input, with the timer that lets them sleep. */
+  private readonly awakeWindows = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -250,12 +294,20 @@ export class Daemon {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
     }));
-    this.serverTabs = options.cdpPort ? new ServerTabs(new BrowserCdp(options.cdpPort)) : null;
+    const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
+    this.serverTabs = cdp ? new ServerTabs(cdp) : null;
+    this.desktop = cdp ? new Desktop(cdp) : null;
+    this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
       this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
-      serverTabs.onPointer = (page, pointer) => this.relay.notify(page, "pointer", { ...pointer });
+      serverTabs.onPointer = (page, pointer) =>
+        // A tab the helper opened: whichever page shows it draws the cursor.
+        page === HELPER_PAGE
+          ? this.relay.notifyAll("pointer", { ...pointer })
+          : this.relay.notify(page, "pointer", { ...pointer });
       serverTabs.onOrphaned = (key) => this.relay.notifyAll("server_tab_orphaned", { ...key });
+      if (this.desktop) this.openServerTabs(serverTabs, this.desktop);
     }
     // Links a thread's apps open become tabs in the thread (opener.ts).
     try {
@@ -302,9 +354,37 @@ export class Daemon {
   // started it (its origin tag) and any a shell added it to. A thread's id is
   // its tag (t3:thread/<id>, plain:thread/<id>; see docs/SHELLS.md).
 
+  /** The browser's Plutonium domain, if it has one (else ask the shell). */
+  private async direct(): Promise<Desktop | null> {
+    return this.desktop && (await this.desktop.available()) ? this.desktop : null;
+  }
+
+  /** The direct way, or an error naming what's missing. */
+  private async requireDirect(what: string): Promise<Desktop> {
+    const desktop = await this.direct();
+    if (!desktop) {
+      throw new HttpError(
+        501,
+        `${what} needs the browser's Plutonium DevTools domain (a newer Plutonium Chromium, ` +
+          "and a helper started with --cdp-port).",
+      );
+    }
+    return desktop;
+  }
+
+  private async allWindows(): Promise<NativeWindowEntry[]> {
+    const desktop = await this.direct();
+    return desktop ? desktop.windows().map(windowEntry) : this.relay.windows();
+  }
+
+  private async allTabs(): Promise<BrowserTabEntry[]> {
+    const desktop = await this.direct();
+    return desktop ? desktop.tabs().map(tabEntry) : this.relay.tabs();
+  }
+
   /** The thread's windows, oldest first. */
   async threadWindows(threadId: string): Promise<NativeWindowEntry[]> {
-    const windows = await this.relay.windows();
+    const windows = await this.allWindows();
     return windows
       .filter((entry) => (entry.tags ? entry.tags.includes(threadId) : threadForPid(entry.pid) === threadId))
       .sort((a, b) => a.id - b.id);
@@ -352,7 +432,8 @@ export class Daemon {
     waitMs: number,
     show = false,
   ): Promise<{ pid: number; windows: ThreadWindow[] }> {
-    const before = this.relay.connected
+    const before =
+      this.relay.connected || (await this.direct())
       ? new Set((await this.threadWindows(threadId)).map((entry) => entry.id))
       : undefined;
     void this.gpu();
@@ -393,17 +474,26 @@ export class Daemon {
   /** Asks the app to close the window; waits up to `waitMs` for it to go. */
   async close(threadId: string, windowId: number, waitMs = 3_000): Promise<{ closed: boolean }> {
     await this.ownedWindow(threadId, windowId);
-    await this.ask(threadId, "close", { windowId });
+    const desktop = await this.direct();
+    if (desktop) await desktop.closeWindow(windowId);
+    else await this.ask(threadId, "close", { windowId });
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       await sleep(150);
-      if (!(await this.relay.windows()).some((entry) => entry.id === windowId)) return { closed: true };
+      if (!(await this.allWindows()).some((entry) => entry.id === windowId)) return { closed: true };
     }
     return { closed: false };
   }
 
   async snapshot(threadId: string, windowId: number): Promise<Buffer> {
     await this.ownedWindow(threadId, windowId);
+    const desktop = await this.direct();
+    if (desktop) {
+      // Right after input the app may not have drawn its answer yet.
+      const settle = (this.lastInput.get(windowId) ?? 0) + INPUT_SETTLE_MS - Date.now();
+      if (settle > 0) await new Promise((resolve) => setTimeout(resolve, settle));
+      return (await desktop.captureWindow(windowId)).data;
+    }
     const reply = await this.askRaw(threadId, "snapshot", { windowId }, 10_000);
     if (reply.kind !== "png") throw new HttpError(502, "The shell did not send an image.");
     return reply.data;
@@ -413,7 +503,7 @@ export class Daemon {
 
   /** The thread's tabs, oldest first. */
   async threadTabs(threadId: string): Promise<BrowserTabEntry[]> {
-    return (await this.relay.tabs())
+    return (await this.allTabs())
       .filter((tab) => (tab.tags ?? [tab.tag]).includes(threadId))
       .sort((a, b) => a.id - b.id);
   }
@@ -426,29 +516,43 @@ export class Daemon {
 
   /** Opens a tab for the thread; with `waitMs`, waits that long for it to load. */
   async openTab(threadId: string, url: string, focus: boolean, waitMs: number): Promise<ThreadTab> {
-    const tab = await this.ask<BrowserTabEntry>(threadId, "open_tab", { threadId, url });
+    const desktop = await this.direct();
+    const tab = desktop
+      ? tabEntry(await desktop.createTab(url, [threadId]).catch((error: Error) => {
+          throw new HttpError(400, error.message);
+        }))
+      : await this.ask<BrowserTabEntry>(threadId, "open_tab", { threadId, url });
     if (focus) await this.ask(threadId, "focus_tab", { tabId: tab.id }).catch(() => {});
     return threadTab(await this.waitForLoad(threadId, tab.id, waitMs));
   }
 
   async navigateTab(threadId: string, tabId: number, url: string, waitMs: number): Promise<ThreadTab> {
     await this.ownedTab(threadId, tabId);
-    await this.ask(threadId, "navigate_tab", { tabId, url });
+    const desktop = await this.direct();
+    if (desktop) {
+      await desktop.navigateTab(tabId, url).catch((error: Error) => {
+        throw new HttpError(400, error.message);
+      });
+    } else await this.ask(threadId, "navigate_tab", { tabId, url });
     return threadTab(await this.waitForLoad(threadId, tabId, waitMs));
   }
 
   async tabCommand(threadId: string, tabId: number, command: string, waitMs: number): Promise<ThreadTab> {
     await this.ownedTab(threadId, tabId);
-    await this.ask(threadId, "tab_command", { tabId, command });
+    const desktop = await this.direct();
+    if (desktop) await desktop.tabCommand(tabId, command as (typeof TAB_COMMANDS)[number]);
+    else await this.ask(threadId, "tab_command", { tabId, command });
     return threadTab(await this.waitForLoad(threadId, tabId, waitMs));
   }
 
   async closeTab(threadId: string, tabId: number): Promise<{ closed: boolean }> {
     await this.ownedTab(threadId, tabId);
-    await this.ask(threadId, "tab_command", { tabId, command: "close" });
+    const desktop = await this.direct();
+    if (desktop) await desktop.tabCommand(tabId, "close");
+    else await this.ask(threadId, "tab_command", { tabId, command: "close" });
     for (let i = 0; i < 20; i++) {
       await sleep(100);
-      if (!(await this.relay.tabs()).some((tab) => tab.id === tabId)) return { closed: true };
+      if (!(await this.allTabs()).some((tab) => tab.id === tabId)) return { closed: true };
     }
     return { closed: false };
   }
@@ -456,7 +560,9 @@ export class Daemon {
   async answerDialog(threadId: string, tabId: number, accept: boolean, text: string): Promise<ThreadTab> {
     const tab = await this.ownedTab(threadId, tabId);
     if (!tab.dialogType) throw new HttpError(409, `Tab ${tabId} has no dialog open.`);
-    await this.ask(threadId, "answer_dialog", { tabId, accept, text });
+    const desktop = await this.direct();
+    if (desktop) await desktop.answerTabDialog(tabId, accept, text);
+    else await this.ask(threadId, "answer_dialog", { tabId, accept, text });
     await sleep(150);
     return threadTab(await this.ownedTab(threadId, tabId));
   }
@@ -468,9 +574,282 @@ export class Daemon {
 
   async snapshotTab(threadId: string, tabId: number): Promise<Buffer> {
     await this.ownedTab(threadId, tabId);
+    const desktop = await this.direct();
+    if (desktop) return (await desktop.captureTab(tabId)).data;
     const reply = await this.askRaw(threadId, "snapshot_tab", { tabId }, 10_000);
     if (reply.kind !== "png") throw new HttpError(502, "The shell did not send an image.");
     return reply.data;
+  }
+
+  // Driving windows: mouse and keys from agents, straight into the app. Points
+  // are in snapshot_window's pixels (the window's DIPs times its scale).
+
+  /**
+   * The server's tabs no shell page shows: the helper opens them itself
+   * (serverTabs.ts, "open"), straight from the browser, so the server needn't
+   * wait for a page. Without the Plutonium domain the server waits as before.
+   */
+  private openServerTabs(serverTabs: ServerTabs, desktop: Desktop): void {
+    const opening = new Set<string>();
+    serverTabs.onOpen = (key, tag) => {
+      const id = `${key.threadId}\u0000${key.tabId}`;
+      if (opening.has(id)) return;
+      opening.add(id);
+      void (async () => {
+        if (!(await desktop.available())) return;
+        const tab = await desktop.createTab("about:blank", [tag]);
+        const shownTabId = serverTabs.attach(
+          key,
+          {
+            targetId: tab.targetId,
+            browserTabId: tab.id,
+            page: HELPER_PAGE,
+            url: () => desktop.tab(tab.id)?.url ?? "",
+            title: () => desktop.tab(tab.id)?.title ?? "",
+          },
+          (other) => other === HELPER_PAGE || this.relay.has(other),
+        );
+        // A shell page showed it meanwhile: that page's tab is the one.
+        if (shownTabId !== tab.id) await desktop.tabCommand(tab.id, "close");
+      })()
+        .catch((error: Error) => console.warn(`plutoniumd: can't open the server's tab: ${error.message}`))
+        .finally(() => opening.delete(id));
+    };
+    serverTabs.onClose = (_key, browserTabId) => {
+      void desktop.tabCommand(browserTabId, "close").catch(() => {});
+    };
+    // The user closed one: the server's tab is gone.
+    desktop.changeListeners.add(() => {
+      for (const { key, browserTabId } of serverTabs.pageTabs(HELPER_PAGE)) {
+        if (!desktop.tab(browserTabId)) serverTabs.detach(key, HELPER_PAGE);
+      }
+    });
+  }
+
+  /**
+   * A window no page shows draws a frame a second: while an agent drives it,
+   * keep it drawing at full rate, until it's left alone for AWAKE_MS.
+   */
+  private keepAwake(desktop: Desktop, windowId: number): void {
+    const timer = this.awakeWindows.get(windowId);
+    if (timer) clearTimeout(timer);
+    else void desktop.setWindowAwake(windowId, true).catch(() => {});
+    const expiry = setTimeout(() => {
+      this.awakeWindows.delete(windowId);
+      this.lastInput.delete(windowId);
+      void desktop.setWindowAwake(windowId, false).catch(() => {});
+    }, AWAKE_MS);
+    expiry.unref();
+    this.awakeWindows.set(windowId, expiry);
+  }
+
+  async windowInput(threadId: string, windowId: number, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const desktop = await this.requireDirect("Driving windows");
+    await this.ownedWindow(threadId, windowId);
+    this.keepAwake(desktop, windowId);
+    const window = desktop.window(windowId);
+    const scale = window?.deviceScaleFactor || 1;
+    const point = (value: unknown, name: string): [number, number] => {
+      if (!Array.isArray(value) || value.length !== 2 || !value.every((n) => typeof n === "number" && Number.isFinite(n))) {
+        throw new HttpError(400, `${name} must be [x, y].`);
+      }
+      return [value[0] / scale, value[1] / scale];
+    };
+    const at = () => point([body.x, body.y], "x and y");
+    const button = (() => {
+      const value = body.button ?? "left";
+      if (value !== "left" && value !== "right" && value !== "middle") {
+        throw new HttpError(400, "button must be left, right or middle.");
+      }
+      return value;
+    })();
+    const held = { left: 1, right: 2, middle: 4 }[button];
+    const send = (event: Parameters<Desktop["mouse"]>[1]) =>
+      desktop.mouse(windowId, event).catch((error: Error) => {
+        throw new HttpError(409, error.message);
+      });
+    const keys = (events: ReturnType<typeof textKeys>) =>
+      desktop.keys(windowId, events).catch((error: Error) => {
+        throw new HttpError(409, error.message);
+      });
+    switch (body.action) {
+      case "move": {
+        const [x, y] = at();
+        await send({ type: "mouseMoved", x, y });
+        break;
+      }
+      case "click": {
+        const [x, y] = at();
+        const count = body.count === 2 || body.count === 3 ? body.count : 1;
+        await send({ type: "mouseMoved", x, y });
+        for (let click = 1; click <= count; click++) {
+          await send({ type: "mousePressed", x, y, button, buttons: held, clickCount: click });
+          await send({ type: "mouseReleased", x, y, button, buttons: 0, clickCount: click });
+        }
+        break;
+      }
+      case "drag": {
+        const [fromX, fromY] = point(body.from, "from");
+        const [toX, toY] = point(body.to, "to");
+        await send({ type: "mouseMoved", x: fromX, y: fromY });
+        await send({ type: "mousePressed", x: fromX, y: fromY, button, buttons: held, clickCount: 1 });
+        const steps = 12;
+        for (let step = 1; step <= steps; step++) {
+          await sleep(16);
+          await send({
+            type: "mouseMoved",
+            x: fromX + ((toX - fromX) * step) / steps,
+            y: fromY + ((toY - fromY) * step) / steps,
+            buttons: held,
+          });
+        }
+        await send({ type: "mouseReleased", x: toX, y: toY, button, buttons: 0, clickCount: 1 });
+        break;
+      }
+      case "scroll": {
+        const [x, y] = at();
+        const deltaX = typeof body.dx === "number" ? body.dx : 0;
+        const deltaY = typeof body.dy === "number" ? body.dy : 0;
+        await send({ type: "mouseMoved", x, y });
+        await send({ type: "mouseWheel", x, y, deltaX, deltaY });
+        break;
+      }
+      case "type": {
+        if (typeof body.text !== "string") throw new HttpError(400, "text is required.");
+        let events;
+        try {
+          events = textKeys(body.text);
+        } catch (error) {
+          throw new HttpError(400, (error as Error).message);
+        }
+        // In batches, so a long text doesn't hold the keyboard all at once, and
+        // apart: Exo drops a client that can't keep up (a busy LibreOffice died
+        // of a poem typed back to back). Each batch is a focus blip
+        // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
+        // what fills a field.
+        for (let i = 0; i < events.length; i += TYPE_BATCH) {
+          if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
+          await keys(events.slice(i, i + TYPE_BATCH));
+        }
+        break;
+      }
+      case "press": {
+        const combos = Array.isArray(body.keys) ? body.keys : [body.keys];
+        if (!combos.every((combo) => typeof combo === "string" && combo)) {
+          throw new HttpError(400, "keys must be a key combination or a list of them.");
+        }
+        let events;
+        try {
+          events = (combos as string[]).flatMap(comboKeys);
+        } catch (error) {
+          throw new HttpError(400, (error as Error).message);
+        }
+        await keys(events);
+        break;
+      }
+      case "resize": {
+        if (typeof body.width !== "number" || typeof body.height !== "number") {
+          throw new HttpError(400, "width and height are required.");
+        }
+        await desktop.resizeWindow(windowId, Math.round(body.width), Math.round(body.height)).catch((error: Error) => {
+          throw new HttpError(409, error.message);
+        });
+        break;
+      }
+      default:
+        throw new HttpError(400, "action must be move, click, drag, scroll, type, press or resize.");
+    }
+    return {};
+  }
+
+  // Driving pages: Playwright on the thread's tabs (pages.ts). Elements are
+  // found by the refs a page snapshot gives ("e12") or by a Playwright selector.
+
+  async pageAction(threadId: string, tabId: number, body: Record<string, unknown>): Promise<unknown> {
+    await this.requireDirect("Driving pages");
+    if (!this.pages) throw new HttpError(501, "No DevTools port.");
+    await this.ownedTab(threadId, tabId);
+    const page = await this.pages.page(threadId, tabId);
+    const timeout = typeof body.timeoutMs === "number" ? Math.min(Math.max(body.timeoutMs, 0), 60_000) : 10_000;
+    const target = () => {
+      if (typeof body.ref === "string" && body.ref) return page.locator(`aria-ref=${body.ref}`);
+      if (typeof body.selector === "string" && body.selector) return page.locator(body.selector);
+      throw new HttpError(400, "ref (from a snapshot) or selector is required.");
+    };
+    const state = async () => ({ url: page.url(), title: await page.title().catch(() => "") });
+    try {
+      switch (body.action) {
+        case "snapshot":
+          return { ...(await state()), snapshot: await page.ariaSnapshot({ mode: "ai", timeout }) };
+        case "click": {
+          const button = body.button === "right" || body.button === "middle" ? body.button : "left";
+          const locator = target();
+          if (body.double === true) await locator.dblclick({ button, timeout });
+          else await locator.click({ button, timeout });
+          break;
+        }
+        case "hover":
+          await target().hover({ timeout });
+          break;
+        case "type": {
+          if (typeof body.text !== "string") throw new HttpError(400, "text is required.");
+          const locator = target();
+          if (body.slowly === true) await locator.pressSequentially(body.text, { timeout });
+          else await locator.fill(body.text, { timeout });
+          if (body.submit === true) await locator.press("Enter", { timeout });
+          break;
+        }
+        case "select": {
+          const values = Array.isArray(body.values) ? body.values.map(String) : [String(body.values ?? "")];
+          await target().selectOption(values, { timeout });
+          break;
+        }
+        case "press": {
+          if (typeof body.key !== "string" || !body.key) throw new HttpError(400, "key is required.");
+          await page.keyboard.press(body.key);
+          break;
+        }
+        case "scroll": {
+          const dx = typeof body.dx === "number" ? body.dx : 0;
+          const dy = typeof body.dy === "number" ? body.dy : 0;
+          if (typeof body.ref === "string" || typeof body.selector === "string") await target().hover({ timeout });
+          await page.mouse.wheel(dx, dy);
+          break;
+        }
+        case "evaluate": {
+          if (typeof body.expression !== "string" || !body.expression) throw new HttpError(400, "expression is required.");
+          // An expression, or a function's source (called with the element,
+          // given a target), as Playwright takes them; not subject to the page's CSP.
+          const value =
+            typeof body.ref === "string" || typeof body.selector === "string"
+              ? await target().evaluate(body.expression, undefined, { timeout })
+              : await page.evaluate(body.expression);
+          return { ...(await state()), value: value === undefined ? null : value };
+        }
+        case "wait_for": {
+          if (typeof body.text === "string" && body.text) {
+            await page.getByText(body.text).first().waitFor({ state: "visible", timeout });
+          } else if (typeof body.text_gone === "string" && body.text_gone) {
+            await page.getByText(body.text_gone).first().waitFor({ state: "hidden", timeout });
+          } else if (typeof body.selector === "string" && body.selector) {
+            await page.locator(body.selector).first().waitFor({ state: "visible", timeout });
+          } else {
+            await page.waitForLoadState("load", { timeout });
+          }
+          break;
+        }
+        default:
+          throw new HttpError(
+            400,
+            "action must be snapshot, click, hover, type, select, press, scroll, evaluate or wait_for.",
+          );
+      }
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      // Playwright's messages say what went wrong (no such element, timeout).
+      throw new HttpError(409, (error as Error).message.split("\n").slice(0, 6).join("\n"));
+    }
+    return state();
   }
 
   // A navigation starts asynchronously: give it a moment to begin, then wait
@@ -585,7 +964,7 @@ export class Daemon {
         const shownTabId = this.serverTabs.attach(
           { threadId, tabId },
           { targetId, browserTabId, page, url: () => shown.url, title: () => shown.title },
-          (other) => this.relay.has(other),
+          (other) => other === HELPER_PAGE || this.relay.has(other),
         );
         return sendJson(response, 200, { browserTabId: shownTabId });
       }
@@ -606,6 +985,8 @@ export class Daemon {
         shellConnected: this.relay.connected,
         shells: this.relay.shells(),
         serverTabs: this.serverTabs !== null,
+        // Windows and tabs straight from the browser (else through a shell).
+        direct: (await this.direct()) !== null,
         gpu: await this.gpu(),
       });
     }
@@ -671,6 +1052,28 @@ export class Daemon {
     }
 
     if (local) {
+      // The agent bridge's tools for a frontend's own MCP server (T3 Code
+      // offers the window tools to every provider's agents with its own).
+      if (method === "GET" && path === "/v1/mcp/tools") {
+        return sendJson(response, 200, { tools: mcpTools(url.searchParams.get("set") ?? undefined) });
+      }
+      const mcpCall = path.match(/^\/v1\/threads\/([^/]+)\/mcp\/call$/);
+      if (method === "POST" && mcpCall) {
+        const { name, arguments: args } = await readJson(request);
+        if (typeof name !== "string") throw new HttpError(400, "name is required.");
+        const threadId = decodeURIComponent(mcpCall[1]!);
+        try {
+          const content = await callTool(
+            name,
+            args && typeof args === "object" ? (args as Record<string, unknown>) : {},
+            this.options.socketPath,
+            threadId,
+          );
+          return sendJson(response, 200, { content });
+        } catch (error) {
+          return sendJson(response, 200, { content: [{ type: "text", text: (error as Error).message }], isError: true });
+        }
+      }
       const tabs = path.match(/^\/v1\/threads\/([^/]+)\/tabs$/);
       if (tabs) {
         const threadId = decodeURIComponent(tabs[1]!);
@@ -719,6 +1122,7 @@ export class Daemon {
             );
           }
           if (what === "close") return sendJson(response, 200, await this.closeTab(threadId, tabId));
+          if (what === "page") return sendJson(response, 200, await this.pageAction(threadId, tabId, body));
         }
       }
       const windows = path.match(/^\/v1\/threads\/([^/]+)\/windows$/);
@@ -726,7 +1130,7 @@ export class Daemon {
         const threadId = decodeURIComponent(windows[1]!);
         return sendJson(response, 200, (await this.threadWindows(threadId)).map(threadWindow));
       }
-      const action = path.match(/^\/v1\/threads\/([^/]+)\/windows\/(\d+)\/(focus|close|snapshot)$/);
+      const action = path.match(/^\/v1\/threads\/([^/]+)\/windows\/(\d+)\/(focus|close|snapshot|input)$/);
       if (action) {
         const threadId = decodeURIComponent(action[1]!);
         const windowId = Number(action[2]);
@@ -741,6 +1145,13 @@ export class Daemon {
         }
         if (method === "POST" && action[3] === "close") {
           return sendJson(response, 200, await this.close(threadId, windowId));
+        }
+        if (method === "POST" && action[3] === "input") {
+          try {
+            return sendJson(response, 200, await this.windowInput(threadId, windowId, await readJson(request)));
+          } finally {
+            this.lastInput.set(windowId, Date.now());
+          }
         }
       }
     }
@@ -907,6 +1318,7 @@ export class Daemon {
 
   stop(): void {
     this.terminals.closeAll();
+    this.pages?.closeAll();
     for (const server of this.servers) server.close();
     this.threads.shutdown();
     try {
