@@ -153,13 +153,16 @@ image_cmd() {
   local ref=$PREBUILT_REPO:$PREBUILT_TAG
   case "${1:-}" in
     build)
-      need_container
+      # In the build container: it has strip and the Chromium checkout, and
+      # the prebuilt image (CONTAINER with PREBUILT=1) has neither.
+      container_running "$BUILD_CONTAINER" ||
+        die "the build container '$BUILD_CONTAINER' is not running (plutonium container create, without PREBUILT=1; or set BUILD_CONTAINER)"
       local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT stage=$DATA_DIR/image-stage
       [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
       stage_release "$out" "$stage"
-      in_container sh -c "strip --strip-unneeded '$stage/chrome/chrome' '$stage/chrome/chrome_crashpad_handler' '$stage'/chrome/*.so*"
+      in_build_container sh -c "strip --strip-unneeded '$stage/chrome/chrome' '$stage/chrome/chrome_crashpad_handler' '$stage'/chrome/*.so*"
       # Chromium's license notices, which redistributing it requires.
-      in_container sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir $CHROMIUM_RELEASE_OUT '$stage/chrome/LICENSES.chromium.html'" ||
+      in_build_container sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir $CHROMIUM_RELEASE_OUT '$stage/chrome/LICENSES.chromium.html'" ||
         echo "warning: could not generate LICENSES.chromium.html" >&2
       cp "$ROOT/container/Containerfile.runtime" "$stage/Containerfile"
       du -sh "$stage/chrome"
