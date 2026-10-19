@@ -31,7 +31,9 @@ Separators left at either end or doubled go too, and a menu with nothing left is
 
 **The shell library draws it for niri and the plain shell**, as a popover (so it is above fullscreen elements too), with arrow keys, Enter, Escape, submenus and press-drag-release. Its look comes from custom properties each shell sets: `--plutonium-menu-bg`, `-fg`, `-border`, `-radius`, `-shadow`, `-backdrop`, `-font`, `-hover-bg`, `-hover-fg`, `-separator`. It closes on a click elsewhere, a key that isn't the menu's, an app or tab taking the keyboard, or the shell being hidden. `connect({ contextMenu: false })` leaves the menus to Chrome; `contextMenu: (request) => true` draws them yourself.
 
-T3 Code doesn't use the shell library for this, so it gets Chrome's menu, filtered.
+T3 Code loads the shell library too, so its menus are the library's.
+
+**Focus.** While the shell shows a tab's menu, the shell page has the keyboard, so the menu's arrow keys work. Before Chrome runs the chosen item, the tab gets back its focus, with the frame and element it had (`chromium/patches/0026-*.patch`). Spelling suggestions, paste, cut, undo, delete and select all act on the focused frame. Before this they ran against nothing, and picking a suggestion did nothing, because the shell's `focus()` on the `<embed>` reaches the browser after `closeContextMenu()`. Copy link address and Open link in new tab didn't depend on focus, and worked.
 
 ## Keys
 
@@ -76,7 +78,14 @@ On Xvfb (slot 6 of a worktree, niri at startup and the plain shell behind it), w
 | Alt+Left and Alt+Right in a tab | ✓ |
 | Ctrl+Shift+= and Ctrl+Space reach the tab's page; the UI scale stays | ✓ |
 
-Not tested: DRM, T3 Code, the status bubble, a real game with the keys, a shell page's own text field in a docked-DevTools layout.
+On DRM (tty6, slot 8 of a worktree, T3 Code, DPR 1.78, a uinput mouse), 2026-10-20, with patch 0026:
+
+| | |
+|---|---|
+| A tab's link: "Copy link address" and "Open link in new tab" from the menu (also without 0026) | ✓ |
+| claude.ai's message box: right-click "recieve", pick "receive"; the word is replaced and the box keeps focus (did nothing without 0026) | ✓ |
+
+Not tested: the status bubble, a real game with the keys, a shell page's own text field in a docked-DevTools layout.
 
 ## Not done
 
