@@ -185,6 +185,10 @@ function waitMsOf(value: unknown): number {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// type_window: key events per batch, and the pause between batches.
+const TYPE_BATCH = 64;
+const TYPE_BATCH_GAP_MS = 25;
+
 // The uid owning the local end of a loopback TCP connection, from the kernel's
 // socket table (the peer is on this host: we only listen on 127.0.0.1).
 function loopbackPeerUid(peerPort: number, ourPort: number): number | undefined {
@@ -718,8 +722,15 @@ export class Daemon {
         } catch (error) {
           throw new HttpError(400, (error as Error).message);
         }
-        // In batches, so a long text doesn't hold the keyboard all at once.
-        for (let i = 0; i < events.length; i += 64) await keys(events.slice(i, i + 64));
+        // In batches, so a long text doesn't hold the keyboard all at once, and
+        // apart: Exo drops a client that can't keep up (a busy LibreOffice died
+        // of a poem typed back to back). Each batch is a focus blip
+        // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
+        // what fills a field.
+        for (let i = 0; i < events.length; i += TYPE_BATCH) {
+          if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
+          await keys(events.slice(i, i + TYPE_BATCH));
+        }
         break;
       }
       case "press": {

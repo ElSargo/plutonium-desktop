@@ -151,7 +151,8 @@ const TOOLS = [
     description:
       "Type text into one of this thread's windows, as from a keyboard (into whatever in the window has the " +
       "keyboard: click a field first). The window gets the keys even if the user is typing elsewhere; their " +
-      "keyboard stays where it is. Keys are a US keyboard's: other characters are refused. \n presses Enter.",
+      "keyboard stays where it is. Keys are a US keyboard's: other characters are refused. \n presses Enter; " +
+      "after an Enter that should move the focus (a toolbar box, a dialog field), click where the next text goes.",
     inputSchema: {
       type: "object",
       properties: { window_id: pointProperties.window_id, text: { type: "string" } },
@@ -163,7 +164,7 @@ const TOOLS = [
     name: "press_window",
     description:
       'Press keys in one of this thread\'s windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", ' +
-      '"Down", or a list of them pressed in turn.',
+      '"Down", "ctrl+]", or a list of them pressed in turn.',
     inputSchema: {
       type: "object",
       properties: {

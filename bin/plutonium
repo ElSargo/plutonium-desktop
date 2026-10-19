@@ -541,7 +541,11 @@ t3_start() {
     [[ -f .env ]] && { set -a; . ./.env; set +a; }
     # Under a supervisor that picks the host: Settings, Connections, Network
     # access in the shell switches it (lib/t3-server.sh).
-    setsid env PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+    # Its own session's helper, not the one of a session this was started
+    # from (a terminal or an agent in a thread has a thread's variables).
+    setsid env -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
+      PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+      PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" \
       PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
       ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
       bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser \
@@ -716,6 +720,9 @@ run_cmd() {
   export ORIGINS=$(IFS=,; echo "${origins[*]}")
   rest=("${entries[@]:1}")
   export SHELLS=$(IFS='|'; echo "${rest[*]}")
+  # Started from a thread of another session: none of its variables apply here.
+  unset PLUTONIUM_HELPER PLUTONIUM_THREAD_ID PLUTONIUM_OPENERS PLUTONIUM_SHOW PLUTONIUM_WAYLAND_DISPLAY \
+    PLUTONIUM_T3 PLUTONIUM_T3_SUPERVISED PLUTONIUM_T3_HOST_PINNED
   exec "$ROOT/lib/session.sh"
 }
 

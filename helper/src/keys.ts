@@ -162,6 +162,11 @@ export function comboKeys(combo: string): WindowKeyEvent[] {
   }
   // A KeyboardEvent.code as it is.
   if (!code && /^[A-Z][A-Za-z0-9]+$/.test(key)) code = key;
-  if (!code) throw new Error(`Unknown key "${key}".`);
+  if (!code) {
+    throw new Error(
+      `Unknown key "${key}": use a character ("]", "a"), a name (Enter, Tab, Home, Up, F5, ...) ` +
+        'or a KeyboardEvent.code ("BracketRight", "KeyA").',
+    );
+  }
   return stroke(code, modifiers);
 }
