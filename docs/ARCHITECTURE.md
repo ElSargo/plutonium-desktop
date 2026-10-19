@@ -81,6 +81,7 @@
 | Drag and drop | [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md) |
 | Window sizing, `object-fit`, cross-fade, `windowrequest` | [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md) |
 | Links as tabs in their thread | [features/OPENING_LINKS.md](features/OPENING_LINKS.md) |
+| Screenshots, screen sharing, recording (design) | [features/CAPTURE.md](features/CAPTURE.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |
 | The helper's HTTP API and shell library | [../helper/README.md](../helper/README.md) |
