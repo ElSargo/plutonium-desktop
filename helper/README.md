@@ -8,12 +8,13 @@ What it does:
 - **Launching apps** into a thread, optionally waiting for the app's window.
 - **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
+- **The backup terminal.** A page (`/v1/terminal/`) with tabs of login shells on this machine, for Ash's switcher to open when no shell works (`src/terminal.ts`, `src/ptybridge.py`, `web/terminal/`, xterm.js in `web/vendor/xterm/`). Each session is `$SHELL` on a pty, made by Python's `pty` module, in the thread `plutonium:terminal`. Needs `python3`.
 - **Server-driven tabs.** A frontend's server can drive the tabs the shell shows for it over the DevTools protocol, as T3 Code drives its desktop app's tabs with Playwright (`src/serverTabs.ts`, `docs/features/TABS.md`). The helper connects to the browser's own DevTools (`--cdp-port`) and gives the server one relay per tab, which reaches that tab's page and nothing else.
 
 ## Running
 
 ```
-node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3774[,<origin>…] \
+node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3773[,<origin>…] \
   [--wayland-display wayland-plutonium] [--port 3780] [--cdp-port 9224]
 ```
 
@@ -67,6 +68,19 @@ Shared (socket and shell):
 | `GET /v1/apps` | launchable desktop apps (`.desktop` entries from the XDG data dirs): `{id, name, genericName, comment, keywords, categories, hasIcon, terminal}`, by name |
 | `GET /v1/apps/<id>/icon` | the app's icon (SVG or PNG; themes `PLUTONIUM_ICON_THEME`, breeze, hicolor, Adwaita) |
 | `POST /v1/apps/launch {thread, id, waitMs?, show?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot); shown unless `show: false` |
+
+The backup terminal. Its page and scripts (`GET /v1/terminal/`, `terminal.js`, `terminal.css`, `xterm.js`, `xterm.css`, `addon-fit.js`) are public and can't be framed. Its sessions are for the socket, or for this user's same-origin requests on the port: `Sec-Fetch-Site: same-origin`, which other pages can't send.
+
+| Request | Answer |
+|---|---|
+| `GET /v1/terminal/sessions` | `[{id, alive, createdAt}]` |
+| `POST /v1/terminal/sessions {rows, cols}` | `{id}`: a new session (at most 32) |
+| `GET /v1/terminal/sessions/<id>/stream` | EventSource: `data` events (JSON strings of output, the scrollback first, up to 512 K characters), then `exit` (the status) |
+| `POST /v1/terminal/sessions/<id>/input` | the body, as typed |
+| `POST /v1/terminal/sessions/<id>/resize {rows, cols}` | |
+| `POST /v1/terminal/sessions/<id>/close` | hangs up |
+
+A session nobody watches for 30 s is hung up.
 
 Socket only (the agent bridge; `<thread>` is the caller's thread):
 

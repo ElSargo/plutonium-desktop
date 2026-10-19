@@ -29,6 +29,7 @@ The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `
   - `T3_TAILSCALE=1` (in `plutonium.env`): Tailscale Serve publishes the server at `https://<machine>.<tailnet>.ts.net` while it runs (on 443; slot N on 8443 + 100 × N, or `T3_TAILSCALE_PORT`). The server stays on loopback, and Settings, Connections shows the pairing link's QR code for that address. It needs tailscaled running, and `sudo tailscale set --operator=$USER` so the server can configure Serve.
   - `plutonium t3 pair --tailscale`: a QR code over your tailnet, in the terminal.
   - `T3_HOST=0.0.0.0` with `plutonium t3 pair`: a QR code on your network.
+  - **Settings, Connections, Network access** in the shell (patch 0016): the switch T3's desktop app has. The launcher runs the server under `lib/t3-server.sh`, which binds it to 0.0.0.0 or 127.0.0.1 from `$T3_HOME/plutonium-network-access`. Switching saves the choice there and restarts the server (running agents stop, as in the desktop app), and the shell stays signed in. Then Authorized clients makes pairing links and QR codes for the LAN address, for phones, browsers and other T3 Code apps (Add environment). `T3_HOST` pins the host, and the switch is then disabled. The machine's firewall must let `T3_PORT` (3773, as for T3's desktop app) in.
 
 The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
 
@@ -48,6 +49,7 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0013 | In a browser, Settings, Connections pairs over the addresses the server reports (its tailnet and LAN addresses, and its Tailscale Serve name), so the shell on loopback can show a QR code |
 | 0014 | A page's popup (an OAuth sign-in window) is shown as a new panel tab that keeps `window.opener`, and closes with it |
 | 0015 | What the user starts comes to the front: apps from a terminal (not setup or settle scripts) or the launcher open in the thread's panel with the keyboard. In another thread, they wait in its panel. What agents open waits, and a toast with Show says so while its thread is open |
+| 0016 | Network access from the shell's Settings, Connections: the server, in a Plutonium session, saves the choice and restarts under the launcher's supervisor on the other host; the session cookie keeps its name |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

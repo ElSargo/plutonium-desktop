@@ -34,6 +34,7 @@ import {
 } from "./relay.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ServerTabs } from "./serverTabs.ts";
+import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import { showsForPids, threadForPid, threadsForPids, Threads } from "./threads.ts";
 
 export interface DaemonOptions {
@@ -51,6 +52,15 @@ const HELPER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHELL_LIBRARY =
   process.env.PLUTONIUM_SHELL_LIBRARY || join(HELPER_ROOT, "web", "plutonium-shell.js");
 const CLI = join(HELPER_ROOT, "plutonium.ts");
+// The backup terminal's page (terminal.ts), public like the shell library.
+const TERMINAL_FILES: Record<string, readonly [string, string]> = {
+  "/v1/terminal/": [join(HELPER_ROOT, "web", "terminal", "index.html"), "text/html; charset=utf-8"],
+  "/v1/terminal/terminal.js": [join(HELPER_ROOT, "web", "terminal", "terminal.js"), "text/javascript"],
+  "/v1/terminal/terminal.css": [join(HELPER_ROOT, "web", "terminal", "terminal.css"), "text/css"],
+  "/v1/terminal/xterm.js": [join(HELPER_ROOT, "web", "vendor", "xterm", "xterm.js"), "text/javascript"],
+  "/v1/terminal/xterm.css": [join(HELPER_ROOT, "web", "vendor", "xterm", "xterm.css"), "text/css"],
+  "/v1/terminal/addon-fit.js": [join(HELPER_ROOT, "web", "vendor", "xterm", "addon-fit.js"), "text/javascript"],
+};
 const MAX_BODY = 1 << 26;
 // How long a group list from the browser is used for routing.
 const GROUPS_TTL_MS = 2_000;
@@ -198,7 +208,7 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   response.end(JSON.stringify(value));
 }
 
-/** An http(s) origin as browsers send it ("http://127.0.0.1:3774"). */
+/** An http(s) origin as browsers send it ("http://127.0.0.1:3773"). */
 function isOrigin(value: unknown): value is string {
   if (typeof value !== "string") return false;
   try {
@@ -221,6 +231,7 @@ export class Daemon {
   readonly threads: Threads;
   readonly relay = new ShellRelay();
   readonly apps = new DesktopApps();
+  readonly terminals: Terminals;
   readonly serverTabs: ServerTabs | null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
@@ -232,6 +243,13 @@ export class Daemon {
   constructor(options: DaemonOptions) {
     this.options = options;
     this.threads = new Threads(options.waylandDisplay, options.socketPath);
+    this.terminals = new Terminals(() => ({
+      ...process.env,
+      // Typed in by the user: what it starts is shown.
+      ...this.threads.environment(TERMINAL_THREAD, { show: true }),
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+    }));
     this.serverTabs = options.cdpPort ? new ServerTabs(new BrowserCdp(options.cdpPort)) : null;
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
@@ -489,6 +507,11 @@ export class Daemon {
     const method = request.method ?? "GET";
     const path = url.pathname;
 
+    if (path === "/v1/terminal" || path.startsWith("/v1/terminal/")) {
+      await this.handleTerminal(request, response, url, local);
+      return;
+    }
+
     if (!local) {
       // The shell library is public: any page may load it, only the shell can use it.
       if (method === "GET" && path === "/v1/shell.js") {
@@ -724,6 +747,101 @@ export class Daemon {
     throw new HttpError(404, "Not found.");
   }
 
+  // The backup terminal. Its page is public; its sessions are for this user's
+  // processes, and for the page itself: a same-origin request from this
+  // origin (other pages can't send one, nor make Sec-Fetch-Site say so).
+  private async handleTerminal(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    local: boolean,
+  ): Promise<void> {
+    const method = request.method ?? "GET";
+    const path = url.pathname;
+    if (method === "GET" && path === "/v1/terminal") {
+      response.writeHead(308, { Location: "/v1/terminal/" }).end();
+      return;
+    }
+    const file = TERMINAL_FILES[path];
+    if (method === "GET" && file) {
+      response.writeHead(200, {
+        "Content-Type": file[1],
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": "frame-ancestors 'none'",
+        "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.end(readFileSync(file[0]));
+      return;
+    }
+    if (!local) {
+      const uid = loopbackPeerUid(request.socket.remotePort ?? 0, this.options.port);
+      const origin = request.headers.origin;
+      if (
+        uid !== process.getuid?.() ||
+        request.headers["sec-fetch-site"] !== "same-origin" ||
+        (origin !== undefined && origin !== `http://127.0.0.1:${this.options.port}`)
+      ) {
+        throw new HttpError(403, "Only the terminal page may use this.");
+      }
+    }
+    const sizeOf = (body: Record<string, unknown>) => ({
+      rows: typeof body.rows === "number" ? body.rows : 24,
+      cols: typeof body.cols === "number" ? body.cols : 80,
+    });
+    if (path === "/v1/terminal/sessions") {
+      if (method === "GET") return sendJson(response, 200, this.terminals.list());
+      if (method === "POST") {
+        const { rows, cols } = sizeOf(await readJson(request));
+        try {
+          return sendJson(response, 200, { id: this.terminals.create(rows, cols).id });
+        } catch (error) {
+          throw new HttpError(429, (error as Error).message);
+        }
+      }
+    }
+    const match = path.match(/^\/v1\/terminal\/sessions\/([\w-]+)\/(stream|input|resize|close)$/);
+    const session = match ? this.terminals.get(match[1]!) : undefined;
+    if (match && !session) throw new HttpError(404, "No such terminal.");
+    if (session && method === "GET" && match![2] === "stream") {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+      });
+      const stop = session.listen((event) => {
+        response.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+      });
+      const heartbeat = setInterval(() => response.write(": \n\n"), 15_000);
+      request.socket.setNoDelay(true);
+      response.once("close", () => {
+        clearInterval(heartbeat);
+        stop();
+      });
+      return;
+    }
+    if (session && method === "POST") {
+      switch (match![2]) {
+        case "input":
+          session.input((await readBody(request)).toString("utf8"));
+          break;
+        case "resize": {
+          const { rows, cols } = sizeOf(await readJson(request));
+          session.resize(rows, cols);
+          break;
+        }
+        case "close":
+          session.close();
+          break;
+        default:
+          throw new HttpError(404, "Not found.");
+      }
+      response.writeHead(204).end();
+      return;
+    }
+    throw new HttpError(404, "Not found.");
+  }
+
   private serve(local: boolean): Server {
     const server = createServer((request, response) => {
       this.handle(request, response, local).catch((error: unknown) => {
@@ -788,6 +906,7 @@ export class Daemon {
   }
 
   stop(): void {
+    this.terminals.closeAll();
     for (const server of this.servers) server.close();
     this.threads.shutdown();
     try {

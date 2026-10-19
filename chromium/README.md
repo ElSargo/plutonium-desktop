@@ -3,7 +3,7 @@
 Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland server (Exo), built as a Linux ChromeOS (`target_os = "chromeos"`) that runs on an ordinary Linux machine.
 
 - **`BASE`**: the upstream commit the patches apply to. It is `9f2eedcd653d` (2026-10-14, Chrome 158.0.8106.0).
-- **`patches/`**: the patch series, in order (`git am`). Together they change 218 files (about 15,200 lines).
+- **`patches/`**: the patch series, in order (`git am`). Together they change 223 files (about 17,500 lines).
 - **`args.gn`**: the build arguments.
 
 `plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [INSTALL.md](../INSTALL.md).
@@ -34,6 +34,8 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0020 | The box is where the window is (the app's frame stretched to it until it answers a resize); `crossfade-easing`, and niri's cross-fade; no fade on a window's first size | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 | 0021 | Seat management through logind (`--plutonium-logind-session`): devices from `TakeDevice`, given up and taken back across VT switches; Ctrl+Alt+F1…F12 and Ctrl+Alt+Backspace | [features/SEAT](../docs/features/SEAT.md) |
 | 0022 | Chrome's own UI in the shell: docked DevTools for shell pages, a tab's DevTools as a tab, context menus without browser-window items drawn by the shell (`contextmenurequest`), only DevTools and clipboard commands in shell windows, keys in tabs, only hardware keys of Ash's accelerators, no status bubble | [features/CHROME_UI](../docs/features/CHROME_UI.md) |
+| 0023 | The switcher: Super+Tab's sidebar of shells over windows and tabs, with a page for each (shell status and management, a window's shells, snapshot and details); `EmbeddedWindows::Present()` opens a window fullscreen above every shell (EXO-PRESENT); the backup terminal and browser; launching a desktop app through the helper's socket (`--plutonium-helper-url`, `--plutonium-helper-socket`) | [features/SHELLS](../docs/features/SHELLS.md) |
+| 0024 | Google sign-in works: shell mode turns off Mirror account consistency (EXO-SIGNIN), so Gaia's sign-in pages aren't cancelled for an OS "Add account" dialog Plutonium doesn't have. Tabs open fullscreen from the switcher, the tab's own page in an Ash window (`PlutoniumTabs::Present()`, `PlutoniumTabPresenter`) | [features/SHELLS](../docs/features/SHELLS.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).

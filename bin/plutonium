@@ -28,7 +28,7 @@ Setup (INSTALL.md walks through these in order):
 
 Sessions:
   run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
-                             The first is the desktop, Super+Tab switches. Default: niri plain.
+                             The first is the desktop, Super+Tab switches. Default: t3.
   stop [--drm|--x11]         stop a session's Ash (both if neither is given)
   t3 server [--x11]          (re)start the T3 Code server for a session ('run t3' starts it)
   t3 stop                    stop the T3 Code server
@@ -539,9 +539,12 @@ t3_start() {
     cd "$T3CODE_DIR"
     # T3 Connect (remote devices through T3's relay): its public settings.
     [[ -f .env ]] && { set -a; . ./.env; set +a; }
+    # Under a supervisor that picks the host: Settings, Connections, Network
+    # access in the shell switches it (lib/t3-server.sh).
     setsid env PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+      PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
       ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
-      node "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" --host "${T3_HOST:-127.0.0.1}" "${tailscale[@]}" --no-browser \
+      bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser \
       > "$LOGS/t3-server.log" 2>&1 < /dev/null &
     echo $! > "$pidfile"
   )
@@ -700,7 +703,7 @@ run_cmd() {
     esac
     shift
   done
-  [[ ${#shells[@]} -gt 0 ]] || shells=(niri plain)
+  [[ ${#shells[@]} -gt 0 ]] || shells=(t3)
   [[ -n $VT && -n $HOLD_S ]] && WAIT_S=120
   # DRM and X11 sessions have their own socket and ports, so both can run.
   session_vars "$mode"

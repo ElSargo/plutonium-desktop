@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Plutonium helper CLI (Node 24+, no dependencies).
 //
-//   plutonium.ts daemon [--wayland-display wayland-plutonium] --shell-origin http://127.0.0.1:3774[,<origin>…] [--port 3780]
+//   plutonium.ts daemon [--wayland-display wayland-plutonium] --shell-origin http://127.0.0.1:3773[,<origin>…] [--port 3780]
 //     [--cdp-port 9222]
 //   plutonium.ts thread-setup <thread-id>   JSON {env, mcpServer} for a thread's processes
 //   plutonium.ts launch <thread-id> <argv>…  start an app in a thread

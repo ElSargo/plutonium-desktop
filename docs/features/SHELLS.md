@@ -77,24 +77,73 @@ A group is a tag that a shell has described: `{tag, label, shellId}`.
 
 **Routing.** A page's request stream says which shell it is (`shell=<id>`, from `getShellId()`). The helper asks the browser for the groups (cached for 2 s) and sends a thread's requests to the shell that owns the thread's group. When that shell shows what an agent asked for, the library makes it visible (`showShell()`).
 
-## Step 3: the overlay
+## Step 3: the overlay (the switcher)
 
-**Super+Tab** opens a panel over the visible shell, with the next shell selected. Pressing Super+Tab again, or ↑/↓, moves the selection. Enter acts, Escape closes, and clicking elsewhere closes it too. The search box filters everything. The footer lists the keys for whatever is selected:
+**Super+Tab** opens the switcher over whatever is in front, with the next shell selected. On the left is a sidebar, split in two, each half scrolling on its own: the shells at the top, every window and tab below. On the right, the main area shows the selected item's page. The search box filters both halves.
 
-- **Shells:**
-  - Enter switches to the shell, or turns it on if it's off.
-  - Ctrl+O turns it off or on. The last running shell can't be turned off.
-  - Ctrl+R reloads it, for example after its renderer crashed.
-  - Ctrl+E edits its name and URL. A new URL loads in place.
-  - Ctrl+N, or "Add a shell…", adds one; its window opens hidden.
-  - Ctrl+Delete removes a shell that's off, along with its groups.
-- **Windows and tabs**, every one, grouped by the label of their first labelled tag, else their first tag, else "Not in any group":
-  - Enter shows the item in the shell that owns its group (else the visible one). It switches to that shell and sends the page a `windowfocusrequest` or `tabfocusrequest`. A window whose shell doesn't take the request is popped out instead.
-  - Ctrl+P pops a window out to the desktop.
-  - Ctrl+T adds the item to a group, or takes it out of one.
-  - Ctrl+W closes it.
+- **Left click** acts: a shell is shown, a window or tab opens fullscreen.
+- **Right click** only selects, so the item's page opens in the main area.
+- **Keys:** ↑/↓ (or Super+Tab again) move the selection and show its page. Enter acts as a left click does. Tab moves into the page's buttons and fields, and Escape goes back to the list, or closes the switcher from there. Ctrl+O starts or stops a shell, Ctrl+R reloads it, Ctrl+N adds one, Ctrl+W closes a window or tab, and Ctrl+P pops a window out.
+
+**A shell's page** shows its state (visible, running, loading, crashed, starting or off, polled every second), its address, the page it shows, its title, the origin with shell rights, the groups it described and how many windows it shows. From there you can:
+- switch to it, or bring it to the front;
+- start or stop it (the last running shell can't be stopped);
+- reload it, or reload it from the network;
+- open its DevTools, docked in its window;
+- move it up or down (Super+Tab's order);
+- change its name and address (a new address loads in place);
+- remove it, once it's off, with a second click to confirm.
+
+Starting a shell from here keeps the switcher open.
+
+**Built in**, below the shells:
+- **Add a shell…**: what a shell is and how shells work, what the address must say (`?helper=` or `?plutoniumHelper=`, with this session's helper URL), and a form.
+- **Backup terminal**: the helper's terminal page (`/v1/terminal/`, see the helper README) in a maximized app window. Each tab is your `$SHELL` on this machine, in the thread `plutonium:terminal`, so the apps it starts show up as windows. Ctrl+Shift+T opens a tab, Ctrl+Shift+W closes one, Ctrl+PageUp/PageDown switch between them, and Ctrl+Shift+C/V copy and paste. Sessions survive a reload of the page, and the helper hangs up a session nobody has watched for 30 s.
+- **Backup browser**: Chrome's own tabbed browser window (address bar, tab strip, Chrome's tabs, not the shells' tabs), maximized.
+- **Launch an app…**: the helper's desktop apps (over its Unix socket, so no shell is involved), with a filter. The app starts in the thread `plutonium:switcher`. Its first window opens fullscreen, and the switcher names that window's origin tag if the browser couldn't.
+
+Neither backup window is a shell. They sit above the shells until one is shown. Ash learns where the helper is from `--plutonium-helper-url` and `--plutonium-helper-socket`, which `lib/session.sh` passes.
+
+**A window's page:**
+- Open fullscreen, or Leave fullscreen.
+- Pop out to the desktop.
+- Close.
+- **In the shells:** each running shell, whether it shows the window (has a `<native-window>` attached to it), and "Focus it in <shell>". That shows the shell and sends it a `windowfocusrequest`; a shell that doesn't listen gets the window popped out instead.
+- **Inspect:** a snapshot (taken even while the window is hidden; "New snapshot" takes another), the window and process ids, app id, size and scale, keyboard focus, where it was started, and its tags with their labels.
+- **Groups:** a toggle per group (the origin group can't be left).
+
+**A tab's page:** open it fullscreen (or leave fullscreen), show it in its shell, load its address in the backup browser, reload or close it, open its DevTools (a tab beside it), a snapshot, its details, and the same group toggles.
+
+**Open fullscreen** (`exo::EmbeddedWindows::Present()`, EXO-PRESENT) puts the window on the desktop, fullscreen and active, even while shells' elements show it. Until it ends, those elements keep their attachments but don't park, size, focus or send input to the window. It ends:
+- with **Super+F**, which returns to the visible shell;
+- when a shell is shown (`PlutoniumShells::Show()`), or a backup window opens;
+- with Leave fullscreen or Focus it in….
+
+The window then goes back to its elements, at the size they last asked for. With `--plutonium-hide-windows` and no element, it leaves the desktop. One window is presented at a time.
+
+**A tab, fullscreen** (`PlutoniumTabs::Present()`) is the tab's own page, with its state, not its address loaded again. Its `<embed>` lets go of it but keeps wanting it, and no `<embed>` can take it (a SurfaceEmbed child filter) until the presentation ends. Meanwhile Ash shows it in a fullscreen window of its own (`PlutoniumTabPresenter`, a `views::WebView`), with the keyboard. It ends the way a window's does, and then the visible shell's `<embed>` takes it back. One window or tab is presented at a time.
 
 Shells that the overlay adds aren't on the helper's command line. Each shell page reports the browser's shell origins to the helper (`POST /v1/shell/origins`, after `shellschanged`), and the helper then accepts them too.
+
+### Verified: the switcher (2026-10-19, Xvfb `:99`, niri at startup, plain second, dev build)
+
+| Check | |
+|---|---|
+| Sidebar: shells and built-ins on top, windows and tabs grouped below; search filters both, "No shell matches" when none does | ✓ |
+| Left click on a foot window that no shell showed: fullscreen, typing reaches it; Super+Tab opens the switcher over it | ✓ |
+| Right click: the window's page with its snapshot, ids, size and tags; "Focus it in Plain" ends fullscreen and Plain shows it | ✓ |
+| A window Plain embeds, opened fullscreen, then Super+F: back in Plain's element at Plain's size | ✓ |
+| Shell page: stop (Ctrl+O), start again (Loading, then Running); the switcher stays open | ✓ |
+| Add a shell from the form: it runs hidden; stop it, Remove asks for a second click, then it's gone | ✓ |
+| Backup terminal: tabs of login shells in `plutonium:terminal` at the window's size; Ctrl+Shift+T opens one tab; after a reload both tabs come back with their scrollback | ✓ |
+| Backup browser: Chrome's tabbed window with its new tab page | ✓ |
+| Launch an app: the helper's apps, filtered; Foot starts in `plutonium:switcher` and opens fullscreen, listed under "Started from the switcher" | ✓ |
+| A tab's page: snapshot, details, group toggles | ✓ |
+| No DCHECKs in Ash's log | ✓ |
+| (patch 0024) Left click on a tab: the page itself fullscreen; a click in it navigates it | ✓ |
+| (patch 0024) A tab Plain showed, opened fullscreen, then Super+F: back in Plain's `<embed>`, painting | ✓ |
+
+Not tried: DRM, the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
 
 ### Verified (steps 2–4, Xvfb `:99` and DRM, plain shell at startup, T3 second)
 
@@ -137,8 +186,7 @@ Fixed along the way: the browser couldn't read app environments from inside the 
 
 ### Not done in steps 2–4
 
-- The overlay has no thumbnails or icons, and it shows only on the display where new windows open.
-- Removing a shell has no confirmation, but it must be turned off first.
+- The switcher shows no app icons, and only on the display where new windows open.
 
 ### Not done in step 1
 

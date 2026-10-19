@@ -191,6 +191,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **Native overlay** (step 3). L · Ash views: shells (switch, add, edit,
   turn off, reload), every window and tab by group, search, actions.
   Replaces Super+Tab cycling. The helper must learn shells added at runtime.
+- [x] **The switcher** (the overlay, reworked). L · A sidebar of shells over
+  windows, and a page for each: shell status and management, a window's
+  shells, fullscreen (EXO-PRESENT), snapshot and details. An add-shell guide,
+  a backup terminal (the helper's page) and browser (Chrome's), and launching
+  an app fullscreen.
+- [ ] **Switcher: app icons** in the window list and the launcher (the helper
+  serves them; SVG needs decoding in the browser process).
+- [ ] **Switcher on DRM**: verify it there (only Xvfb so far).
 - [x] **Frontends** (step 4). M · T3 and the plain shell register threads,
   tag what they open, show an "Elsewhere" area with import.
 

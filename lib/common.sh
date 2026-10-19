@@ -28,7 +28,7 @@ CHROMIUM_RELEASE_OUT=${CHROMIUM_RELEASE_OUT:-out/Release}  # release build, for 
 T3CODE_DIR=${T3CODE_DIR:-$ROOT/frontends/t3code/checkout}
 DATA_DIR=${DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/plutonium}   # browser profiles
 T3_HOME=${T3_HOME:-${T3CODE_HOME:-$HOME/.t3}}          # T3 Code's data: the host's own
-T3_PORT=${T3_PORT:-$(slot_port 3774)}
+T3_PORT=${T3_PORT:-$(slot_port 3773)}
 # T3_TAILSCALE=1: Tailscale Serve publishes the server over HTTPS on the tailnet,
 # on 443 (slot N: 8443 + 100 x N).
 (( SLOT )) && T3_TAILSCALE_PORT=${T3_TAILSCALE_PORT:-$(slot_port 8443)}

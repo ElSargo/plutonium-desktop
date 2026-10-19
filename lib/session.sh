@@ -57,6 +57,8 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
        --disable-features=Forest --disable-sync --exo-viability-no-signin-error
        "--plutonium-shell-origin=${ORIGINS%%,*}" "--plutonium-shell-url=$SHELL_URL"
        --plutonium-hide-windows
+       "--plutonium-helper-url=http://127.0.0.1:$HELPER_PORT"
+       "--plutonium-helper-socket=$RUN_DIR/plutonium/$SOCKET.sock"
        --enable-logging=stderr --v=0 "--vmodule=$VMODULE")
 [[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS")
 

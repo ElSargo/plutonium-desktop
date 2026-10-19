@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Backup terminal</title>
+  <link rel="stylesheet" href="xterm.css">
+  <link rel="stylesheet" href="terminal.css">
+</head>
+<body>
+  <!-- The helper's backup terminal (helper/src/terminal.ts): tabs of login
+       shells on this machine, for when no shell works. Ash's shells overlay
+       opens it in an app window. -->
+  <header>
+    <nav id="tabs" role="tablist" aria-label="Terminals"></nav>
+    <button id="new" title="New tab (Ctrl+Shift+T)" aria-label="New tab">+</button>
+  </header>
+  <main id="terminals">
+    <div id="empty" hidden>
+      <p>No terminals open.</p>
+      <button id="new-empty">New terminal</button>
+      <p class="keys">Ctrl+Shift+T new tab · Ctrl+Shift+W close tab · Ctrl+PageUp/PageDown switch · Ctrl+Shift+C/V copy, paste · Super+Tab the switcher</p>
+    </div>
+  </main>
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+  <script src="terminal.js"></script>
+</body>
+</html>
