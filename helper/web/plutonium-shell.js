@@ -272,8 +272,18 @@ export class PlutoniumShell extends EventTarget {
       : entry.pid > 0
         ? undefined
         : null;
-    this.windows.set(entry.id, { ...plain(entry), threadId });
+    const known = plain(entry);
+    this.windows.set(entry.id, {
+      ...known,
+      threadId,
+      tags: known.tags.length || !threadId ? known.tags : [threadId],
+    });
     if (threadId === undefined) this._resolvePid(entry.pid);
+    else if (threadId && this._tagFromHelper.delete(entry.id)) {
+      // Another window of a client already resolved (an X app's satellite
+      // has all of its thread's X windows): named as the first one was.
+      this.broker.setWindowOriginTag(entry.id, threadId).catch(() => {});
+    }
     this._changed();
   }
 
