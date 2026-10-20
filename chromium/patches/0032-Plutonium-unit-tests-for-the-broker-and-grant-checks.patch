@@ -1,0 +1,1127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Tue, 20 Oct 2026 21:48:05 +1300
+Subject: [PATCH 32/32] Plutonium: unit tests for the broker and grant checks
+
+EXO-BROKER: plutonium_unittests (chrome/test/BUILD.gn), a target of its
+own on //chrome/browser and content's test support, about 800 build
+steps from a built chrome against about 8,800 for unit_tests:
+- exo_window_broker_unittest.cc: grants (issue, resolve, validate,
+  forged tokens, other frames and pages), revocation (explicit, window
+  close, navigation, reload; back/forward-cached documents keep theirs),
+  a new document in the same RenderFrameHost (RenderDocument for main
+  frames off), and observers' events not nesting.
+- plutonium_shell_unittest.cc: IsShellDocument (other origins,
+  about:blank, iframes, error pages, prerendered, fenced frames, inner
+  contents, back/forward cache), the WindowBroker binder, grantrevoked
+  forwarding (this document's grants only), resubscribing, and
+  NativeWindowHost.Attach refusals told apart by their log lines, plus an
+  unattached host given Focus/SetSize/... over raw Mojo (what a
+  compromised renderer can send).
+ExoWindowBroker::AddWindowForTesting() stands in for Exo's windows.
+
+content_unittests: RenderWidgetHostInputEventRouterTest covers
+IsForeignFrameSinkEmbeddedHere() and RouteToForeign()'s check, with a
+fake ForeignFrameSinkDelegate.
+
+Run with --ozone-platform=headless.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/exo_window_broker.cc           |  10 +
+ chrome/browser/exo_window_broker.h            |   5 +
+ chrome/browser/exo_window_broker_unittest.cc  | 328 +++++++++++
+ chrome/browser/plutonium_shell_unittest.cc    | 528 ++++++++++++++++++
+ chrome/test/BUILD.gn                          |  22 +
+ ...widget_host_input_event_router_unittest.cc | 129 +++++
+ 6 files changed, 1022 insertions(+)
+ create mode 100644 chrome/browser/exo_window_broker_unittest.cc
+ create mode 100644 chrome/browser/plutonium_shell_unittest.cc
+
+diff --git a/chrome/browser/exo_window_broker.cc b/chrome/browser/exo_window_broker.cc
+index 2183291cfc..0b4fd5e0ff 100644
+--- a/chrome/browser/exo_window_broker.cc
++++ b/chrome/browser/exo_window_broker.cc
+@@ -223,6 +223,16 @@ void ExoWindowBroker::RevokeGrantsIf(Pred pred) {
+   }
+ }
+ 
++void ExoWindowBroker::AddWindowForTesting(const WindowInfo& window) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  windows_[window.id] = window;
++  Notify(base::BindRepeating(
++      [](const WindowInfo& window, Observer& observer) {
++        observer.OnWindowAdded(window);
++      },
++      window));
++}
++
+ void ExoWindowBroker::OnEmbeddedWindowChanged(int32_t window_id) {
+   UpdateWindow(window_id);
+ }
+diff --git a/chrome/browser/exo_window_broker.h b/chrome/browser/exo_window_broker.h
+index fd620c2bf0..56c8426a5c 100644
+--- a/chrome/browser/exo_window_broker.h
++++ b/chrome/browser/exo_window_broker.h
+@@ -134,6 +134,11 @@ class ExoWindowBroker : public exo::EmbeddedWindows::Observer {
+   void RevokeGrantsForWindow(int32_t window_id);
+   size_t grant_count() const { return grants_.size(); }
+ 
++  // Tests: puts |window| in the registry as if Exo had reported it (there is
++  // no exo::EmbeddedWindows entry behind it). OnEmbeddedWindowDestroyed()
++  // removes it again.
++  void AddWindowForTesting(const WindowInfo& window);
++
+   // exo::EmbeddedWindows::Observer:
+   void OnEmbeddedWindowChanged(int32_t window_id) override;
+   void OnEmbeddedWindowDestroyed(int32_t window_id) override;
+diff --git a/chrome/browser/exo_window_broker_unittest.cc b/chrome/browser/exo_window_broker_unittest.cc
+new file mode 100644
+index 0000000000..e3b889bb84
+--- /dev/null
++++ b/chrome/browser/exo_window_broker_unittest.cc
+@@ -0,0 +1,328 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/exo_window_broker.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/test/scoped_feature_list.h"
++#include "base/unguessable_token.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/content_features.h"
++#include "content/public/test/navigation_simulator.h"
++#include "content/public/test/test_renderer_host.h"
++#include "content/public/test/web_contents_tester.h"
++#include "content/test/render_document_feature.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "url/gurl.h"
++
++// EXO-BROKER: the registry's grants, and when they stop working.
++namespace {
++
++constexpr int32_t kWindow = 7;
++constexpr int32_t kOtherWindow = 8;
++
++ExoWindowBroker::WindowInfo MakeWindow(int32_t id) {
++  ExoWindowBroker::WindowInfo window;
++  window.id = id;
++  window.app_id = "org.example.app";
++  window.title = u"App";
++  window.size = gfx::Size(400, 300);
++  return window;
++}
++
++// Records what the broker reports, in order.
++class Recorder : public ExoWindowBroker::Observer {
++ public:
++  struct Revoked {
++    base::UnguessableToken grant;
++    int32_t window_id;
++    content::GlobalRenderFrameHostId frame;
++  };
++
++  void OnWindowAdded(const ExoWindowBroker::WindowInfo& window) override {
++    events.push_back("added " + base::NumberToString(window.id));
++  }
++  void OnWindowRemoved(int32_t window_id) override {
++    events.push_back("removed " + base::NumberToString(window_id));
++  }
++  void OnGrantRevoked(const base::UnguessableToken& grant,
++                      int32_t window_id,
++                      content::GlobalRenderFrameHostId frame) override {
++    events.push_back("revoked " + base::NumberToString(window_id));
++    revoked.push_back({grant, window_id, frame});
++  }
++
++  std::vector<std::string> events;
++  std::vector<Revoked> revoked;
++};
++
++class ExoWindowBrokerTest : public content::RenderViewHostTestHarness {
++ public:
++  void SetUp() override {
++    content::RenderViewHostTestHarness::SetUp();
++    broker_ = std::make_unique<ExoWindowBroker>();
++    broker_->AddObserver(&recorder_);
++    broker_->AddWindowForTesting(MakeWindow(kWindow));
++    broker_->AddWindowForTesting(MakeWindow(kOtherWindow));
++    NavigateAndCommit(GURL("http://localhost:8765/shell.html"));
++  }
++
++  void TearDown() override {
++    broker_->RemoveObserver(&recorder_);
++    DeleteContents();
++    broker_.reset();
++    content::RenderViewHostTestHarness::TearDown();
++  }
++
++ protected:
++  ExoWindowBroker* broker() { return broker_.get(); }
++
++  std::unique_ptr<ExoWindowBroker> broker_;
++  Recorder recorder_;
++};
++
++TEST_F(ExoWindowBrokerTest, GetReturnsTheBroker) {
++  EXPECT_EQ(broker(), ExoWindowBroker::Get());
++  EXPECT_TRUE(broker()->GetWindow(kWindow));
++  EXPECT_FALSE(broker()->GetWindow(99));
++}
++
++TEST_F(ExoWindowBrokerTest, GrantNeedsAKnownWindowAndALiveFrame) {
++  EXPECT_FALSE(broker()->IssueGrant(main_rfh(), 99));
++  EXPECT_FALSE(broker()->IssueGrant(nullptr, kWindow));
++  EXPECT_TRUE(broker()->IssueGrant(main_rfh(), kWindow));
++  EXPECT_EQ(1u, broker()->grant_count());
++}
++
++TEST_F(ExoWindowBrokerTest, EveryGrantIsNew) {
++  std::optional<base::UnguessableToken> a =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  std::optional<base::UnguessableToken> b =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(a && b);
++  EXPECT_NE(*a, *b);
++  EXPECT_EQ(2u, broker()->grant_count());
++}
++
++TEST_F(ExoWindowBrokerTest, GrantResolvesToItsWindowOnly) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*grant, main_rfh()));
++  EXPECT_TRUE(broker()->ValidateGrant(*grant, main_rfh(), kWindow));
++  // Never another window's, even with a matching document.
++  EXPECT_FALSE(broker()->ValidateGrant(*grant, main_rfh(), kOtherWindow));
++}
++
++TEST_F(ExoWindowBrokerTest, ForgedAndEmptyTokensResolveToNothing) {
++  ASSERT_TRUE(broker()->IssueGrant(main_rfh(), kWindow));
++  EXPECT_FALSE(
++      broker()->ResolveGrant(base::UnguessableToken::Create(), main_rfh()));
++  EXPECT_FALSE(broker()->ResolveGrant(base::UnguessableToken(), main_rfh()));
++  EXPECT_FALSE(broker()->ResolveGrant(base::UnguessableToken::Create(),
++                                      nullptr));
++}
++
++TEST_F(ExoWindowBrokerTest, GrantDoesNothingInAnIframe) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  content::RenderFrameHost* child =
++      content::RenderFrameHostTester::For(main_rfh())->AppendChild("child");
++  child = content::NavigationSimulator::NavigateAndCommitFromDocument(
++      GURL("http://localhost:8765/frame.html"), child);
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, child));
++  // And a grant issued to the iframe does nothing in its parent.
++  std::optional<base::UnguessableToken> child_grant =
++      broker()->IssueGrant(child, kWindow);
++  ASSERT_TRUE(child_grant);
++  EXPECT_FALSE(broker()->ResolveGrant(*child_grant, main_rfh()));
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*child_grant, child));
++}
++
++TEST_F(ExoWindowBrokerTest, GrantDoesNothingInAnotherPage) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  // The same URL, in another tab.
++  std::unique_ptr<content::WebContents> other = CreateTestWebContents();
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(
++      other.get(), GURL("http://localhost:8765/shell.html"));
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, other->GetPrimaryMainFrame()));
++}
++
++// A document that leaves for the back/forward cache isn't gone: it keeps its
++// grants (they work again if it comes back), but they resolve nowhere else.
++TEST_F(ExoWindowBrokerTest, NavigatingAwayLeavesTheGrantBehind) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  NavigateAndCommit(GURL("http://127.0.0.1:8766/elsewhere.html"));
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, main_rfh()));
++}
++
++TEST_F(ExoWindowBrokerTest, ClosingTheWindowRevokesItsGrantsFirst) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  std::optional<base::UnguessableToken> other =
++      broker()->IssueGrant(main_rfh(), kOtherWindow);
++  ASSERT_TRUE(grant && other);
++  recorder_.events.clear();
++  broker()->OnEmbeddedWindowDestroyed(kWindow);
++  EXPECT_EQ((std::vector<std::string>{"revoked 7", "removed 7"}),
++            recorder_.events);
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, main_rfh()));
++  EXPECT_EQ(kOtherWindow, broker()->ResolveGrant(*other, main_rfh()));
++  // The window is gone: no new grants for it.
++  EXPECT_FALSE(broker()->IssueGrant(main_rfh(), kWindow));
++}
++
++TEST_F(ExoWindowBrokerTest, RevokeGrantRevokesThatGrantOnly) {
++  std::optional<base::UnguessableToken> a =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  std::optional<base::UnguessableToken> b =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(a && b);
++  broker()->RevokeGrant(*a);
++  EXPECT_FALSE(broker()->ResolveGrant(*a, main_rfh()));
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*b, main_rfh()));
++  ASSERT_EQ(1u, recorder_.revoked.size());
++  EXPECT_EQ(*a, recorder_.revoked[0].grant);
++  // Revoking again, or a token that was never issued, reports nothing.
++  broker()->RevokeGrant(*a);
++  broker()->RevokeGrant(base::UnguessableToken::Create());
++  EXPECT_EQ(1u, recorder_.revoked.size());
++}
++
++// An observer that changes the registry while being told something (an
++// element detaching from a revoked grant changes its window): every observer
++// hears of the revocation first, then of the change.
++TEST_F(ExoWindowBrokerTest, EventsCausedByAnObserverWaitTheirTurn) {
++  class Reacting : public ExoWindowBroker::Observer {
++   public:
++    explicit Reacting(ExoWindowBroker* broker) : broker_(broker) {}
++    void OnGrantRevoked(const base::UnguessableToken&,
++                        int32_t,
++                        content::GlobalRenderFrameHostId) override {
++      broker_->AddWindowForTesting(MakeWindow(9));
++    }
++
++   private:
++    raw_ptr<ExoWindowBroker> broker_;
++  };
++  // Told before |recorder_| would be, were it not already registered: so
++  // register a second recorder after it.
++  Reacting reacting(broker());
++  Recorder later;
++  broker()->AddObserver(&reacting);
++  broker()->AddObserver(&later);
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  recorder_.events.clear();
++  broker()->RevokeGrant(*grant);
++  EXPECT_EQ((std::vector<std::string>{"revoked 7", "added 9"}),
++            recorder_.events);
++  EXPECT_EQ((std::vector<std::string>{"revoked 7", "added 9"}), later.events);
++  broker()->RemoveObserver(&later);
++  broker()->RemoveObserver(&reacting);
++}
++
++TEST_F(ExoWindowBrokerTest, RevokeGrantsForWindow) {
++  std::optional<base::UnguessableToken> a =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  std::optional<base::UnguessableToken> b =
++      broker()->IssueGrant(main_rfh(), kOtherWindow);
++  ASSERT_TRUE(a && b);
++  broker()->RevokeGrantsForWindow(kWindow);
++  EXPECT_FALSE(broker()->ResolveGrant(*a, main_rfh()));
++  EXPECT_TRUE(broker()->ResolveGrant(*b, main_rfh()));
++  // The window itself stays.
++  EXPECT_TRUE(broker()->GetWindow(kWindow));
++}
++
++// Without the back/forward cache, a document that navigates away is gone.
++class ExoWindowBrokerNoCacheTest : public ExoWindowBrokerTest {
++ public:
++  ExoWindowBrokerNoCacheTest() {
++    back_forward_cache_.InitAndDisableFeature(features::kBackForwardCache);
++  }
++
++ private:
++  base::test::ScopedFeatureList back_forward_cache_;
++};
++
++TEST_F(ExoWindowBrokerNoCacheTest, NavigatingRevokesTheDocumentsGrants) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  content::GlobalRenderFrameHostId frame = main_rfh()->GetGlobalId();
++  NavigateAndCommit(GURL("http://127.0.0.1:8766/elsewhere.html"));
++  EXPECT_EQ(0u, broker()->grant_count());
++  ASSERT_EQ(1u, recorder_.revoked.size());
++  EXPECT_EQ(*grant, recorder_.revoked[0].grant);
++  EXPECT_EQ(kWindow, recorder_.revoked[0].window_id);
++  EXPECT_EQ(frame, recorder_.revoked[0].frame);
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, main_rfh()));
++}
++
++TEST_F(ExoWindowBrokerNoCacheTest, ReloadingRevokesTheDocumentsGrants) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  content::NavigationSimulator::Reload(web_contents());
++  EXPECT_EQ(0u, broker()->grant_count());
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, main_rfh()));
++}
++
++// A navigation that keeps the RenderFrameHost (no RenderDocument for main
++// frames) still starts a new document, which doesn't inherit the old one's
++// grants.
++class ExoWindowBrokerSameFrameTest : public ExoWindowBrokerNoCacheTest {
++ public:
++  ExoWindowBrokerSameFrameTest() {
++    content::InitAndEnableRenderDocumentFeature(&render_document_,
++                                                "crashed-frame");
++  }
++
++ private:
++  base::test::ScopedFeatureList render_document_;
++};
++
++TEST_F(ExoWindowBrokerSameFrameTest, NewDocumentInTheSameFrameHasNoGrants) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  content::GlobalRenderFrameHostId frame = main_rfh()->GetGlobalId();
++  content::NavigationSimulator::NavigateAndCommitFromDocument(
++      GURL("http://localhost:8765/other.html"), main_rfh());
++  // The point of this test: same frame, new document.
++  ASSERT_EQ(frame, main_rfh()->GetGlobalId());
++  EXPECT_FALSE(broker()->ResolveGrant(*grant, main_rfh()));
++  EXPECT_EQ(0u, broker()->grant_count());
++  // The new document gets grants of its own.
++  std::optional<base::UnguessableToken> fresh =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(fresh);
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*fresh, main_rfh()));
++}
++
++TEST_F(ExoWindowBrokerSameFrameTest, SameDocumentNavigationKeepsGrants) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  content::NavigationSimulator::CreateRendererInitiated(
++      GURL("http://localhost:8765/shell.html#elsewhere"), main_rfh())
++      ->CommitSameDocument();
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*grant, main_rfh()));
++}
++
++}  // namespace
+diff --git a/chrome/browser/plutonium_shell_unittest.cc b/chrome/browser/plutonium_shell_unittest.cc
+new file mode 100644
+index 0000000000..e162127b3d
+--- /dev/null
++++ b/chrome/browser/plutonium_shell_unittest.cc
+@@ -0,0 +1,528 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_shell.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <tuple>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/test/scoped_logging_settings.h"
++#include "base/test/test_future.h"
++#include "base/unguessable_token.h"
++#include "chrome/browser/exo_embedder.h"
++#include "chrome/browser/exo_window_broker.h"
++#include "components/exo/embedded_windows.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/test/navigation_simulator.h"
++#include "content/public/test/prerender_test_util.h"
++#include "content/public/test/test_renderer_host.h"
++#include "content/public/test/test_utils.h"
++#include "content/public/test/web_contents_tester.h"
++#include "mojo/public/cpp/bindings/associated_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "net/base/net_errors.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/mojom/native_window/native_window.mojom.h"
++#include "third_party/blink/public/mojom/native_window/window_broker.mojom.h"
++#include "ui/gfx/geometry/size.h"
++#include "url/gurl.h"
++
++// EXO-BROKER: which documents are the shell, what the shell API gives them,
++// and the checks <native-window> attaches go through.
++namespace {
++
++constexpr char kShellOrigin[] = "http://localhost:8765";
++constexpr char kShellUrl[] = "http://localhost:8765/shell.html";
++constexpr char kOtherSiteUrl[] = "http://127.0.0.1:8766/shell.html";
++
++constexpr int32_t kWindow = 7;
++constexpr int32_t kOtherWindow = 8;
++
++ExoWindowBroker::WindowInfo MakeWindow(int32_t id) {
++  ExoWindowBroker::WindowInfo window;
++  window.id = id;
++  window.app_id = "org.example.app";
++  window.title = u"App";
++  window.size = gfx::Size(400, 300);
++  return window;
++}
++
++// VLOG lines, for telling apart why an attach was refused.
++std::vector<std::string>& Logged() {
++  static base::NoDestructor<std::vector<std::string>> logged;
++  return *logged;
++}
++
++bool RecordLog(int severity,
++               const char* file,
++               int line,
++               size_t message_start,
++               const std::string& message) {
++  Logged().push_back(message.substr(message_start));
++  return false;
++}
++
++bool WasLogged(const std::string& part) {
++  for (const std::string& message : Logged()) {
++    if (message.find(part) != std::string::npos) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// The shell page's end of navigator.windowBroker's events.
++class FakeObserver : public blink::mojom::WindowBrokerObserver {
++ public:
++  void OnWindowAdded(blink::mojom::NativeWindowEntryPtr window) override {
++    events.push_back("added " + base::NumberToString(window->id));
++  }
++  void OnWindowChanged(blink::mojom::NativeWindowEntryPtr window) override {
++    events.push_back("changed " + base::NumberToString(window->id));
++  }
++  void OnWindowRemoved(int32_t window_id) override {
++    events.push_back("removed " + base::NumberToString(window_id));
++  }
++  void OnGrantRevoked(const base::UnguessableToken& grant,
++                      int32_t window_id) override {
++    events.push_back("revoked " + base::NumberToString(window_id));
++    revoked.push_back(grant);
++  }
++  void OnWindowFocusRequested(
++      blink::mojom::NativeWindowEntryPtr window) override {}
++
++  std::vector<std::string> events;
++  std::vector<base::UnguessableToken> revoked;
++  mojo::AssociatedReceiver<blink::mojom::WindowBrokerObserver> receiver{this};
++};
++
++class PlutoniumShellTest : public content::RenderViewHostTestHarness {
++ public:
++  void SetUp() override {
++    // Read once per process (GetShellOrigin() keeps it); every test here
++    // uses the same.
++    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++    if (!command_line->HasSwitch(plutonium_shell::kShellOriginSwitch)) {
++      command_line->AppendSwitchASCII(plutonium_shell::kShellOriginSwitch,
++                                      kShellOrigin);
++    }
++    content::RenderViewHostTestHarness::SetUp();
++    broker_ = std::make_unique<ExoWindowBroker>();
++    embedder_ = std::make_unique<ExoEmbedder>();
++    broker_->AddWindowForTesting(MakeWindow(kWindow));
++    broker_->AddWindowForTesting(MakeWindow(kOtherWindow));
++    NavigateAndCommit(GURL(kShellUrl));
++  }
++
++  void TearDown() override {
++    DeleteContents();
++    embedder_.reset();
++    broker_.reset();
++    content::RenderViewHostTestHarness::TearDown();
++  }
++
++ protected:
++  ExoWindowBroker* broker() { return broker_.get(); }
++
++  // A frame in the shell page, committed at |url|.
++  content::RenderFrameHost* AddIframe(const std::string& url) {
++    content::RenderFrameHost* child =
++        content::RenderFrameHostTester::For(main_rfh())->AppendChild("child");
++    return content::NavigationSimulator::NavigateAndCommitFromDocument(
++        GURL(url), child);
++  }
++
++  mojo::Remote<blink::mojom::WindowBroker> BindBroker(
++      content::RenderFrameHost* rfh) {
++    mojo::Remote<blink::mojom::WindowBroker> remote;
++    plutonium_shell::BindWindowBroker(rfh, remote.BindNewPipeAndPassReceiver());
++    return remote;
++  }
++
++  std::unique_ptr<ExoWindowBroker> broker_;
++  std::unique_ptr<ExoEmbedder> embedder_;
++};
++
++TEST_F(PlutoniumShellTest, ShellOriginComesFromTheCommandLine) {
++  ASSERT_TRUE(plutonium_shell::GetShellOrigin());
++  EXPECT_EQ(url::Origin::Create(GURL(kShellOrigin)),
++            *plutonium_shell::GetShellOrigin());
++  EXPECT_TRUE(plutonium_shell::IsShellOrigin(
++      url::Origin::Create(GURL(kShellUrl))));
++  EXPECT_FALSE(plutonium_shell::IsShellOrigin(
++      url::Origin::Create(GURL(kOtherSiteUrl))));
++}
++
++TEST_F(PlutoniumShellTest, AcceptableShellUrls) {
++  EXPECT_TRUE(plutonium_shell::IsAcceptableShellUrl(GURL(kShellUrl)));
++  EXPECT_TRUE(plutonium_shell::IsAcceptableShellUrl(GURL(kOtherSiteUrl)));
++  EXPECT_TRUE(
++      plutonium_shell::IsAcceptableShellUrl(GURL("https://shell.example/")));
++  // Not potentially trustworthy, or not http(s).
++  EXPECT_FALSE(
++      plutonium_shell::IsAcceptableShellUrl(GURL("http://shell.example/")));
++  EXPECT_FALSE(plutonium_shell::IsAcceptableShellUrl(GURL("file:///shell")));
++  EXPECT_FALSE(plutonium_shell::IsAcceptableShellUrl(GURL("data:text/html,")));
++  EXPECT_FALSE(plutonium_shell::IsAcceptableShellUrl(GURL("about:blank")));
++  EXPECT_FALSE(plutonium_shell::IsAcceptableShellUrl(GURL("not a url")));
++}
++
++TEST_F(PlutoniumShellTest, TheShellPageIsTheShell) {
++  EXPECT_TRUE(plutonium_shell::IsShellDocument(main_rfh()));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(nullptr));
++}
++
++TEST_F(PlutoniumShellTest, OtherOriginsAreNot) {
++  NavigateAndCommit(GURL(kOtherSiteUrl));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(main_rfh()));
++  // Same host, another port.
++  NavigateAndCommit(GURL("http://localhost:8766/shell.html"));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(main_rfh()));
++  // And back.
++  NavigateAndCommit(GURL(kShellUrl));
++  EXPECT_TRUE(plutonium_shell::IsShellDocument(main_rfh()));
++}
++
++TEST_F(PlutoniumShellTest, AboutBlankIsNot) {
++  NavigateAndCommit(GURL("about:blank"));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(main_rfh()));
++}
++
++TEST_F(PlutoniumShellTest, IframesAreNot) {
++  EXPECT_FALSE(
++      plutonium_shell::IsShellDocument(AddIframe("http://localhost:8765/f")));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(AddIframe(kOtherSiteUrl)));
++  // The shell itself still is.
++  EXPECT_TRUE(plutonium_shell::IsShellDocument(main_rfh()));
++}
++
++TEST_F(PlutoniumShellTest, ErrorPagesAreNot) {
++  content::NavigationSimulator::NavigateAndFailFromBrowser(
++      web_contents(), GURL("http://localhost:8765/missing"),
++      net::ERR_CONNECTION_REFUSED);
++  ASSERT_TRUE(main_rfh()->IsErrorDocument());
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(main_rfh()));
++}
++
++TEST_F(PlutoniumShellTest, PrerenderedShellIsNot) {
++  content::test::ScopedPrerenderFeatureList prerender_features;
++  content::test::ScopedPrerenderWebContentsDelegate delegate(*web_contents());
++  content::RenderFrameHost* prerendered =
++      content::WebContentsTester::For(web_contents())
++          ->AddPrerenderAndCommitNavigation(
++              GURL("http://localhost:8765/prerendered.html"));
++  ASSERT_TRUE(prerendered);
++  EXPECT_NE(prerendered, main_rfh());
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(prerendered));
++  // Not bound for it either.
++  mojo::Remote<blink::mojom::WindowBroker> remote = BindBroker(prerendered);
++  remote.FlushForTesting();
++  EXPECT_FALSE(remote.is_connected());
++}
++
++TEST_F(PlutoniumShellTest, BackForwardCachedShellIsNot) {
++  content::RenderFrameHostWrapper shell(main_rfh());
++  NavigateAndCommit(GURL(kOtherSiteUrl));
++  ASSERT_FALSE(shell.IsDestroyed());
++  ASSERT_TRUE(shell->IsInLifecycleState(
++      content::RenderFrameHost::LifecycleState::kInBackForwardCache));
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(shell.get()));
++}
++
++TEST_F(PlutoniumShellTest, FencedFramesAreNot) {
++  content::RenderFrameHost* fenced =
++      content::RenderFrameHostTester::For(main_rfh())->AppendFencedFrame();
++  fenced = content::NavigationSimulator::NavigateAndCommitFromDocument(
++      GURL("http://localhost:8765/fenced.html"), fenced);
++  ASSERT_TRUE(fenced);
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(fenced));
++}
++
++TEST_F(PlutoniumShellTest, InnerContentsAreNot) {
++  // A guest (e.g. <webview>) at the shell's URL.
++  content::RenderFrameHost* child = AddIframe("http://localhost:8765/f");
++  content::WebContents* inner = content::CreateAndAttachInnerContents(child);
++  ASSERT_TRUE(inner);
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(inner,
++                                                             GURL(kShellUrl));
++  ASSERT_TRUE(inner->GetOuterWebContents());
++  EXPECT_FALSE(plutonium_shell::IsShellDocument(inner->GetPrimaryMainFrame()));
++}
++
++TEST_F(PlutoniumShellTest, BindsTheBrokerForTheShellOnly) {
++  mojo::Remote<blink::mojom::WindowBroker> shell = BindBroker(main_rfh());
++  base::test::TestFuture<std::vector<blink::mojom::NativeWindowEntryPtr>>
++      windows;
++  shell->GetWindows(windows.GetCallback());
++  EXPECT_EQ(2u, windows.Get().size());
++  EXPECT_TRUE(shell.is_connected());
++
++  // An iframe's pipe just closes.
++  mojo::Remote<blink::mojom::WindowBroker> iframe =
++      BindBroker(AddIframe("http://localhost:8765/f"));
++  iframe.FlushForTesting();
++  EXPECT_FALSE(iframe.is_connected());
++
++  // So does another site's page.
++  std::unique_ptr<content::WebContents> other = CreateTestWebContents();
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(
++      other.get(), GURL(kOtherSiteUrl));
++  mojo::Remote<blink::mojom::WindowBroker> ordinary =
++      BindBroker(other->GetPrimaryMainFrame());
++  ordinary.FlushForTesting();
++  EXPECT_FALSE(ordinary.is_connected());
++}
++
++TEST_F(PlutoniumShellTest, GrantsAreForTheRequestingDocument) {
++  mojo::Remote<blink::mojom::WindowBroker> shell = BindBroker(main_rfh());
++  base::test::TestFuture<const std::optional<base::UnguessableToken>&> grant;
++  shell->RequestGrant(kWindow, grant.GetCallback());
++  ASSERT_TRUE(grant.Get());
++  EXPECT_EQ(kWindow, broker()->ResolveGrant(*grant.Get(), main_rfh()));
++
++  base::test::TestFuture<const std::optional<base::UnguessableToken>&> none;
++  shell->RequestGrant(99, none.GetCallback());
++  EXPECT_FALSE(none.Get());
++}
++
++TEST_F(PlutoniumShellTest, ForwardsTheDocumentsRevokedGrants) {
++  mojo::Remote<blink::mojom::WindowBroker> shell = BindBroker(main_rfh());
++  FakeObserver observer;
++  base::test::TestFuture<std::vector<blink::mojom::NativeWindowEntryPtr>>
++      snapshot;
++  shell->AddObserver(observer.receiver.BindNewEndpointAndPassRemote(),
++                     snapshot.GetCallback());
++  ASSERT_TRUE(snapshot.Wait());
++
++  base::test::TestFuture<const std::optional<base::UnguessableToken>&> grant;
++  shell->RequestGrant(kWindow, grant.GetCallback());
++  ASSERT_TRUE(grant.Get());
++  base::UnguessableToken token = *grant.Get();
++
++  // The shell revokes it.
++  shell->RevokeGrant(token);
++  shell.FlushForTesting();
++  ASSERT_EQ(1u, observer.revoked.size());
++  EXPECT_EQ(token, observer.revoked[0]);
++  EXPECT_EQ((std::vector<std::string>{"revoked 7"}), observer.events);
++
++  // The window closes: its grant goes first, then the window.
++  base::test::TestFuture<const std::optional<base::UnguessableToken>&> second;
++  shell->RequestGrant(kOtherWindow, second.GetCallback());
++  ASSERT_TRUE(second.Get());
++  observer.events.clear();
++  broker()->OnEmbeddedWindowDestroyed(kOtherWindow);
++  shell.FlushForTesting();
++  EXPECT_EQ((std::vector<std::string>{"revoked 8", "removed 8"}),
++            observer.events);
++  EXPECT_EQ(*second.Get(), observer.revoked.back());
++}
++
++TEST_F(PlutoniumShellTest, OtherDocumentsGrantsAreNotForwarded) {
++  mojo::Remote<blink::mojom::WindowBroker> shell = BindBroker(main_rfh());
++  FakeObserver observer;
++  base::test::TestFuture<std::vector<blink::mojom::NativeWindowEntryPtr>>
++      snapshot;
++  shell->AddObserver(observer.receiver.BindNewEndpointAndPassRemote(),
++                     snapshot.GetCallback());
++  ASSERT_TRUE(snapshot.Wait());
++
++  // Another shell page (same origin, its own tab) has a grant.
++  std::unique_ptr<content::WebContents> other = CreateTestWebContents();
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(other.get(),
++                                                             GURL(kShellUrl));
++  std::optional<base::UnguessableToken> theirs =
++      broker()->IssueGrant(other->GetPrimaryMainFrame(), kWindow);
++  ASSERT_TRUE(theirs);
++
++  // This shell can't revoke it...
++  shell->RevokeGrant(*theirs);
++  shell.FlushForTesting();
++  EXPECT_EQ(kWindow,
++            broker()->ResolveGrant(*theirs, other->GetPrimaryMainFrame()));
++  // ...and isn't told when it goes.
++  broker()->RevokeGrant(*theirs);
++  shell.FlushForTesting();
++  EXPECT_TRUE(observer.revoked.empty());
++}
++
++TEST_F(PlutoniumShellTest, UnsubscribedObserverIsDropped) {
++  mojo::Remote<blink::mojom::WindowBroker> shell = BindBroker(main_rfh());
++  auto observer = std::make_unique<FakeObserver>();
++  base::test::TestFuture<std::vector<blink::mojom::NativeWindowEntryPtr>>
++      snapshot;
++  shell->AddObserver(observer->receiver.BindNewEndpointAndPassRemote(),
++                     snapshot.GetCallback());
++  ASSERT_TRUE(snapshot.Wait());
++  // The page stops listening (closes its end); events after that go nowhere,
++  // and the broker pipe stays up.
++  observer.reset();
++  shell.FlushForTesting();
++  broker()->AddWindowForTesting(MakeWindow(9));
++  shell.FlushForTesting();
++  EXPECT_TRUE(shell.is_connected());
++
++  // Listening again gives the current windows again.
++  FakeObserver again;
++  base::test::TestFuture<std::vector<blink::mojom::NativeWindowEntryPtr>>
++      snapshot2;
++  shell->AddObserver(again.receiver.BindNewEndpointAndPassRemote(),
++                     snapshot2.GetCallback());
++  EXPECT_EQ(3u, snapshot2.Get().size());
++  broker()->OnEmbeddedWindowDestroyed(9);
++  shell.FlushForTesting();
++  EXPECT_EQ((std::vector<std::string>{"removed 9"}), again.events);
++}
++
++// Attaching (NativeWindowHost.Attach). Refusals are told apart by the
++// browser's log; a fake window can't be embedded, so a grant that passes
++// every check fails afterwards with "not embeddable".
++class PlutoniumAttachTest : public PlutoniumShellTest {
++ public:
++  void SetUp() override {
++    PlutoniumShellTest::SetUp();
++    vmodule_.InitWithSwitches("exo_embedder=1");
++    Logged().clear();
++    previous_handler_ = logging::GetLogMessageHandler();
++    logging::SetLogMessageHandler(&RecordLog);
++  }
++
++  void TearDown() override {
++    logging::SetLogMessageHandler(previous_handler_);
++    PlutoniumShellTest::TearDown();
++  }
++
++ protected:
++  bool Attach(content::RenderFrameHost* rfh,
++              const base::UnguessableToken& grant,
++              int32_t window_id) {
++    mojo::Remote<blink::mojom::NativeWindowHost> host;
++    ExoEmbedder::BindNativeWindowHost(rfh, host.BindNewPipeAndPassReceiver());
++    mojo::PendingRemote<blink::mojom::NativeWindowClient> client;
++    std::ignore = client.InitWithNewPipeAndPassReceiver();
++    base::test::TestFuture<bool> attached;
++    host->Attach(grant, window_id, std::move(client), attached.GetCallback());
++    return attached.Get();
++  }
++
++ private:
++  logging::ScopedVmoduleSwitches vmodule_;
++  logging::LogMessageHandlerFunction previous_handler_ = nullptr;
++};
++
++TEST_F(PlutoniumAttachTest, ValidGrantPassesTheChecks) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  EXPECT_FALSE(Attach(main_rfh(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("attach failed: window #7 not embeddable"));
++  EXPECT_FALSE(WasLogged("attach refused"));
++  // Without the window id too: the grant decides.
++  Logged().clear();
++  EXPECT_FALSE(Attach(main_rfh(), *grant, 0));
++  EXPECT_TRUE(WasLogged("attach failed: window #7 not embeddable"));
++}
++
++TEST_F(PlutoniumAttachTest, NoGrantOrForgedGrant) {
++  // (An empty token can't be sent: Mojo refuses to serialize one.)
++  EXPECT_FALSE(Attach(main_rfh(), base::UnguessableToken::Create(), kWindow));
++  EXPECT_TRUE(WasLogged("attach refused: no valid grant"));
++  Logged().clear();
++  EXPECT_FALSE(Attach(main_rfh(), base::UnguessableToken::Create(), 0));
++  EXPECT_TRUE(WasLogged("attach refused: no valid grant"));
++}
++
++TEST_F(PlutoniumAttachTest, AnotherWindowsGrant) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kOtherWindow);
++  ASSERT_TRUE(grant);
++  EXPECT_FALSE(Attach(main_rfh(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("attach refused: grant is for window #8, not #7"));
++}
++
++TEST_F(PlutoniumAttachTest, RevokedGrant) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  broker()->RevokeGrant(*grant);
++  EXPECT_FALSE(Attach(main_rfh(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("attach refused: no valid grant"));
++}
++
++TEST_F(PlutoniumAttachTest, PreviousDocumentsGrant) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  NavigateAndCommit(GURL("http://localhost:8765/reloaded.html"));
++  ASSERT_TRUE(plutonium_shell::IsShellDocument(main_rfh()));
++  EXPECT_FALSE(Attach(main_rfh(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("attach refused: no valid grant"));
++}
++
++TEST_F(PlutoniumAttachTest, ShellGrantInAnIframe) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  EXPECT_FALSE(
++      Attach(AddIframe("http://localhost:8765/f"), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("is not the shell"));
++}
++
++TEST_F(PlutoniumAttachTest, NotTheShellEvenWithItsOwnGrant) {
++  // Grants only come from the shell API, but the broker would issue one to
++  // any live frame: attaching still refuses a document that isn't the shell.
++  std::unique_ptr<content::WebContents> other = CreateTestWebContents();
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(
++      other.get(), GURL(kOtherSiteUrl));
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(other->GetPrimaryMainFrame(), kWindow);
++  ASSERT_TRUE(grant);
++  EXPECT_FALSE(Attach(other->GetPrimaryMainFrame(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("is not the shell"));
++  EXPECT_FALSE(WasLogged("not embeddable"));
++}
++
++TEST_F(PlutoniumAttachTest, StolenShellGrantInAnotherPage) {
++  std::optional<base::UnguessableToken> grant =
++      broker()->IssueGrant(main_rfh(), kWindow);
++  ASSERT_TRUE(grant);
++  // Another page on the shell origin (a top-level page there is a shell
++  // document outside shell mode): the grant is still the first page's.
++  std::unique_ptr<content::WebContents> other = CreateTestWebContents();
++  content::NavigationSimulator::NavigateAndCommitFromBrowser(other.get(),
++                                                             GURL(kShellUrl));
++  EXPECT_FALSE(Attach(other->GetPrimaryMainFrame(), *grant, kWindow));
++  EXPECT_TRUE(WasLogged("attach refused: no valid grant"));
++}
++
++// What a compromised renderer can send without attaching: the host acts on
++// no window.
++TEST_F(PlutoniumAttachTest, UnattachedHostDoesNothing) {
++  mojo::Remote<blink::mojom::NativeWindowHost> host;
++  ExoEmbedder::BindNativeWindowHost(main_rfh(),
++                                    host.BindNewPipeAndPassReceiver());
++  host->Focus();
++  host->SetVisible(true);
++  host->SetSize(gfx::Size(800, 600));
++  host->OnFullscreenChanged(true);
++  host->Blur();
++  host->Detach();
++  host.FlushForTesting();
++  EXPECT_TRUE(host.is_connected());
++  EXPECT_EQ(0, exo::EmbeddedWindows::Get()->focused_window_id());
++  EXPECT_FALSE(exo::EmbeddedWindows::Get()->IsAttached(kWindow));
++  EXPECT_FALSE(WasLogged("EXO-FULLSCREEN"));
++}
++
++}  // namespace
+diff --git a/chrome/test/BUILD.gn b/chrome/test/BUILD.gn
+index a4ccb1e765..a45f61bb13 100644
+--- a/chrome/test/BUILD.gn
++++ b/chrome/test/BUILD.gn
+@@ -4947,3 +4947,25 @@ test("captcha_provider_fuzztests") {
+     "//url",
+   ]
+ }
++
++if (is_chromeos) {
++  # PLUTONIUM: the window broker, the shell's privileges and the grant checks
++  # (EXO-BROKER). A target of its own, on content's test support: unit_tests
++  # takes about ten times as long to build. Run with
++  #   out/Cros/plutonium_unittests --ozone-platform=headless
++  test("plutonium_unittests") {
++    sources = [
++      "../browser/exo_window_broker_unittest.cc",
++      "../browser/plutonium_shell_unittest.cc",
++    ]
++    deps = [
++      "//base/test:test_support",
++      "//chrome/browser",
++      "//chrome/browser:exo_parts",
++      "//components/exo",
++      "//content/test:run_all_unittests",
++      "//content/test:test_support",
++      "//testing/gtest",
++    ]
++  }
++}
+diff --git a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+index 54ec67760c..da5e4e51cf 100644
+--- a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
++++ b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+@@ -5,6 +5,9 @@
+ #include "components/input/render_widget_host_input_event_router.h"
+ 
+ #include <memory>
++#include <set>
++#include <utility>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/run_loop.h"
+@@ -470,6 +473,18 @@ class RenderWidgetHostInputEventRouterTest : public testing::Test {
+ 
+   void FlushInkRenderer() { delegate_->FlushInkRenderer(); }
+ 
++  // EXO-BROKER: the router's checks before input reaches a native window.
++  bool IsForeignFrameSinkEmbeddedHere(const viz::FrameSinkId& sink) {
++    return rwhier()->IsForeignFrameSinkEmbeddedHere(sink);
++  }
++  void RouteToForeign(const viz::FrameSinkId& sink,
++                      const blink::WebMouseEvent& event) {
++    rwhier()->RouteToForeign(view_root_.get(), sink, gfx::PointF(5, 5), event);
++  }
++  viz::FrameSinkId& foreign_capture_sink() {
++    return rwhier()->foreign_capture_sink_;
++  }
++
+   BrowserTaskEnvironment task_environment_;
+ 
+   std::unique_ptr<MockRenderWidgetHostDelegate> delegate_;
+@@ -3061,4 +3076,118 @@ TEST_F(RenderWidgetHostInputEventRouterTest, AutoscrollValidation) {
+ 
+ #endif  // defined(USE_AURA)
+ 
++// EXO-BROKER: a native window's frame sink is linked to the page that embeds
++// it (with a grant) through ExoEmbedder, which is the router's
++// ForeignFrameSinkDelegate. The router only sends input to foreign sinks
++// linked to one of its own views.
++class FakeForeignFrameSinkDelegate : public input::ForeignFrameSinkDelegate {
++ public:
++  FakeForeignFrameSinkDelegate() {
++    input::RenderWidgetHostInputEventRouter::SetForeignFrameSinkDelegate(this);
++  }
++  ~FakeForeignFrameSinkDelegate() override {
++    input::RenderWidgetHostInputEventRouter::SetForeignFrameSinkDelegate(
++        nullptr);
++  }
++
++  void Link(const viz::FrameSinkId& sink, const viz::FrameSinkId& parent) {
++    links_.insert({sink, parent});
++  }
++  void Unlink(const viz::FrameSinkId& sink, const viz::FrameSinkId& parent) {
++    links_.erase({sink, parent});
++  }
++
++  // input::ForeignFrameSinkDelegate:
++  bool IsEmbeddedIn(const viz::FrameSinkId& sink,
++                    const viz::FrameSinkId& parent) override {
++    return links_.contains({sink, parent});
++  }
++  void RouteMouseEvent(const viz::FrameSinkId& sink,
++                       const gfx::PointF& location,
++                       const blink::WebMouseEvent& event) override {
++    routed.push_back(sink);
++  }
++  void PointerLeft(const viz::FrameSinkId& sink) override {}
++  void PageMouseDown() override {}
++
++  std::vector<viz::FrameSinkId> routed;
++
++ private:
++  std::set<std::pair<viz::FrameSinkId, viz::FrameSinkId>> links_;
++};
++
++// Client id 0: what Exo's windows have (the browser's own sinks).
++const viz::FrameSinkId kNativeWindowSink(0, 41);
++const viz::FrameSinkId kOtherNativeWindowSink(0, 42);
++
++TEST_F(RenderWidgetHostInputEventRouterTest, NoForeignSinksWithoutDelegate) {
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToThisPage) {
++  FakeForeignFrameSinkDelegate delegate;
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  EXPECT_TRUE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  // Only that window.
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kOtherNativeWindowSink));
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(viz::FrameSinkId()));
++  delegate.Unlink(kNativeWindowSink, view_root_->GetFrameSinkId());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToAChildView) {
++  FakeForeignFrameSinkDelegate delegate;
++  ChildViewState child = MakeChildView(view_root_.get());
++  delegate.Link(kNativeWindowSink, child.view->GetFrameSinkId());
++  EXPECT_TRUE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  rwhier()->OnRenderWidgetHostViewInputDestroyed(child.view.get());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToAnotherPage) {
++  FakeForeignFrameSinkDelegate delegate;
++  // A view this router doesn't have (another tab's).
++  delegate.Link(kNativeWindowSink, viz::FrameSinkId(77, 1));
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, OwnViewsAreNeverForeign) {
++  FakeForeignFrameSinkDelegate delegate;
++  ChildViewState child = MakeChildView(view_root_.get());
++  delegate.Link(child.view->GetFrameSinkId(), view_root_->GetFrameSinkId());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(child.view->GetFrameSinkId()));
++  rwhier()->OnRenderWidgetHostViewInputDestroyed(child.view.get());
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, RouteToForeignChecksTheLink) {
++  FakeForeignFrameSinkDelegate delegate;
++  blink::WebMouseEvent down =
++      blink::SyntheticWebMouseEventBuilder::Build(
++          blink::WebInputEvent::Type::kMouseDown, 5, 5, 0);
++  down.button = blink::WebPointerProperties::Button::kLeft;
++  RouteToForeign(kNativeWindowSink, down);
++  EXPECT_TRUE(delegate.routed.empty());
++
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  RouteToForeign(kNativeWindowSink, down);
++  ASSERT_EQ(1u, delegate.routed.size());
++  EXPECT_EQ(kNativeWindowSink, delegate.routed[0]);
++}
++
++// A drag that started on a window loses its capture when the link goes (the
++// grant was revoked mid-drag).
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignCaptureEndsWithTheLink) {
++  FakeForeignFrameSinkDelegate delegate;
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  foreign_capture_sink() = kNativeWindowSink;
++  delegate.Unlink(kNativeWindowSink, view_root_->GetFrameSinkId());
++  blink::WebMouseEvent move = blink::SyntheticWebMouseEventBuilder::Build(
++      blink::WebInputEvent::Type::kMouseMove, 6, 6,
++      blink::WebInputEvent::kLeftButtonDown);
++  RouteToForeign(kNativeWindowSink, move);
++  EXPECT_TRUE(delegate.routed.empty());
++  EXPECT_FALSE(foreign_capture_sink().is_valid());
++}
++
+ }  // namespace content

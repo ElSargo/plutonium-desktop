@@ -49,19 +49,37 @@ Done in Phase 2: window broker and grants, grant-checked embedding and input,
 shell-only broker API (`--plutonium-shell-origin`), push events instead of the
 JSON registry, viz hit-test rewrite limited to browser-linked children.
 
-- [ ] **Unit and browser tests for the broker and grant checks.** M · Phase 2
-  Everything was verified by hand on Xvfb (`phase2-grant-checks.js` in the research repo).
-  Cover `ExoWindowBroker` grants/revocation, `IsShellDocument`, attach
-  refusals and the input router's `IsForeignFrameSinkEmbeddedHere`.
-- [ ] **Exercise the untested shell-exclusion cases live.** S · Phase 2
-  Popup / `window.open()` from the shell, `<webview>`/guest at the shell
-  origin, prerendered shell, cross-site iframes, same-RFH cross-document
-  grant reuse, and a compromised renderer calling `Focus`/`SetSize` without
-  attaching. All are excluded by construction; none were run.
-- [ ] **Forward `OnGrantRevoked` to the shell.** S · Phase 2
-  Only the element's `windowclose` reports revocation today.
-- [ ] **Unsubscribe from broker events when the last listener goes.** S
-- [ ] **`NativeWindowEvent` script constructor.** S
+- [x] **Unit and browser tests for the broker and grant checks.** M · Phase 2
+  Done 2026-10-20 (`chromium/patches/0032`, `features/BROKER.md`): unit
+  tests, not browser tests. `plutonium_unittests` is a target of its own
+  (about 800 build steps from a built chrome; `unit_tests` would be about
+  8,800 and `browser_tests` 8,100): `ExoWindowBroker` grants and revocation,
+  `IsShellDocument`, the binder, attach refusals, and an unattached host
+  given `Focus`/`SetSize` over raw Mojo. The input router's
+  `IsForeignFrameSinkEmbeddedHere` is in `content_unittests`. What needs a
+  real Exo window or shell mode is in the live checks below instead.
+- [x] **Exercise the untested shell-exclusion cases live.** S · Phase 2
+  Done 2026-10-20: `tools/shell-checks/run.sh [--forced]`, 39 checks, all
+  passing (`features/BROKER.md`). No holes. Found and fixed on the way:
+  `revokeGrant()` crashed the dev build (re-entrant observer list,
+  `chromium/patches/0031`). A `javascript:` URL's document keeps the
+  previous document's grants: the browser sees no new document, and only
+  the shell's own script can make one, so it is not a hole. A compromised
+  renderer is covered by the unit test, not live.
+- [x] **Forward `OnGrantRevoked` to the shell.** S · Phase 2
+  Done 2026-10-20 (`chromium/patches/0031`): the `grantrevoked` event, for
+  the document's own grants. The shell library drops a revoked cached grant.
+- [x] **Unsubscribe from broker events when the last listener goes.** S
+  Done 2026-10-20 (`chromium/patches/0031`): for every kind of broker
+  event; listening again replays the current state.
+- [x] **`NativeWindowEvent` script constructor.** S
+  Done 2026-10-20 (`chromium/patches/0031`). `BrowserTabEvent` has none
+  yet.
+- [ ] **An activated prerender of the shell has no `navigator.windowBroker`.**
+  S · Phase 2. The origin trial is only force-enabled for primary-main-frame
+  navigations, so a shell page that prerenders its own next page would lose
+  the API on activation (the browser would bind it: the activated page is
+  the shell). Not a hole; no shell prerenders today.
 - [ ] **Allow an isolated web app origin as the shell** (widen the
   `--plutonium-shell-origin` scheme check) when the real shell is ported. S · Phase 5
 
