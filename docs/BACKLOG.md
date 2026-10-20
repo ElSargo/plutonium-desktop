@@ -191,16 +191,6 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
     that refuse or ask to save. Un-settling doesn't reopen anything.
 - [x] **Touchpad on DRM.** Through libinput (`use_libinput`), with scrolling
   into native windows fixed (`NIRI_SHELL.md`, "Scrolling in apps").
-- [ ] **Browser features tabs lack** (no `Browser` behind them). M–L ·
-  Find-in-page, printing, zoom, permission prompts, downloads, file
-  pickers (one picker with the FileChooser portal, below), form autofill.
-  Passwords don't wait on this: they're typed in by the helper
-  (`PASSWORDS.md`). (DevTools, back, forward and reload keys and
-  menu items work: `CHROME_UI.md`.) Decided (2026-10-20): attach tab
-  helpers rather than host tabs in a hidden `Browser`. Each feature is
-  exposed to shells (events and calls, as with context menus) so a shell
-  can draw its own UI, customise it, and tie it into the rest of the
-  desktop, with Chrome's UI only as a fallback.
 - [ ] **Chrome UI still in the shell** (`CHROME_UI.md`). S–M · Ash's
   tooltips for `title`; a shell page's own `alert()`, permission bubbles
   and file pickers; the system clipboard read before a context menu stalls
@@ -238,7 +228,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `features/OPENING_LINKS.md`), Settings (color scheme, accent),
   Notification, Inhibit, Print, Account, Access and Background. A
   FileChooser dialog should open over its parent's element (see "Where do
-  dialogs go?") and could use the same picker as tabs' file inputs. Needs
+  dialogs go?") and uses the same picker as tabs' file inputs (`TAB_FEATURES.md`). Needs
   the parent window handle mapped to Exo windows, which the capture picker
   needs too.
 - [ ] **Password manager adapter** (`features/PASSWORDS.md`). L · Phase 5
@@ -255,6 +245,49 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   (`nix/chrome.nix`, the release binary autoPatchelf'd against nixpkgs).
   Verified on X11 (Xvfb :99, GPU, embedded foot); DRM not yet. Still to do:
   building Chromium itself as a Nix derivation, and dev builds on the host.
+
+## Browser features for tabs (`TAB_FEATURES.md`)
+
+In the suggested order. Tabs have no `Browser` behind them, so these were
+missing. Decided (2026-10-20): attach tab helpers rather than host tabs in a
+hidden `Browser`. Passwords don't wait on this (`PASSWORDS.md`). Each feature attaches its helpers to the registry's
+`WebContents` (not `TabFeatures`, which needs a `TabInterface`), asks the shell
+showing the tab with a cancelable event, and falls back to Chrome's UI.
+
+- [ ] **Tab request plumbing, and zoom.** S–M · `plutonium_tab_requests`
+  (one request, answer and fallback path, generalising the context menu's),
+  `pending` on `BrowserTabEntry`, the new `tabCommand`s and keys, the
+  library's `connect()` options and dialog styles. Zoom: `ZoomController`,
+  `ContentsZoomChange`, `BrowserTabEntry.zoom`, `setTabZoom`; T3's zoom.
+- [ ] **File pickers for tabs.** L · `RunFileChooser` through
+  `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
+  tabs' pickers (inputs, File System Access, Save As) to the shell as
+  `filechooserrequest`. The library's picker over the helper's file listing.
+  Container sessions don't see the user's home: mount, document portal or
+  staging (open question). Uploads are cancelled in every tab today.
+- [ ] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
+  `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
+  fails in tabs today), `permissionrequest`/`answerPermission`, devices in
+  use on the tab. Chrome's bubble anchored over the tab as the fallback.
+- [ ] **Per-thread permission grants.** M · Scopes once, this thread and
+  everywhere; a (thread, origin, permission) store and a check in
+  `PermissionContextBase`. Agents can deny but not grant (open question).
+- [ ] **Downloads in threads.** M · A download observer that records the
+  tab's thread, `download*` events to every shell, `downloadCommand`, open
+  and show through the helper in the thread's environment, closing the empty
+  tab a download leaves. Where files land is an open question.
+  `list_downloads` for agents; Playwright's download events in the relay.
+- [ ] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
+  `stopFind`, `findresult`, and the library's find bar.
+- [ ] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
+  `printToPdf` for the shell's preview, host printers and jobs through the
+  helper (CUPS). Chrome's preview over the shell's window as the fallback.
+- [ ] **FileChooser and Print portals on the same picker and dialog.** M ·
+  Part of "Our own portal backend for the rest": the same
+  `filechooserrequest` and print dialog for native apps.
+- [ ] **Form autofill in tabs.** S–M (Chrome's popup) to L (shell-drawn,
+  saving) · Only if wanted: Chrome's local autofill, or identities and cards
+  through the password adapter (open question).
 
 ## Capture and sharing (`CAPTURE.md`)
 

@@ -19,6 +19,7 @@
 - [features/SEAT.md](features/SEAT.md): DRM sessions through logind: starting, stopping, switching VTs
 - [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording (design, not built)
 - [features/PASSWORDS.md](features/PASSWORDS.md): a password manager adapter for apps, tabs and agents (design, not built)
+- [features/TAB_FEATURES.md](features/TAB_FEATURES.md): find, zoom, printing, permission prompts, downloads, file pickers and autofill for tabs, through the shell (design, not built)
 - [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them (design, not built)
 
 **History.** These are the reports as they were written, in order. Their commands and paths refer to the original research repository: `tools/launch-*.sh` is now `plutonium run`, `patches/exo-*.patch` is now `chromium/patches/`, and `shell/` and `shell-niri/` are now `shells/`.

@@ -174,7 +174,7 @@ Verified on Xvfb with the host's T3 data:
   - permission prompts (they'd be denied), downloads UI, file pickers (`<input type=file>` untested);
   - autofill and password manager tab helpers;
   - fullscreen requests (they'd be refused).
-  Options: attach the needed tab helpers to the registry's `WebContents`, or keep tabs in a hidden real `Browser` (as the WebUI browser does with its own `BrowserWindow`), which would also allow popping a tab out to a normal window.
+  Decided (2026-10-20): attach the needed tab helpers to the registry's `WebContents`, exposed to shells (`TAB_FEATURES.md`).
 - **Tabs don't survive a browser restart** (no session restore).
 - **DevTools:** tabs are CDP targets of type `page` (`other` before `CHROME_UI.md`). A tab's DevTools is a tab of its own (`openedBy: "devtools"`), listed as `other`.
 - A key typed within milliseconds of switching tabs can be lost while the tab re-attaches. No key was lost with a 50 ms gap.

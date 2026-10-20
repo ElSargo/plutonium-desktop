@@ -1,0 +1,283 @@
+# Browser features for tabs
+
+**Status: design. Nothing here is built yet.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+
+A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
+
+Each feature works the way context menus do (`CHROME_UI.md`) and capture is planned (`CAPTURE.md`). The browser asks a shell through the broker. The shell library draws a default UI, which a shell can restyle or replace with its own. Chrome's own UI is the fallback when no shell takes the request. Passwords are not part of this: the helper types them in (`PASSWORDS.md`).
+
+## Why not `TabFeatures`
+
+In this checkout, `TabHelpers::AttachTabHelpers` is gone. Chrome attaches a tab's helpers in `TabFeatures::Init(tabs::TabInterface&, Profile*)` (`chrome/browser/ui/tabs/tab_features.cc`), and many of them need the `TabInterface`: its browser window, tab strip and page actions. Our tabs aren't `TabInterface`s, and making them one would bring the tab strip and the browser window in with it.
+
+So the registry's `Tab` attaches, one by one, the `WebContentsUserData` helpers that only need a `WebContents`, using the same lines as `tab_features.cc`. It implements the `WebContentsDelegate` methods that `BrowserWebContentsDelegate` (`chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc`) implements for these features. Where Chrome's UI then looks for a `Browser`, we hook in a request to the shell. Each section below lists its helpers.
+
+## The common shape
+
+All features use the same plumbing, written once (`plutonium_tab_requests.{h,cc}`, generalising `plutonium_context_menu.cc`'s `Pending`):
+
+- **Who is asked.** For a tab, the shell page whose `<embed>` shows the tab, or else the visible shell (`PlutoniumTabs::shell()`), as for context menus. For a native app's portal request, the focused shell, as in `CAPTURE.md`.
+- **Requests.** The broker sends a cancelable event, such as `filechooserrequest`. The shell calls `preventDefault()` to take it, and later answers with the request's id. If no listener takes it, the fallback runs at once. If a shell takes it and then goes away (it reloads, closes or crashes), the request is cancelled or falls back, depending on the feature (`WrapCallbackWithDefaultInvokeIfNotRun`, as context menus do). A request never hangs.
+- **Pending state on the tab.** `BrowserTabEntry` gets `pending: {permission?, fileChooser?, print?}`, as it already has `dialogType`. Every shell, the switcher and agents can see a tab that waits on the user, mark it with a dot and bring it forward.
+- **State goes to every shell.** Zoom, find results, downloads and devices in use are reported to every shell through `tabchanged` or their own events, as `capturestart` will be.
+- **Commands.** `tabCommand(id, …)` gets `"find"`, `"print"`, `"zoom-in"`, `"zoom-out"` and `"zoom-reset"`, so a shell's own buttons and menus can start them, not only keys.
+- **Keys.** Once the page has let a key through, a tab gets Chrome's key for each feature, as it got back, forward and reload (`plutonium_keys.cc`, `Tab::HandleKeyboardEvent`): Ctrl+F, F3, Ctrl+G and Ctrl+Shift+G, Ctrl+P, Ctrl+plus, Ctrl+minus and Ctrl+0. A page like Google Docs that takes Ctrl+F for itself keeps it.
+- **Shell library.** `connect({ findBar, zoom, permissions, fileChooser, print, downloads })`. Each option is either `false` (leave it to Chrome), a function (draw it yourself and return true if you took the request), or left out (the library draws it). The look comes from custom properties, as with menus: `--plutonium-dialog-bg`, `-fg`, `-border`, `-radius`, `-shadow`, `-font`, `-accent`, plus the menu's `--plutonium-menu-*`.
+- **Context menu.** Print, and "Save link, image or page as", come back to the tab's menu (`Keeps()` in `plutonium_context_menu.cc`) once printing and downloads work.
+
+## Find in page
+
+**Helpers.** `FindBarState::ConfigureWebContents()` (`chrome/browser/ui/find_bar/find_bar_state.cc`) creates `find_in_page::FindTabHelper` (`components/find_in_page/find_tab_helper.h`). `StartFinding()` and `StopFinding()` drive it, and results arrive through `FindResultObserver::OnFindResultAvailable()` (`components/find_in_page/find_result_observer.h`, from `WebContentsObserver::DidReceiveFindReply`). Chrome's find bar is `FindBarController` with a views `FindBarHost` in the `BrowserView`, and we don't use it.
+
+**Shell.**
+- `findrequest {requestId, tabId, initialText}` (cancelable), from Ctrl+F or `tabCommand(id, "find")`. `initialText` is the selection, or the last search (`GetInitialSearchText`).
+- `shell.find(tabId, text, { forward, matchCase })`: starting a new search or moving to the next match is the same call, as in `StartFinding`.
+- `shell.stopFind(tabId, "keep" | "clear" | "activate")`, matching `SelectionAction`. Activate clicks the match, as Enter in Chrome's bar does with a link.
+- `findresult {tabId, matches, activeMatch, rect, final}`, from `FindNotificationDetails`. The rect lets a shell draw its own marker beside the tab, or scroll its layout to it.
+- F3, Ctrl+G and Ctrl+Shift+G call `find` with the last text when no bar is open.
+
+**Fallback.** The shell library's find bar: a small popover at the top right of the tab's element, with a text field, a count, next and previous, match case, and Escape to close. A shell with `findBar: false` and no library gets nothing, as today: Chrome's bar needs a `BrowserView`.
+
+**Agents.** No need. They read the page (`read_tab`).
+
+**Size.** S–M. S in Chromium (the helper, keys, two broker calls and an event), S for the library's bar.
+
+## Zoom
+
+**Helpers.** `zoom::ZoomController::CreateForWebContents()` (`components/zoom/zoom_controller.h`), and `zoom::PageZoom::Zoom()` (`components/zoom/page_zoom.h`) for in, out and reset. Levels are saved per host in the profile (`HostZoomMap`, `chrome/browser/ui/zoom/chrome_zoom_level_prefs.h`), as in Chrome. Ctrl+wheel arrives as `WebContentsDelegate::ContentsZoomChange()`, which `BrowserWebContentsDelegate` turns into `IDC_ZOOM_PLUS`/`MINUS`. The tab does the same with `PageZoom`. Chrome's zoom bubble (`ZoomViewController`) is a page action, and we don't use it.
+
+**Shell.**
+- `BrowserTabEntry.zoom`: the percent (`ZoomController::GetZoomPercent`), plus `zoomDefault` (true at the default level). Changes come as `tabchanged`, from a `ZoomObserver`.
+- `setTabZoom(id, percent)`, and `tabCommand(id, "zoom-in" | "zoom-out" | "zoom-reset")`.
+- A shell can show the level in its address bar or as a short toast, and offer a reset. This also gives T3's Browser panel the zoom it lacks (`TABS.md`, "Not done for T3").
+
+**Fallback.** Zoom works without any UI. The library shows a short "110%" toast over the tab's element when the level changes, unless `zoom: false` is passed.
+
+**Agents.** No. They size pages with `Emulation`.
+
+**Not this:** "Page zoom" in `BACKLOG.md`'s design questions is about zooming the shell page around native windows. That is a different thing.
+
+**Size.** S.
+
+## Permission prompts
+
+**Helpers.**
+- `permissions::PermissionRequestManager::CreateForWebContents()` (`components/permissions/permission_request_manager.h`). Without it, requests are denied, as they are today.
+- `content_settings::PageSpecificContentSettings::CreateForWebContents()` with a `PageSpecificContentSettingsDelegate` (`chrome/browser/content_settings/page_specific_content_settings_delegate.h`): what the page used or was blocked from.
+- In the delegate, `RequestMediaAccessPermission()` and `CheckMediaAccessPermission()` call `MediaCaptureDevicesDispatcher` (`chrome/browser/media/webrtc/media_capture_devices_dispatcher.h`), as `BrowserWebContentsDelegate` does. Its `PermissionBubbleMediaAccessHandler` (`permission_bubble_media_access_handler.h`) goes through the request manager. Today the default delegate returns `NOT_SUPPORTED`, so `getUserMedia` fails in tabs.
+- `FileSystemAccessPermissionRequestManager::CreateForWebContents()` (`chrome/browser/file_system_access/file_system_access_permission_request_manager.h`): write access for files the page opened. This is a prompt of its own, reported the same way.
+- `CanDownload()` in the delegate goes to `DownloadRequestLimiter` (`chrome/browser/download/download_request_limiter.h`). Its "download several files" question is the `automatic-downloads` permission.
+- `MediaStreamCaptureIndicator` (`chrome/browser/media/webrtc/media_stream_capture_indicator.h`): which tabs use the camera, microphone or screen right now.
+
+**Hook.** Chrome builds a prompt in `CreatePermissionPrompt()` (`chrome/browser/ui/views/permissions/permission_prompt_factory.cc`, called from `PermissionPrompt::Create` in `components/permissions/permission_prompt_impl.cc`). For a registry tab, it returns a `PlutoniumPermissionPrompt` instead: a `permissions::PermissionPrompt` that asks the shell and answers through the `PermissionPrompt::Delegate` (`Accept`, `AcceptThisTime`, `Deny`, `Dismiss`).
+
+**Shell.**
+- `permissionrequest {requestId, tabId, thread, origin, embeddingOrigin, types, devices?}` (cancelable). `types` holds names such as `camera`, `microphone`, `geolocation`, `notifications`, `clipboard-read`, `midi-sysex`, `storage-access`, `automatic-downloads`, `window-management`, `local-fonts`, `idle-detection`, `keyboard-lock` and `file-write`. Several requests can be grouped into one, as Chrome groups camera and microphone.
+- `answerPermission(requestId, "allow" | "deny" | "dismiss", { scope: "once" | "thread" | "everywhere" })`.
+- `shell.permissions({ thread?, origin? })` lists the decisions Plutonium knows about, and `revokePermission(…)` removes one.
+- `BrowserTabEntry.inUse: {camera, microphone, screen, geolocation}` changes through `tabchanged`, so a shell can draw a dot on the tab or the thread. Screen capture from a tab also reaches every shell as `capturestart` (`CAPTURE.md`).
+- **Hidden tabs.** The request manager shows nothing while its tab is hidden, and shows the request when the tab becomes visible. A tab no `<embed>` shows is hidden, so a background tab's request waits. `pending.permission` lets the shell mark the tab, and bring it forward if it wants to.
+
+### Grants and threads
+
+Chrome stores decisions per origin, in the profile, and every thread's tabs share the shells' profile. Allowing the camera for meet.example.com in one thread would allow it in all of them. Plutonium's model is that a thread is the unit of reach: agents reach only their thread, and password fills can be allowed "for this thread and site" (`PASSWORDS.md`). So the prompt offers three scopes:
+
+| Scope | Stored by | Lasts |
+|---|---|---|
+| `once` | Chrome's one-time grant (`AcceptThisTime`) | until the page's origin is closed or navigated away from, as in Chrome |
+| `thread` | Plutonium, keyed by (thread, origin, permission) | until revoked, or the thread is settled |
+| `everywhere` | Chrome's content setting (`HostContentSettingsMap`) | until revoked; also shown in `chrome://settings/content` |
+
+- **The thread** is the tab's origin tag (its first tag), which never changes. A tab another thread borrowed (an added tag) keeps its origin thread's grants.
+- **Thread grants.** For a thread grant, Chrome's own setting stays "ask". Two hooks make the grant hold:
+  - `PlutoniumPermissionPrompt` answers a covered request with `AcceptThisTime` without asking anyone;
+  - a check in `PermissionContextBase` (`components/permissions/permission_context_base.h`) reports "granted" for a registry tab whose thread holds the grant, so `navigator.permissions.query()` and `Notification.permission` say so too.
+- **Deny** takes the same scopes.
+- **Settling.** When a thread is settled, its grants go with it, unless the user keeps them (the T3 sidebar item in `BACKLOG.md` decides what settle does).
+
+**Fallback.** If no shell takes the request, Chrome's own bubble is shown, anchored at the top of the tab's `<embed>` in the shell's window. Chrome's anchor lookup goes through `GetBrowser()` in `permission_prompt_factory.cc`, so this needs a patch. If the bubble can't be built, the request is dismissed. That stores nothing, and the page can ask again.
+
+**Agents.**
+- `list_tabs` shows `pending.permission`.
+- An agent can answer `deny` or `dismiss` (`answer_permission`). Only the user can grant.
+- Playwright's `Browser.grantPermissions` stays acknowledged and does nothing (`helper/src/serverTabs.ts`, `pages.ts`), as now.
+
+**Size.** M–L. M in Chromium (the helpers, the prompt, the media delegate methods, indicators), M for thread grants (the store and the `PermissionContextBase` check), S for the library's prompt.
+
+## File pickers
+
+**Helpers.**
+- In the delegate, `RunFileChooser()` and `EnumerateDirectory()` call `FileSelectHelper` (`chrome/browser/file_select_helper.h`), as `BrowserWebContentsDelegate` does. Today the default delegate cancels every `<input type=file>`.
+- `FileSelectHelper` opens a `ui::SelectFileDialog` with a `ChromeSelectFilePolicy(web_contents)` (`chrome/browser/ui/select_file_policy/chrome_select_file_policy.h`). So do the File System Access pickers (`content/browser/file_system_access/file_system_chooser.cc`, `showOpenFilePicker`, `showSaveFilePicker`, `showDirectoryPicker`) and a download's Save As (`chrome/browser/download/download_file_picker.cc`).
+
+**Hook.** Ash sets the dialog factory to `SelectFileDialogExtensionFactory` (the Files app; `chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc`). In shell mode a `PlutoniumSelectFileDialogFactory` wraps it (`ui/shell_dialogs/select_file_dialog_factory.h`). When the policy's source `WebContents` is a registry tab, it returns a dialog that asks the shell. Otherwise it returns the Files app's dialog. `ChromeSelectFilePolicy` needs a getter for its `source_contents_`. Every picker a tab can open goes through this one hook.
+
+**Shell.** Tabs and native apps send the same request:
+
+```
+filechooserrequest {
+  requestId,
+  source: {tabId, origin} | {appId, pid, windowId},
+  thread,
+  mode: "open" | "open-multiple" | "folder" | "save",
+  title, acceptLabel,
+  filters: [{name, patterns, mimeTypes}], currentFilter,
+  currentName, currentFolder,
+  choices?            // the portal's extra choices, such as an encoding
+}
+```
+
+- The shell answers with `answerFileChooser(requestId, { paths, filter?, choices? })`, or `null` to cancel.
+- The library's picker lists the host's files through the helper, which runs as the user (`GET /v1/files?dir=`, recent files, the XDG user folders). It also offers the thread's own places: a T3 thread's project folder, and the thread's downloads.
+- A shell can restyle the picker or replace it (`fileChooser: (request) => true`).
+
+### One picker with the FileChooser portal
+
+"Our own portal backend for the rest" (`BACKLOG.md`) has the helper implement `org.freedesktop.impl.portal.FileChooser` (`OpenFile`, `SaveFile`, `SaveFiles`) next to the capture interfaces, in the same `plutonium.portal` and `plutonium-portals.conf`.
+
+1. A native app's request comes with a parent window handle. The helper maps it to the Exo window, and so to the thread. This is the same mapping the capture picker needs.
+2. The helper sends the same `filechooserrequest` to the focused shell, with `source: {appId, pid, windowId}`. The shell can open the picker over the parent's element (see "Where do dialogs go?" in `BACKLOG.md`).
+3. The answer's paths go back to the portal as URIs. For sandboxed apps, xdg-desktop-portal's frontend exports them through the document portal itself.
+
+So a tab and a native app show one picker with the same places and the same recent files, as capture's picker serves both. When the portal backend doesn't exist yet, only tabs use the picker.
+
+### Paths in the container
+
+The answer is a host path, but Ash in the container doesn't see the user's home. Its `$HOME` is `$DATA_DIR/container-home` (`bin/plutonium`, `container create`), and only the checkout, `$DATA_DIR` and the runtime dir are shared. `HOST=1` sessions have no such problem. For container sessions, there are three ways (open question):
+
+- **Mount the user's folders** (the XDG user dirs, or all of `$HOME`) into the container at the same path. This is the simplest way, and the container already keeps paths the same inside and out.
+- **The document portal.** The helper adds each chosen file to it (`org.freedesktop.portal.Documents.AddFull`), and Ash reads `$XDG_RUNTIME_DIR/doc/<id>/<name>`. The runtime dir is shared, but the FUSE mount has to reach the container. To check: whether podman's bind of the runtime dir carries it.
+- **Staging.** The helper copies the chosen files under the runtime dir. Saving and folders make this awkward.
+
+**Fallback.** The Files app's dialog (`SelectFileDialogExtension`). In a container session it only shows the profile's own My files, and whether it shows at all in shell mode is to check. If it can't open, the request is cancelled, as today. For the portal, if no shell takes the request, the helper can forward it to the GTK backend (`org.freedesktop.impl.portal.desktop.gtk`). Its dialog is an Exo window that a shell then has to show.
+
+**Agents.**
+- Playwright's file chooser handling (`Page.setInterceptFileChooserDialog`, `Page.fileChooserOpened`, `DOM.setFileInputFiles`) runs in content before the delegate. An agent driving a tab that way never opens the user's picker.
+- For the helper's own tab tools, `choose_files {paths}` answers a pending chooser in the agent's thread.
+- The paths must be visible to Ash (above). An agent already runs as the user and can read the files anyway, so this adds no reach.
+- A native app an agent launched asks the user's shell like any other app.
+
+**Size.** L overall:
+- M in Chromium: the factory, the dialog, the delegate methods;
+- M–L for the library's picker and the helper's file listing;
+- S–M for the container paths;
+- M for the portal interface, on top of the portal backend item.
+
+## Downloads
+
+**Helpers.**
+- The download manager is the profile's (`ChromeDownloadManagerDelegate`, `chrome/browser/download/chrome_download_manager_delegate.h`), so downloads from tabs already happen. They land in the profile's download folder, and nothing shows them.
+- On ChromeOS the download UI is `DownloadNotificationManager` (`chrome/browser/download/notification/download_notification_manager.h`, chosen in `download_ui_controller.cc`). It shows Ash notifications, and shell mode has none.
+- `CanDownload()` in the delegate goes to `DownloadRequestLimiter` (see Permissions).
+- A link opened in a new tab that turns out to be a download leaves an empty tab. `DownloadUIController` closes such a tab only when it is in a `Browser`'s tab strip. The registry should close it itself when the tab's first navigation becomes a download.
+
+**Hook.**
+- A `content::DownloadManager::Observer` and `download::DownloadItem::Observer` in the browser (`plutonium_downloads.{h,cc}`).
+- At `OnDownloadCreated` it reads the tab from `content::DownloadItemUtils::GetWebContents()` and keeps its thread (the origin tag). The tab may be closed later.
+- `ChromeDownloadManagerDelegate::OpenDownload()` and `ShowDownloadInShell()` call `platform_util`, which opens the Files app on ChromeOS. For Plutonium they go to the helper instead.
+- A dangerous file's confirmation (`RequestConfirmation`) becomes a state of the download (below). Safe Browsing has no Google API keys here, so only Chrome's local file-type checks apply.
+
+**Shell.**
+- `downloadadded`, `downloadchanged` and `downloadremoved`, sent to every shell. Subscribing replays the current ones, as tabs do. Each carries `{id, tabId, thread, url, filename, path, mime, receivedBytes, totalBytes, state: "in-progress" | "paused" | "complete" | "cancelled" | "interrupted", danger?}`.
+- `shell.downloads({ thread? })`.
+- `downloadCommand(id, "pause" | "resume" | "cancel" | "open" | "show" | "keep" | "discard" | "remove")`:
+  - `open` and `show` go to the helper, which opens the file in the download's thread: its `xdg-open`, with the thread's environment (`OPENING_LINKS.md`). Show uses `org.freedesktop.FileManager1.ShowItems`.
+  - `keep` and `discard` answer a dangerous file's confirmation.
+- Save As (Chrome's "ask where to save" setting, or "Save link as") opens the file picker in `save` mode.
+
+### Downloads in a thread
+
+Every download records its thread, so a shell can list a thread's downloads with the thread (T3's sidebar, the plain shell's thread view). The file itself goes to one of these (open question):
+
+- **One folder for everything** (`~/Downloads`, the user's choice), with the thread kept only as metadata. This is what users expect from a browser.
+- **A folder per thread** (`~/Downloads/<thread label>/`), or a T3 thread's project folder. This keeps a thread's files together, and an agent can find them.
+
+Either way, in a container session Chrome writes inside the profile under `$DATA_DIR`, which the host can see. When the download completes, the helper moves the file to its folder (normally on the same filesystem, so it's a rename). The alternative is mounting the folder into the container (see "Paths in the container" above).
+
+**Fallback.** The library shows its own download list and a toast when a download starts and finishes. With `downloads: false` and no library, files land silently, as today.
+
+**Agents.**
+- `list_downloads` shows the thread's downloads with their paths.
+- `download_action` takes the same commands, except `keep` on a dangerous file, which is the user's decision.
+- Playwright's download events need `Browser.setDownloadBehavior` with events, and the helper's relays only acknowledge it today. The relay could pass on `Browser.downloadWillBegin` and `downloadProgress` for its own tab's frames, so `waitForEvent("download")` works.
+
+**Size.** M: M in Chromium (the observer, the thread, the delegate overrides, the empty-tab close), S in the helper (moving, opening, showing), S for the library's list.
+
+## Printing
+
+**Helpers.**
+- `printing::InitializePrintingForWebContents()` (`chrome/browser/printing/printing_init.cc`) creates `PrintViewManager` (`chrome/browser/printing/print_view_manager.h`), and `PrintCompositeClient` (`components/printing/browser/print_composite_client.h`) for pages with out-of-process frames.
+- Chrome's preview is `PrintPreviewDialogController` (`print_preview_dialog_controller.cc`). It is a tab-modal web dialog that needs a `WebContentsModalDialogHost`, found through `FindBrowserWithTab()` or the `WebContentsModalDialogManager`'s delegate.
+- On a `target_os = "chromeos"` build, its printers come from Ash's CUPS printer manager, which expects ChromeOS's own printing service. Probably only "Save as PDF" works there (to check).
+
+**Hook.** `PrintViewManager::PrintPreview()` and `ShowScriptedPrintPreview()` (`print_view_manager.cc`; Ctrl+P and `window.print()`). For a registry tab they send a request to the shell instead of opening Chrome's preview. `window.print()` blocks the page's script until the request is answered.
+
+**Shell.**
+- `printrequest {requestId, tabId, thread, title, url, hasSelection, scripted}` (cancelable).
+- `shell.printToPdf(tabId, { pageRanges, landscape, scale, margins, paper, background, headerFooter, selectionOnly }) → Blob`. This uses `PrintViewManagerBase::PrintToPdf()` and `print_to_pdf::PdfPrintJob` (`components/printing/browser/print_to_pdf/pdf_print_job.h`), as DevTools' `Page.printToPDF` does. The shell calls it again whenever a setting changes, and shows the PDF as its preview.
+- `shell.printers()` lists the host's printers, through the helper (CUPS on the host, over IPP or `lpstat`).
+- `shell.print(requestId, pdf, { printer, copies, duplex, color })`: the helper sends the job to host CUPS. "Save as PDF" uses the file picker in `save` mode.
+- `answerPrint(requestId, "done" | "cancel")` lets `window.print()` return.
+
+**The Print portal** (`org.freedesktop.impl.portal.Print`, part of "Our own portal backend for the rest") uses the same dialog for native apps. `PreparePrint` shows the dialog without a preview and returns the settings, and `Print` hands the helper the document, which it sends to CUPS. So tabs and apps get one print dialog, as they get one file picker.
+
+**Fallback.**
+- Chrome's print preview, as a dialog over the shell's window. The tab gets a `web_modal::WebContentsModalDialogManager` whose delegate gives the shell's widget as the host (`HasWebContentsModalDialogHost()` in `print_preview_dialog_controller.cc`).
+- If the preview can't offer real printers (above), it still saves PDFs.
+
+**Agents.** `Page.printToPDF` already works through Playwright (`page.pdf()`), so nothing is needed for PDFs. Printing to a physical printer is the user's (open question).
+
+**Size.** M–L:
+- M in Chromium (the helpers, the hook, `printToPdf`, the modal dialog host for the fallback);
+- M for the library's dialog and preview;
+- S–M for the helper's CUPS side;
+- M for the Print portal, later.
+
+## Form autofill
+
+Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so `ChromePasswordManagerClient` is not attached.
+
+**Helpers.**
+- `AutofillClientProvider::CreateClientForWebContents()` (`chrome/browser/ui/autofill/autofill_client_provider.h`) creates `ChromeAutofillClient` (`chrome/browser/ui/autofill/chrome_autofill_client.h`) and its `ContentAutofillDriverFactory`.
+- The suggestion popup is a views popup (`chrome/browser/ui/views/autofill/popup/`) parented to the tab's widget, so it may already show in the shell's window.
+- Save and update prompts go through `autofill::BubbleManager` and page actions, which need a `TabInterface` (`tab_features.cc`). They won't work.
+
+**Shell (later).** `autofillrequest {requestId, tabId, field, suggestions: [{id, label, sublabel, icon}]}`, answered with `answerAutofill(requestId, suggestionId)`. Chrome then fills the form itself (`AutofillSuggestionDelegate::DidAcceptSuggestion`). As with passwords, the shell sees only labels: a card shows as "•••• 1234" and its number never reaches the shell.
+
+**Fallback.** Chrome's popup. Saving new addresses and cards would need its own UI.
+
+**Agents.** No.
+
+**Without Chrome's autofill.** There is no sync, so whatever Chrome's autofill stores stays local. Bitwarden and 1Password already keep identities and cards. The password adapter could fill them in the same way it fills logins (open question).
+
+**Size.** S–M for Chrome's popup alone, L for a shell-drawn popup and saving.
+
+## Suggested order
+
+1. **The common plumbing, and zoom.** S–M. Zoom is the smallest feature, so it proves the request and state plumbing, the keys and the library options. It also gives T3 its zoom.
+2. **File pickers for tabs.** L. Uploads fail on every site today. This includes the library's picker, the helper's file listing, and the container paths.
+3. **Permission prompts.** M–L. Camera and microphone (video calls), notifications, clipboard. Thread grants can follow as their own step.
+4. **Downloads.** M. Files already land; this adds the UI, threads, open and show.
+5. **Find in page.** S–M.
+6. **Printing.** M–L.
+7. **The FileChooser and Print portals** on the same picker and dialog, with "Our own portal backend for the rest".
+8. **Form autofill.** Only if it's wanted (below).
+
+## Not covered here
+
+- **Web notifications** (`Notification`). The permission is above, but showing them needs a notification UI. Shell mode has no Ash notifications. The shell (and the Notification portal for apps) should draw them, as a separate item.
+- Translate, Cast, picture-in-picture windows, "Save page as" beyond the picker, and Chrome's site settings UI.
+- Fullscreen requests from tabs already work (patch 0011).
+
+## Open questions
+
+1. **Permission scopes.** Should the three scopes be once, this thread and everywhere? Which one should be the default button? Should "everywhere" exist at all, or should every lasting grant be per thread?
+2. **The permission fallback.** Chrome's bubble anchored over the tab (needs a patch), or simply dismiss when no shell takes the request?
+3. **Agents and permissions.** Should an agent be able to grant a permission in its own thread (for example camera for a test page), or only deny? Should `Browser.grantPermissions` map to thread grants?
+4. **What settle does to grants.** Should a thread's grants go when it settles?
+5. **Paths in container sessions.** Mount the user's folders into the container, use the document portal, or stage copies? This decides uploads, Save As and where downloads are written.
+6. **Where downloads land.** One `~/Downloads` with the thread kept as metadata, a folder per thread, or the thread's project folder for T3 threads? Should agent-started downloads go somewhere else?
+7. **Zoom scope.** Chrome's per-site zoom is shared by every thread. Is that right, or should zoom be per tab (`ZoomController`'s isolated mode)?
+8. **Physical printing by agents.** Never, or with the user's approval?
+9. **Form autofill.** Should it be Chrome's (local only, no sync), the password adapter filling identities and cards, or not built at all?
+10. **Who gets a tab's request** when several monitors each have a visible shell (`MULTI_MONITOR.md`). The shell showing the tab seems right, but a tab no shell shows has no display. Should it go to the focused shell?
