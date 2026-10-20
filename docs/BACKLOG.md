@@ -180,23 +180,27 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   pickers (one picker with the FileChooser portal, below), form autofill.
   Passwords don't wait on this: they're typed in by the helper
   (`PASSWORDS.md`). (DevTools, back, forward and reload keys and
-  menu items work: `CHROME_UI.md`.) Attach tab helpers, or host tabs in a
-  hidden `Browser` (which would also allow popping a tab out to a normal
-  window).
+  menu items work: `CHROME_UI.md`.) Decided (2026-10-20): attach tab
+  helpers rather than host tabs in a hidden `Browser`. Each feature is
+  exposed to shells (events and calls, as with context menus) so a shell
+  can draw its own UI, customise it, and tie it into the rest of the
+  desktop, with Chrome's UI only as a fallback.
 - [ ] **Chrome UI still in the shell** (`CHROME_UI.md`). S–M · Ash's
   tooltips for `title`; a shell page's own `alert()`, permission bubbles
   and file pickers; the system clipboard read before a context menu stalls
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
-- [ ] **Tabs don't survive a browser restart.** M · Session restore. Also
+- [ ] **Tabs don't survive a browser restart.** M · Session restore.
+  Not needed yet (2026-10-20). Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
 - [x] **Drag and drop** between native apps, tabs and pages
   (`DRAG_AND_DROP.md`). Tested on DRM in the niri shell.
-- [ ] **Clipboard** between page content and native apps
-  (`wl_data_device.set_selection`). Untested. M · Phase 5
-  Screenshot copy (`CAPTURE.md`) and the password clipboard fallback
-  (`PASSWORDS.md`) wait on it.
+- [x] **Clipboard** between page content and native apps
+  (`wl_data_device.set_selection`). Works in daily use (the user,
+  2026-10-20); an automated check in both directions is part of the DRM
+  verification pass. The primary selection (middle-click paste) isn't a
+  requirement.
 - [ ] **text-input-v3 (IME for GTK 4, Qt, foot).** L · Phase 5
   Exo only has text-input-v1. With v1, activation and focus handoff to and
   from the page work (`weston-editor`).
