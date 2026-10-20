@@ -118,7 +118,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
-  session's keymap (xkb) instead of assuming US keycodes.
+  session's keymap (xkb) instead of assuming US keycodes. Characters the
+  layout lacks need the temporary keymap that password auto-type needs too
+  (`PASSWORDS.md`, "Native windows"); build it once for both.
 - [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
   the browser.
@@ -153,11 +155,31 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   element picker, screenshots to file, recording, PiP windows, DevTools
   window, console/network entries in snapshots. T3 doesn't draw Chrome's
   context menus itself yet (`CHROME_UI.md`): it gets Chrome's, filtered.
+- [ ] **T3 sidebar: show a thread's open apps and tabs; decide what snooze and
+  settle do to them.** M–L · Phase 5
+  - Indicator: like the terminal one on a thread row (`Sidebar.tsx`,
+    `terminalStatus`), with a count in the tooltip. Icons: a tab's
+    favicon, or a generic browser icon; an app's desktop-file icon (from
+    its app_id, or `xdg_toplevel_icon` once Exo has it), or a generic app
+    icon. With several, show one or two and a count. The helper's icon
+    lookup is shared with "Switcher: app icons".
+  - Settle closes the thread's apps and tabs by default. First it asks
+    for confirmation and lists what will close. The confirmation can be
+    turned off globally, or for one app (by app_id) or one site (by
+    origin). The same settings could also keep an app or site open.
+  - Snooze needs a setting with the same global, per-app and per-site
+    overrides: keep running (the default?), close, or close and reopen on
+    wake (tabs only; apps can't be restored). Reopening a tab with its
+    state needs the same work as "Tabs don't survive a browser restart".
+  - Closing asks the app nicely (`xdg_toplevel.close`) and handles apps
+    that refuse or ask to save. Un-settling doesn't reopen anything.
 - [x] **Touchpad on DRM.** Through libinput (`use_libinput`), with scrolling
   into native windows fixed (`NIRI_SHELL.md`, "Scrolling in apps").
 - [ ] **Browser features tabs lack** (no `Browser` behind them). M–L ·
   Find-in-page, printing, zoom, permission prompts, downloads, file
-  pickers, autofill/passwords. (DevTools, back, forward and reload keys and
+  pickers (one picker with the FileChooser portal, below), form autofill.
+  Passwords don't wait on this: they're typed in by the helper
+  (`PASSWORDS.md`). (DevTools, back, forward and reload keys and
   menu items work: `CHROME_UI.md`.) Attach tab helpers, or host tabs in a
   hidden `Browser` (which would also allow popping a tab out to a normal
   window).
@@ -166,11 +188,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and file pickers; the system clipboard read before a context menu stalls
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
-- [ ] **Tabs don't survive a browser restart.** M · Session restore.
+- [ ] **Tabs don't survive a browser restart.** M · Session restore. Also
+  what "close and reopen on wake" for a snoozed thread needs (the T3
+  sidebar item).
 - [x] **Drag and drop** between native apps, tabs and pages
   (`DRAG_AND_DROP.md`). Tested on DRM in the niri shell.
 - [ ] **Clipboard** between page content and native apps
   (`wl_data_device.set_selection`). Untested. M · Phase 5
+  Screenshot copy (`CAPTURE.md`) and the password clipboard fallback
+  (`PASSWORDS.md`) wait on it.
 - [ ] **text-input-v3 (IME for GTK 4, Qt, foot).** L · Phase 5
   Exo only has text-input-v1. With v1, activation and focus handoff to and
   from the page work (`weston-editor`).
@@ -182,7 +208,27 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `ext_data_control`. M each · Phase 5
 - [x] **X11 apps** via rootless Xwayland as an Exo client. Done
   (xwayland-satellite per thread, now in the helper).
-- [ ] **Accessibility, multi-monitor, HiDPI polish.** L · Phase 5
+- [ ] **Our own portal backend for the rest** (`org.freedesktop.impl.portal.*`
+  behind `xdg-desktop-portal`). L · Phase 5
+  Builds on the helper's capture backend (ScreenCast, Screenshot and
+  GlobalShortcuts are in "Capture and sharing" below), using the same
+  `plutonium.portal` and `plutonium-portals.conf`, which then prefer us for
+  more interfaces. The UI is drawn by the shell rather than GTK or KDE
+  dialogs: FileChooser, OpenURI (Flatpak link opening, see
+  `features/OPENING_LINKS.md`), Settings (color scheme, accent),
+  Notification, Inhibit, Print, Account, Access and Background. A
+  FileChooser dialog should open over its parent's element (see "Where do
+  dialogs go?") and could use the same picker as tabs' file inputs. Needs
+  the parent window handle mapped to Exo windows, which the capture picker
+  needs too.
+- [ ] **Password manager adapter** (`features/PASSWORDS.md`). L · Phase 5
+  One adapter for the user's manager (Bitwarden first, then 1Password,
+  KeePassXC, `pass`). Logins are auto-typed into tabs (origin-checked) and
+  native windows (by app id), with the clipboard as a fallback. Agents can
+  ask for a fill through an Ash-drawn prompt and never see the secret.
+  Native typing needs an Exo patch (key events with a temporary keymap).
+- [ ] **Accessibility and HiDPI polish.** L · Phase 5 (Several monitors has
+  its own section below.)
 - [ ] **Packaging:** reproducible build that runs on NixOS outside the dev
   container. L · Phase 5
   Running is done for release builds: `HOST=1`, `plutonium host build`
@@ -252,6 +298,27 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 - [ ] **Switcher on DRM**: verify it there (only Xvfb so far).
 - [x] **Frontends** (step 4). M · T3 and the plain shell register threads,
   tag what they open, show an "Elsewhere" area with import.
+
+## Several monitors (`MULTI_MONITOR.md`)
+
+In order. A shell window per display, each with its own shell instances;
+shells that want to span monitors run on each and sync themselves.
+
+- [ ] **Displays in the broker; a shell per display.** M–L · A display list
+  and events, one shell window per display, a shell choice per display,
+  Super+Tab and the switcher on the focused display, agent routing to the
+  set of visible shells. Hotplug moves an unplugged display's windows to
+  Elsewhere.
+- [ ] **One window, one place.** M · Replaces "only the visible shell
+  drives": the newest claim on a window wins and the loser gets
+  `windowtaken`. Tabs already work this way.
+- [ ] **Show on display N.** S · Routed like focus requests, for the
+  switcher, shortcuts and agents.
+- [ ] **Drag windows between shells.** M · `application/x-plutonium-window`
+  carrying the window id; the drop asks the broker to take it. Check that
+  Ash's drag controller already carries ordinary data across displays.
+- [ ] **Linked documents** (a shell's second display as a same-origin child
+  document). Only if a shell needs shared in-page state; T3 shouldn't.
 
 ## Design questions
 

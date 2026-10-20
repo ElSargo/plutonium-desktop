@@ -83,6 +83,8 @@
 | Links as tabs in their thread | [features/OPENING_LINKS.md](features/OPENING_LINKS.md) |
 | Chrome's own UI in the shell: DevTools, context menus, browser and Ash keys | [features/CHROME_UI.md](features/CHROME_UI.md) |
 | Screenshots, screen sharing, recording (design) | [features/CAPTURE.md](features/CAPTURE.md) |
+| Password manager adapter (design) | [features/PASSWORDS.md](features/PASSWORDS.md) |
+| Several monitors (design) | [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |
 | The helper's HTTP API and shell library | [../helper/README.md](../helper/README.md) |

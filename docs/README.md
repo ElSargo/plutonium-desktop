@@ -17,6 +17,9 @@
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread
 - [features/GPU_X11.md](features/GPU_X11.md): the GPU path for apps
 - [features/SEAT.md](features/SEAT.md): DRM sessions through logind: starting, stopping, switching VTs
+- [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording (design, not built)
+- [features/PASSWORDS.md](features/PASSWORDS.md): a password manager adapter for apps, tabs and agents (design, not built)
+- [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them (design, not built)
 
 **History.** These are the reports as they were written, in order. Their commands and paths refer to the original research repository: `tools/launch-*.sh` is now `plutonium run`, `patches/exo-*.patch` is now `chromium/patches/`, and `shell/` and `shell-niri/` are now `shells/`.
 1. [history/exo-viability-handoff.md](history/exo-viability-handoff.md): the brief

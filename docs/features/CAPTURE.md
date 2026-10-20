@@ -80,7 +80,7 @@ To check: Exo must keep sending frame callbacks to a parked window while it's ca
 `plutoniumd` implements the backend side of xdg-desktop-portal on the session D-Bus:
 
 - `org.freedesktop.impl.portal.ScreenCast`, `Screenshot` and `GlobalShortcuts`. `RemoteDesktop` may come later.
-- Files: `plutonium.portal`, plus `plutonium-portals.conf`, which chooses our backend for these interfaces and leaves the rest (file chooser, and so on) to the GTK backend.
+- Files: `plutonium.portal`, plus `plutonium-portals.conf`, which chooses our backend for these interfaces. The rest (file chooser, and so on) stay with the GTK backend until our own backend covers them (`BACKLOG.md`, "Our own portal backend for the rest").
 - The session sets `XDG_CURRENT_DESKTOP=Plutonium` and passes it to D-Bus activation (`dbus-update-activation-environment`).
 
 A ScreenCast request runs like this:
