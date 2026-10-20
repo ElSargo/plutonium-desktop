@@ -62,3 +62,18 @@ The helper asks Exo what a GL client would be told (`helper/src/gpu.ts`, a small
 
 - **Minecraft (SDL 3) failed with "No supported graphics backend".** Exo lacks `wp_fifo_v1`, so SDL 3 picks X (through xwayland-satellite), and Minecraft's GL setup fails there ("Could not retrieve OpenGL functions"). SDL itself makes a GPU context on both X and Wayland. The helper now sets `SDL_VIDEO_DRIVER` and `SDL_VIDEODRIVER` to `wayland,x11` for thread processes. Minecraft runs on Wayland with the GPU (confirmed by the user).
 - **Extreme Tux Racer froze the shell's input.** It goes fullscreen while parked (hidden). Parked windows have opacity 0, but Exo still reported the client's opaque region for occlusion, and opaque regions count regardless of opacity. So Ash marked the shell's WebContents occluded: `document.visibilityState` was `hidden`, the page stopped painting and handling input, and only the cursor still changed. Fix: parked windows report no opaque regions (`patches/exo-parked-occlusion.patch`). A/B on `:99` with a hidden `weston-simple-egl -f -o`: the page went `hidden` without the fix and stays `visible` with it.
+
+## Buffers the GPU can't import (2026-10-20)
+
+**What happened.** In X11-hosted sessions (ANGLE on Vulkan), Qt apps such as kwrite draw into `wl_shm` buffers in `XRGB8888`, which Exo makes into `BGRX_8888` shared images. No backing on that GPU path can create `BGRX_8888` from shared memory. A shared image that fails to create makes the GPU process stop the client's whole GPU channel (`SharedImageStub::OnError()`), and that client is the browser: every context was lost, including the display compositor's, and rebuilt. Exo tried the same import again at the app's next commit. So one app stalled the whole display: other windows' snapshots and DevTools screenshots hung. Within a few minutes the Ash log had over 42,000 `Could not find SharedImageBackingFactory … format: BGRX_8888` lines.
+
+**The fix** (`chromium/patches/0028-*.patch`, EXO-IMPORT):
+- The GPU process says which 32-bit RGB formats it can import from shared memory (`SharedImageCapabilities::shared_memory_import_formats`). It finds them the way `SharedImageFactory::CreateSharedImage()` does: a backing factory that takes the buffer, or else a GPU backing for a `CompoundImageBacking`.
+- Exo checks the list before creating a shared image. An `X` format the GPU can't import is imported as its `A` twin (`BGRX` as `BGRA`). The alpha byte is padding, so the surface counts as opaque (`Buffer::alpha_is_padding()`).
+- A format with no importable twin isn't advertised by `wl_shm`. A client that uses it anyway gets a `wl_shm.invalid_format` error at `create_buffer`. Exo doesn't fail again on every commit.
+- If something gets past that, `Buffer::Texture::Create()` drops the buffer before it reaches the GPU process, logging once.
+- An empty list (a GPU process that doesn't say) changes nothing.
+
+The `EXO-DIAG` logging from the viability work is now `VLOG(1)`. It was `LOG(ERROR)` on hot paths, such as overlay candidates per frame and `IsSupported` checks per shared image. Turn it back on with `--vmodule=*=1` or a narrower pattern.
+
+**Verified** on the slot's Xvfb session, with foot and kwrite in the plain shell: kwrite draws, the page's screenshot returns at once, and the Ash log has none of the errors. kwrite still uses `XRGB8888` (`WAYLAND_DEBUG`).

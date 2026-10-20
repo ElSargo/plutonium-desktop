@@ -69,6 +69,21 @@ Not done:
 - Not tested in X11-hosted sessions (warping the pointer under Xwayland).
 - Not tested with a real game yet.
 
+## Modal dialogs and pointer leave
+
+**Modal dialogs** (`chromium/patches/0030-*.patch`, EXO-MODAL). While a GTK modal dialog was open, the app sent its keys to the dialog, but the parent's element still reported `windowFocused`. Exo now implements `xdg_wm_dialog_v1`, which GTK 4 and Qt 6 use to say a window is modal to its parent. While a page shows the dialog:
+- focusing the parent (`focusWindow()`, a click) focuses the dialog instead;
+- a dialog that opens, becomes modal, or is first shown over the focused window takes its focus;
+- when the focused dialog closes or its element goes away, focus goes back to the parent.
+
+The elements' `windowfocus` and `windowblur` events follow, so a shell can move its own focus with them (the niri shell does). If no element shows the dialog, focus stays on the parent. GTK then drops the keys, because its parent is blocked. A shell should show the app's new windows.
+
+Verified on the slot's Xvfb session with a small GTK 4 app (a window and a `modal=True` transient window), its dialog shown in a second element. The dialog took focus when shown, kept it when the parent was clicked, got the keys, and gave focus back to the parent when it closed or its element was removed.
+
+Not covered: **GTK 3** says a dialog is modal only through GNOME's `gtk_shell1`, which Exo doesn't implement. Qt 5 says nothing.
+
+**Pointer leave after a drag** (`0029`). A press in an embedded window keeps the pointer there until the release (an implicit grab). When the release happened over something else, the app got `wl_pointer.leave` only at the next move. It now gets the leave with the release, as on other compositors. Verified with `wev` and xdotool on Xvfb. The other ways out (onto the page, an overlay covering the window, the element hidden) already sent a leave, as does leaving the browser window, by the code (Xvfb can't test that).
+
 ## Shell shortcuts
 
 A frontend's own shortcuts used to stop working once an app or a tab had the keyboard. `navigator.windowBroker.setShellShortcuts(["Alt+Digit1", "Ctrl+KeyT", …])` (and `shell.setShellShortcuts()` in the shell library) lists the combinations the shell handles itself. The format is modifiers `Ctrl`, `Alt`, `Shift`, `Super`, then a `KeyboardEvent.code`. While an embedded window or a tab has keyboard focus, a matching press goes to the shell page as an ordinary key event, and the app or page never sees it.
