@@ -29,6 +29,13 @@
 // the tab and calls showServerTab(); the helper gives the server that one
 // tab's DevTools. The agent's cursor arrives as "agentpointer" events.
 //
+// Windows agents work in: `agentWindows` holds, by window id, the size an
+// agent holds a window at (launch_app's width and height, resize_window) and
+// whether it's working in it right now. A page showing such a window keeps it
+// at that size, scaled into its own box, until the user takes control
+// (releaseWindow()); then the page sizes it again. Changes are
+// "agentwindowschange" events.
+//
 // Context menus: Chrome's menu for this page or one of its tabs (editing,
 // links, images, spelling; not Chrome's browser-window items) is drawn here,
 // in the page's style, as a popover with the class "plutonium-menu". Its
@@ -58,6 +65,9 @@ const HELPER = new URL(import.meta.url).origin;
  *   threadId: the thread that started it; null if none did; undefined until known.
  * @typedef {{ tag: string, label: string, shellId: string }} ItemGroup
  *   A tag a shell described; shellId is the shell that owns it.
+ * @typedef {{ id: number, width?: number, height?: number, userControl: boolean, busy: boolean }} AgentWindow
+ *   width, height: the size an agent holds it at (absent once the user took control, or if
+ *   it never held one); busy: an agent gave it input in the last few seconds.
  * @typedef {{ id: string, name: string, url: string, origin: string, enabled: boolean,
  *   running: boolean, visible: boolean }} ShellEntry
  *   One of the browser's shells (several live at once; one is visible).
@@ -125,6 +135,8 @@ export class PlutoniumShell extends EventTarget {
     this.tabs = new Map();
     /** @type {Map<number, ShellWindow>} */
     this.windows = new Map();
+    /** @type {Map<number, AgentWindow>} windows agents work in, by id */
+    this.agentWindows = new Map();
     /** @type {Map<number, string | null>} pid → thread (null: none) */
     this.threadByPid = new Map();
     /** @type {Map<number, Promise<string>>} */
@@ -456,6 +468,15 @@ export class PlutoniumShell extends EventTarget {
     return this._announceServerTab(shown);
   }
 
+  /**
+   * The user takes control of window `id`, which an agent held at a size:
+   * the page sizes it from now on.
+   */
+  async releaseWindow(id) {
+    const response = await fetch(`${HELPER}/v1/shell/windows/${id}/release`, { method: "POST" });
+    if (!response.ok) throw new Error(`the helper refused (${response.status})`);
+  }
+
   /** The server's tab `{threadId, tabId}` is no longer shown here. */
   async releaseServerTab({ threadId, tabId }) {
     const key = serverTabKey({ threadId, tabId });
@@ -673,6 +694,10 @@ export class PlutoniumShell extends EventTarget {
       if (id === undefined) {
         // A notice: nothing to answer.
         if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
+        if (op === "agent_windows") {
+          this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
+          this.dispatchEvent(new Event("agentwindowschange"));
+        }
         // The page that showed a server tab went away: this one takes over if it shows it.
         if (op === "server_tab_orphaned") {
           const shown = this._serverTabs.get(serverTabKey(args));

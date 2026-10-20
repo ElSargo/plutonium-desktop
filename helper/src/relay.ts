@@ -96,6 +96,8 @@ export class ShellRelay {
   private nextId = 1;
   /** A shell page's request stream ended (it closed, reloaded or went away). */
   onDisconnect: (key: string) => void = () => {};
+  /** A shell page's request stream started (it may have missed notices). */
+  onAttach: (key: string) => void = () => {};
 
   get connected(): boolean {
     return this.connections.size > 0;
@@ -128,6 +130,7 @@ export class ShellRelay {
     response.once("close", () => {
       if (this.connections.get(key) === connection) this.detach(key);
     });
+    this.onAttach(key);
   }
 
   /** A shell page was shown or hidden. False if `key` isn't connected. */

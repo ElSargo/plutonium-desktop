@@ -51,7 +51,8 @@ const TOOLS = [
     name: "list_windows",
     description:
       "List the native app windows that belong to this thread (apps you or this thread's terminals started). " +
-      "Each has an id, title, app id, size in DIPs, whether the shell is showing it to the user, and whether it has keyboard focus.",
+      "Each has an id, title, app id, size in DIPs, whether the shell is showing it to the user, and whether it has keyboard focus; " +
+      "agentSize when it's held at the size you gave it, userControl when the user took control of its size.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -59,7 +60,9 @@ const TOOLS = [
     description:
       "Start a GUI app as part of this thread and wait for its window. The app runs detached from your shell, " +
       "on the Plutonium desktop, and its windows belong to this thread. Its windows wait in the thread (the user is told, " +
-      "and can open them) unless focus is true. Returns the new windows (empty if none appeared in time).",
+      "and can open them) unless focus is true. Its windows keep the size you give (width and height) or the one the app " +
+      "picks: the user sees them scaled to fit, and that you're working in them, until they take control. " +
+      "Returns the new windows (empty if none appeared in time).",
     inputSchema: {
       type: "object",
       properties: {
@@ -71,6 +74,8 @@ const TOOLS = [
         },
         cwd: { type: "string", description: "Working directory (default: your home directory)." },
         wait_seconds: { type: "number", description: "How long to wait for a window (default 10, 0 to not wait)." },
+        width: { type: "integer", minimum: 1, description: "Window width in DIPs (with height; default: the app's own)." },
+        height: { type: "integer", minimum: 1, description: "Window height in DIPs (with width)." },
         focus: {
           type: "boolean",
           description:
@@ -181,8 +186,8 @@ const TOOLS = [
   {
     name: "resize_window",
     description:
-      "Ask the app to resize one of this thread's windows (DIPs, as list_windows gives sizes). Only while the " +
-      "shell isn't showing it: then the shell decides its size.",
+      "Ask the app to resize one of this thread's windows (DIPs, as list_windows gives sizes). It keeps that size while " +
+      "the user looks at it (scaled to fit), unless they took control of its size. Returns the size the app took.",
     inputSchema: {
       type: "object",
       properties: {
@@ -191,6 +196,44 @@ const TOOLS = [
         height: { type: "integer", minimum: 1 },
       },
       required: ["window_id", "width", "height"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_window",
+    description:
+      "Read one of this thread's windows as an accessibility tree, when the app has one (GTK, Qt, LibreOffice and most " +
+      "desktop apps; not terminals or games): each element's role, name, states, text, its center in snapshot_window's " +
+      "pixels (@x,y) and a ref for act_window. Better than a snapshot for reading text and finding controls. Hidden " +
+      "elements are left out unless all is true; ref reads one element and what's in it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        window_id: pointProperties.window_id,
+        ref: { type: "string", description: 'An element\'s ref from read_window (e.g. "a12"), to read only that part.' },
+        all: { type: "boolean", description: "Include hidden elements (default false)." },
+      },
+      required: ["window_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "act_window",
+    description:
+      "Act on an element of one of this thread's windows by its ref from read_window, through the app's accessibility: " +
+      '"click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace ' +
+      'an editable text\'s contents with text), "set_value" (a slider\'s or spin button\'s value), "select" (pick it ' +
+      'in its list or tabs), "scroll_into_view", or one of the actions read_window lists for it. Read again to see the result.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        window_id: pointProperties.window_id,
+        ref: { type: "string", description: 'The element\'s ref from read_window (e.g. "a12").' },
+        action: { type: "string", description: "click, focus, set_text, set_value, select, scroll_into_view, or one of its actions." },
+        text: { type: "string", description: "For set_text." },
+        value: { type: "number", description: "For set_value." },
+      },
+      required: ["window_id", "ref", "action"],
       additionalProperties: false,
     },
   },
@@ -441,6 +484,8 @@ export const WINDOW_TOOLS = new Set([
   "type_window",
   "press_window",
   "resize_window",
+  "read_window",
+  "act_window",
   "focus_window",
   "close_window",
 ]);
@@ -516,6 +561,36 @@ export async function callTool(
       return windowInput({ action: "press", keys: args.keys });
     case "resize_window":
       return windowInput({ action: "resize", width: args.width, height: args.height });
+    case "read_window": {
+      const query = new URLSearchParams();
+      if (typeof args.ref === "string" && args.ref) query.set("ref", args.ref);
+      if (args.all === true) query.set("all", "1");
+      const response = await helperRequest(
+        socket,
+        "GET",
+        `/v1/threads/${thread}/windows/${windowId()}/a11y${query.size ? `?${query}` : ""}`,
+      );
+      const body = response.body.toString("utf8");
+      if (response.status >= 400) {
+        let message = body;
+        try {
+          message = JSON.parse(body).error ?? body;
+        } catch {
+          // As it is.
+        }
+        throw new Error(message || `read_window failed (${response.status}).`);
+      }
+      return [{ type: "text", text: body }];
+    }
+    case "act_window":
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/a11y`, {
+          ref: args.ref,
+          action: args.action,
+          text: args.text,
+          value: args.value,
+        }),
+      );
     case "read_tab":
       return pageAction("snapshot", []);
     case "click_tab":
@@ -592,6 +667,10 @@ export async function callTool(
           cwd: typeof args.cwd === "string" ? args.cwd : undefined,
           waitMs: Math.max(0, waitSeconds * 1000),
           show: args.focus === true,
+          // An agent works in what it starts: its windows hold their size.
+          agent: true,
+          width: typeof args.width === "number" ? args.width : undefined,
+          height: typeof args.height === "number" ? args.height : undefined,
         }),
       );
     }
@@ -642,7 +721,8 @@ async function handle(message: JsonRpcMessage): Promise<unknown> {
         instructions:
           "Native app windows and browser tabs of this chat thread on the Plutonium desktop. Use launch_app to open GUI apps, " +
           "snapshot_window to see them, click_window, type_window, press_window, scroll_window and drag_window to use " +
-          "them (points are snapshot_window's pixels), focus_window to show one to the user and close_window to close it. " +
+          "them (points are snapshot_window's pixels), read_window and act_window to read and use them through the app's " +
+          "accessibility tree, focus_window to show one to the user and close_window to close it. " +
           "Use open_tab to open web pages in real browser tabs (the user's browser profile), read_tab to read a page " +
           "with element refs, click_tab, type_tab, press_tab, select_tab and evaluate_tab to use it, snapshot_tab to " +
           "see it, and navigate_tab, tab_action, focus_tab and close_tab. You work in the background: the user's own " +

@@ -232,6 +232,14 @@ export class Desktop {
     await this.cdp.send("Plutonium.setWindowAwake", { id, awake });
   }
 
+  /**
+   * Keeps window `id`'s app keyboard focused for the agent's keys, beside the
+   * user's focus in another app (a browser without it: only during each keys()).
+   */
+  async setWindowAgentFocus(id: number, focused: boolean): Promise<void> {
+    await this.cdp.send("Plutonium.setWindowAgentFocus", { id, focused });
+  }
+
   async closeWindow(id: number): Promise<void> {
     await this.cdp.send("Plutonium.closeWindow", { id });
   }

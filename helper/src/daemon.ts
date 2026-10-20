@@ -26,6 +26,8 @@ import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { A11yError, Accessibility } from "./a11y.ts";
+import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { BrowserCdp } from "./cdp.ts";
 import { Desktop, type DesktopTab, type DesktopWindow } from "./desktop.ts";
@@ -78,6 +80,9 @@ const MAX_BODY = 1 << 26;
 const GROUPS_TTL_MS = 2_000;
 // How long a window snapshot waits after input, for the app to draw.
 const INPUT_SETTLE_MS = 200;
+// How long after launch_app's wait an agent's app's new windows are still held
+// at its size (a slow first start; the main window after a splash).
+const LATE_WINDOWS_MS = 60_000;
 // How long a window an agent drove stays at full frame rate (setWindowAwake).
 const AWAKE_MS = 60_000;
 
@@ -97,9 +102,13 @@ export interface ThreadWindow {
   /** Whether the shell shows it right now (e.g. in a tab). */
   readonly shown: boolean;
   readonly focused: boolean;
+  /** The size an agent holds it at: the shell shows it scaled, at this size. */
+  readonly agentSize?: { readonly width: number; readonly height: number };
+  /** The user took control of its size: the shell sizes it. */
+  readonly userControl?: true;
 }
 
-function threadWindow(entry: NativeWindowEntry): ThreadWindow {
+function threadWindow(entry: NativeWindowEntry, agent?: AgentWindow): ThreadWindow {
   return {
     id: entry.id,
     title: entry.title,
@@ -108,6 +117,8 @@ function threadWindow(entry: NativeWindowEntry): ThreadWindow {
     height: entry.height,
     shown: entry.embedded,
     focused: entry.focused,
+    ...(agent?.width && agent.height ? { agentSize: { width: agent.width, height: agent.height } } : {}),
+    ...(agent?.userControl ? { userControl: true as const } : {}),
   };
 }
 
@@ -277,6 +288,10 @@ export class Daemon {
   private readonly lastInput = new Map<number, number>();
   /** Windows kept awake after input, with the timer that lets them sleep. */
   private readonly awakeWindows = new Map<number, ReturnType<typeof setTimeout>>();
+  /** The sizes agents hold windows at, and which they're working in (for the shells). */
+  readonly agentWindows = new AgentWindows();
+  /** Windows as accessibility trees (read_window, act_window). */
+  readonly a11y = new Accessibility();
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -308,6 +323,22 @@ export class Daemon {
           : this.relay.notify(page, "pointer", { ...pointer });
       serverTabs.onOrphaned = (key) => this.relay.notifyAll("server_tab_orphaned", { ...key });
       if (this.desktop) this.openServerTabs(serverTabs, this.desktop);
+    }
+    // The shells show the windows agents work in as such (agent_windows),
+    // also to a page that connects later.
+    this.agentWindows.onChange = (windows) => this.relay.notifyAll("agent_windows", { windows });
+    this.relay.onAttach = (key) => this.relay.notify(key, "agent_windows", { windows: this.agentWindows.list() });
+    if (this.desktop) {
+      const desktop = this.desktop;
+      desktop.changeListeners.add(() => {
+        const windows = desktop.windows();
+        const existing = new Set(windows.map((window) => window.id));
+        this.agentWindows.prune(existing);
+        for (const window of windows) {
+          if (!window.embedded) this.agentWindows.follow(window.id, window.width, window.height);
+        }
+        this.a11y.prune(existing);
+      });
     }
     // Links a thread's apps open become tabs in the thread (opener.ts).
     try {
@@ -423,7 +454,10 @@ export class Daemon {
   /**
    * Starts `argv` as one of the thread's processes. With `waitMs`, waits that
    * long for the thread's first new window(s). With `show`, the shell brings
-   * its windows to the front (PLUTONIUM_SHOW).
+   * its windows to the front (PLUTONIUM_SHOW). With `agent`, an agent started
+   * it to work in: its windows are held at `agent.size`, or at the size the
+   * app picks (shells show them scaled at that size until the user takes
+   * control), so what the agent sees stays put.
    */
   async launch(
     threadId: string,
@@ -431,6 +465,7 @@ export class Daemon {
     cwd: string | undefined,
     waitMs: number,
     show = false,
+    agent?: { readonly size?: { readonly width: number; readonly height: number } },
   ): Promise<{ pid: number; windows: ThreadWindow[] }> {
     const before =
       this.relay.connected || (await this.direct())
@@ -449,6 +484,10 @@ export class Daemon {
     });
     child.unref();
     const pid = child.pid ?? 0;
+    const holds = agent !== undefined && (agent.size !== undefined || !show);
+    // Windows that come after the wait (a slow first start, the main window
+    // after a splash) are held too.
+    if (before && holds) void this.holdLate(threadId, before, agent.size, Date.now() + Math.max(waitMs, 0) + LATE_WINDOWS_MS);
     if (!before || waitMs <= 0) return { pid, windows: [] };
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
@@ -457,12 +496,71 @@ export class Daemon {
       if (fresh.length > 0) {
         // Apps often map a second window (a dialog, a splash) right after.
         await sleep(300);
-        const settled = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
-        return { pid, windows: settled.map(threadWindow) };
+        let settled = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
+        if (holds) settled = await this.holdNew(settled, agent.size);
+        return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
       }
       if (child.exitCode !== null && child.exitCode !== 0) break;
     }
     return { pid, windows: [] };
+  }
+
+  /**
+   * Holds an agent's new windows at `size` (else at their own size): resized
+   * now if no page shows them, else by the shell, which follows the hold.
+   * Returns them as they are then.
+   */
+  private async holdNew(
+    windows: NativeWindowEntry[],
+    size: { readonly width: number; readonly height: number } | undefined,
+  ): Promise<NativeWindowEntry[]> {
+    const desktop = await this.direct();
+    for (const entry of windows) {
+      const width = size?.width ?? entry.width;
+      const height = size?.height ?? entry.height;
+      if (width < 1 || height < 1) continue;
+      this.agentWindows.hold(entry.id, width, height, !size);
+      if (size && desktop && !entry.embedded) {
+        await desktop.resizeWindow(entry.id, width, height).catch(() => {});
+      }
+    }
+    if (!size) return windows;
+    // The app's answer.
+    const ids = new Set(windows.map((entry) => entry.id));
+    await this.waitForSizes(ids, size, 1_500);
+    return (await this.allWindows()).filter((entry) => ids.has(entry.id));
+  }
+
+  /** Holds the thread's windows new since `before` that aren't held yet, until `until`. */
+  private async holdLate(
+    threadId: string,
+    before: ReadonlySet<number>,
+    size: { readonly width: number; readonly height: number } | undefined,
+    until: number,
+  ): Promise<void> {
+    const seen = new Set(before);
+    while (Date.now() < until) {
+      await sleep(500);
+      const fresh = (await this.threadWindows(threadId).catch(() => [])).filter((entry) => !seen.has(entry.id));
+      if (fresh.length === 0) continue;
+      for (const entry of fresh) seen.add(entry.id);
+      const unheld = fresh.filter((entry) => !this.agentWindows.get(entry.id));
+      if (unheld.length > 0) await this.holdNew(unheld, size).catch(() => {});
+    }
+  }
+
+  /** Waits up to `waitMs` for windows `ids` to take `size` (an app may pick another). */
+  private async waitForSizes(
+    ids: ReadonlySet<number>,
+    size: { readonly width: number; readonly height: number },
+    waitMs: number,
+  ): Promise<void> {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      const windows = (await this.allWindows()).filter((entry) => ids.has(entry.id));
+      if (windows.every((entry) => entry.width === size.width && entry.height === size.height)) return;
+      await sleep(100);
+    }
   }
 
   /** Asks the frontend to show the window to the user (it pops it out if the frontend can't). */
@@ -631,13 +729,20 @@ export class Daemon {
    * keep it drawing at full rate, until it's left alone for AWAKE_MS.
    */
   private keepAwake(desktop: Desktop, windowId: number): void {
+    this.agentWindows.touch(windowId);
     const timer = this.awakeWindows.get(windowId);
     if (timer) clearTimeout(timer);
-    else void desktop.setWindowAwake(windowId, true).catch(() => {});
+    else {
+      void desktop.setWindowAwake(windowId, true).catch(() => {});
+      // The app stays focused between the agent's keys (a browser without
+      // this focuses it for each batch of keys only).
+      void desktop.setWindowAgentFocus(windowId, true).catch(() => {});
+    }
     const expiry = setTimeout(() => {
       this.awakeWindows.delete(windowId);
       this.lastInput.delete(windowId);
       void desktop.setWindowAwake(windowId, false).catch(() => {});
+      void desktop.setWindowAgentFocus(windowId, false).catch(() => {});
     }, AWAKE_MS);
     expiry.unref();
     this.awakeWindows.set(windowId, expiry);
@@ -751,15 +856,81 @@ export class Daemon {
         if (typeof body.width !== "number" || typeof body.height !== "number") {
           throw new HttpError(400, "width and height are required.");
         }
-        await desktop.resizeWindow(windowId, Math.round(body.width), Math.round(body.height)).catch((error: Error) => {
-          throw new HttpError(409, error.message);
-        });
-        break;
+        const size = { width: Math.round(body.width), height: Math.round(body.height) };
+        if (size.width < 1 || size.height < 1) throw new HttpError(400, "width and height must be positive.");
+        const held = this.agentWindows.hold(windowId, size.width, size.height);
+        const shown = desktop.window(windowId)?.embedded === true;
+        if (!held && shown) {
+          throw new HttpError(
+            409,
+            "The user took control of this window's size: it's shown at the size they gave it.",
+          );
+        }
+        // Shown: the shell follows the agent's size (T3 Code does; other shells size it themselves).
+        if (!shown) {
+          await desktop.resizeWindow(windowId, size.width, size.height).catch((error: Error) => {
+            throw new HttpError(409, error.message);
+          });
+        }
+        await this.waitForSizes(new Set([windowId]), size, 1_000);
+        const now = desktop.window(windowId);
+        return { width: now?.width, height: now?.height };
       }
       default:
         throw new HttpError(400, "action must be move, click, drag, scroll, type, press or resize.");
     }
     return {};
+  }
+
+  /** The window as accessibility knows it (its pid, title and size). */
+  private async a11yWindow(threadId: string, windowId: number) {
+    const entry = await this.ownedWindow(threadId, windowId);
+    const window = (await this.direct())?.window(windowId);
+    return {
+      id: windowId,
+      pid: entry.pid,
+      title: entry.title,
+      width: entry.width,
+      height: entry.height,
+      deviceScaleFactor: window?.deviceScaleFactor || entry.deviceScaleFactor || 1,
+    };
+  }
+
+  /** read_window: the window (or one element) as an accessibility outline. */
+  async readWindow(threadId: string, windowId: number, ref?: string, all = false): Promise<string> {
+    const window = await this.a11yWindow(threadId, windowId);
+    try {
+      return await this.a11y.read(window, { ref, all });
+    } catch (error) {
+      if (error instanceof A11yError) throw new HttpError(409, error.message);
+      throw error;
+    }
+  }
+
+  /** act_window: an action on an element of the window, by its ref from read_window. */
+  async actInWindow(threadId: string, windowId: number, body: Record<string, unknown>): Promise<unknown> {
+    const window = await this.a11yWindow(threadId, windowId);
+    if (typeof body.ref !== "string" || !body.ref) throw new HttpError(400, "ref is required.");
+    if (typeof body.action !== "string" || !body.action) throw new HttpError(400, "action is required.");
+    const desktop = await this.direct();
+    if (desktop) this.keepAwake(desktop, windowId);
+    let result;
+    try {
+      result = await this.a11y.act(window, body.ref, body.action, {
+        text: typeof body.text === "string" ? body.text : undefined,
+        value: typeof body.value === "number" ? body.value : undefined,
+      });
+    } catch (error) {
+      if (error instanceof A11yError) throw new HttpError(409, error.message);
+      throw error;
+    }
+    if ("click" in result) {
+      // No action of its own: a click at its center.
+      const [x, y] = result.click;
+      await this.windowInput(threadId, windowId, { action: "click", x, y });
+      return { done: `clicked at ${x},${y}` };
+    }
+    return result;
   }
 
   // Driving pages: Playwright on the thread's tabs (pages.ts). Elements are
@@ -968,6 +1139,13 @@ export class Daemon {
         );
         return sendJson(response, 200, { browserTabId: shownTabId });
       }
+      // The user took control of a window an agent held the size of.
+      const release = path.match(/^\/v1\/shell\/windows\/(\d+)\/release$/);
+      if (method === "POST" && release) {
+        this.agentWindows.release(Number(release[1]));
+        response.writeHead(204).end();
+        return;
+      }
       const reply = path.match(/^\/v1\/shell\/replies\/(\w+)$/);
       if (method === "POST" && reply) {
         const body = await readBody(request);
@@ -1033,10 +1211,15 @@ export class Daemon {
     }
     if (method === "POST" && path === "/v1/launch") {
       const body = await readJson(request);
-      const { thread, argv, cwd, waitMs, show } = body;
+      const { thread, argv, cwd, waitMs, show, agent, width, height } = body;
       if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread is required.");
       if (!Array.isArray(argv) || argv.length === 0 || !argv.every((arg) => typeof arg === "string")) {
         throw new HttpError(400, "argv must be a non-empty array of strings.");
+      }
+      const sized = typeof width === "number" && typeof height === "number";
+      if (sized && (width < 1 || height < 1)) throw new HttpError(400, "width and height must be positive.");
+      if ((typeof width === "number") !== (typeof height === "number")) {
+        throw new HttpError(400, "Give both width and height, or neither.");
       }
       return sendJson(
         response,
@@ -1047,6 +1230,9 @@ export class Daemon {
           typeof cwd === "string" ? cwd : undefined,
           typeof waitMs === "number" ? Math.min(waitMs, 60_000) : 0,
           show === true,
+          agent === true || sized
+            ? { size: sized ? { width: Math.round(width), height: Math.round(height) } : undefined }
+            : undefined,
         ),
       );
     }
@@ -1128,9 +1314,13 @@ export class Daemon {
       const windows = path.match(/^\/v1\/threads\/([^/]+)\/windows$/);
       if (method === "GET" && windows) {
         const threadId = decodeURIComponent(windows[1]!);
-        return sendJson(response, 200, (await this.threadWindows(threadId)).map(threadWindow));
+        return sendJson(
+          response,
+          200,
+          (await this.threadWindows(threadId)).map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))),
+        );
       }
-      const action = path.match(/^\/v1\/threads\/([^/]+)\/windows\/(\d+)\/(focus|close|snapshot|input)$/);
+      const action = path.match(/^\/v1\/threads\/([^/]+)\/windows\/(\d+)\/(focus|close|snapshot|input|a11y)$/);
       if (action) {
         const threadId = decodeURIComponent(action[1]!);
         const windowId = Number(action[2]);
@@ -1145,6 +1335,24 @@ export class Daemon {
         }
         if (method === "POST" && action[3] === "close") {
           return sendJson(response, 200, await this.close(threadId, windowId));
+        }
+        if (method === "GET" && action[3] === "a11y") {
+          const text = await this.readWindow(
+            threadId,
+            windowId,
+            url.searchParams.get("ref") ?? undefined,
+            url.searchParams.get("all") === "1",
+          );
+          response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+          response.end(text);
+          return;
+        }
+        if (method === "POST" && action[3] === "a11y") {
+          try {
+            return sendJson(response, 200, await this.actInWindow(threadId, windowId, await readJson(request)));
+          } finally {
+            this.lastInput.set(windowId, Date.now());
+          }
         }
         if (method === "POST" && action[3] === "input") {
           try {
