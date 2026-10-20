@@ -63,10 +63,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   the panel (tty2, 2026-10-16).
 - [ ] **Autostart at power-on.** Today the session starts from a logged-in VT.
   Getty autologin plus a unit that runs the launcher. S
-- [ ] **Hotplugged input devices are ignored in the container.** Devices that
-  appear after Ash starts are never opened: in the rootless container libudev
-  drops the host's udev events (sender uid isn't 0 in the user namespace;
-  inferred). Needs Ash outside the user namespace or a udev relay. M
+- [x] **Hotplugged input devices are ignored in the container.** Done: host
+  root shows up in the container as uid 65534, which keep-id mapped, so
+  libudev dropped the host's events ("Sender uid=65534, message ignored").
+  `--userns=keep-id:size=65534` leaves it unmapped, and libudev trusts senders
+  from outside its user namespace. No relay. Existing containers must be made
+  again (`plutonium doctor` says so).
 - [x] **Fullscreen for embedded apps and tabs; keys that work everywhere.**
   Done (`CONTROLS.md`): Super+F, apps' and pages' own fullscreen, shell
   shortcuts, the helper's app list and launcher.
