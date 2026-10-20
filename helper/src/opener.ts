@@ -121,7 +121,7 @@ function withoutOpeners(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       .split(delimiter)
       .filter((item) => item && resolve(item) !== resolve(entry))
       .join(delimiter);
-  const result = { ...environment, PATH: drop(environment.PATH, binDir), XDG_DATA_DIRS: drop(environment.XDG_DATA_DIRS, dataDir) };
+  const result: NodeJS.ProcessEnv = { ...environment, PATH: drop(environment.PATH, binDir), XDG_DATA_DIRS: drop(environment.XDG_DATA_DIRS, dataDir) };
   delete result.BROWSER;
   delete result[OPENERS_VARIABLE];
   return result;

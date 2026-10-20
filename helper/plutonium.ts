@@ -8,6 +8,8 @@
 //   plutonium.ts mcp                        the agent bridge as a stdio MCP server
 //   plutonium.ts open <url|file>…           xdg-open for a thread's apps: web links
 //                                           become tabs in $PLUTONIUM_THREAD_ID
+//   plutonium.ts stop-x-displays            stops the threads' X servers a stopped
+//                                           helper left running (plutonium stop)
 //
 // Clients find the daemon's socket in $PLUTONIUM_HELPER (set in every thread
 // process), else from --wayland-display / $PLUTONIUM_WAYLAND_DISPLAY.
@@ -17,7 +19,7 @@ import { helperJson } from "./src/client.ts";
 import { Daemon, defaultSocketPath } from "./src/daemon.ts";
 import { runMcpServer } from "./src/mcp.ts";
 import { runOpen } from "./src/opener.ts";
-import { HELPER_VARIABLE, wantsShow } from "./src/threads.ts";
+import { HELPER_VARIABLE, stopXDisplays, wantsShow, xDisplayStatePath } from "./src/threads.ts";
 
 const [command, ...rest] = process.argv.slice(2);
 // An app's own arguments (after `launch <thread-id>`) aren't ours to parse.
@@ -44,7 +46,8 @@ function usage(): never {
       "       plutonium.ts thread-setup <thread-id>\n" +
       "       plutonium.ts launch <thread-id> <program> [args…]\n" +
       "       plutonium.ts mcp\n" +
-      "       plutonium.ts open <url|file>…",
+      "       plutonium.ts open <url|file>…\n" +
+      "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
 }
@@ -103,6 +106,10 @@ switch (command) {
     break;
   case "open":
     process.exitCode = await runOpen(rest, socketPath);
+    break;
+  case "stop-x-displays":
+    // The helper keeps them running across its restarts.
+    stopXDisplays(xDisplayStatePath(waylandDisplay, socketPath));
     break;
   default:
     usage();

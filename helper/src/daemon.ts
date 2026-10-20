@@ -45,7 +45,15 @@ import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
-import { showsForPids, threadForPid, threadsForPids, Threads } from "./threads.ts";
+import {
+  rememberLaunch,
+  SHOW_VARIABLE,
+  showsForPids,
+  threadForPid,
+  threadsForPids,
+  Threads,
+  type XDisplayOptions,
+} from "./threads.ts";
 
 export interface DaemonOptions {
   readonly waylandDisplay: string;
@@ -59,6 +67,8 @@ export interface DaemonOptions {
    * relays what it can, and there are no such tabs).
    */
   readonly cdpPort?: number | undefined;
+  /** Where the threads' X servers go (tests use their own). */
+  readonly xDisplays?: XDisplayOptions;
 }
 
 const HELPER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -301,7 +311,11 @@ export class Daemon {
 
   constructor(options: DaemonOptions) {
     this.options = options;
-    this.threads = new Threads(options.waylandDisplay, options.socketPath);
+    // Started from a Plutonium terminal (not by `plutonium run`, which unsets
+    // it), the helper has PLUTONIUM_SHOW=1, and would pass it on: everything
+    // agents start, and every X window, would be shown.
+    delete process.env[SHOW_VARIABLE];
+    this.threads = new Threads(options.waylandDisplay, options.socketPath, options.xDisplays);
     this.terminals = new Terminals(() => ({
       ...process.env,
       // Typed in by the user: what it starts is shown.
@@ -483,6 +497,7 @@ export class Daemon {
       child.once("error", (error) => reject(new HttpError(400, `Could not start ${argv[0]}: ${error.message}`)));
     });
     child.unref();
+    rememberLaunch(child, threadId, show);
     const pid = child.pid ?? 0;
     const holds = agent !== undefined && (agent.size !== undefined || !show);
     // Windows that come after the wait (a slow first start, the main window

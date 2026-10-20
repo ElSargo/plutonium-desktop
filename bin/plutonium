@@ -739,8 +739,17 @@ stop_cmd() {
     session_vars "$mode"
     on_ash pkill -TERM -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)" 2>/dev/null &&
       echo "stopped the $mode session" || true
-    local pidfile=$RUN_DIR/plutonium/helper-$SOCKET.pid
-    [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile" || true
+    local pidfile=$RUN_DIR/plutonium/helper-$SOCKET.pid pid
+    if [[ -f $pidfile ]]; then
+      pid=$(cat "$pidfile")
+      if kill "$pid" 2>/dev/null; then
+        for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+      fi
+      rm -f "$pidfile"
+    fi
+    # Its threads' X servers, which outlive a helper restart.
+    node "$ROOT/helper/plutonium.ts" stop-x-displays --wayland-display "$SOCKET" \
+      --socket "$RUN_DIR/plutonium/$SOCKET.sock" 2>/dev/null || true
   done
 }
 
