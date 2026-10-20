@@ -6,6 +6,9 @@
   "bin": {
     "plutonium": "./plutonium.ts"
   },
+  "scripts": {
+    "test": "node --test --test-timeout=60000 \"test/*.test.ts\""
+  },
   "engines": {
     "node": ">=24"
   },

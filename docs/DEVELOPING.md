@@ -88,6 +88,14 @@ plutonium live revert t3
 
 Run `live` from the checkout whose slot the session is in: the main checkout for your own desktop. A worktree's `live` changes its own slot's sessions.
 
+## Helper tests
+
+`cd helper && npm test` runs them (Node's own test runner, no dependencies, a few seconds). They need Linux (`/proc`) and nothing else: no session, Exo or browser.
+- **Unit tests** for the relay (`relay.test.ts`), thread scoping and the pid → thread resolver, the thread environment and the threads' X displays (`threads.test.ts`, with a stand-in for `systemd-socket-activate` in `test/fixtures/`), the windows agents hold (`agentWindows.test.ts`), D-Bus (`dbus.test.ts`) and accessibility (`a11y.test.ts`).
+- **End to end** (`e2e.test.ts`): a helper, a fake shell page connected to it over the shell API as a real one is, the agent's MCP server (`plutonium.ts mcp`) in a thread, and a fake accessibility bus (`test/fixtures/fakeBus.ts`, a D-Bus bus with AT-SPI apps on it).
+
+`node --test test/<file>.test.ts` runs one file. To typecheck, run `tsc -p helper` with `@types/node` available; the tests are part of the project.
+
 ## Testing a session
 
 **Launching sessions:**

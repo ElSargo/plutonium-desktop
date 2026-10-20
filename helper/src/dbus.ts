@@ -7,11 +7,46 @@ import { userInfo } from "node:os";
 /** A variant's value with its signature (as sent: `["d", 0.5]`). */
 export type Variant = readonly [signature: string, value: unknown];
 
-const METHOD_CALL = 1;
-const METHOD_RETURN = 2;
-const ERROR = 3;
+export const METHOD_CALL = 1;
+export const METHOD_RETURN = 2;
+export const ERROR = 3;
 
-const FIELD = { path: 1, interface: 2, member: 3, errorName: 4, replySerial: 5, destination: 6, signature: 8 };
+const FIELD = {
+  path: 1,
+  interface: 2,
+  member: 3,
+  errorName: 4,
+  replySerial: 5,
+  destination: 6,
+  sender: 7,
+  signature: 8,
+} as const;
+
+/** One message, as encodeMessage takes it and decodeMessage gives it. */
+export interface Message {
+  readonly type: number;
+  readonly serial: number;
+  readonly path?: string;
+  readonly interface?: string;
+  readonly member?: string;
+  readonly errorName?: string;
+  readonly replySerial?: number;
+  readonly destination?: string;
+  readonly sender?: string;
+  readonly signature?: string;
+  readonly body?: readonly unknown[];
+}
+
+const FIELD_TYPES: Record<keyof typeof FIELD, string> = {
+  path: "o",
+  interface: "s",
+  member: "s",
+  errorName: "s",
+  replySerial: "u",
+  destination: "s",
+  sender: "s",
+  signature: "g",
+};
 
 const ALIGN: Record<string, number> = {
   y: 1, b: 4, n: 2, q: 2, i: 4, u: 4, x: 8, t: 8, d: 8, s: 4, o: 4, g: 1, a: 4, "(": 8, "{": 8, v: 1, h: 4,
@@ -366,27 +401,18 @@ export class DBusConnection {
   call(call: Call): Promise<unknown[]> {
     if (this.closed) return Promise.reject(this.closed);
     const serial = this.serial++;
-    const body = new Writer();
-    const signature = call.signature ?? "";
-    splitSignature(signature).forEach((type, index) => body.write(type, call.body?.[index]));
-    const bodyBuffer = body.buffer();
-    const fields: [number, Variant][] = [
-      [FIELD.path, ["o", call.path]],
-      [FIELD.interface, ["s", call.interface]],
-      [FIELD.member, ["s", call.member]],
-      [FIELD.destination, ["s", call.destination]],
-    ];
-    if (signature) fields.push([FIELD.signature, ["g", signature]]);
-    const header = new Writer();
-    header.write("y", "l".charCodeAt(0));
-    header.write("y", METHOD_CALL);
-    header.write("y", 0);
-    header.write("y", 1);
-    header.write("u", bodyBuffer.length);
-    header.write("u", serial);
-    header.write("a(yv)", fields);
-    header.align(8);
-    this.socket.write(Buffer.concat([header.buffer(), bodyBuffer]));
+    this.socket.write(
+      encodeMessage({
+        type: METHOD_CALL,
+        serial,
+        path: call.path,
+        interface: call.interface,
+        member: call.member,
+        destination: call.destination,
+        signature: call.signature ?? "",
+        body: call.body ?? [],
+      }),
+    );
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(serial);
@@ -409,40 +435,84 @@ export class DBusConnection {
   private onData(data: Buffer): void {
     this.input = this.input.length ? Buffer.concat([this.input, data]) : data;
     for (;;) {
-      if (this.input.length < 16) return;
-      const little = this.input[0] === "l".charCodeAt(0);
-      const u32 = (at: number) => (little ? this.input.readUInt32LE(at) : this.input.readUInt32BE(at));
-      const bodyLength = u32(4);
-      const fieldsLength = u32(12);
-      const headerLength = 16 + fieldsLength + ((8 - ((16 + fieldsLength) % 8)) % 8);
-      const total = headerLength + bodyLength;
-      if (this.input.length < total) return;
+      const total = messageLength(this.input);
+      if (total === undefined || this.input.length < total) return;
       const message = this.input.subarray(0, total);
       this.input = this.input.subarray(total);
       try {
-        this.onMessage(message, little, headerLength);
+        this.onMessage(decodeMessage(message));
       } catch (error) {
         console.warn(`dbus: a message we couldn't read: ${(error as Error).message}`);
       }
     }
   }
 
-  private onMessage(message: Buffer, little: boolean, headerLength: number): void {
-    const type = message[1];
-    if (type !== METHOD_RETURN && type !== ERROR) return;
-    const fields = new Reader(message, little, 12).read("a(yv)") as [number, unknown][];
-    const field = (code: number) => fields.find(([key]) => key === code)?.[1];
-    const pending = this.pending.get(field(FIELD.replySerial) as number);
+  private onMessage(message: Message): void {
+    if (message.type !== METHOD_RETURN && message.type !== ERROR) return;
+    const serial = message.replySerial;
+    const pending = serial === undefined ? undefined : this.pending.get(serial);
     if (!pending) return;
-    this.pending.delete(field(FIELD.replySerial) as number);
+    this.pending.delete(serial!);
     clearTimeout(pending.timer);
-    const signature = (field(FIELD.signature) as string | undefined) ?? "";
-    const reader = new Reader(message, little, headerLength, headerLength);
-    const values = splitSignature(signature).map((part) => reader.read(part));
-    if (type === ERROR) {
-      pending.reject(new DBusError(String(field(FIELD.errorName)), typeof values[0] === "string" ? values[0] : ""));
+    const values = message.body ?? [];
+    if (message.type === ERROR) {
+      pending.reject(new DBusError(String(message.errorName), typeof values[0] === "string" ? values[0] : ""));
     } else {
-      pending.resolve(values);
+      pending.resolve([...values]);
     }
   }
+}
+
+/** A whole message (little-endian), header and body. */
+export function encodeMessage(message: Message): Buffer {
+  const body = new Writer();
+  const signature = message.signature ?? "";
+  splitSignature(signature).forEach((type, index) => body.write(type, message.body?.[index]));
+  const bodyBuffer = body.buffer();
+  const fields: [number, Variant][] = [];
+  for (const [name, code] of Object.entries(FIELD) as [keyof typeof FIELD, number][]) {
+    const value = name === "signature" ? signature || undefined : message[name];
+    if (value !== undefined) fields.push([code, [FIELD_TYPES[name], value]]);
+  }
+  const header = new Writer();
+  header.write("y", "l".charCodeAt(0));
+  header.write("y", message.type);
+  header.write("y", 0);
+  header.write("y", 1);
+  header.write("u", bodyBuffer.length);
+  header.write("u", message.serial);
+  header.write("a(yv)", fields);
+  header.align(8);
+  return Buffer.concat([header.buffer(), bodyBuffer]);
+}
+
+/** The length of the message `input` starts with, once its fixed header is in. */
+export function messageLength(input: Buffer): number | undefined {
+  if (input.length < 16) return undefined;
+  const little = input[0] === "l".charCodeAt(0);
+  const u32 = (at: number) => (little ? input.readUInt32LE(at) : input.readUInt32BE(at));
+  const fieldsLength = u32(12);
+  return 16 + fieldsLength + ((8 - ((16 + fieldsLength) % 8)) % 8) + u32(4);
+}
+
+/** A whole message, as encodeMessage made it (either byte order). */
+export function decodeMessage(buffer: Buffer): Message {
+  const little = buffer[0] === "l".charCodeAt(0);
+  const u32 = (at: number) => (little ? buffer.readUInt32LE(at) : buffer.readUInt32BE(at));
+  const fieldsLength = u32(12);
+  const headerLength = 16 + fieldsLength + ((8 - ((16 + fieldsLength) % 8)) % 8);
+  const fields = new Reader(buffer, little, 12).read("a(yv)") as [number, unknown][];
+  const field = (code: number) => fields.find(([key]) => key === code)?.[1];
+  const signature = (field(FIELD.signature) as string | undefined) ?? "";
+  const reader = new Reader(buffer, little, headerLength, headerLength);
+  const message: Record<string, unknown> = {
+    type: buffer[1],
+    serial: u32(8),
+    body: splitSignature(signature).map((part) => reader.read(part)),
+  };
+  for (const [name, code] of Object.entries(FIELD)) {
+    const value = field(code);
+    if (value !== undefined) message[name] = value;
+  }
+  return message as unknown as Message;
 }

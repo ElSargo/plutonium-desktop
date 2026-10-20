@@ -136,11 +136,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
   the browser.
-- [ ] **Helper: no tests.** M · Unit tests for the resolver, relay and
+- [x] **Helper: no tests.** M · Unit tests for the resolver, relay and
   thread scoping; an end-to-end run against a fake shell.
-- [ ] **Helper restarts forget thread X displays.** S · Processes started
+  `cd helper && npm test` (`DEVELOPING.md`, "Helper tests"): also the X
+  displays, D-Bus, accessibility (a fake AT-SPI bus) and the MCP server.
+- [x] **Helper restarts forget thread X displays.** S · Processes started
   before keep a dead `DISPLAY`. Persist the mapping, or re-adopt live
-  satellites.
+  satellites. Both: the satellites outlive the helper, the next one takes
+  them over from a saved map, and starts gone ones again on the same display
+  for processes that still use it. `plutonium stop` stops them.
 
 ## App compatibility and features (Phase 5)
 
@@ -278,9 +282,11 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   `Screenshot`, `plutonium.portal`, `plutonium-portals.conf`,
   `XDG_CURRENT_DESKTOP=Plutonium`, restore tokens that name stable things.
   Test with OBS and native Discord.
-- [ ] **`ELECTRON_OZONE_PLATFORM_HINT=wayland` in the thread environment.** S ·
+- [x] **`ELECTRON_OZONE_PLATFORM_HINT=wayland` in the thread environment.** S ·
   The XWayland Discord can't share a screen: its rootless Xwayland holds
-  only its own windows.
+  only its own windows. With `XDG_SESSION_TYPE=wayland`, which Electron 38+
+  goes by instead; the helper resolves the apps it launched by pid, as
+  Electron 43 blanks its environ.
 - [ ] **GlobalShortcuts portal.** M · The helper answers it; the focused shell
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
 - [ ] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.

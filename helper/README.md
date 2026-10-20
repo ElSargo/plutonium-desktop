@@ -3,8 +3,8 @@
 The frontend-neutral part of a Plutonium shell. A frontend (T3 Code, the plain shell in `shells/plain/`, anything else) only adds UI on top of it. Node 24+, no dependencies; run the `.ts` files directly.
 
 What it does:
-- **Thread environment.** Gives each thread's processes the variables that bind their windows to it: `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, toolkit backends, `PLUTONIUM_HELPER` (this socket), and `DISPLAY` for a per-thread rootless Xwayland (xwayland-satellite, started on the first X client). Processes the user started (a terminal, a launcher) also get `PLUTONIUM_SHOW=1`, and frontends bring their windows and links to the front; an agent's don't, so what they open waits in the thread. An agent can opt in with `PLUTONIUM_SHOW=1 <command>`, or `focus: true` on `launch_app` and `open_tab`.
-- **pid → thread.** Reads `/proc/<pid>/environ`, walking up parent pids, to say which thread a window's client belongs to, and whether it asked to be shown.
+- **Thread environment.** Gives each thread's processes the variables that bind their windows to it: `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, toolkit backends, `PLUTONIUM_HELPER` (this socket), and `DISPLAY` for a per-thread rootless Xwayland (xwayland-satellite, started on the first X client). The X servers outlive the helper: a restarted helper takes them over (the map is in `<socket dir>/<wayland display>.x-displays.json`), so apps started before keep a working `DISPLAY`, and one that ended is started again on the same display while the thread's processes still use it. `plutonium stop` stops them. Electron apps run on Wayland: `ELECTRON_OZONE_PLATFORM_HINT=wayland` for older Electron, `XDG_SESSION_TYPE=wayland` for 38 and later, which ignore the hint. Processes the user started (a terminal, a launcher) also get `PLUTONIUM_SHOW=1`, and frontends bring their windows and links to the front; an agent's don't, so what they open waits in the thread. An agent can opt in with `PLUTONIUM_SHOW=1 <command>`, or `focus: true` on `launch_app` and `open_tab`.
+- **pid → thread.** Reads `/proc/<pid>/environ`, walking up parent pids, to say which thread a window's client belongs to, and whether it asked to be shown. Some apps blank their environment there (Electron 43 does, for its process title), so the helper also remembers the processes it launched, while they run.
 - **Launching apps** into a thread, optionally waiting for the app's window.
 - **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
@@ -25,6 +25,8 @@ node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3773[,<origin>�
 A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
 
 `plutonium run` starts it with Ash (DRM sessions on port 3782, X11 ones on 3781). X11 apps need `xwayland-satellite` on `PATH` or in `PLUTONIUM_XWAYLAND_SATELLITE`, plus `systemd-socket-activate`.
+
+Tests: `npm test` here (`docs/DEVELOPING.md`, "Helper tests").
 
 Other commands:
 
