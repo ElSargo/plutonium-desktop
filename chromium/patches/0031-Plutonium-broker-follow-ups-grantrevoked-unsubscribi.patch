@@ -1,0 +1,650 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Tue, 20 Oct 2026 21:48:03 +1300
+Subject: [PATCH 31/32] Plutonium: broker follow-ups: grantrevoked,
+ unsubscribing, NativeWindowEvent constructor
+
+EXO-BROKER:
+- The shell hears when a grant it holds stops working: a "grantrevoked"
+  NativeWindowEvent (event.grant, event.windowId) after revokeGrant(), and
+  when the window closes, just before its "windowremoved".
+  WindowBrokerObserver.OnGrantRevoked, forwarded for the document's own
+  grants only.
+- Removing the last listener of a kind of broker event unsubscribes (the
+  observer pipe closes and the browser drops it); listening again
+  subscribes again, with a new snapshot. A snapshot that arrives after its
+  subscription ended is dropped. For windows, tabs, groups, shells and
+  context menus; a page that stops listening for context menus gets
+  Chrome's own again.
+- new NativeWindowEvent(type, {windowId, entry, grant}), and a grant
+  attribute.
+- ExoWindowBroker tells observers one event at a time. Revoking a grant
+  detached the element, whose detach changed the window, which notified
+  observers from inside the revocation's notification: a re-entrant
+  ObserverList iteration, fatal with DCHECKs (revokeGrant() crashed the
+  dev build). Events an observer causes now wait their turn, so the shell
+  gets "grantrevoked" before the "windowchanged" it causes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/exo_window_broker.cc           | 51 ++++++++---
+ chrome/browser/exo_window_broker.h            |  8 ++
+ chrome/browser/plutonium_shell.cc             | 18 ++++
+ .../mojom/native_window/window_broker.mojom   |  9 +-
+ .../renderer/bindings/generated_in_core.gni   |  2 +
+ .../blink/renderer/bindings/idl_in_core.gni   |  1 +
+ .../core/events/event_type_names.json5        |  1 +
+ .../core/html/native_window_broker.cc         | 87 ++++++++++++++++---
+ .../renderer/core/html/native_window_broker.h | 31 +++++--
+ .../core/html/native_window_broker.idl        |  8 ++
+ .../renderer/core/html/native_window_event.cc | 21 ++++-
+ .../renderer/core/html/native_window_event.h  | 15 +++-
+ .../core/html/native_window_event.idl         | 10 ++-
+ .../core/html/native_window_event_init.idl    | 13 +++
+ 14 files changed, 237 insertions(+), 38 deletions(-)
+ create mode 100644 third_party/blink/renderer/core/html/native_window_event_init.idl
+
+diff --git a/chrome/browser/exo_window_broker.cc b/chrome/browser/exo_window_broker.cc
+index 992197c611..2183291cfc 100644
+--- a/chrome/browser/exo_window_broker.cc
++++ b/chrome/browser/exo_window_broker.cc
+@@ -7,6 +7,7 @@
+ #include <sstream>
+ #include <utility>
+ 
++#include "base/auto_reset.h"
+ #include "base/check.h"
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
+@@ -213,9 +214,12 @@ void ExoWindowBroker::RevokeGrantsIf(Pred pred) {
+     VLOG(1) << "EXO-BROKER grant revoked: window #" << grant.window_id
+             << " frame " << grant.frame << " (" << grants_.size()
+             << " grants)";
+-    for (Observer& observer : observers_) {
+-      observer.OnGrantRevoked(token, grant.window_id, grant.frame);
+-    }
++    Notify(base::BindRepeating(
++        [](const base::UnguessableToken& token, const Grant& grant,
++           Observer& observer) {
++          observer.OnGrantRevoked(token, grant.window_id, grant.frame);
++        },
++        token, grant));
+   }
+ }
+ 
+@@ -283,9 +287,11 @@ void ExoWindowBroker::OnEmbeddedWindowDestroyed(int32_t window_id) {
+     return;
+   }
+   VLOG(1) << "EXO-BROKER window removed: #" << window_id;
+-  for (Observer& observer : observers_) {
+-    observer.OnWindowRemoved(window_id);
+-  }
++  Notify(base::BindRepeating(
++      [](int32_t window_id, Observer& observer) {
++        observer.OnWindowRemoved(window_id);
++      },
++      window_id));
+ }
+ 
+ void ExoWindowBroker::UpdateWindow(int32_t window_id) {
+@@ -329,9 +335,11 @@ void ExoWindowBroker::UpdateWindow(int32_t window_id) {
+   if (it == windows_.end()) {
+     windows_.emplace(window_id, window);
+     VLOG(1) << "EXO-BROKER window added: " << Describe(window);
+-    for (Observer& observer : observers_) {
+-      observer.OnWindowAdded(window);
+-    }
++    Notify(base::BindRepeating(
++        [](const WindowInfo& window, Observer& observer) {
++          observer.OnWindowAdded(window);
++        },
++        window));
+     return;
+   }
+   // Surface id and geometry origin churn every frame or resize; only report
+@@ -341,7 +349,28 @@ void ExoWindowBroker::UpdateWindow(int32_t window_id) {
+   }
+   it->second = window;
+   VLOG(1) << "EXO-BROKER window changed: " << Describe(window);
+-  for (Observer& observer : observers_) {
+-    observer.OnWindowChanged(window);
++  Notify(base::BindRepeating(
++      [](const WindowInfo& window, Observer& observer) {
++        observer.OnWindowChanged(window);
++      },
++      window));
++}
++
++void ExoWindowBroker::Notify(base::RepeatingCallback<void(Observer&)> event) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  pending_events_.push_back(std::move(event));
++  // An event an observer causes (an element detaching from a revoked grant
++  // changes the window) waits until the current one has reached everyone.
++  if (notifying_) {
++    return;
++  }
++  base::AutoReset<bool> notifying(&notifying_, true);
++  while (!pending_events_.empty()) {
++    base::RepeatingCallback<void(Observer&)> next =
++        std::move(pending_events_.front());
++    pending_events_.pop_front();
++    for (Observer& observer : observers_) {
++      next.Run(observer);
++    }
+   }
+ }
+diff --git a/chrome/browser/exo_window_broker.h b/chrome/browser/exo_window_broker.h
+index 54a82e66a2..fd620c2bf0 100644
+--- a/chrome/browser/exo_window_broker.h
++++ b/chrome/browser/exo_window_broker.h
+@@ -5,12 +5,14 @@
+ #ifndef CHROME_BROWSER_EXO_WINDOW_BROKER_H_
+ #define CHROME_BROWSER_EXO_WINDOW_BROKER_H_
+ 
++#include <deque>
+ #include <map>
+ #include <optional>
+ #include <set>
+ #include <string>
+ #include <vector>
+ 
++#include "base/functional/callback.h"
+ #include "base/observer_list.h"
+ #include "base/observer_list_types.h"
+ #include "base/memory/weak_ptr.h"
+@@ -152,6 +154,10 @@ class ExoWindowBroker : public exo::EmbeddedWindows::Observer {
+   template <typename Pred>
+   void RevokeGrantsIf(Pred pred);
+   void UpdateWindow(int32_t window_id);
++  // Tells every observer |event|, one event at a time: one that an observer
++  // causes while being told is queued until the current one has reached
++  // every observer.
++  void Notify(base::RepeatingCallback<void(Observer&)> event);
+   // EXO-TAGS: the client's thread tag was read (off the UI thread).
+   void OnOriginTagRead(int32_t window_id, std::optional<std::string> tag);
+ 
+@@ -166,6 +172,8 @@ class ExoWindowBroker : public exo::EmbeddedWindows::Observer {
+   std::set<int32_t> origin_unknown_;
+   std::map<base::UnguessableToken, Grant> grants_;
+   base::ObserverList<Observer> observers_;
++  bool notifying_ = false;
++  std::deque<base::RepeatingCallback<void(Observer&)>> pending_events_;
+   SEQUENCE_CHECKER(sequence_checker_);
+   base::WeakPtrFactory<ExoWindowBroker> weak_ptr_factory_{this};
+ };
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index f402eb0ea8..e0e16ac475 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -548,6 +548,10 @@ class WindowBrokerImpl
+     }
+     context_menu_observer_.reset();
+     context_menu_observer_.Bind(std::move(observer));
++    // The page stopped listening: Chrome shows its own menus again.
++    context_menu_observer_.set_disconnect_handler(base::BindOnce(
++        [](WindowBrokerImpl* self) { self->context_menu_observer_.reset(); },
++        base::Unretained(this)));
+   }
+ 
+   void CloseContextMenu(int32_t menu_id, int32_t item_id) override {
+@@ -635,6 +639,20 @@ class WindowBrokerImpl
+       observer->OnWindowRemoved(window_id);
+     }
+   }
++  void OnGrantRevoked(const base::UnguessableToken& grant,
++                      int32_t window_id,
++                      content::GlobalRenderFrameHostId frame) override {
++    // Only this document's grants. Grants are issued to the current
++    // document, and a document's grants are revoked when it goes away, so
++    // a grant for this frame is this document's.
++    if (frame != render_frame_host().GetGlobalId() || observers_.empty() ||
++        !StillShell()) {
++      return;
++    }
++    for (auto& observer : observers_) {
++      observer->OnGrantRevoked(grant, window_id);
++    }
++  }
+ 
+  private:
+   static std::vector<blink::mojom::NativeWindowEntryPtr> CurrentWindowsNone() {
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 3737aecbeb..27538c1f44 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -42,11 +42,18 @@ struct NativeWindowEntry {
+ };
+ 
+ // Window lifecycle events, surfaced to script as navigator.windowBroker's
+-// "windowadded", "windowchanged" and "windowremoved" events.
++// "windowadded", "windowchanged", "windowremoved" and "grantrevoked" events.
++// The renderer unsubscribes by closing its end, when the page has no
++// listeners left.
+ interface WindowBrokerObserver {
+   OnWindowAdded(NativeWindowEntry window);
+   OnWindowChanged(NativeWindowEntry window);
+   OnWindowRemoved(int32 window_id);
++  // EXO-BROKER: |grant| (for |window_id|), held by this document, is no
++  // longer valid: the shell revoked it, or the window closed (then just
++  // before OnWindowRemoved()). Elements using it have detached. Surfaced as
++  // a "grantrevoked" event.
++  OnGrantRevoked(mojo_base.mojom.UnguessableToken grant, int32 window_id);
+   // EXO-SHELLS: the browser's own UI (the shells overlay) asks this shell to
+   // show |window|. Surfaced as a "windowfocusrequest" event.
+   OnWindowFocusRequested(NativeWindowEntry window);
+diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
+index 2d2b3071de..c277c9d6c3 100644
+--- a/third_party/blink/renderer/bindings/generated_in_core.gni
++++ b/third_party/blink/renderer/bindings/generated_in_core.gni
+@@ -134,6 +134,8 @@ generated_dictionary_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_shell_entry.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_entry.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_entry.h",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_event_init.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_native_window_event_init.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_registered_tool.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_registered_tool.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_accelerator.cc",
+diff --git a/third_party/blink/renderer/bindings/idl_in_core.gni b/third_party/blink/renderer/bindings/idl_in_core.gni
+index 6a14064a6f..8cd5e8d189 100644
+--- a/third_party/blink/renderer/bindings/idl_in_core.gni
++++ b/third_party/blink/renderer/bindings/idl_in_core.gni
+@@ -489,6 +489,7 @@ static_idl_files_in_core = [
+   "//third_party/blink/renderer/core/html/native_window_broker.idl",
+   "//third_party/blink/renderer/core/html/native_window_entry.idl",
+   "//third_party/blink/renderer/core/html/native_window_event.idl",
++  "//third_party/blink/renderer/core/html/native_window_event_init.idl",
+   "//third_party/blink/renderer/core/html/native_window_request_event.idl",
+   "//third_party/blink/renderer/core/html/navigator_native_window_broker.idl",
+   "//third_party/blink/renderer/core/html/browser_tab_entry.idl",
+diff --git a/third_party/blink/renderer/core/events/event_type_names.json5 b/third_party/blink/renderer/core/events/event_type_names.json5
+index c1c15d8657..0284d8a4e7 100644
+--- a/third_party/blink/renderer/core/events/event_type_names.json5
++++ b/third_party/blink/renderer/core/events/event_type_names.json5
+@@ -373,6 +373,7 @@
+     "tabfocusrequest",
+     "tabremoved",
+     // EXO-BROKER: navigator.windowBroker.
++    "grantrevoked",
+     "windowadded",
+     "windowchanged",
+     "windowfocusrequest",
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 17eb7e5f7d..c93107c003 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -31,6 +31,21 @@ namespace blink {
+ 
+ namespace {
+ 
++bool IsWindowEvent(const AtomicString& event_type) {
++  return event_type == event_type_names::kWindowadded ||
++         event_type == event_type_names::kWindowchanged ||
++         event_type == event_type_names::kWindowremoved ||
++         event_type == event_type_names::kWindowfocusrequest ||
++         event_type == event_type_names::kGrantrevoked;
++}
++
++bool IsTabEvent(const AtomicString& event_type) {
++  return event_type == event_type_names::kTabadded ||
++         event_type == event_type_names::kTabchanged ||
++         event_type == event_type_names::kTabremoved ||
++         event_type == event_type_names::kTabfocusrequest;
++}
++
+ NativeWindowEntry* ToEntry(const mojom::blink::NativeWindowEntry& window) {
+   auto* entry = NativeWindowEntry::Create();
+   entry->setId(window.id);
+@@ -128,16 +143,10 @@ void NativeWindowBroker::AddedEventListener(
+     const AtomicString& event_type,
+     RegisteredEventListener& registered_listener) {
+   EventTarget::AddedEventListener(event_type, registered_listener);
+-  if (event_type == event_type_names::kWindowadded ||
+-      event_type == event_type_names::kWindowchanged ||
+-      event_type == event_type_names::kWindowremoved ||
+-      event_type == event_type_names::kWindowfocusrequest) {
++  if (IsWindowEvent(event_type)) {
+     Subscribe();
+   }
+-  if (event_type == event_type_names::kTabadded ||
+-      event_type == event_type_names::kTabchanged ||
+-      event_type == event_type_names::kTabremoved ||
+-      event_type == event_type_names::kTabfocusrequest) {
++  if (IsTabEvent(event_type)) {
+     SubscribeTabs();
+   }
+   if (event_type == event_type_names::kGroupschanged) {
+@@ -151,6 +160,41 @@ void NativeWindowBroker::AddedEventListener(
+   }
+ }
+ 
++void NativeWindowBroker::RemovedEventListener(
++    const AtomicString& event_type,
++    const RegisteredEventListener& registered_listener) {
++  EventTarget::RemovedEventListener(event_type, registered_listener);
++  // The last listener of a kind went: unsubscribe. Closing the observer's
++  // end is enough; the browser drops it.
++  if (IsWindowEvent(event_type) &&
++      !HasAnyEventListeners({event_type_names::kWindowadded,
++                             event_type_names::kWindowchanged,
++                             event_type_names::kWindowremoved,
++                             event_type_names::kWindowfocusrequest,
++                             event_type_names::kGrantrevoked})) {
++    observer_receiver_.reset();
++  }
++  if (IsTabEvent(event_type) &&
++      !HasAnyEventListeners(
++          {event_type_names::kTabadded, event_type_names::kTabchanged,
++           event_type_names::kTabremoved,
++           event_type_names::kTabfocusrequest})) {
++    tab_observer_receiver_.reset();
++  }
++  if (event_type == event_type_names::kGroupschanged &&
++      !HasEventListeners(event_type)) {
++    group_observer_receiver_.reset();
++  }
++  if (event_type == event_type_names::kShellschanged &&
++      !HasEventListeners(event_type)) {
++    shell_observer_receiver_.reset();
++  }
++  if (event_type == event_type_names::kContextmenurequest &&
++      !HasEventListeners(event_type)) {
++    context_menu_observer_receiver_.reset();
++  }
++}
++
+ void NativeWindowBroker::SubscribeContextMenus() {
+   if (context_menu_observer_receiver_.is_bound() || !BindRemote()) {
+     return;
+@@ -230,12 +274,18 @@ void NativeWindowBroker::SubscribeTabs() {
+   remote_->AddTabObserver(
+       tab_observer_receiver_.BindNewEndpointAndPassRemote(
+           GetExecutionContext()->GetTaskRunner(TaskType::kInternalDefault)),
+-      BindOnce(&NativeWindowBroker::OnTabSnapshot, WrapWeakPersistent(this)));
++      BindOnce(&NativeWindowBroker::OnTabSnapshot, WrapWeakPersistent(this),
++               ++tab_subscription_));
+ }
+ 
+ void NativeWindowBroker::OnTabSnapshot(
++    int subscription,
+     Vector<mojom::blink::BrowserTabEntryPtr> tabs) {
+   for (auto& tab : tabs) {
++    if (subscription != tab_subscription_ ||
++        !tab_observer_receiver_.is_bound()) {
++      return;
++    }
+     OnTabAdded(std::move(tab));
+   }
+ }
+@@ -282,12 +332,19 @@ void NativeWindowBroker::Subscribe() {
+   remote_->AddObserver(
+       observer_receiver_.BindNewEndpointAndPassRemote(
+           GetExecutionContext()->GetTaskRunner(TaskType::kInternalDefault)),
+-      BindOnce(&NativeWindowBroker::OnSnapshot, WrapWeakPersistent(this)));
++      BindOnce(&NativeWindowBroker::OnSnapshot, WrapWeakPersistent(this),
++               ++window_subscription_));
+ }
+ 
+ void NativeWindowBroker::OnSnapshot(
++    int subscription,
+     Vector<mojom::blink::NativeWindowEntryPtr> windows) {
+   for (auto& window : windows) {
++    // A listener may have unsubscribed (and subscribed again) meanwhile.
++    if (subscription != window_subscription_ ||
++        !observer_receiver_.is_bound()) {
++      return;
++    }
+     OnWindowAdded(std::move(window));
+   }
+ }
+@@ -318,6 +375,16 @@ void NativeWindowBroker::OnWindowRemoved(int32_t window_id) {
+       event_type_names::kWindowremoved, window_id, nullptr));
+ }
+ 
++void NativeWindowBroker::OnGrantRevoked(const base::UnguessableToken& grant,
++                                        int32_t window_id) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<NativeWindowEvent>(
++      event_type_names::kGrantrevoked, window_id, nullptr,
++      String(grant.ToString())));
++}
++
+ void NativeWindowBroker::OnWindowFocusRequested(
+     mojom::blink::NativeWindowEntryPtr window) {
+   if (!GetExecutionContext()) {
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index ac06e22e59..68cdde1217 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -36,13 +36,15 @@ class ScriptPromiseResolverBase;
+ // document; elsewhere the pipe closes and every call rejects.
+ //
+ // Push events: adding the first "windowadded" / "windowchanged" /
+-// "windowremoved" listener subscribes (WindowBroker.AddObserver). The
+-// snapshot that subscribing returns is dispatched as one "windowadded" per
+-// existing window, then every later change follows, so a page that listens
+-// before anything else builds its whole window list from events. The
+-// observer is associated with the broker pipe, so the snapshot can't race
+-// the events. Subscribing is one-shot per document (removing listeners
+-// doesn't unsubscribe).
++// "windowremoved" / "windowfocusrequest" / "grantrevoked" listener subscribes
++// (WindowBroker.AddObserver). The snapshot that subscribing returns is
++// dispatched as one "windowadded" per existing window, then every later
++// change follows, so a page that listens before anything else builds its
++// whole window list from events. The observer is associated with the broker
++// pipe, so the snapshot can't race the events. Removing the last of those
++// listeners unsubscribes (the observer pipe closes); adding one again
++// subscribes again, with a new snapshot. Tabs, groups, shells and context
++// menus subscribe and unsubscribe the same way, each on their own events.
+ class CORE_EXPORT NativeWindowBroker final
+     : public EventTarget,
+       public ExecutionContextClient,
+@@ -104,6 +106,7 @@ class CORE_EXPORT NativeWindowBroker final
+   void closeContextMenu(int32_t menu_id, int32_t item_id);
+ 
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(contextmenurequest, kContextmenurequest)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(grantrevoked, kGrantrevoked)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(groupschanged, kGroupschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(shellschanged, kShellschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(windowadded, kWindowadded)
+@@ -127,6 +130,8 @@ class CORE_EXPORT NativeWindowBroker final
+   void OnWindowAdded(mojom::blink::NativeWindowEntryPtr window) override;
+   void OnWindowChanged(mojom::blink::NativeWindowEntryPtr window) override;
+   void OnWindowRemoved(int32_t window_id) override;
++  void OnGrantRevoked(const base::UnguessableToken& grant,
++                      int32_t window_id) override;
+   void OnWindowFocusRequested(
+       mojom::blink::NativeWindowEntryPtr window) override;
+ 
+@@ -153,6 +158,8 @@ class CORE_EXPORT NativeWindowBroker final
+   // EventTarget:
+   void AddedEventListener(const AtomicString& event_type,
+                           RegisteredEventListener&) override;
++  void RemovedEventListener(const AtomicString& event_type,
++                            const RegisteredEventListener&) override;
+ 
+  private:
+   // False (and |resolver| rejected) if the broker can't be reached.
+@@ -160,9 +167,11 @@ class CORE_EXPORT NativeWindowBroker final
+   // Binds |remote_| if needed; false if the broker can't be reached.
+   bool BindRemote();
+   void Subscribe();
+-  void OnSnapshot(Vector<mojom::blink::NativeWindowEntryPtr> windows);
++  void OnSnapshot(int subscription,
++                  Vector<mojom::blink::NativeWindowEntryPtr> windows);
+   void SubscribeTabs();
+-  void OnTabSnapshot(Vector<mojom::blink::BrowserTabEntryPtr> tabs);
++  void OnTabSnapshot(int subscription,
++                     Vector<mojom::blink::BrowserTabEntryPtr> tabs);
+   void SubscribeGroups();
+   void SubscribeShells();
+   void SubscribeContextMenus();
+@@ -188,6 +197,10 @@ class CORE_EXPORT NativeWindowBroker final
+                              NativeWindowBroker>
+       context_menu_observer_receiver_;
+   bool disconnected_ = false;
++  // Counts subscriptions, so a snapshot that arrives after its subscription
++  // ended (the page stopped and started listening again) is dropped.
++  int window_subscription_ = 0;
++  int tab_subscription_ = 0;
+   // Calls in flight, rejected if the pipe closes.
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending_;
+ };
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index e96c0eee00..4766e8dc8e 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -38,6 +38,14 @@
+     // EXO-SHELLS: the browser's shells overlay asks this shell to show a
+     // window. Listening subscribes, as for "windowadded".
+     attribute EventHandler onwindowfocusrequest;
++    // A grant this document holds is no longer valid (event.grant,
++    // event.windowId): revokeGrant(), or the window closed (just before its
++    // "windowremoved"). Listening subscribes, as for "windowadded".
++    attribute EventHandler ongrantrevoked;
++    // Removing the last listener of these five unsubscribes; listening again
++    // subscribes again, and the current windows arrive again as
++    // "windowadded". The same holds for each of the other kinds of events
++    // below.
+ 
+     // EXO-TABS: browser tabs (see BrowserTabEntry).
+     //
+diff --git a/third_party/blink/renderer/core/html/native_window_event.cc b/third_party/blink/renderer/core/html/native_window_event.cc
+index 741c4a6a19..43f393b94d 100644
+--- a/third_party/blink/renderer/core/html/native_window_event.cc
++++ b/third_party/blink/renderer/core/html/native_window_event.cc
+@@ -6,17 +6,34 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_native_window_entry.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_native_window_event_init.h"
+ #include "third_party/blink/renderer/core/event_interface_names.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ 
+ namespace blink {
+ 
++// static
++NativeWindowEvent* NativeWindowEvent::Create(
++    const AtomicString& type,
++    const NativeWindowEventInit* initializer) {
++  return MakeGarbageCollected<NativeWindowEvent>(type, initializer);
++}
++
+ NativeWindowEvent::NativeWindowEvent(const AtomicString& type,
+                                      int32_t window_id,
+-                                     NativeWindowEntry* entry)
++                                     NativeWindowEntry* entry,
++                                     const String& grant)
+     : Event(type, Bubbles::kNo, Cancelable::kNo),
+       window_id_(window_id),
+-      entry_(entry) {}
++      entry_(entry),
++      grant_(grant) {}
++
++NativeWindowEvent::NativeWindowEvent(const AtomicString& type,
++                                     const NativeWindowEventInit* initializer)
++    : Event(type, initializer),
++      window_id_(initializer->windowId()),
++      entry_(initializer->hasEntry() ? initializer->entry() : nullptr),
++      grant_(initializer->grant()) {}
+ 
+ ScriptValue NativeWindowEvent::entry(ScriptState* script_state) const {
+   v8::Isolate* isolate = script_state->GetIsolate();
+diff --git a/third_party/blink/renderer/core/html/native_window_event.h b/third_party/blink/renderer/core/html/native_window_event.h
+index 452013be2d..001caf925d 100644
+--- a/third_party/blink/renderer/core/html/native_window_event.h
++++ b/third_party/blink/renderer/core/html/native_window_event.h
+@@ -8,10 +8,12 @@
+ #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/platform/heap/member.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
+ class NativeWindowEntry;
++class NativeWindowEventInit;
+ class ScriptState;
+ 
+ // EXO-BROKER: see native_window_event.idl.
+@@ -19,13 +21,21 @@ class NativeWindowEvent final : public Event {
+   DEFINE_WRAPPERTYPEINFO();
+ 
+  public:
+-  // |entry| is null for "windowremoved".
++  static NativeWindowEvent* Create(const AtomicString& type,
++                                   const NativeWindowEventInit* initializer);
++
++  // |entry| is null for "windowremoved" and "grantrevoked"; |grant| is only
++  // set for "grantrevoked".
+   NativeWindowEvent(const AtomicString& type,
+                     int32_t window_id,
+-                    NativeWindowEntry* entry);
++                    NativeWindowEntry* entry,
++                    const String& grant = g_empty_string);
++  NativeWindowEvent(const AtomicString& type,
++                    const NativeWindowEventInit* initializer);
+ 
+   int32_t windowId() const { return window_id_; }
+   ScriptValue entry(ScriptState*) const;
++  const String& grant() const { return grant_; }
+ 
+   const AtomicString& InterfaceName() const override;
+   void Trace(Visitor*) const override;
+@@ -33,6 +43,7 @@ class NativeWindowEvent final : public Event {
+  private:
+   const int32_t window_id_;
+   Member<NativeWindowEntry> entry_;
++  const String grant_;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/native_window_event.idl b/third_party/blink/renderer/core/html/native_window_event.idl
+index a808cf2733..17e875c89b 100644
+--- a/third_party/blink/renderer/core/html/native_window_event.idl
++++ b/third_party/blink/renderer/core/html/native_window_event.idl
+@@ -2,16 +2,20 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-// EXO-BROKER: a navigator.windowBroker lifecycle event ("windowadded",
+-// "windowchanged", "windowremoved").
++// EXO-BROKER: a navigator.windowBroker window event ("windowadded",
++// "windowchanged", "windowremoved", "windowfocusrequest", "grantrevoked").
+ [
+     Exposed=Window,
+     RuntimeEnabled=PlutoniumShell,
+     SecureContext
+ ] interface NativeWindowEvent : Event {
++    constructor(DOMString type, optional NativeWindowEventInit eventInitDict = {});
+     // The broker's window id.
+     readonly attribute long windowId;
+     // The window as a NativeWindowEntry dictionary (a fresh object on every
+-    // read); null for "windowremoved".
++    // read); null for "windowremoved" and "grantrevoked".
+     [CallWith=ScriptState] readonly attribute any entry;
++    // For "grantrevoked": the grant that is no longer valid. Elements using it
++    // have detached ("windowclose"). Otherwise "".
++    readonly attribute DOMString grant;
+ };
+diff --git a/third_party/blink/renderer/core/html/native_window_event_init.idl b/third_party/blink/renderer/core/html/native_window_event_init.idl
+new file mode 100644
+index 0000000000..769b678707
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/native_window_event_init.idl
+@@ -0,0 +1,13 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// EXO-BROKER: what new NativeWindowEvent(type, init) takes (so a shell, or
++// its tests, can make the events navigator.windowBroker fires).
++dictionary NativeWindowEventInit : EventInit {
++    long windowId = 0;
++    // Left out for "windowremoved" and "grantrevoked".
++    NativeWindowEntry entry;
++    // For "grantrevoked".
++    DOMString grant = "";
++};

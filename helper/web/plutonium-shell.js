@@ -173,6 +173,13 @@ export class PlutoniumShell extends EventTarget {
       this._unannounced.delete(event.windowId);
       if (this.windows.delete(event.windowId)) this._changed();
     });
+    // A grant the browser revoked can't attach again: forget it, so the
+    // next grantFor() asks for a new one.
+    this.broker.addEventListener("grantrevoked", async (event) => {
+      const cached = this.grants.get(event.windowId);
+      if (!cached || (await cached.catch(() => null)) !== event.grant) return;
+      if (this.grants.get(event.windowId) === cached) this.grants.delete(event.windowId);
+    });
     if (this.tabsAvailable) {
       // Replays the current tabs as "tabadded" events.
       const onTab = (event) => {

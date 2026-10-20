@@ -96,6 +96,21 @@ Run `live` from the checkout whose slot the session is in: the main checkout for
 
 `node --test test/<file>.test.ts` runs one file. To typecheck, run `tsc -p helper` with `@types/node` available; the tests are part of the project.
 
+## Chromium tests
+
+Chromium's own test targets are big: from a built `chrome`, `unit_tests` is about 8,800 build steps and `browser_tests` about 8,100. Plutonium's tests are in smaller targets. Build and run them in the build container (`plutonium container shell`), with `--ozone-platform=headless`:
+
+```
+autoninja -C out/Cros plutonium_unittests content_unittests
+out/Cros/plutonium_unittests --ozone-platform=headless
+out/Cros/content_unittests --ozone-platform=headless --gtest_filter='RenderWidgetHostInputEventRouterTest.*Foreign*'
+```
+
+- **`plutonium_unittests`** (`chrome/test/BUILD.gn`, about 800 steps): the window broker, `IsShellDocument` and the grant checks (`features/BROKER.md`).
+- **`content_unittests`** (about 1,900 steps): the input router's checks for native windows.
+
+**Live checks** need a session: `tools/shell-checks/run.sh [--forced]` runs the broker's exclusion checks in an X11 session in the checkout's slot (`features/BROKER.md`).
+
 ## Testing a session
 
 **Launching sessions:**

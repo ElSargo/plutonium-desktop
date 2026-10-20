@@ -38,7 +38,7 @@
 **The window broker** (`navigator.windowBroker`) is how the shell finds and controls windows.
 - **Contents:** it lists Exo's windows with title, app id, client pid and tags, and pushes add, change and remove events.
 - **Grants:** these are per-document tokens. A page can embed a window only with one.
-- **Who gets it:** only a shell page does: a top-level document whose origin is one of `--plutonium-shell-origin` or the shells. Ordinary pages and iframes get nothing, and the browser enforces this (`history/PHASE2_REPORT.md`).
+- **Who gets it:** only a shell page does: a top-level document whose origin is one of `--plutonium-shell-origin` or the shells. Ordinary pages and iframes get nothing, and the browser enforces this (`features/BROKER.md`, `history/PHASE2_REPORT.md`).
 
 **Browser tabs** (patch 0007, `features/TABS.md`) are real `WebContents`, owned by the browser.
 - **Display:** the shell shows them as `<embed type="application/x-chromium-surface-embed">`. They are composited and get input like an out-of-process iframe, and there is no script channel between page and tab.
@@ -74,6 +74,7 @@
 
 | Topic | Doc |
 |---|---|
+| The window broker, grants, who counts as the shell, and their tests | [features/BROKER.md](features/BROKER.md) |
 | Fullscreen, shell shortcuts, pointer capture, the app launcher | [features/CONTROLS.md](features/CONTROLS.md) |
 | Tabs | [features/TABS.md](features/TABS.md) |
 | Several shells, tags, the overlay | [features/SHELLS.md](features/SHELLS.md) |
