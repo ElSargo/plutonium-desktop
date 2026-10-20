@@ -104,9 +104,12 @@ container_cmd() {
       #   maps to threads;
       # - /dev/dri, /dev/input and udev: Ash on DRM with evdev input;
       # - the system D-Bus: Ash gets the display and input devices from logind;
-      # - keep-id: files in the checkout stay yours.
+      # - keep-id: files in the checkout stay yours. size=65534 leaves uid
+      #   65534 unmapped, which host root shows up as: libudev trusts senders
+      #   outside its user namespace, so it takes the host's udev events, and
+      #   Ash sees hotplugged input devices. Mapped, it drops them.
       pm create --name "$CONTAINER" --hostname "$CONTAINER" --pid=host --network=host --ipc=host \
-        --userns=keep-id --group-add keep-groups --security-opt label=disable \
+        --userns=keep-id:size=65534 --group-add keep-groups --security-opt label=disable \
         --device /dev/dri -v /dev/input:/dev/input -v /run/udev:/run/udev:ro -v /run/dbus:/run/dbus "${mounts[@]}" \
         -e HOME="$HOME" -e XDG_RUNTIME_DIR="$RUN_DIR" \
         -e PATH="$DEPOT_TOOLS:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -1199,6 +1202,7 @@ doctor() {
     [[ -n ${PREBUILT:-} ]] || check "image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
     check "container $CONTAINER running" "container_running" "plutonium container create / start"
     check "the system D-Bus in the container (DRM)" "in_container test -S /run/dbus/system_bus_socket" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
+    check "uid 65534 unmapped in the container (DRM input hotplug)" "in_container cat /proc/self/uid_map | awk '\$1 <= 65534 && 65534 < \$1 + \$3 { m = 1 } END { exit m }'" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
     echo "Chromium:"
     if [[ -n ${PREBUILT:-} ]]; then
       check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"

@@ -208,6 +208,6 @@ The niri shell's launcher (Super+D) has an entry that starts Claude Code with th
 | `run`: "session … is not in front" | The console isn't the one on screen. Switch to it, or use `--hold` with `--vt`, which waits for it |
 | `run`: "no system D-Bus where Ash runs" | The container is from before seat management. Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
 | Apps render in software | See `logs/helper-*.log` and `docs/features/GPU_X11.md`. The host needs Mesa with your GPU's driver |
-| Hotplugged keyboards or mice are ignored on DRM | Plug them in before starting the session. The rootless container doesn't receive udev hotplug events (`docs/BACKLOG.md`) |
+| Hotplugged keyboards or mice are ignored on DRM | The container is from before the fix (it maps uid 65534, so libudev drops the host's udev events; `plutonium doctor` says so). Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
 | X11 apps don't start | Install `xwayland-satellite`, or set `PLUTONIUM_XWAYLAND_SATELLITE` |
 | `run`: "port 8775 is taken" | Another copy of the shell server is running, for example from another checkout. Stop it |
