@@ -3,7 +3,7 @@
 Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland server (Exo), built as a Linux ChromeOS (`target_os = "chromeos"`) that runs on an ordinary Linux machine.
 
 - **`BASE`**: the upstream commit the patches apply to. It is `9f2eedcd653d` (2026-10-14, Chrome 158.0.8106.0).
-- **`patches/`**: the patch series, in order (`git am`). Together they change 223 files (about 17,500 lines).
+- **`patches/`**: the patch series, in order (`git am`). Together they change 246 files (about 19,500 lines).
 - **`args.gn`**: the build arguments.
 
 `plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [INSTALL.md](../INSTALL.md).
@@ -39,6 +39,9 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0025 | Agents drive windows and tabs (EXO-AGENT): the `Plutonium` DevTools domain on the browser target, for trusted clients only (lists and events, `createTab`, `captureTab`, `captureWindow`, window mouse and keys, `setTabAwake`, `setWindowAwake`, window screencasts); `EmbeddedWindows::InjectMouseEvent()`, `InjectKeyEvents()` (`Seat::DispatchAgentKeyEvent()`), `KeepDrawing()` (frames without the undrawn throttle) | [features/AGENT_CONTROL](../docs/features/AGENT_CONTROL.md) |
 | 0026 | A tab's context menu item runs with the tab focused: the shell had the keyboard while it showed the menu, so spelling suggestions, paste, cut, undo and select all did nothing (`SurfaceEmbedConnector::FocusInnerWebContents`) | [features/CHROME_UI](../docs/features/CHROME_UI.md) |
 | 0027 | Agent keyboard focus beside the user's (EXO-AGENT): a client focuses the window an agent drives while the user's focus is in another app (`Seat::AddAgentFocus()`), held between calls (`EmbeddedWindows::HoldAgentFocus()`, `Plutonium.setWindowAgentFocus`). The compositor decorates every window (EXO-DECOR): xdg-decoration always answers server side, and KDE's server-decoration protocol (for GTK 3) always answers server | [features/AGENT_CONTROL](../docs/features/AGENT_CONTROL.md) |
+| 0028 | Shared-memory buffers the GPU can't import don't stall the display (EXO-IMPORT): the GPU process reports which formats it can import (`SharedImageCapabilities::shared_memory_import_formats`), `wl_shm` imports an X format it can't as its A twin and refuses a format with no twin (`invalid_format`), and Exo never sends an unimportable one (which stopped the browser's GPU channel on every commit). The `EXO-DIAG` logging is `VLOG(1)` | [features/GPU_X11](../docs/features/GPU_X11.md) |
+| 0029 | A drag that ends outside an embedded window sends `wl_pointer.leave` with the release, not at the next move | [features/CONTROLS](../docs/features/CONTROLS.md) |
+| 0030 | Embedded focus follows modal dialogs (EXO-MODAL): `xdg_wm_dialog_v1`, and while a page shows a window's modal dialog, focus on the window goes to the dialog, and back when it closes | [features/CONTROLS](../docs/features/CONTROLS.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).

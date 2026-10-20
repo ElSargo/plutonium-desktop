@@ -21,17 +21,27 @@ we know. Sizes: **S** ≈ hours, **M** ≈ a day, **L** ≈ several days.
   driven on DRM. Still to do: the full exit test on the
   TTY setup (`TTY_REPORT.md`): three apps side by side, typing, menus,
   resize, scroll, flicker. Includes trying GTK with its Vulkan renderer.
-- [ ] **One client's failing buffers stall the whole display.** M · Phase 1
+- [x] **One client's failing buffers stall the whole display.** M · Phase 1
   gtk4-demo (Vulkan, dmabuf) on Xvfb: buffers can't be imported (no native
   pixmaps), the GPU process logs ~80k shared-image failures and stops
   presenting for everyone. (The trigger is gone since GPU_X11.md: Xvfb
   sessions import dmabufs now and gtk4-demo runs. The missing guard stays.) Exo should reject or drop a buffer that fails to
   import (and tell the client), not keep retrying. The `EXO-DIAG` error
   logging from the viability work may make it worse; demote it.
-- [ ] **Modal dialogs: page shows the wrong window as focused.** S · Phase 1
+  Done 2026-10-20 (`chromium/patches/0028`, GPU_X11.md): kwrite's XRGB8888
+  shm buffers on Xvfb were the trigger. The GPU process reports which shm
+  formats it can import, Exo imports XRGB as ARGB with padding alpha or
+  refuses the format (`wl_shm.invalid_format`), and never sends one that
+  would stop the GPU channel. `EXO-DIAG` is `VLOG(1)`. Failing dmabuf
+  imports aren't guarded the same way.
+- [x] **Modal dialogs: page shows the wrong window as focused.** S · Phase 1
   While a GTK modal dialog is open, keys go to the dialog but the parent's
   element still reports `windowFocused`. Embedded focus should follow the
   client's own redirection (or the page should be told).
+  Done 2026-10-20 for GTK 4 and Qt 6 (`xdg_dialog_v1`, `chromium/patches/0030`,
+  CONTROLS.md): focus on the parent goes to its modal dialog while a page
+  shows it. Still open: GTK 3 (only `gtk_shell1` says modal), and shells
+  that don't show a dialog, where its keys are lost.
 
 ## Security and broker (Phase 2 follow-ups)
 
@@ -344,7 +354,9 @@ shells that want to span monitors run on each and sync themselves.
 - **Firefox gets no TILED states** (binds an older xdg-shell), so it keeps
   its client-side shadow; handled by the geometry offset.
 - **Xvfb sometimes drops or delays synthetic input** (xdotool). Test helpers
-  add a 1 px nudge; don't mistake it for an embedding bug.
+  add a 1 px nudge; don't mistake it for an embedding bug. Seen again on
+  2026-10-20: after a click, the next input event (a move, a key release)
+  reaches Ash only with the one after it, on page content too.
 
 ## T3 shell test (2026-10-16)
 
@@ -360,7 +372,7 @@ shells that want to span monitors run on each and sync themselves.
   - `tools/freeze-probe.sh` (research repo) compares the page's own latest frame with what the X window shows, plus rAF rate and process states. Run it while frozen;
   - `plutonium run` keeps the previous Ash log as `logs/ash-<socket>.prev.log`.
   Not reproduced by clicking through DevTools (new thread → No project), which bypasses Ash's input path; the cause is still unknown.
-- [ ] **No `wl_pointer.leave`** when the pointer leaves an embedded window (seen with wev).
+- [x] **No `wl_pointer.leave`** when the pointer leaves an embedded window (seen with wev). The common cases already worked. A drag that ended outside the window got its leave only at the next move. Now it comes with the release (`chromium/patches/0029`, CONTROLS.md).
 
 ## Shipping
 
