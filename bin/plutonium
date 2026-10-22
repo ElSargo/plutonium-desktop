@@ -388,7 +388,7 @@ GCLIENT
       # Branch plutonium, at this checkout's series. Only files that differ
       # from what the checkout has are written, so the next build redoes no more
       # than it must.
-      [[ -d $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
+      [[ -e $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
       chromium_lock patch
       src_clean || die "$src has uncommitted changes"
       local commit tip last
@@ -408,7 +408,7 @@ GCLIENT
       # A dev build of this checkout's series, for its sessions: the one kept
       # already, or the series built in the Chromium checkout, which then goes
       # back to what it had.
-      [[ -d $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
+      [[ -e $src/.git ]] || die "no checkout at $src (plutonium chromium fetch)"
       chromium_lock ensure
       if [[ -x $BUILDS_DIR/$BUILD_KEY/chrome ]]; then
         echo "built already: $BUILDS_DIR/$BUILD_KEY"
@@ -427,7 +427,7 @@ GCLIENT
       true ;;
     wait) chromium_wait "${2:-}" ;;
     export)
-      [[ -d $src/.git ]] || die "no checkout at $src"
+      [[ -e $src/.git ]] || die "no checkout at $src"
       chromium_lock export
       src_clean || die "commit your changes in $src first"
       rm -f "$ROOT"/chromium/patches/*.patch
