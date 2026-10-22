@@ -286,8 +286,8 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 - [ ] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
   `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
   fails in tabs today), `permissionrequest`/`answerPermission`, devices in
-  use on the tab. Fallback when no shell takes it: Chrome's bubble or
-  dismiss (open question).
+  use on the tab. Fallback when no shell takes it: dismiss, and
+  mark the request blocked on the tab.
 - [ ] **Per-thread permission grants.** M · Scopes once, this thread and
   everywhere; a (thread, origin, permission) store and a check in
   `PermissionContextBase`. Default "this thread". Grants survive settling and go on archive or

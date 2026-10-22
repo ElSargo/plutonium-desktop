@@ -95,7 +95,7 @@ Chrome stores decisions per origin, in the profile, and every thread's tabs shar
 - **Deny** takes the same scopes.
 - **Settling.** A thread's grants stay when it is settled, and go when it is archived or deleted.
 
-**Fallback.** If no shell takes the request, Chrome's own bubble is shown, anchored at the top of the tab's `<embed>` in the shell's window. Chrome's anchor lookup goes through `GetBrowser()` in `permission_prompt_factory.cc`, so this needs a patch. If the bubble can't be built, the request is dismissed. That stores nothing, and the page can ask again.
+**Fallback.** If no shell takes the request, it is dismissed (decided). That stores nothing, and the page can ask again. The tab's state records the blocked request (`blocked: [{origin, permission}]`), so a shell can show a badge and ask later. Chrome's bubble isn't used: its anchor lookup goes through `GetBrowser()` in `permission_prompt_factory.cc` and would need a patch, and the library's prompt covers the normal case.
 
 **Agents.**
 - `list_tabs` shows `pending.permission`.
@@ -274,7 +274,7 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 **No fake restrictions on agents.** An agent with shell access can already print, read files and run programs. Limits that only the browser enforces, and that an agent can get around through its shell, are not added. A limit is kept only where it holds: a browser permission, or a secret the agent never sees.
 
 1. **Permission scopes:** once, this thread and everywhere, all three. The default button is "this thread". "Everywhere" stays, for sites the user trusts (video calls).
-2. **The permission fallback:** still open.
+2. **The permission fallback:** dismiss, and record the request as blocked on the tab so a shell can show it and ask again. No Chrome bubble.
 3. **Agents and permissions:** an agent can deny or dismiss. To grant, it asks the user, through the same prompt a page's request uses, marked as the agent's. `Browser.grantPermissions` becomes such a request in the agent's thread, and resolves once the user answers.
 4. **Grants and settling:** a thread's grants stay when it is settled, because settling is easy to undo. They go when the thread is archived or deleted.
 5. **Paths:** the target is Ash outside the container (`HOST=1`), where host paths just work. Until then, container sessions mount the user's home at the same path, so the features can be built and tested there. The document portal and staging copies are not built.
