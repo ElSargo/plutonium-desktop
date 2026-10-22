@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: the common plumbing is built ("As built: adding a feature"); the features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing ("As built: adding a feature") and zoom are built; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -77,6 +77,15 @@ The raw broker API, for shells that don't use the library, is in `native_window_
 **Not this:** "Page zoom" in `BACKLOG.md`'s design questions is about zooming the shell page around native windows. That is a different thing.
 
 **Size.** S.
+
+**Built** (2026-10-23, `plutonium_zoom.{h,cc}`). As designed, with these details:
+- The state is `zoom` (the percent) and `zoomDefault`. A new tab reports them as soon as it is registered.
+- The commands are `zoom-in`, `zoom-out`, `zoom-reset` and `zoom-set {percent}` (clamped to 25–500, as Chrome's menu). `setTabZoom(id, percent)` in the library is `zoom-set`, and each command resolves with the new percent.
+- Ctrl+plus (Ctrl+= and the keypad's +), Ctrl+minus and Ctrl+0 work once the page lets them through, and so does Ctrl+wheel (`ContentsZoomChange`). A page that takes them for itself keeps them.
+- The level is per site and shared by every tab and thread on it, so all of them report the change. It survives a reload.
+- The toast shows on the shell page that shows the tab, for any change of level, including going to a site that has its own level. `connect({ zoom: false })` turns it off; a function `(tab) => true` draws its own.
+- Verified on X11 (2026-10-23): the commands and their sharing over DevTools, then keys and the wheel as real X input through xdotool. DevTools' `Input.dispatchKeyEvent` can't test the keys: its events skip the browser's handling of keys the page didn't take (`skip_if_unhandled`).
+- **Not done:** T3's own zoom controls in its browser panel are still ignored by its bridge (`zoomIn`, `zoomOut`, `resetZoom`, `setZoomFactor` in patch 0012). T3 gets zoom through the keys, the wheel and the toast.
 
 ## Permission prompts
 

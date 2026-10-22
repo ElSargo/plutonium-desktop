@@ -140,7 +140,7 @@ Verified, Xvfb and panel:
 | `sendTabDevToolsCommand`: `Target.*` refused; `Page.navigate` to `file://` refused | ✅ |
 
 Not done for T3 (the bridge rejects or ignores these):
-- zoom, emulated color scheme, mute, the DevTools window;
+- the panel's own zoom controls (zoom itself works: the keys, Ctrl+wheel and the library's toast, `TAB_FEATURES.md`), emulated color scheme, mute, the DevTools window;
 - element picking (needs T3's picker preload), screenshots saved to a file, recordings, picture-in-picture windows, cookie import;
 - console and network entries in snapshots (always empty).
 
@@ -170,7 +170,7 @@ Verified on Xvfb with the host's T3 data:
 
 ## Limits and next steps
 - **No `Browser` behind a tab.** Some things go through a `Browser` window and are missing:
-  - keyboard shortcuts beyond DevTools, back, forward and reload (`CHROME_UI.md`), find-in-page, printing, zoom UI;
+  - keyboard shortcuts beyond DevTools, back, forward, reload and zoom (`CHROME_UI.md`, `TAB_FEATURES.md`), find-in-page, printing;
   - permission prompts (they'd be denied), downloads UI, file pickers (`<input type=file>` untested);
   - autofill and password manager tab helpers;
   - fullscreen requests (they'd be refused).
