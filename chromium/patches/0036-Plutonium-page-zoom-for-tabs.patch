@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 09:03:58 +1300
+Subject: [PATCH 36/36] Plutonium: page zoom for tabs
+
+EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Zoom"): the registry's
+tabs get Chrome's ZoomController (plutonium_zoom.{h,cc}), with Chrome's
+per-site levels in the profile, shared by every thread. The tab's state
+reports "zoom" (the percent) and "zoomDefault". Commands zoom-in,
+zoom-out and zoom-reset (also Ctrl+plus, Ctrl+minus and Ctrl+0 the page
+let through) go through zoom::PageZoom as Chrome's do, and zoom-set
+{percent} sets the site's level. Ctrl+wheel arrives as
+ContentsZoomChange(), as in BrowserWebContentsDelegate.
+---
+ chrome/browser/BUILD.gn          |   3 +
+ chrome/browser/plutonium_tabs.cc |   9 +-
+ chrome/browser/plutonium_zoom.cc | 139 +++++++++++++++++++++++++++++++
+ chrome/browser/plutonium_zoom.h  |  34 ++++++++
+ 4 files changed, 184 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/plutonium_zoom.cc
+ create mode 100644 chrome/browser/plutonium_zoom.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f098672184..44a8ad9e9f 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -785,6 +785,7 @@ if (is_chromeos) {
+       "plutonium_shells.h",
+       "plutonium_tab_requests.h",
+       "plutonium_tabs.h",
++      "plutonium_zoom.h",
+     ]
+     sources = [
+       "exo_embedder.cc",
+@@ -798,6 +799,7 @@ if (is_chromeos) {
+       "plutonium_shells.cc",
+       "plutonium_tab_requests.cc",
+       "plutonium_tabs.cc",
++      "plutonium_zoom.cc",
+     ]
+     public_deps = [
+       "//components/input",
+@@ -819,6 +821,7 @@ if (is_chromeos) {
+       "//components/surface_embed/browser",
+       "//components/url_formatter",
+       "//components/viz/common",
++      "//components/zoom",
+       "//media",
+       "//media/capture/mojom:video_capture_buffer",
+       "//skia",
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 9d14224d57..3eb33bb58f 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -32,6 +32,7 @@
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/plutonium_zoom.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params_utils.h"
+ #include "components/input/native_web_keyboard_event.h"
+@@ -519,6 +520,11 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+ 
+   // EXO-CHROME: the browser keys a page has without a browser window, once
+   // the page has let them through: DevTools, and back, forward and reload.
++  // EXO-TAB-FEATURES: Ctrl+wheel the page let through.
++  void ContentsZoomChange(bool zoom_in) override {
++    plutonium_zoom::ZoomChange(contents_, zoom_in);
++  }
++
+   bool HandleKeyboardEvent(
+       content::WebContents* source,
+       const input::NativeWebKeyboardEvent& event) override {
+@@ -758,7 +764,7 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   // delegate, Tab implements below, as BrowserWebContentsDelegate does.
+   // Called once the tab is registered (so a helper may SetTabState()), for
+   // the tab's own page only.
+-  void AttachHelpers() {}
++  void AttachHelpers() { plutonium_zoom::AttachHelpers(contents_); }
+ 
+  private:
+ 
+@@ -862,6 +868,7 @@ PlutoniumTabs::PlutoniumTabs() {
+     SetShell(shells->GetVisibleContents());
+   }
+   // EXO-TAB-FEATURES: their commands (AddCommand()), one line per feature.
++  plutonium_zoom::AddCommands(this);
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           "plutonium-test-tab-requests")) {
+     AddCommand("test-request",
+diff --git a/chrome/browser/plutonium_zoom.cc b/chrome/browser/plutonium_zoom.cc
+new file mode 100644
+index 0000000000..1558cd361b
+--- /dev/null
++++ b/chrome/browser/plutonium_zoom.cc
+@@ -0,0 +1,139 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_zoom.h"
++
++#include <algorithm>
++#include <cmath>
++#include <optional>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/scoped_observation.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/zoom/page_zoom.h"
++#include "components/zoom/zoom_controller.h"
++#include "components/zoom/zoom_observer.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/page_zoom.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
++
++namespace plutonium_zoom {
++
++namespace {
++
++// Chrome's zoom menu's range.
++constexpr int kMinPercent = 25;
++constexpr int kMaxPercent = 500;
++
++// Reports the tab's zoom to the registry (its state).
++class ZoomReporter : public content::WebContentsUserData<ZoomReporter>,
++                     public zoom::ZoomObserver {
++ public:
++  ZoomReporter(const ZoomReporter&) = delete;
++  ZoomReporter& operator=(const ZoomReporter&) = delete;
++  ~ZoomReporter() override = default;
++
++  void Report() {
++    zoom::ZoomController* controller =
++        zoom::ZoomController::FromWebContents(&GetWebContents());
++    if (!controller) {
++      return;
++    }
++    PlutoniumTabs* tabs = PlutoniumTabs::Get();
++    tabs->SetTabState(&GetWebContents(), "zoom",
++                      base::Value(controller->GetZoomPercent()));
++    tabs->SetTabState(&GetWebContents(), "zoomDefault",
++                      base::Value(controller->IsAtDefaultZoom()));
++  }
++
++  // zoom::ZoomObserver:
++  void OnZoomControllerDestroyed(
++      zoom::ZoomController* zoom_controller) override {
++    observation_.Reset();
++  }
++  void OnZoomChanged(
++      const zoom::ZoomController::ZoomChangedEventData& data) override {
++    Report();
++  }
++
++ private:
++  friend class content::WebContentsUserData<ZoomReporter>;
++
++  explicit ZoomReporter(content::WebContents* contents)
++      : content::WebContentsUserData<ZoomReporter>(*contents) {
++    if (zoom::ZoomController* controller =
++            zoom::ZoomController::FromWebContents(contents)) {
++      observation_.Observe(controller);
++    }
++  }
++
++  base::ScopedObservation<zoom::ZoomController, zoom::ZoomObserver>
++      observation_{this};
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ZoomReporter);
++
++void AddZoomCommand(PlutoniumTabs* tabs,
++                    const char* name,
++                    content::PageZoom how) {
++  tabs->AddCommand(
++      name, base::BindRepeating(
++                [](content::PageZoom how, content::WebContents* contents,
++                   const base::DictValue& args,
++                   PlutoniumTabs::CommandCallback done) {
++                  zoom::PageZoom::Zoom(contents, how);
++                  zoom::ZoomController* controller =
++                      zoom::ZoomController::FromWebContents(contents);
++                  std::move(done).Run(
++                      controller ? base::Value(controller->GetZoomPercent())
++                                 : base::Value());
++                },
++                how));
++}
++
++}  // namespace
++
++void AttachHelpers(content::WebContents* contents) {
++  zoom::ZoomController::CreateForWebContents(contents);
++  ZoomReporter::CreateForWebContents(contents);
++  ZoomReporter::FromWebContents(contents)->Report();
++}
++
++void AddCommands(PlutoniumTabs* tabs) {
++  AddZoomCommand(tabs, "zoom-in", content::PAGE_ZOOM_IN);
++  AddZoomCommand(tabs, "zoom-out", content::PAGE_ZOOM_OUT);
++  AddZoomCommand(tabs, "zoom-reset", content::PAGE_ZOOM_RESET);
++  // {percent}: the site's level (as Chrome's zoom menu sets it).
++  tabs->AddCommand(
++      "zoom-set",
++      base::BindRepeating([](content::WebContents* contents,
++                             const base::DictValue& args,
++                             PlutoniumTabs::CommandCallback done) {
++        zoom::ZoomController* controller =
++            zoom::ZoomController::FromWebContents(contents);
++        std::optional<double> percent = args.FindDouble("percent");
++        if (!controller || !percent || !std::isfinite(*percent)) {
++          std::move(done).Run(std::nullopt);
++          return;
++        }
++        const double clamped = std::clamp<double>(*percent, kMinPercent,
++                                                  kMaxPercent);
++        controller->SetZoomLevel(
++            blink::ZoomFactorToZoomLevel(clamped / 100.0));
++        std::move(done).Run(base::Value(controller->GetZoomPercent()));
++      }));
++}
++
++void ZoomChange(content::WebContents* contents, bool zoom_in) {
++  zoom::PageZoom::Zoom(contents, zoom_in ? content::PAGE_ZOOM_IN
++                                         : content::PAGE_ZOOM_OUT);
++}
++
++}  // namespace plutonium_zoom
+diff --git a/chrome/browser/plutonium_zoom.h b/chrome/browser/plutonium_zoom.h
+new file mode 100644
+index 0000000000..c946cbfdac
+--- /dev/null
++++ b/chrome/browser/plutonium_zoom.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_ZOOM_H_
++#define CHROME_BROWSER_PLUTONIUM_ZOOM_H_
++
++class PlutoniumTabs;
++
++namespace content {
++class WebContents;
++}
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Zoom"): page zoom for
++// the registry's tabs, as Chrome's. Levels are Chrome's per-site ones in the
++// profile (HostZoomMap), so every thread shares them.
++//
++// The tab's state has "zoom" (the percent) and "zoomDefault" (whether it is
++// at the default level). Commands: "zoom-in", "zoom-out", "zoom-reset" (also
++// Ctrl+plus, Ctrl+minus, Ctrl+0 and Ctrl+wheel) and "zoom-set" {percent}.
++namespace plutonium_zoom {
++
++// Tab::AttachHelpers(): Chrome's ZoomController, and the state it reports.
++void AttachHelpers(content::WebContents* contents);
++
++// The commands, in PlutoniumTabs' constructor.
++void AddCommands(PlutoniumTabs* tabs);
++
++// WebContentsDelegate::ContentsZoomChange() (Ctrl+wheel).
++void ZoomChange(content::WebContents* contents, bool zoom_in);
++
++}  // namespace plutonium_zoom
++
++#endif  // CHROME_BROWSER_PLUTONIUM_ZOOM_H_

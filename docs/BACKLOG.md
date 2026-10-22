@@ -272,11 +272,14 @@ hidden `Browser`. Passwords don't wait on this (`PASSWORDS.md`). Each feature at
 `WebContents` (not `TabFeatures`, which needs a `TabInterface`), asks the shell
 showing the tab with a cancelable event, and falls back to Chrome's UI.
 
-- [ ] **Tab request plumbing, and zoom.** S–M · `plutonium_tab_requests`
+- [x] **Tab request plumbing, and zoom.** S–M · `plutonium_tab_requests`
   (one request, answer and fallback path, generalising the context menu's),
   `pending` on `BrowserTabEntry`, the new `tabCommand`s and keys, the
   library's `connect()` options and dialog styles. Zoom: `ZoomController`,
   `ContentsZoomChange`, `BrowserTabEntry.zoom`, `setTabZoom`; T3's zoom.
+  Done (2026-10-23): see `TAB_FEATURES.md`, "As built" and Zoom. T3 has zoom
+  through the keys, the wheel and the toast; its panel's own zoom controls
+  are still ignored (its bridge, patch 0012).
 - [ ] **File pickers for tabs.** L · `RunFileChooser` through
   `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
   tabs' pickers (inputs, File System Access, Save As) to the shell as

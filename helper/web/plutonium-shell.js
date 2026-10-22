@@ -44,6 +44,19 @@
 // -separator); see MENU_STYLE. connect({ contextMenu: false }) leaves the
 // menus to Chrome; a function draws them itself (see ConnectOptions).
 //
+// Tab features (docs/features/TAB_FEATURES.md): what Chrome reaches through
+// its browser window (find, zoom, printing, permission prompts, file
+// pickers, downloads) is asked of the shell. A tab's page needing the user is
+// a "tab request" of some kind ("permission", "fileChooser", ...): the
+// library draws its default UI, unless connect() gets `<option>: false`
+// (leave it to the browser's fallback) or a function (draw it yourself:
+// return true if you took the request, then answer it with
+// answerTabRequest(); `request.signal` aborts if it ends first). What a
+// tab's features report (zoom, the requests it waits on as `pending`)
+// arrives on the tab, with a "tabstatechange" event per changed field. The
+// dialogs' look comes from --plutonium-dialog-bg, -fg, -border, -radius,
+// -shadow, -font and -accent (DIALOG_STYLE).
+//
 // Tags: every window and tab carries a list of tags, and items with the same
 // tag go together. The first is where the item came from: the thread that
 // started a window's app, or the thread a tab was created for (tabs its page
@@ -74,10 +87,20 @@ const HELPER = new URL(import.meta.url).origin;
  * @typedef {{ id: number, contentId: string, url: string, title: string, loading: boolean,
  *   canGoBack: boolean, canGoForward: boolean, embedded: boolean, focused: boolean, tag: string,
  *   openerId: number, openedBy: string, dialogType: string, dialogMessage: string,
- *   dialogDefaultPrompt: string, tags: string[] }} BrowserTab
+ *   dialogDefaultPrompt: string, tags: string[], pending: Record<string, PendingTabRequest>,
+ *   stateJson: string, [feature: string]: any }} BrowserTab
  *   tag: the thread it was created for ("" if none); tags: tag first, then the ones shells added.
  *   dialogType: "alert", "confirm", "prompt" or "beforeunload" while the page waits on a
  *   dialog (answer it with answerTabDialog()), else "".
+ *   pending: the tab requests it waits on, by kind. Every other field a tab feature reports
+ *   (such as `zoom`) is on the tab too, by its name.
+ * @typedef {{ requestId: number, taken: boolean, detail: any }} PendingTabRequest
+ *   taken: a shell shows it to the user.
+ * @typedef {{ requestId: number, tabId: number, kind: string, detail: any, tab: BrowserTab | undefined,
+ *   signal: AbortSignal, answer: (answer: any) => Promise<boolean> }} TabRequest
+ *   A tab's page needs the user. answer() answers it (resolves to false if it is over, or the
+ *   kind doesn't take that answer); signal aborts if it ends otherwise (an agent answered it,
+ *   the browser cancelled it, or the tab closed).
  * @typedef {{ id: string, name: string, genericName: string, comment: string,
  *   keywords: string[], categories: string[], hasIcon: boolean, terminal: boolean }} DesktopApp
  * @typedef {{ id: number, parentId: number, type: "command" | "checkbox" | "radio" | "separator" |
@@ -89,13 +112,34 @@ const HELPER = new URL(import.meta.url).origin;
  * @typedef {{ onFocus?: (window: ShellWindow) => boolean | Promise<boolean>,
  *   onFocusTab?: (tab: BrowserTab) => boolean | Promise<boolean>,
  *   onOpenTab?: (tab: BrowserTab) => string | null | undefined | Promise<string | null | undefined>,
- *   contextMenu?: false | ((request: ContextMenuRequest) => boolean) }} ConnectOptions
+ *   contextMenu?: false | ((request: ContextMenuRequest) => boolean),
+ *   [feature: string]: any }} ConnectOptions
  *   onOpenTab: a link this page opened in a new tab or window (Ctrl+click, target=_blank,
  *   window.open) arrived as a tab, untagged. Return the thread to put it in (it is then tagged
  *   and shown with onFocusTab), or nothing to leave it alone.
  *   contextMenu: false leaves Chrome's context menus to Chrome. A function draws them itself:
  *   it returns true if it shows `request`, then answers with closeContextMenu(menuId, itemId).
+ *   zoom: the page zoom toast ("110%" over the tab's element when its level changes). false
+ *   shows none; a function (tab: BrowserTab) => boolean shows your own (return true, or false
+ *   for the library's). A tab's level is `tab.zoom` (percent) and `tab.zoomDefault`.
+ *   A tab feature's option (TAB_REQUEST_KINDS' `option`, or the feature's own, such as `zoom`):
+ *   false leaves it to the browser; a function (request: TabRequest) => boolean draws it
+ *   itself; left out, the library draws it.
  */
+
+/**
+ * The kinds of tab request the library knows, by kind: the connect() option that controls
+ * it, and how the library draws it by default (`draw(shell, request)` returns true if it
+ * took it; leave `draw` out to leave the kind to the browser's fallback by default).
+ * A feature adds its kind with registerTabRequestKind().
+ * @type {Map<string, { option: string, draw?: (shell: PlutoniumShell, request: TabRequest) => boolean }>}
+ */
+export const TAB_REQUEST_KINDS = new Map();
+
+/** Adds (or replaces) a kind of tab request (see TAB_REQUEST_KINDS). */
+export function registerTabRequestKind(kind, { option, draw }) {
+  TAB_REQUEST_KINDS.set(kind, { option, draw });
+}
 
 /** The <embed> type that shows a browser tab. */
 export const TAB_EMBED_TYPE = "application/x-chromium-surface-embed";
@@ -112,6 +156,10 @@ export class PlutoniumShell extends EventTarget {
     this.onOpenTab = options.onOpenTab;
     /** @type {ConnectOptions["contextMenu"]} */
     this.contextMenu = options.contextMenu;
+    /** @type {ConnectOptions} every option connect() got (tab features read theirs here) */
+    this.options = { ...options };
+    /** @type {Map<number, AbortController>} tab requests this page took, by id */
+    this._tabRequests = new Map();
     /** The context menu shown now. */
     this._menu = null;
     /** Link tabs this page opened that were already handed to onOpenTab. */
@@ -185,10 +233,12 @@ export class PlutoniumShell extends EventTarget {
       const onTab = (event) => {
         if (!event.entry) return;
         const tab = plainTab(event.entry);
-        const opened = this._live && !this.tabs.has(event.tabId);
+        const previous = this.tabs.get(event.tabId);
+        const opened = this._live && !previous;
         this.tabs.set(event.tabId, tab);
         this._changed();
         if (opened) this.dispatchEvent(new CustomEvent("tabopened", { detail: { tab } }));
+        if (previous) this._tabStateChanged(previous, tab);
         this._maybeClaimOpenedTab(tab);
       };
       this.broker.addEventListener("tabadded", onTab);
@@ -233,6 +283,24 @@ export class PlutoniumShell extends EventTarget {
       this.broker.addEventListener("tabfocusrequest", async (event) => {
         const tab = this.tabs.get(event.tabId) ?? plainTab(event.entry);
         if (this.onFocusTab) await this.onFocusTab(tab);
+      });
+    }
+    // Zoom: a toast when a tab's level changes (TAB_FEATURES.md, "Zoom").
+    this.addEventListener("tabstatechange", (event) => {
+      const { tab, key, value, previous } = event.detail;
+      if (key !== "zoom" || previous === undefined || value === undefined) return;
+      const option = this.options.zoom;
+      if (option === false) return;
+      if (typeof option === "function" && option(tab)) return;
+      this.showTabToast(tab.id, `${value}%`);
+    });
+    // Tab features' requests (TAB_FEATURES.md).
+    if (typeof this.broker.answerTabRequest === "function") {
+      this.broker.addEventListener("tabrequest", (event) => this._onTabRequest(event));
+      this.broker.addEventListener("tabrequestend", (event) => {
+        const controller = this._tabRequests.get(event.requestId);
+        this._tabRequests.delete(event.requestId);
+        controller?.abort();
       });
     }
     // Chrome's context menus, drawn in this page's style.
@@ -453,9 +521,25 @@ export class PlutoniumShell extends EventTarget {
     return this.broker.navigateTab(tabId, url);
   }
 
-  /** "back", "forward", "reload", "stop" or "close". */
-  tabCommand(tabId, command) {
-    this.broker?.tabCommand?.(tabId, command);
+  /**
+   * Runs `command` on tab `tabId`: "back", "forward", "reload", "stop", "close", or a tab
+   * feature's ("zoom-in", "zoom-out", "zoom-reset", "find", "print", ...) with `args`.
+   * Resolves with its result; rejects if there is no such tab or command.
+   */
+  async tabCommand(tabId, command, args = undefined) {
+    if (typeof this.broker?.tabCommand !== "function") return null;
+    const result = await this.broker.tabCommand(tabId, command, args === undefined ? "" : JSON.stringify(args));
+    // Browsers from before tab features return nothing.
+    return typeof result === "string" && result ? JSON.parse(result) : null;
+  }
+
+  /**
+   * Sets tab `tabId`'s page zoom to `percent` (25 to 500), for its whole site, as Chrome's
+   * zoom menu does. Resolves with the level it got. zoom-in, zoom-out and zoom-reset are
+   * tabCommand()s.
+   */
+  setTabZoom(tabId, percent) {
+    return this.tabCommand(tabId, "zoom-set", { percent });
   }
 
   /** Answers the tab's pending dialog: OK (`accept`) or Cancel, with `text` for a prompt. */
@@ -561,6 +645,91 @@ export class PlutoniumShell extends EventTarget {
     }
     event.preventDefault();
     this.showContextMenu(request);
+  }
+
+  // A tab's page needs the user: the connect() option for its kind decides
+  // who draws it (see TAB_REQUEST_KINDS); preventDefault() takes it.
+  _onTabRequest(event) {
+    const kind = TAB_REQUEST_KINDS.get(event.kind);
+    const option = kind ? this.options[kind.option] : undefined;
+    if (option === false) return;
+    const controller = new AbortController();
+    /** @type {TabRequest} */
+    const request = {
+      requestId: event.requestId,
+      tabId: event.tabId,
+      kind: event.kind,
+      detail: event.detail,
+      tab: this.tabs.get(event.tabId),
+      signal: controller.signal,
+      answer: (answer) => this.answerTabRequest(event.requestId, answer),
+    };
+    let taken = false;
+    try {
+      if (typeof option === "function") taken = !!option(request);
+      else if (kind?.draw) taken = !!kind.draw(this, request);
+    } catch (error) {
+      console.error(`plutonium: drawing the ${event.kind} request`, error);
+    }
+    if (!taken) return;
+    event.preventDefault();
+    this._tabRequests.set(event.requestId, controller);
+  }
+
+  /**
+   * Answers tab request `requestId`, which this page took, with `answer` (its form depends
+   * on the kind). Resolves to false if it is over, or the kind doesn't take that answer.
+   */
+  async answerTabRequest(requestId, answer) {
+    if (typeof this.broker?.answerTabRequest !== "function") return false;
+    const ok = await this.broker.answerTabRequest(requestId, JSON.stringify(answer ?? null)).catch(() => false);
+    if (ok) this._tabRequests.delete(requestId);
+    return ok;
+  }
+
+  // "tabstatechange" for each feature field of the tab that changed.
+  _tabStateChanged(previous, tab) {
+    const before = parseTabState(previous.stateJson);
+    const after = parseTabState(tab.stateJson);
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+      this.dispatchEvent(
+        new CustomEvent("tabstatechange", { detail: { tab, key, value: after[key], previous: before[key] } }),
+      );
+    }
+  }
+
+  /** The element in this page that shows tab `tabId` now, if any. */
+  shownTabElement(tabId) {
+    const tab = this.tabs.get(tabId);
+    if (!tab?.contentId) return null;
+    return document.querySelector(`embed[data-content-id="${CSS.escape(tab.contentId)}"]`);
+  }
+
+  /**
+   * A short message over tab `tabId`'s element (at its top centre), such as "110%"; a new
+   * one for the same tab replaces it. Nothing if this page doesn't show the tab.
+   */
+  showTabToast(tabId, text, { duration = 1500 } = {}) {
+    const element = this.shownTabElement(tabId);
+    if (!element) return;
+    ensureDialogStyle();
+    this._toasts ??= new Map();
+    this._toasts.get(tabId)?.remove();
+    const toast = document.createElement("div");
+    toast.className = "plutonium-toast";
+    toast.popover = "manual";
+    toast.textContent = text;
+    document.body.append(toast);
+    toast.showPopover();
+    const box = element.getBoundingClientRect();
+    toast.style.left = `${box.left + box.width / 2 - toast.offsetWidth / 2}px`;
+    toast.style.top = `${box.top + 12}px`;
+    this._toasts.set(tabId, toast);
+    setTimeout(() => {
+      toast.remove();
+      if (this._toasts.get(tabId) === toast) this._toasts.delete(tabId);
+    }, duration);
   }
 
   /** Draws `request` (Chrome's context menu) here; the choice goes back to Chrome. */
@@ -770,8 +939,7 @@ export class PlutoniumShell extends EventTarget {
         await this.navigateTab(args.tabId, args.url);
         return {};
       case "tab_command":
-        this.tabCommand(args.tabId, args.command);
-        return {};
+        return { result: await this.tabCommand(args.tabId, args.command, args.args) };
       case "answer_dialog":
         this.answerTabDialog(args.tabId, args.accept, args.text ?? "");
         return {};
@@ -829,6 +997,33 @@ const MENU_STYLE = `@layer plutonium {
 }`;
 
 let menuStyle = null;
+
+// Tab features' dialogs, toasts and bars. Pages set the custom properties
+// (or style the classes; these rules are in the same layer as the menu's).
+const DIALOG_STYLE = `@layer plutonium {
+  .plutonium-dialog, .plutonium-toast {
+    position: fixed; inset: auto; margin: 0; box-sizing: border-box;
+    background: var(--plutonium-dialog-bg, var(--plutonium-menu-bg, Canvas));
+    color: var(--plutonium-dialog-fg, var(--plutonium-menu-fg, CanvasText));
+    border: var(--plutonium-dialog-border, var(--plutonium-menu-border, 1px solid color-mix(in srgb, currentColor 18%, transparent)));
+    border-radius: var(--plutonium-dialog-radius, var(--plutonium-menu-radius, 8px));
+    box-shadow: var(--plutonium-dialog-shadow, var(--plutonium-menu-shadow, 0 8px 28px #0006));
+    font: var(--plutonium-dialog-font, var(--plutonium-menu-font, 13px/1.3 system-ui, sans-serif));
+  }
+  .plutonium-dialog { padding: 12px 14px; max-width: min(420px, calc(100vw - 16px)); }
+  .plutonium-dialog button.default { background: var(--plutonium-dialog-accent, AccentColor); color: AccentColorText; }
+  .plutonium-toast { padding: 6px 12px; pointer-events: none; user-select: none; font-variant-numeric: tabular-nums; }
+}`;
+
+let dialogStyle = null;
+
+/** Adds DIALOG_STYLE to the document, once. */
+export function ensureDialogStyle() {
+  if (dialogStyle) return;
+  dialogStyle = document.createElement("style");
+  dialogStyle.textContent = DIALOG_STYLE;
+  document.head.append(dialogStyle);
+}
 
 // Chrome's context menu, drawn by the page: a popover (in the top layer, so
 // over fullscreen elements too) per open (sub)menu. The choice goes back to
@@ -1125,8 +1320,22 @@ function plainGroup(group) {
   return { tag: group.tag, label: group.label, shellId: group.shellId ?? "" };
 }
 
+function parseTabState(json) {
+  try {
+    const state = JSON.parse(json || "{}");
+    return state && typeof state === "object" && !Array.isArray(state) ? state : {};
+  } catch {
+    return {};
+  }
+}
+
 function plainTab(entry) {
+  // Fields features report come first, so they can't hide the tab's own.
+  const state = parseTabState(entry.stateJson);
   return {
+    ...state,
+    pending: state.pending ?? {},
+    stateJson: entry.stateJson ?? "{}",
     id: entry.id,
     contentId: entry.contentId,
     url: entry.url,
@@ -1156,6 +1365,7 @@ export function connect(options = {}) {
     if (options.onFocusTab) shell.onFocusTab = options.onFocusTab;
     if (options.onOpenTab) shell.onOpenTab = options.onOpenTab;
     if (options.contextMenu !== undefined) shell.contextMenu = options.contextMenu;
+    Object.assign(shell.options, options);
   }
   return shell;
 }

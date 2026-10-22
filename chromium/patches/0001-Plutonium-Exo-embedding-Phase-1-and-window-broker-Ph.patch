@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Thu, 15 Oct 2026 21:28:15 +1300
-Subject: [PATCH 01/33] Plutonium: Exo embedding (Phase 1) and window broker
+Subject: [PATCH 01/36] Plutonium: Exo embedding (Phase 1) and window broker
  (Phase 2)
 
 Viability work, the <native-window> element (EXO-EMBED) and the window
