@@ -281,31 +281,35 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
   tabs' pickers (inputs, File System Access, Save As) to the shell as
   `filechooserrequest`. The library's picker over the helper's file listing.
-  Container sessions don't see the user's home: mount, document portal or
-  staging (open question). Uploads are cancelled in every tab today.
+  Container sessions mount the user's home at the same path until Ash runs
+  outside the container (decided). Uploads are cancelled in every tab today.
 - [ ] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
   `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
   fails in tabs today), `permissionrequest`/`answerPermission`, devices in
-  use on the tab. Chrome's bubble anchored over the tab as the fallback.
+  use on the tab. Fallback when no shell takes it: Chrome's bubble or
+  dismiss (open question).
 - [ ] **Per-thread permission grants.** M · Scopes once, this thread and
   everywhere; a (thread, origin, permission) store and a check in
-  `PermissionContextBase`. Agents can deny but not grant (open question).
+  `PermissionContextBase`. Default "this thread". Grants survive settling and go on archive or
+  delete. Agents can deny; to grant they ask the user (also
+  `Browser.grantPermissions`).
 - [ ] **Downloads in threads.** M · A download observer that records the
   tab's thread, `download*` events to every shell, `downloadCommand`, open
   and show through the helper in the thread's environment, closing the empty
-  tab a download leaves. Where files land is an open question.
+  tab a download leaves. Files go to `~/Downloads` by default, with options
+  for a `.downloads` in the thread's working directory or
+  `~/Downloads/<thread>/`.
   `list_downloads` for agents; Playwright's download events in the relay.
 - [ ] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
   `stopFind`, `findresult`, and the library's find bar.
 - [ ] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
   `printToPdf` for the shell's preview, host printers and jobs through the
-  helper (CUPS). Chrome's preview over the shell's window as the fallback.
+  helper (CUPS); agents may print. Chrome's preview over the shell's window as the fallback.
 - [ ] **FileChooser and Print portals on the same picker and dialog.** M ·
   Part of "Our own portal backend for the rest": the same
   `filechooserrequest` and print dialog for native apps.
-- [ ] **Form autofill in tabs.** S–M (Chrome's popup) to L (shell-drawn,
-  saving) · Only if wanted: Chrome's local autofill, or identities and cards
-  through the password adapter (open question).
+- [ ] **Form autofill in tabs.** S–M to L · Not now (decided 2026-10-23).
+  Later: identities and cards through the password adapter.
 
 ## Capture and sharing (`CAPTURE.md`)
 

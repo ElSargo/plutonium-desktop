@@ -85,7 +85,7 @@ Chrome stores decisions per origin, in the profile, and every thread's tabs shar
 | Scope | Stored by | Lasts |
 |---|---|---|
 | `once` | Chrome's one-time grant (`AcceptThisTime`) | until the page's origin is closed or navigated away from, as in Chrome |
-| `thread` | Plutonium, keyed by (thread, origin, permission) | until revoked, or the thread is settled |
+| `thread` | Plutonium, keyed by (thread, origin, permission) | until revoked, or the thread is archived or deleted |
 | `everywhere` | Chrome's content setting (`HostContentSettingsMap`) | until revoked; also shown in `chrome://settings/content` |
 
 - **The thread** is the tab's origin tag (its first tag), which never changes. A tab another thread borrowed (an added tag) keeps its origin thread's grants.
@@ -93,14 +93,14 @@ Chrome stores decisions per origin, in the profile, and every thread's tabs shar
   - `PlutoniumPermissionPrompt` answers a covered request with `AcceptThisTime` without asking anyone;
   - a check in `PermissionContextBase` (`components/permissions/permission_context_base.h`) reports "granted" for a registry tab whose thread holds the grant, so `navigator.permissions.query()` and `Notification.permission` say so too.
 - **Deny** takes the same scopes.
-- **Settling.** When a thread is settled, its grants go with it, unless the user keeps them (the T3 sidebar item in `BACKLOG.md` decides what settle does).
+- **Settling.** A thread's grants stay when it is settled, and go when it is archived or deleted.
 
 **Fallback.** If no shell takes the request, Chrome's own bubble is shown, anchored at the top of the tab's `<embed>` in the shell's window. Chrome's anchor lookup goes through `GetBrowser()` in `permission_prompt_factory.cc`, so this needs a patch. If the bubble can't be built, the request is dismissed. That stores nothing, and the page can ask again.
 
 **Agents.**
 - `list_tabs` shows `pending.permission`.
-- An agent can answer `deny` or `dismiss` (`answer_permission`). Only the user can grant.
-- Playwright's `Browser.grantPermissions` stays acknowledged and does nothing (`helper/src/serverTabs.ts`, `pages.ts`), as now.
+- An agent can answer `deny` or `dismiss` (`answer_permission`).
+- To grant, an agent asks the user (`request_permission`), through the same prompt, marked as the agent's. Playwright's `Browser.grantPermissions` (`helper/src/serverTabs.ts`, `pages.ts`) becomes such a request and resolves once the user answers.
 
 **Size.** M–L. M in Chromium (the helpers, the prompt, the media delegate methods, indicators), M for thread grants (the store and the `PermissionContextBase` check), S for the library's prompt.
 
@@ -143,7 +143,7 @@ So a tab and a native app show one picker with the same places and the same rece
 
 ### Paths in the container
 
-The answer is a host path, but Ash in the container doesn't see the user's home. Its `$HOME` is `$DATA_DIR/container-home` (`bin/plutonium`, `container create`), and only the checkout, `$DATA_DIR` and the runtime dir are shared. `HOST=1` sessions have no such problem. For container sessions, there are three ways (open question):
+The answer is a host path, but Ash in the container doesn't see the user's home. Its `$HOME` is `$DATA_DIR/container-home` (`bin/plutonium`, `container create`), and only the checkout, `$DATA_DIR` and the runtime dir are shared. `HOST=1` sessions have no such problem. The target is Ash outside the container. Until then, container sessions mount the user's home at the same path (decided). The three ways considered:
 
 - **Mount the user's folders** (the XDG user dirs, or all of `$HOME`) into the container at the same path. This is the simplest way, and the container already keeps paths the same inside and out.
 - **The document portal.** The helper adds each chosen file to it (`org.freedesktop.portal.Documents.AddFull`), and Ash reads `$XDG_RUNTIME_DIR/doc/<id>/<name>`. The runtime dir is shared, but the FUSE mount has to reach the container. To check: whether podman's bind of the runtime dir carries it.
@@ -187,7 +187,7 @@ The answer is a host path, but Ash in the container doesn't see the user's home.
 
 ### Downloads in a thread
 
-Every download records its thread, so a shell can list a thread's downloads with the thread (T3's sidebar, the plain shell's thread view). The file itself goes to one of these (open question):
+Every download records its thread, so a shell can list a thread's downloads with the thread (T3's sidebar, the plain shell's thread view). The file goes to `~/Downloads` by default; the per-thread folders are options (decided):
 
 - **One folder for everything** (`~/Downloads`, the user's choice), with the thread kept only as metadata. This is what users expect from a browser.
 - **A folder per thread** (`~/Downloads/<thread label>/`), or a T3 thread's project folder. This keeps a thread's files together, and an agent can find them.
@@ -225,7 +225,7 @@ Either way, in a container session Chrome writes inside the profile under `$DATA
 - Chrome's print preview, as a dialog over the shell's window. The tab gets a `web_modal::WebContentsModalDialogManager` whose delegate gives the shell's widget as the host (`HasWebContentsModalDialogHost()` in `print_preview_dialog_controller.cc`).
 - If the preview can't offer real printers (above), it still saves PDFs.
 
-**Agents.** `Page.printToPDF` already works through Playwright (`page.pdf()`), so nothing is needed for PDFs. Printing to a physical printer is the user's (open question).
+**Agents.** `Page.printToPDF` already works through Playwright (`page.pdf()`), so nothing is needed for PDFs. Agents may print to a physical printer too (`print_tab`), with no approval: an agent with a shell can already run `lp`.
 
 **Size.** M–L:
 - M in Chromium (the helpers, the hook, `printToPdf`, the modal dialog host for the fallback);
@@ -248,7 +248,7 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 
 **Agents.** No.
 
-**Without Chrome's autofill.** There is no sync, so whatever Chrome's autofill stores stays local. Bitwarden and 1Password already keep identities and cards. The password adapter could fill them in the same way it fills logins (open question).
+**Without Chrome's autofill.** There is no sync, so whatever Chrome's autofill stores stays local. Bitwarden and 1Password already keep identities and cards. The password adapter could fill them in the same way it fills logins. Decided: not now, and later through the adapter.
 
 **Size.** S–M for Chrome's popup alone, L for a shell-drawn popup and saving.
 
@@ -269,15 +269,17 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 - Translate, Cast, picture-in-picture windows, "Save page as" beyond the picker, and Chrome's site settings UI.
 - Fullscreen requests from tabs already work (patch 0011).
 
-## Open questions
+## Decisions (2026-10-23)
 
-1. **Permission scopes.** Should the three scopes be once, this thread and everywhere? Which one should be the default button? Should "everywhere" exist at all, or should every lasting grant be per thread?
-2. **The permission fallback.** Chrome's bubble anchored over the tab (needs a patch), or simply dismiss when no shell takes the request?
-3. **Agents and permissions.** Should an agent be able to grant a permission in its own thread (for example camera for a test page), or only deny? Should `Browser.grantPermissions` map to thread grants?
-4. **What settle does to grants.** Should a thread's grants go when it settles?
-5. **Paths in container sessions.** Mount the user's folders into the container, use the document portal, or stage copies? This decides uploads, Save As and where downloads are written.
-6. **Where downloads land.** One `~/Downloads` with the thread kept as metadata, a folder per thread, or the thread's project folder for T3 threads? Should agent-started downloads go somewhere else?
-7. **Zoom scope.** Chrome's per-site zoom is shared by every thread. Is that right, or should zoom be per tab (`ZoomController`'s isolated mode)?
-8. **Physical printing by agents.** Never, or with the user's approval?
-9. **Form autofill.** Should it be Chrome's (local only, no sync), the password adapter filling identities and cards, or not built at all?
-10. **Who gets a tab's request** when several monitors each have a visible shell (`MULTI_MONITOR.md`). The shell showing the tab seems right, but a tab no shell shows has no display. Should it go to the focused shell?
+**No fake restrictions on agents.** An agent with shell access can already print, read files and run programs. Limits that only the browser enforces, and that an agent can get around through its shell, are not added. A limit is kept only where it holds: a browser permission, or a secret the agent never sees.
+
+1. **Permission scopes:** once, this thread and everywhere, all three. The default button is "this thread". "Everywhere" stays, for sites the user trusts (video calls).
+2. **The permission fallback:** still open.
+3. **Agents and permissions:** an agent can deny or dismiss. To grant, it asks the user, through the same prompt a page's request uses, marked as the agent's. `Browser.grantPermissions` becomes such a request in the agent's thread, and resolves once the user answers.
+4. **Grants and settling:** a thread's grants stay when it is settled, because settling is easy to undo. They go when the thread is archived or deleted.
+5. **Paths:** the target is Ash outside the container (`HOST=1`), where host paths just work. Until then, container sessions mount the user's home at the same path, so the features can be built and tested there. The document portal and staging copies are not built.
+6. **Downloads:** one `~/Downloads` by default, with the thread kept as metadata. Options, per shell or per thread: a `.downloads` folder in the thread's working directory, or `~/Downloads/<thread>/`. Agent downloads follow the same setting.
+7. **Zoom:** Chrome's per-site zoom, shared by every thread.
+8. **Printing by agents:** allowed, with no approval, like any other print job (see above).
+9. **Form autofill:** not built for now. Identities and cards come later through the password adapter (`PASSWORDS.md`).
+10. **Several monitors:** a request from a tab no shell is showing goes to the focused shell.
