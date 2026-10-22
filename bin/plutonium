@@ -70,9 +70,9 @@ Where:
                     log in). Ctrl+Alt+F1…F12 switch VTs while it runs, and
                     Ctrl+Alt+Backspace ends it. This is the default.
   --vt ttyN         DRM in the session logged in on ttyN, from any other shell
-                    (ssh, an agent); ttyN must be in front when it starts
-  --hold SECONDS    DRM: stop Ash after SECONDS (unattended tests); with --vt, first
-                    wait up to 120 s for ttyN to come to the front
+                    (ssh, an agent); if ttyN isn't in front, Ash comes up when
+                    it is
+  --hold SECONDS    DRM: stop Ash after SECONDS (unattended tests)
   --no-killswitch   DRM without the kill switch (see INSTALL.md before using it)
   --flags "..."     more Chromium flags
 EOF
@@ -698,7 +698,7 @@ origin_of() { sed -E 's#^(https?://[^/?\#]+).*#\1#' <<< "$1"; }
 
 run_cmd() {
   local mode=drm shells=()
-  export VT= HOLD_S= WAIT_S= NO_KILLSWITCH= XDISP= EXTRA_FLAGS=
+  export VT= HOLD_S= NO_KILLSWITCH= XDISP= EXTRA_FLAGS=
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --x11) mode=x11; if [[ ${2:-} == :* ]]; then XDISP=$2; shift; fi ;;
@@ -714,7 +714,6 @@ run_cmd() {
     shift
   done
   [[ ${#shells[@]} -gt 0 ]] || shells=(t3)
-  [[ -n $VT && -n $HOLD_S ]] && WAIT_S=120
   # DRM and X11 sessions have their own socket and ports, so both can run.
   session_vars "$mode"
   [[ $mode == x11 ]] && XDISP=${XDISP:-$PRIVATE_XDISP}

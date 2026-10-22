@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 07:02:23 +1300
+Subject: [PATCH 33/33] Plutonium: start a logind session on a VT that isn't in
+ front
+
+logind hands out the devices of a session in the background paused: the
+card without DRM master, the input devices revoked. Ash's first real
+display configuration then failed its test-modeset and the panel was
+marked failed. Now the DRM host manager tells the display configurator
+that the platform has the displays when it gets its delegate while the
+session is inactive, so configurations wait, and the first one happens
+when logind resumes the card (TakeControl with a forced configuration,
+as on coming back from another VT).
+
+Input devices aren't asked of logind while the session is inactive, and
+it isn't an error that they can't be opened. A DRM device taken after
+the session changed state updates whether it is active, since no
+PauseDevice or ResumeDevice comes for it.
+---
+ ui/display/types/native_display_observer.h    |  5 ++--
+ ui/events/ozone/device/logind_session.cc      | 23 +++++++++++++++----
+ .../drm/host/drm_display_host_manager.cc      | 13 ++++++++++-
+ 3 files changed, 34 insertions(+), 7 deletions(-)
+
+diff --git a/ui/display/types/native_display_observer.h b/ui/display/types/native_display_observer.h
+index 6078ec0d22..82d7bb872f 100644
+--- a/ui/display/types/native_display_observer.h
++++ b/ui/display/types/native_display_observer.h
+@@ -22,8 +22,9 @@ class DISPLAY_TYPES_EXPORT NativeDisplayObserver {
+   virtual void OnDisplaySnapshotsInvalidated() = 0;
+ 
+   // The platform took control of the displays away (the session was switched
+-  // away from, and DRM master went with it), or gave it back. Nothing can be
+-  // configured in between, not even turned off.
++  // away from, and DRM master went with it, or it started on a VT that isn't
++  // in front), or gave it back. Nothing can be configured in between, not
++  // even turned off.
+   virtual void OnDisplayControlRevoked() {}
+   virtual void OnDisplayControlRestored() {}
+ };
+diff --git a/ui/events/ozone/device/logind_session.cc b/ui/events/ozone/device/logind_session.cc
+index 708c15f075..7e56804ab2 100644
+--- a/ui/events/ozone/device/logind_session.cc
++++ b/ui/events/ozone/device/logind_session.cc
+@@ -249,6 +249,11 @@ base::ScopedFD LogindSession::OpenDevice(const base::FilePath& path) {
+     LOG(ERROR) << "logind: not a device: " << path.value();
+     return base::ScopedFD();
+   }
++  if (!IsDrm(st.st_rdev) && !active_) {
++    // Opened when the session is in front (OnSessionResumed()).
++    VLOG(1) << "logind: session inactive, not opening " << path.value();
++    return base::ScopedFD();
++  }
+   base::ScopedFD fd;
+   base::WaitableEvent done;
+   thread_.task_runner()->PostTask(
+@@ -256,7 +261,7 @@ base::ScopedFD LogindSession::OpenDevice(const base::FilePath& path) {
+       base::BindOnce(&LogindSession::OpenDeviceOnThread,
+                      base::Unretained(this), st.st_rdev, &fd, &done));
+   done.Wait();
+-  if (!fd.is_valid()) {
++  if (!fd.is_valid() && (IsDrm(st.st_rdev) || active_)) {
+     LOG(ERROR) << "logind: can't open " << path.value();
+   }
+   return fd;
+@@ -285,10 +290,20 @@ void LogindSession::OpenDeviceOnThread(dev_t device,
+       fd.reset();
+     }
+     if (fd.is_valid()) {
+-      if (IsDrm(device) && inactive) {
+-        paused_drm_devices_.insert(device);
+-      }
+       it = devices_.emplace(device, std::move(fd)).first;
++      if (IsDrm(device)) {
++        // What logind says now wins over what it said at TakeControl(): the
++        // session may have been switched to or away from since, and a device
++        // taken after that gets no PauseDevice or ResumeDevice for it.
++        if (inactive) {
++          paused_drm_devices_.insert(device);
++          if (active_.exchange(false)) {
++            observers_->Notify(FROM_HERE, &Observer::OnSessionPaused);
++          }
++        } else if (paused_drm_devices_.empty() && !active_.exchange(true)) {
++          observers_->Notify(FROM_HERE, &Observer::OnSessionResumed);
++        }
++      }
+     }
+   }
+   if (it != devices_.end()) {
+diff --git a/ui/ozone/platform/drm/host/drm_display_host_manager.cc b/ui/ozone/platform/drm/host/drm_display_host_manager.cc
+index 7335699b85..6bd7a4ecd2 100644
+--- a/ui/ozone/platform/drm/host/drm_display_host_manager.cc
++++ b/ui/ozone/platform/drm/host/drm_display_host_manager.cc
+@@ -392,6 +392,14 @@ DrmDisplayHost* DrmDisplayHostManager::GetDisplay(int64_t display_id) {
+ void DrmDisplayHostManager::AddDelegate(DrmNativeDisplayDelegate* delegate) {
+   DCHECK(!delegate_);
+   delegate_ = delegate;
++  LogindSession* session = LogindSession::Get();
++  if (session && !session->is_active()) {
++    // Started on a VT that isn't in front: no DRM master, so nothing can be
++    // configured until the session is in front (OnSessionResumed()). The
++    // GPU process has nothing to give up yet.
++    display_externally_controlled_ = true;
++    delegate_->OnDisplayControlRevoked();
++  }
+ }
+ 
+ void DrmDisplayHostManager::RemoveDelegate(DrmNativeDisplayDelegate* delegate) {
+@@ -432,7 +440,10 @@ void DrmDisplayHostManager::RelinquishDisplayControl(
+   }
+ 
+   if (display_externally_controlled_) {
+-    LOG(ERROR) << "RelinquishDisplayControl called while display not owned";
++    // Under logind, a session that starts in the background was never given
++    // the displays (AddDelegate()).
++    LOG_IF(ERROR, !LogindSession::Get())
++        << "RelinquishDisplayControl called while display not owned";
+     std::move(callback).Run(true);
+     return;
+   }
