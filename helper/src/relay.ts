@@ -39,6 +39,8 @@ export interface BrowserTabEntry {
   readonly dialogType: string;
   readonly dialogMessage: string;
   readonly dialogDefaultPrompt: string;
+  /** What the tab's features report, a JSON object (older browsers: missing). */
+  readonly stateJson?: string;
 }
 
 /** A tag a shell has described: its label and owning shell. */

@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: design. Nothing here is built yet.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing is built ("As built: adding a feature"); the features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -24,6 +24,25 @@ All features use the same plumbing, written once (`plutonium_tab_requests.{h,cc}
 - **Keys.** Once the page has let a key through, a tab gets Chrome's key for each feature, as it got back, forward and reload (`plutonium_keys.cc`, `Tab::HandleKeyboardEvent`): Ctrl+F, F3, Ctrl+G and Ctrl+Shift+G, Ctrl+P, Ctrl+plus, Ctrl+minus and Ctrl+0. A page like Google Docs that takes Ctrl+F for itself keeps it.
 - **Shell library.** `connect({ findBar, zoom, permissions, fileChooser, print, downloads })`. Each option is either `false` (leave it to Chrome), a function (draw it yourself and return true if you took the request), or left out (the library draws it). The look comes from custom properties, as with menus: `--plutonium-dialog-bg`, `-fg`, `-border`, `-radius`, `-shadow`, `-font`, `-accent`, plus the menu's `--plutonium-menu-*`.
 - **Context menu.** Print, and "Save link, image or page as", come back to the tab's menu (`Keeps()` in `plutonium_context_menu.cc`) once printing and downloads work.
+
+### As built: adding a feature
+
+The plumbing is the patch "Plutonium: common plumbing for tab features", with the library and helper parts in this repo. A feature adds to it in these places, one or a few lines each:
+
+- **Helpers.** Attach them in `Tab::AttachHelpers()` (`plutonium_tabs.cc`). Delegate methods go on `Tab`, next to the others it implements.
+- **A request.** Call `PlutoniumTabRequests::Get()->Start(contents, params)` (`plutonium_tab_requests.h`), and keep the returned `Handle` for as long as the request may be answered. Destroying the handle cancels the request.
+  - `params.kind` is the request type in lowerCamelCase, such as `"fileChooser"` or `"permission"`. `params.detail` is a `base::DictValue`: the shell's `request.detail`, and the tab's `pending.<kind>.detail`.
+  - `on_answer(from, answer)` gets the JSON answer from `kShell` or `kAgent`. Return false to refuse it (for example, an agent's "allow"); the request then stays open.
+  - `on_fallback(reason)` runs, posted, when no shell takes the request (`kNotTaken`) or the shell that took it goes away (`kShellGone`). It runs Chrome's UI, or cancels or dismisses.
+  - Start() returns null for a page that isn't a registry tab. Callbacks never run from inside Start(). While the request is open, the tab's state has `pending.<kind> = {requestId, taken, detail}`.
+  - The request goes to the shell whose `<embed>` shows the tab, or else to the visible shell (`PlutoniumTabRequests::ShellFor()`).
+- **A state field.** `PlutoniumTabs::Get()->SetTabState(contents, "zoom", base::Value(110))` sets one; `base::Value()` removes it. Shells see it as `tab.zoom` in the library, with a `tabstatechange {tab, key, value, previous}` event, and as `BrowserTabEntry.stateJson` in the raw broker. Agents see it as `Plutonium.Tab.stateJson`, and the helper's `ThreadTab` shows it as `pending`, plus `state` for everything else.
+- **A command.** Add it in the `PlutoniumTabs` constructor with `AddCommand("zoom-in", handler)`. The handler is `(WebContents*, const base::DictValue& args, CommandCallback done)`, and `done` takes a `base::Value` result, or `std::nullopt` for a failure. It runs from the shells (`shell.tabCommand(id, name, args)` resolves with the result), from agents (`Plutonium.tabCommand`, the helper's `POST /v1/threads/<t>/tabs/<id>/command {command, args}`), and from keys.
+- **A key.** `plutonium_keys::GetTabCommandKey()` maps a key to a command name. Ctrl+F, F3, Ctrl+G, Ctrl+Shift+G, Ctrl+P and Ctrl+plus/minus/0 are already mapped, and a key does something once its command is added. The page gets the key first.
+- **A library option.** For a request kind, `registerTabRequestKind(kind, {option, draw})` in `plutonium-shell.js`. With `connect({[option]: false})`, the shell leaves the request to the fallback. A function `(request) => boolean` draws it itself. Otherwise `draw(shell, request)` does, returning true if it took the request. `request` is `{requestId, tabId, kind, detail, tab, signal, answer(answer)}`, and `signal` aborts on `tabrequestend`. A feature without requests, such as zoom, reads `shell.options.<name>`. Dialogs use `ensureDialogStyle()` and the `.plutonium-dialog` class (the `--plutonium-dialog-*` properties); `shell.showTabToast(tabId, text)` and `shell.shownTabElement(tabId)` do what their names say.
+- **An agent tool.** Add it in `helper/src/mcp.ts`, next to `answer_dialog`. It posts to `/v1/threads/<thread>/tabs/<id>/request {kind, answer}`, which answers the tab's `pending.<kind>` through `Plutonium.answerTabRequest`; the kind's `on_answer` decides whether an agent may give that answer. Agents see `pending` in `list_tabs`.
+
+The raw broker API, for shells that don't use the library, is in `native_window_broker.idl`: `tabrequest` and `tabrequestend` (a `TabRequestEvent`), `answerTabRequest(requestId, answerJson)`, `tabCommand(tabId, command, argsJson)` returning the result as JSON, and `BrowserTabEntry.stateJson`.
 
 ## Find in page
 

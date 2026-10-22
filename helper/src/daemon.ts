@@ -147,9 +147,35 @@ export interface ThreadTab {
   readonly openerId: number;
   /** A dialog the page waits on (answer it with answer_dialog). */
   readonly dialog?: { readonly type: string; readonly message: string; readonly defaultPrompt?: string };
+  /**
+   * What the page waits on the user for, by kind ("permission", "fileChooser",
+   * ...; TAB_FEATURES.md): answer it with the kind's tool.
+   */
+  readonly pending?: Readonly<Record<string, TabRequestInfo>>;
+  /** The rest of what the tab's features report ("zoom", ...). */
+  readonly state?: Readonly<Record<string, unknown>>;
+}
+
+/** An open tab request (a tab's `pending`). */
+export interface TabRequestInfo {
+  readonly requestId: number;
+  /** Whether a shell shows it to the user. */
+  readonly taken: boolean;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+/** A tab's feature state (BrowserTabEntry.stateJson), as an object. */
+export function tabState(entry: { readonly stateJson?: string }): Record<string, unknown> {
+  try {
+    const state: unknown = JSON.parse(entry.stateJson || "{}");
+    return state && typeof state === "object" && !Array.isArray(state) ? (state as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function threadTab(entry: BrowserTabEntry): ThreadTab {
+  const { pending, ...state } = tabState(entry);
   return {
     id: entry.id,
     url: entry.url,
@@ -169,6 +195,8 @@ function threadTab(entry: BrowserTabEntry): ThreadTab {
           },
         }
       : {}),
+    ...(pending && typeof pending === "object" ? { pending: pending as Record<string, TabRequestInfo> } : {}),
+    ...(Object.keys(state).length > 0 ? { state } : {}),
   };
 }
 
@@ -653,9 +681,50 @@ export class Daemon {
   async tabCommand(threadId: string, tabId: number, command: string, waitMs: number): Promise<ThreadTab> {
     await this.ownedTab(threadId, tabId);
     const desktop = await this.direct();
-    if (desktop) await desktop.tabCommand(tabId, command as (typeof TAB_COMMANDS)[number]);
+    if (desktop) await desktop.tabCommand(tabId, command);
     else await this.ask(threadId, "tab_command", { tabId, command });
     return threadTab(await this.waitForLoad(threadId, tabId, waitMs));
+  }
+
+  /**
+   * EXO-TAB-FEATURES: runs a tab feature's command ("zoom-in", "find", ...)
+   * on one of the thread's tabs; resolves with its result.
+   */
+  async runTabCommand(
+    threadId: string,
+    tabId: number,
+    command: string,
+    args?: Record<string, unknown>,
+  ): Promise<{ result: unknown; tab: ThreadTab }> {
+    await this.ownedTab(threadId, tabId);
+    const desktop = await this.direct();
+    let result: unknown;
+    try {
+      result = desktop
+        ? await desktop.tabCommand(tabId, command, args)
+        : ((await this.ask<{ result?: unknown }>(threadId, "tab_command", { tabId, command, args })).result ?? null);
+    } catch (error) {
+      throw new HttpError(400, (error as Error).message);
+    }
+    return { result, tab: threadTab(await this.ownedTab(threadId, tabId)) };
+  }
+
+  /**
+   * EXO-TAB-FEATURES: answers the request of `kind` that one of the thread's
+   * tabs waits on (its `pending`), as an agent. The kind decides which
+   * answers an agent may give.
+   */
+  async answerTabRequest(threadId: string, tabId: number, kind: string, answer: unknown): Promise<ThreadTab> {
+    const tab = await this.ownedTab(threadId, tabId);
+    const request = (tabState(tab).pending as Record<string, TabRequestInfo> | undefined)?.[kind];
+    if (!request) throw new HttpError(409, `Tab ${tabId} has no ${kind} request open.`);
+    const desktop = await this.direct();
+    if (!desktop) throw new HttpError(501, "This browser can't answer tab requests for agents.");
+    await desktop.answerTabRequest(request.requestId, answer).catch((error: Error) => {
+      throw new HttpError(400, error.message);
+    });
+    await sleep(150);
+    return threadTab(await this.ownedTab(threadId, tabId));
   }
 
   async closeTab(threadId: string, tabId: number): Promise<{ closed: boolean }> {
@@ -1323,6 +1392,17 @@ export class Daemon {
             );
           }
           if (what === "close") return sendJson(response, 200, await this.closeTab(threadId, tabId));
+          // EXO-TAB-FEATURES: {command, args?}; {kind, answer}.
+          if (what === "command") {
+            if (typeof body.command !== "string" || !body.command) throw new HttpError(400, "command is required.");
+            const args =
+              body.args && typeof body.args === "object" ? (body.args as Record<string, unknown>) : undefined;
+            return sendJson(response, 200, await this.runTabCommand(threadId, tabId, body.command, args));
+          }
+          if (what === "request") {
+            if (typeof body.kind !== "string" || !body.kind) throw new HttpError(400, "kind is required.");
+            return sendJson(response, 200, await this.answerTabRequest(threadId, tabId, body.kind, body.answer));
+          }
           if (what === "page") return sendJson(response, 200, await this.pageAction(threadId, tabId, body));
         }
       }

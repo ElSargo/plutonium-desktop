@@ -26,6 +26,8 @@ export interface DesktopTab {
   readonly dialogType?: string;
   readonly dialogMessage?: string;
   readonly dialogDefaultPrompt?: string;
+  /** What the tab's features report, a JSON object (TAB_FEATURES.md); older browsers: missing. */
+  readonly stateJson?: string;
 }
 
 /** A native window (Plutonium.Window). */
@@ -206,8 +208,22 @@ export class Desktop {
     await this.cdp.send("Plutonium.navigateTab", { id, url });
   }
 
-  async tabCommand(id: number, command: "back" | "forward" | "reload" | "stop" | "close"): Promise<void> {
-    await this.cdp.send("Plutonium.tabCommand", { id, command });
+  /**
+   * Runs a command on tab `id`: back, forward, reload, stop, close, or a tab
+   * feature's ("zoom-in", "find", ...), with `args`. Resolves with its result.
+   */
+  async tabCommand(id: number, command: string, args?: Record<string, unknown>): Promise<unknown> {
+    const { resultJson } = (await this.cdp.send("Plutonium.tabCommand", {
+      id,
+      command,
+      ...(args ? { argsJson: JSON.stringify(args) } : {}),
+    })) as { resultJson?: string };
+    return resultJson ? JSON.parse(resultJson) : null;
+  }
+
+  /** Answers tab request `requestId` (a tab's `pending`) as an agent. */
+  async answerTabRequest(requestId: number, answer: unknown): Promise<void> {
+    await this.cdp.send("Plutonium.answerTabRequest", { requestId, answerJson: JSON.stringify(answer ?? null) });
   }
 
   async answerTabDialog(id: number, accept: boolean, promptText: string): Promise<void> {
