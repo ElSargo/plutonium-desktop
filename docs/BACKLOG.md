@@ -112,9 +112,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **A way out of a DRM session other than the kill switch.** Done
   (`features/SEAT.md`): Ctrl+Alt+Backspace, and VT switching with
   Ctrl+Alt+Fn. Ash is a logind session controller.
-- [ ] **Start a DRM session on a VT that isn't in front.** logind hands out the
-  devices paused, but Ash's first display configuration needs master. Defer it
-  until the session is active. S
+- [x] **Start a DRM session on a VT that isn't in front.** Done
+  (`features/SEAT.md`, patch 0033): the displays aren't configured until the
+  session is in front, and Ash comes up when it is.
 - [x] **App launching from the shell.** Done in Phase 3: the helper's
   `launch` (shell library `shell.launch()`, MCP `launch_app`).
 - [x] **Zero-copy / display planes for embedded windows.** Done

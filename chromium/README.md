@@ -44,6 +44,7 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0030 | Embedded focus follows modal dialogs (EXO-MODAL): `xdg_wm_dialog_v1`, and while a page shows a window's modal dialog, focus on the window goes to the dialog, and back when it closes | [features/CONTROLS](../docs/features/CONTROLS.md) |
 | 0031 | Broker follow-ups (EXO-BROKER): a `grantrevoked` event for the shell's own grants, removing the last listener of a kind of broker event unsubscribes, `new NativeWindowEvent(type, init)`. The broker tells observers one event at a time (`revokeGrant()` crashed dev builds on a re-entrant observer list) | [features/BROKER](../docs/features/BROKER.md) |
 | 0032 | Unit tests for the broker and grant checks: `plutonium_unittests` (its own target), and the input router's foreign-sink checks in `content_unittests` | [features/BROKER](../docs/features/BROKER.md) |
+| 0033 | A logind session started on a VT that isn't in front: the displays wait for the session to be in front (`DrmDisplayHostManager::AddDelegate()` revokes display control), and the first real configuration is the one on resume. Input devices aren't asked of logind meanwhile | [features/SEAT](../docs/features/SEAT.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).

@@ -10,8 +10,7 @@
 #   ORIGINS      every shell's origin, comma-separated (for the helper)
 #   SOCKET       Exo's Wayland socket name; CDP_PORT, HELPER_PORT, PROFILE
 #   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
-#         seconds), NO_KILLSWITCH, WAIT_S (wait up to N seconds for that
-#         session to come to the front)
+#         seconds), NO_KILLSWITCH
 #   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
 #   EXTRA_FLAGS  more Chromium flags, VMODULE
 set -u
@@ -167,11 +166,10 @@ if ! killswitch_ok; then
   else log "ABORT: the kill switch is not listening (plutonium killswitch install), and no --hold or --no-killswitch"; exit 1
   fi
 fi
-if [[ -n ${WAIT_S:-} ]]; then
-  for _ in $(seq 1 "$WAIT_S"); do [[ $(session_prop Active) == yes ]] && break; sleep 1; done
-fi
+# A session that isn't in front starts too: Ash waits for it with the
+# displays and input devices untouched.
 [[ $(session_prop Active) == yes ]] ||
-  { log "ABORT: session $SID ($(session_prop TTY)) is not in front; switch to it first (Ctrl+Alt+F$(session_prop VTNr))"; exit 1; }
+  log "session $SID ($(session_prop TTY)) is not in front; Ash comes up when it is (Ctrl+Alt+F$(session_prop VTNr))"
 
 start_helper
 echo "Starting Ash on DRM in session $SID ($(session_prop TTY)). Ctrl+Alt+F1…F12 switch VTs, Ctrl+Alt+Backspace ends it."

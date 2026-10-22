@@ -157,11 +157,11 @@ Ash runs in that console's logind session, which hands it the display and input 
 
 However the session ends, even when Ash crashes or is killed, the text console comes back in working order: logind restores it.
 
-**From another shell.** If you're logged in on tty2, you can start a session there from anywhere, for example over ssh or from an agent. tty2 must be in front when it starts:
+**From another shell.** If you're logged in on tty2, you can start a session there from anywhere, for example over ssh or from an agent. If tty2 isn't in front, Ash starts and waits, and comes up when you switch to it (Ctrl+Alt+F2):
 
 ```
 plutonium run --vt tty2 niri
-plutonium run --vt tty2 --hold 120 niri    # unattended: waits up to 120 s for tty2 to come to the front, stops after 120 s
+plutonium run --vt tty2 --hold 120 niri    # unattended: stops after 120 s
 ```
 
 **Choosing shells.** List them in order; the first one is the desktop:
@@ -205,7 +205,7 @@ The niri shell's launcher (Super+D) has an entry that starts Claude Code with th
 | `podman`: "cannot re-exec process to join the existing user namespace" | `PODMAN=lib/pm.sh` in `plutonium.env` |
 | The container exits a minute after starting | Start it with `plutonium container start`, which runs it from a lasting user unit. Starting it from a short-lived wrapper takes its monitor process down with it |
 | `run`: "… is in no logind session" or "… is not on a seat's VT" | Run it from a text console you logged in on (not a terminal in your desktop), or pass `--vt ttyN` |
-| `run`: "session … is not in front" | The console isn't the one on screen. Switch to it, or use `--hold` with `--vt`, which waits for it |
+| `run`: "session … is not in front; Ash comes up when it is" | Not an error: the console isn't the one on screen. Switch to it (Ctrl+Alt+F*n*) and Ash comes up |
 | `run`: "no system D-Bus where Ash runs" | The container is from before seat management. Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
 | Apps render in software | See `logs/helper-*.log` and `docs/features/GPU_X11.md`. The host needs Mesa with your GPU's driver |
 | Hotplugged keyboards or mice are ignored on DRM | The container is from before the fix (it maps uid 65534, so libudev drops the host's udev events; `plutonium doctor` says so). Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
