@@ -119,6 +119,9 @@ const HELPER = new URL(import.meta.url).origin;
  *   and shown with onFocusTab), or nothing to leave it alone.
  *   contextMenu: false leaves Chrome's context menus to Chrome. A function draws them itself:
  *   it returns true if it shows `request`, then answers with closeContextMenu(menuId, itemId).
+ *   zoom: the page zoom toast ("110%" over the tab's element when its level changes). false
+ *   shows none; a function (tab: BrowserTab) => boolean shows your own (return true, or false
+ *   for the library's). A tab's level is `tab.zoom` (percent) and `tab.zoomDefault`.
  *   A tab feature's option (TAB_REQUEST_KINDS' `option`, or the feature's own, such as `zoom`):
  *   false leaves it to the browser; a function (request: TabRequest) => boolean draws it
  *   itself; left out, the library draws it.
@@ -282,6 +285,15 @@ export class PlutoniumShell extends EventTarget {
         if (this.onFocusTab) await this.onFocusTab(tab);
       });
     }
+    // Zoom: a toast when a tab's level changes (TAB_FEATURES.md, "Zoom").
+    this.addEventListener("tabstatechange", (event) => {
+      const { tab, key, value, previous } = event.detail;
+      if (key !== "zoom" || previous === undefined || value === undefined) return;
+      const option = this.options.zoom;
+      if (option === false) return;
+      if (typeof option === "function" && option(tab)) return;
+      this.showTabToast(tab.id, `${value}%`);
+    });
     // Tab features' requests (TAB_FEATURES.md).
     if (typeof this.broker.answerTabRequest === "function") {
       this.broker.addEventListener("tabrequest", (event) => this._onTabRequest(event));
@@ -519,6 +531,15 @@ export class PlutoniumShell extends EventTarget {
     const result = await this.broker.tabCommand(tabId, command, args === undefined ? "" : JSON.stringify(args));
     // Browsers from before tab features return nothing.
     return typeof result === "string" && result ? JSON.parse(result) : null;
+  }
+
+  /**
+   * Sets tab `tabId`'s page zoom to `percent` (25 to 500), for its whole site, as Chrome's
+   * zoom menu does. Resolves with the level it got. zoom-in, zoom-out and zoom-reset are
+   * tabCommand()s.
+   */
+  setTabZoom(tabId, percent) {
+    return this.tabCommand(tabId, "zoom-set", { percent });
   }
 
   /** Answers the tab's pending dialog: OK (`accept`) or Cancel, with `text` for a prompt. */
