@@ -338,6 +338,10 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   (`shell.forgetThreadPermissions(thread)`). S · T3 repo. Also
   `grantPermissions` from the frontend server's relay (`serverTabs.ts`),
   which still acknowledges it without asking.
+- [ ] **Camera request in tabs still not right** (low priority). S–M · In
+  the 2026-10-24 retest, after the container got the cameras, everything
+  else passed but the camera's dialog still wasn't right. Ask the user what
+  they saw (the shell's prompt, Chrome's own, or no picture), then fix.
 - [ ] **Hands-on checks for the tab features.** S · What the workers
   couldn't test, part of the DRM verification pass:
   - find: F3 and Shift+F3 on a real keyboard;
