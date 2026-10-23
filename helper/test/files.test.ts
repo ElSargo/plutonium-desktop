@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 
-import { FilesError, listDirectory, makeFolder, places, recentFiles } from "../src/files.ts";
+import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "../src/files.ts";
 
 describe("files", () => {
   const home = mkdtempSync(join(tmpdir(), "plutonium-files-"));
@@ -34,6 +34,17 @@ describe("files", () => {
     await assert.rejects(listDirectory("relative"), (error: FilesError) => error.status === 400);
     await assert.rejects(listDirectory(join(home, "missing")), (error: FilesError) => error.status === 404);
     await assert.rejects(listDirectory(join(home, "file9.txt")), (error: FilesError) => error.status === 400);
+  });
+
+  test("counts a folder upload's files, as Chrome does", async () => {
+    // file10, file9, .hidden, and the dangling link; not the link to b-folder's contents.
+    mkdirSync(join(home, "b-folder", "deep"), { recursive: true });
+    writeFileSync(join(home, "b-folder", "deep", "x"), "");
+    assert.deepEqual(await countFiles(join(home, "b-folder")), { dir: join(home, "b-folder"), files: 1, more: false });
+    const all = await countFiles(home);
+    assert.equal(all.files, 6); // file10, file9, .hidden, dangling, a-link (not followed), deep/x
+    assert.deepEqual(await countFiles(home, 2), { dir: home, files: 2, more: true });
+    await assert.rejects(countFiles(join(home, "missing")), (error: FilesError) => error.status === 404);
   });
 
   test("makes folders", async () => {

@@ -287,8 +287,8 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `filechooserrequest`. The library's picker over the helper's file listing.
   Container sessions mount the user's home at the same path until Ash runs
   outside the container (decided). Done 2026-10-23 (`TAB_FEATURES.md`,
-  "File pickers"). Not done: pickers from hidden tabs are cancelled by
-  content, as in Chrome (lifting that is a content change; the user's call).
+  "File pickers"). Pickers from hidden tabs are cancelled by content, as in
+  Chrome; the user is fine with that (2026-10-24).
 - [x] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
   `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
   fails in tabs today), `permissionrequest`/`answerPermission`, devices in
@@ -341,7 +341,8 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 - [ ] **Hands-on checks for the tab features.** S · What the workers
   couldn't test, part of the DRM verification pass:
   - find: F3 and Shift+F3 on a real keyboard;
-  - permissions: a real camera and microphone; the prompt's look in niri and T3;
+  - permissions: a real camera and microphone (the container had no
+    `/dev/video*` until 2026-10-24); the prompt's look in niri and T3;
   - downloads: open and show on a file in `~/Downloads` in a container
     session (needs the recreated container); keep and discard on a file
     Chrome flags as dangerous;

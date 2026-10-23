@@ -39,7 +39,7 @@ import {
   ShellRelay,
   type NativeWindowEntry,
 } from "./relay.ts";
-import { FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
+import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
 import { comboKeys, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
@@ -1375,6 +1375,9 @@ export class Daemon {
         if (method === "GET" && path === "/v1/files") {
           const hidden = url.searchParams.get("hidden") === "1";
           return sendJson(response, 200, await listDirectory(url.searchParams.get("dir") ?? "", { hidden }));
+        }
+        if (method === "GET" && path === "/v1/files/count") {
+          return sendJson(response, 200, await countFiles(url.searchParams.get("dir") ?? ""));
         }
         if (method === "GET" && path === "/v1/files/places") {
           return sendJson(response, 200, { places: places(), recent: recentFiles() });

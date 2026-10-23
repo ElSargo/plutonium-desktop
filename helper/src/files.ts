@@ -99,6 +99,36 @@ export async function listDirectory(dir: string, { hidden = false } = {}): Promi
   };
 }
 
+/**
+ * How many files a folder upload of `dir` sends, as Chrome counts them: every file under
+ * it, dot files too, without following links to folders. Stops at `limit` (`more` is then
+ * true).
+ */
+export async function countFiles(dir: string, limit = 100_000): Promise<{ dir: string; files: number; more: boolean }> {
+  dir = checkedPath(dir);
+  let files = 0;
+  const pending = [dir];
+  try {
+    await readdir(dir);
+  } catch (error) {
+    throw failure(error, dir);
+  }
+  while (pending.length && files < limit) {
+    const folder = pending.pop()!;
+    let entries;
+    try {
+      entries = await readdir(folder, { withFileTypes: true });
+    } catch {
+      continue; // Unreadable: Chrome skips it too.
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) pending.push(join(folder, entry.name));
+      else files++;
+    }
+  }
+  return { dir, files: Math.min(files, limit), more: files >= limit && pending.length > 0 };
+}
+
 /** Makes folder `path` (its parent must exist). */
 export async function makeFolder(path: string): Promise<{ path: string }> {
   path = checkedPath(path);

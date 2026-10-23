@@ -895,10 +895,13 @@ export class PlutoniumShell extends EventTarget {
   /**
    * Shows the library's download list (the newest first), with each one's actions; with
    * `thread`, only that thread's. `anchor` (an element) places it below that, else at the
-   * top right.
+   * top right. Called again from the same anchor while it's open, it closes it (a
+   * Downloads button toggles the list).
    */
   showDownloads({ thread, anchor } = {}) {
-    this._downloadList?.close();
+    const open = this._downloadList;
+    open?.close();
+    if (open && anchor && open.anchor === anchor) return;
     this._downloadList = new DownloadList(this, thread, anchor);
   }
 
@@ -1862,6 +1865,8 @@ class FileChooser {
     this.anchor = -1;
     this.hidden = false;
     this.confirmReplace = "";
+    /** The folder a folder upload asked "Upload N files?" about; accepting again sends it. */
+    this.confirmUpload = "";
   }
 
   get isFolder() {
@@ -2223,7 +2228,14 @@ class FileChooser {
   accept(entries = this.selectedEntries()) {
     if (this.isFolder) {
       const chosen = entries.find((entry) => entry.kind === "dir")?.path ?? this.dir;
-      if (chosen) this.finish([chosen]);
+      if (!chosen) return;
+      // A folder upload sends every file in it, so ask first, as Chrome does. The browser
+      // then skips its own dialog for this folder.
+      if (this.request.detail?.upload && this.confirmUpload !== chosen) {
+        this.confirmFolderUpload(chosen);
+        return;
+      }
+      this.finish([chosen]);
       return;
     }
     if (this.isSave) {
@@ -2262,11 +2274,32 @@ class FileChooser {
     this.finish(files.map((entry) => entry.path));
   }
 
+  async confirmFolderUpload(folder) {
+    let count;
+    try {
+      count = await helperFiles(`/v1/files/count?dir=${encodeURIComponent(folder)}`);
+    } catch (error) {
+      this.setMessage(error.message);
+      return;
+    }
+    if (this.closed) return;
+    const files = `${count.files.toLocaleString()}${count.more ? "+" : ""} file${count.files === 1 ? "" : "s"}`;
+    const site = this.request.detail?.origin || "this site";
+    const name = folder.replace(/\/+$/, "").split("/").pop() || folder;
+    this.setMessage(`Upload ${files} from “${name}” to ${site}? Only do this if you trust the site.`);
+    this.confirmUpload = folder;
+    this.acceptButton.textContent = `Upload ${files}`;
+  }
+
   setMessage(text) {
     if (!this.message) return;
     this.message.textContent = text;
     this.message.hidden = !text;
     if (!text && this.isSave) this.acceptButton.textContent = "Save";
+    if (!text && this.confirmUpload) {
+      this.confirmUpload = "";
+      this.acceptButton.textContent = "Upload";
+    }
   }
 
   async finish(paths) {
@@ -2293,7 +2326,10 @@ class FileChooser {
 const DOWNLOAD_STYLE = `@layer plutonium {
   .plutonium-download-toast { pointer-events: auto; cursor: pointer; }
   .plutonium-downloads { width: min(420px, calc(100vw - 16px)); max-height: min(480px, calc(100vh - 16px)); overflow-y: auto; }
-  .plutonium-downloads h2 { margin: 0 0 8px; font-size: 1em; }
+  .plutonium-downloads h2 { margin: 0 0 8px; font-size: 1em; display: flex; align-items: center; }
+  .plutonium-downloads h2 span { flex: 1; }
+  .plutonium-downloads h2 button { all: unset; cursor: default; padding: 0 6px; border-radius: 4px; opacity: .7; }
+  .plutonium-downloads h2 button:hover { opacity: 1; background: color-mix(in srgb, currentColor 10%, transparent); }
   .plutonium-downloads .empty { opacity: .65; }
   .plutonium-download { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
   .plutonium-download .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2324,20 +2360,51 @@ function formatBytes(bytes) {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
 }
 
-// The library's download list: a popover (light dismiss) with each download's progress and
-// actions. It redraws as downloads change, until it closes.
+// The library's download list: a popover with each download's progress and actions. It
+// redraws as downloads change, until it closes: ×, Escape, a click outside it (not on its
+// anchor, which toggles it), or the keyboard going to an app or a tab. Not the popover's
+// own light dismiss: a click into a tab or an app never reaches this page.
 class DownloadList {
   constructor(shell, thread, anchor) {
     ensureDialogStyle();
     ensureDownloadStyle();
     this.shell = shell;
     this.thread = thread;
+    this.anchor = anchor ?? null;
     this.element = document.createElement("div");
     this.element.className = "plutonium-dialog plutonium-downloads";
-    this.element.popover = "auto";
-    this.element.addEventListener("toggle", (event) => {
-      if (event.newState === "closed") this.close();
-    });
+    this.element.popover = "manual";
+    this._listeners = [];
+    const on = (target, type, handler, options) => {
+      target.addEventListener(type, handler, options);
+      this._listeners.push(() => target.removeEventListener(type, handler, options));
+    };
+    on(window, "pointerdown", (event) => {
+      if (!this.element.contains(event.target) && !this.anchor?.contains(event.target)) this.close();
+    }, true);
+    on(window, "keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.close();
+    }, true);
+    on(window, "blur", () => this.close());
+    // What has the keyboard now; the list closes when another app or tab gets it, not on
+    // every change to the one that has it (a download's own tab, say).
+    const focused = new Set();
+    for (const [kind, map] of [["tab", shell.tabs], ["window", shell.windows]]) {
+      for (const [id, entry] of map) if (entry?.focused) focused.add(`${kind}:${id}`);
+    }
+    const onFocused = (kind) => (event) => {
+      const entry = event.entry;
+      if (!entry) return;
+      const key = `${kind}:${entry.id}`;
+      if (!entry.focused) focused.delete(key);
+      else if (!focused.has(key)) this.close();
+    };
+    if (shell.broker) {
+      on(shell.broker, "windowchanged", onFocused("window"));
+      on(shell.broker, "tabchanged", onFocused("tab"));
+    }
     document.body.append(this.element);
     this.render();
     this.element.showPopover();
@@ -2352,6 +2419,9 @@ class DownloadList {
   }
 
   close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const remove of this._listeners) remove();
     if (this.shell._downloadList === this) this.shell._downloadList = null;
     this.element.remove();
   }
@@ -2359,7 +2429,13 @@ class DownloadList {
   render() {
     const downloads = this.shell.downloads({ thread: this.thread }).reverse();
     const title = document.createElement("h2");
-    title.textContent = "Downloads";
+    const label = document.createElement("span");
+    label.textContent = "Downloads";
+    const close = document.createElement("button");
+    close.textContent = "×";
+    close.title = "Close (Escape)";
+    close.addEventListener("click", () => this.close());
+    title.append(label, close);
     const rows = downloads.map((download) => this._row(download));
     if (rows.length === 0) {
       const empty = document.createElement("div");

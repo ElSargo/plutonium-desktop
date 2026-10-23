@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 24 Oct 2026 09:57:58 +1300
+Subject: [PATCH 44/44] Plutonium: a folder upload the shell confirmed skips
+ Chrome's dialog
+
+The library's picker asks "Upload N files to <site>?" itself. When a
+shell or an agent answers a tab's folder upload, FileSelectHelper skips
+its tab-modal confirmation for that folder. Behind the Files app's
+picker (the fallback) it still shows.
+---
+ chrome/browser/file_select_helper.cc     | 10 ++++++++
+ chrome/browser/plutonium_file_chooser.cc | 29 ++++++++++++++++++++++++
+ chrome/browser/plutonium_file_chooser.h  | 19 ++++++++++++++++
+ 3 files changed, 58 insertions(+)
+
+diff --git a/chrome/browser/file_select_helper.cc b/chrome/browser/file_select_helper.cc
+index 6e869e1e24..c5d6dc4095 100644
+--- a/chrome/browser/file_select_helper.cc
++++ b/chrome/browser/file_select_helper.cc
+@@ -54,6 +54,7 @@
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chrome/browser/ash/file_manager/fileapi_util.h"
+ #include "chrome/browser/ash/fusebox/fusebox_server.h"
++#include "chrome/browser/plutonium_file_chooser.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ #include "content/public/browser/site_instance.h"
+@@ -338,6 +339,15 @@ void FileSelectHelper::OnListDone(int error) {
+         FileChooserFileInfo::NewNativeFile(native_file->Clone()));
+   }
+ 
++#if BUILDFLAG(IS_CHROMEOS)
++  // PLUTONIUM (EXO-TAB-FEATURES): the shell's picker (or an agent) that
++  // chose this folder already confirmed the upload.
++  if (dialog_type_ == ui::SelectFileDialog::SELECT_UPLOAD_FOLDER &&
++      PlutoniumTakeFolderUploadConfirmed(web_contents_, base_dir_)) {
++    PerformContentAnalysisIfNeeded(std::move(chooser_files));
++    return;
++  }
++#endif
+   if (dialog_type_ == ui::SelectFileDialog::SELECT_UPLOAD_FOLDER) {
+     auto model = CreateConfirmationDialog(
+         entry->display_name_, std::move(chooser_files),
+diff --git a/chrome/browser/plutonium_file_chooser.cc b/chrome/browser/plutonium_file_chooser.cc
+index 5311930678..50cc5192ab 100644
+--- a/chrome/browser/plutonium_file_chooser.cc
++++ b/chrome/browser/plutonium_file_chooser.cc
+@@ -15,6 +15,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/memory/weak_ptr.h"
++#include "base/supports_user_data.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/sequenced_task_runner.h"
+@@ -36,6 +37,14 @@ namespace {
+ using From = PlutoniumTabRequests::From;
+ using FallbackReason = PlutoniumTabRequests::FallbackReason;
+ 
++// The folder a shell or an agent answered a tab's folder upload with.
++const char kConfirmedFolderKey[] = "plutonium-confirmed-upload-folder";
++
++struct ConfirmedFolder : public base::SupportsUserData::Data {
++  explicit ConfirmedFolder(base::FilePath folder) : path(std::move(folder)) {}
++  base::FilePath path;
++};
++
+ const char* ModeName(ui::SelectFileDialog::Type type) {
+   switch (type) {
+     case ui::SelectFileDialog::SELECT_OPEN_MULTI_FILE:
+@@ -239,6 +248,11 @@ class PlutoniumSelectFileDialog : public ui::SelectFileDialog {
+     } else if (!answer.is_none()) {
+       return false;
+     }
++    if (type_ == SELECT_UPLOAD_FOLDER && files.size() == 1 && contents_) {
++      contents_->SetUserData(
++          kConfirmedFolderKey,
++          std::make_unique<ConfirmedFolder>(files.front().path()));
++    }
+     VLOG(1) << "EXO-TAB-FEATURES fileChooser answered by the "
+             << (from == From::kShell ? "shell" : "agent") << ": "
+             << files.size() << " path(s)";
+@@ -341,3 +355,18 @@ ui::SelectFileDialog* PlutoniumSelectFileDialogFactory::Create(
+   }
+   return nullptr;
+ }
++
++bool PlutoniumTakeFolderUploadConfirmed(content::WebContents* contents,
++                                        const base::FilePath& folder) {
++  if (!contents) {
++    return false;
++  }
++  auto* confirmed =
++      static_cast<ConfirmedFolder*>(contents->GetUserData(kConfirmedFolderKey));
++  if (!confirmed) {
++    return false;
++  }
++  const bool same = confirmed->path == folder.StripTrailingSeparators();
++  contents->RemoveUserData(kConfirmedFolderKey);
++  return same;
++}
+diff --git a/chrome/browser/plutonium_file_chooser.h b/chrome/browser/plutonium_file_chooser.h
+index 3f14a881e1..fdf98400b5 100644
+--- a/chrome/browser/plutonium_file_chooser.h
++++ b/chrome/browser/plutonium_file_chooser.h
+@@ -9,6 +9,14 @@
+ 
+ #include "ui/shell_dialogs/select_file_dialog_factory.h"
+ 
++namespace base {
++class FilePath;
++}
++
++namespace content {
++class WebContents;
++}
++
+ // EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "File pickers"): every
+ // file picker a registry tab opens (<input type=file> through
+ // FileSelectHelper, the File System Access pickers, a download's Save As)
+@@ -24,6 +32,11 @@
+ // container, or a container that mounts the user's home at the same path).
+ // An agent may answer too (it can read the files anyway).
+ //
++// A folder upload (detail.upload) answered here was confirmed by whoever
++// answered: the library's picker asks "Upload N files to <site>?" itself.
++// So Chrome's own confirmation (FileSelectHelper's tab-modal dialog) is
++// skipped for it; behind the Files app's picker it still shows.
++//
+ // If no shell takes the request, or the one that took it goes away, the
+ // picker the factory this wraps makes (the Files app's) opens instead.
+ // Pickers for anything but a registry tab go straight to it.
+@@ -46,4 +59,10 @@ class PlutoniumSelectFileDialogFactory : public ui::SelectFileDialogFactory {
+   std::unique_ptr<ui::SelectFileDialogFactory> fallback_;
+ };
+ 
++// True once, for `folder`, if a shell or an agent answered `contents`'s
++// folder upload with it (above). FileSelectHelper then skips its
++// confirmation.
++bool PlutoniumTakeFolderUploadConfirmed(content::WebContents* contents,
++                                        const base::FilePath& folder);
++
+ #endif  // CHROME_BROWSER_PLUTONIUM_FILE_CHOOSER_H_

@@ -102,9 +102,16 @@ container_cmd() {
         mounts+=(-v "$dir:$dir")
       done
       [[ -d /tmp/.X11-unix ]] && mounts+=(-v /tmp/.X11-unix:/tmp/.X11-unix)
+      # Cameras, for tabs' getUserMedia (V4L2, as on desktop Linux). Those
+      # plugged in now: one plugged in later needs the container made again.
+      local dev
+      for dev in /dev/video* /dev/media*; do
+        [[ -c $dev ]] && mounts+=(--device "$dev")
+      done
       # - host pid namespace: Exo reports real client pids, which the helper
       #   maps to threads;
-      # - /dev/dri, /dev/input and udev: Ash on DRM with evdev input;
+      # - /dev/dri, /dev/input and udev: Ash on DRM with evdev input (and the
+      #   cameras above);
       # - the system D-Bus: Ash gets the display and input devices from logind;
       # - keep-id: files in the checkout stay yours. size=65534 leaves uid
       #   65534 unmapped, which host root shows up as: libudev trusts senders
@@ -1215,6 +1222,11 @@ doctor() {
     check "container $CONTAINER running" "container_running" "plutonium container create / start"
     check "the system D-Bus in the container (DRM)" "in_container test -S /run/dbus/system_bus_socket" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
     check "uid 65534 unmapped in the container (DRM input hotplug)" "in_container cat /proc/self/uid_map | awk '\$1 <= 65534 && 65534 < \$1 + \$3 { m = 1 } END { exit m }'" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
+    local camera
+    for camera in /dev/video*; do
+      [[ -c $camera ]] || continue
+      check "camera $camera in the container (tabs' getUserMedia)" "in_container test -c $camera" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
+    done
     echo "Chromium:"
     if [[ -n ${PREBUILT:-} ]]; then
       check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"

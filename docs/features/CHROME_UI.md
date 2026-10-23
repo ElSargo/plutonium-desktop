@@ -90,6 +90,7 @@ Not tested: the status bubble, a real game with the keys, a shell page's own tex
 ## Not done
 
 - Tooltips (`title`) are still Ash's.
+- Ash's clipboard nudges ("Press Search+V…", after copying and pasting) don't show in shell mode (patch "no clipboard history nudges in shell mode"). Search+V itself still opens Ash's clipboard history.
 - A shell page's own `alert()` and permission prompts are still Chrome's dialogs and bubbles.
 - T3 Code doesn't draw the menus itself yet.
 - On an X11 session, a context menu can wait for the next input event: Chrome reads the clipboard's formats before building the menu, and with `--use-system-clipboard` that read waits on X (seen once in four right-clicks). Not seen to matter on DRM, where there's no X clipboard (not tested).
