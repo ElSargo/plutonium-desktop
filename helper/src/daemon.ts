@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect, type Socket } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { A11yError, Accessibility } from "./a11y.ts";
@@ -524,7 +524,7 @@ export class Daemon {
     });
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);
-      child.once("error", (error) => reject(new HttpError(400, `Could not start ${argv[0]}: ${error.message}`)));
+      child.once("error", (error) => reject(new HttpError(400, this.launchError(argv[0]!, cwd, error, agent !== undefined))));
     });
     child.unref();
     rememberLaunch(child, threadId, show);
@@ -548,6 +548,24 @@ export class Daemon {
       if (child.exitCode !== null && child.exitCode !== 0) break;
     }
     return { pid, windows: [] };
+  }
+
+  /** Why `program` didn't start; for an agent, a program not found points to find_apps and what it would find. */
+  private launchError(program: string, cwd: string | undefined, error: NodeJS.ErrnoException, agent: boolean): string {
+    if (error.code !== "ENOENT" || !agent) return `Could not start ${program}: ${error.message}`;
+    // spawn says ENOENT for a missing working directory too.
+    if (cwd && !existsSync(cwd)) return `Could not start ${program}: the working directory ${cwd} doesn't exist.`;
+    const where = program.includes("/") ? "doesn't exist" : "isn't on PATH";
+    let found: readonly { name: string; argv: readonly string[] }[] = [];
+    try {
+      found = this.apps.find(basename(program)).apps.slice(0, 3);
+    } catch {
+      // Only a hint.
+    }
+    return (
+      `${program} ${where}; find_apps lists installed apps and how to launch them.` +
+      found.map((app) => `\n${app.name}: ${JSON.stringify(app.argv)}`).join("")
+    );
   }
 
   /**
@@ -1368,6 +1386,9 @@ export class Daemon {
     }
     if (method === "GET" && path === "/v1/apps") {
       return sendJson(response, 200, this.apps.list());
+    }
+    if (method === "GET" && path === "/v1/apps/find") {
+      return sendJson(response, 200, this.apps.find(url.searchParams.get("filter") || undefined));
     }
     // EXO-TAB-FEATURES: the host's files, for the file picker.
     if (path === "/v1/files" || path.startsWith("/v1/files/")) {

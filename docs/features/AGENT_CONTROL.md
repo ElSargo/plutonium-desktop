@@ -36,6 +36,14 @@ The compositor tells every app not to draw a title bar or borders (EXO-DECOR): a
 
 LibreOffice drew its own title bar and close buttons before; it draws none now.
 
+## Finding apps
+
+`launch_app` runs its `argv` with no shell: `argv[0]` is looked up on the helper's PATH. Installed apps often aren't on PATH under their names: a Flatpak is reachable as `flatpak run …` or its app id (`org.libreoffice.LibreOffice`), and a Nix build may not be on PATH at all. So `find_apps {filter?}` lists the apps the user's launcher shows (`helper/src/apps.ts`, the desktop entries in `$XDG_DATA_HOME` and `$XDG_DATA_DIRS`, Flatpak exports included), through `GET /v1/apps/find`. Each has its name, generic name, desktop id, an `argv` ready for `launch_app` (the entry's Exec with its `%f`/`%U` field codes and Flatpak's empty `@@u … @@` dropped; a `Terminal=true` app wrapped in a terminal), its `cwd` if it asks for one, its `source` (`flatpak`, `nix profile`, `system` or `user`) and its desktop file, so two installs of one app can be told apart.
+
+The filter is a case-insensitive regular expression (or plain text, if it isn't one) matched against the name, generic name, keywords, desktop id and Exec: `spreadsheet` finds Calc, `office` LibreOffice. With a filter, `onPath` lists the matching executables on PATH too, separately (they're mostly command-line programs), at most 20, with `moreOnPath` counting the rest.
+
+When an agent's `launch_app` can't find `argv[0]`, the error says it isn't on PATH, points to `find_apps`, and lists up to three apps `find_apps` gives for its name, with their argv.
+
 ## Sizes agents hold
 
 `launch_app` takes a `width` and `height`. The helper holds an agent's windows at that size, or, without one, at the size the app picks (followed while no page shows the window, since apps settle their size after mapping). That includes windows that come after `launch_app` stops waiting (a slow first start, a main window after a splash), for 60 s more. `resize_window` holds the new size, also while a page shows the window. A window the user starts (`focus: true` without a size) isn't held.
@@ -61,7 +69,7 @@ All tools act on the calling thread's windows and tabs only.
 
 | Windows | Tabs |
 |---|---|
-| `list_windows`, `launch_app`, `snapshot_window`, `focus_window`, `close_window` | `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab` |
+| `list_windows`, `find_apps {filter?}`, `launch_app`, `snapshot_window`, `focus_window`, `close_window` | `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab` |
 | `click_window {x, y, button?, count?}`, `hover_window`, `drag_window {from, to}`, `scroll_window {x, y, dy?, dx?}` | `read_tab`: title, URL and the page as an accessibility tree with `[ref=eN]` |
 | `type_window {text}`, `press_window {keys}` (`"ctrl+s"`, `["ctrl+a", "Backspace"]`) | `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab`, `select_tab`, `scroll_tab`, `evaluate_tab`, `wait_for_tab` (by `ref` or `selector`) |
 | `resize_window {width, height}`: the size it's held at | |

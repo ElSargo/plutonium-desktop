@@ -9,7 +9,7 @@
 // as an absolute path.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, extname, isAbsolute, join, relative } from "node:path";
 
 import { findExecutable } from "./threads.ts";
 
@@ -32,7 +32,38 @@ interface Entry extends DesktopApp {
   readonly icon: string;
   readonly path: string;
   readonly workingDirectory: string;
+  /** The data directory it's in ($XDG_DATA_HOME or one of $XDG_DATA_DIRS). */
+  readonly dataDir: string;
 }
+
+/** Where an installed app comes from. */
+export type AppSource = "flatpak" | "nix profile" | "system" | "user";
+
+/** An app that matched find_apps' filter, and how launch_app starts it. */
+export interface FoundApp {
+  readonly name: string;
+  readonly genericName?: string;
+  /** Desktop file id. */
+  readonly id: string;
+  /** For launch_app (argv[0] is looked up on PATH). */
+  readonly argv: readonly string[];
+  /** The working directory the app asks for, if any. */
+  readonly cwd?: string;
+  readonly source: AppSource;
+  /** Its desktop file, which tells two installs of one app apart. */
+  readonly desktopFile: string;
+}
+
+export interface FoundApps {
+  readonly apps: readonly FoundApp[];
+  /** Programs on PATH whose names match (only with a filter); mostly command-line ones. */
+  readonly onPath?: readonly string[];
+  /** How many more programs on PATH matched than are listed. */
+  readonly moreOnPath?: number;
+}
+
+// At most this many programs on PATH are listed.
+const MAX_PATH_PROGRAMS = 20;
 
 // The list is re-read at most this often.
 const MAX_AGE_MS = 30_000;
@@ -156,7 +187,12 @@ export function splitExec(exec: string): string[] {
 }
 
 /** The command line for `entry`, with no files or URLs to open. */
-function expandExec(entry: Entry): string[] {
+export function expandExec(entry: {
+  readonly exec: string;
+  readonly name: string;
+  readonly icon: string;
+  readonly path: string;
+}): string[] {
   const argv: string[] = [];
   for (const arg of splitExec(entry.exec)) {
     // Field codes that stand alone expand to nothing (%f %u …), or to
@@ -330,6 +366,7 @@ export class DesktopApps {
           icon: unescapeValue(values.get("Icon") ?? ""),
           path,
           workingDirectory: unescapeValue(values.get("Path") ?? ""),
+          dataDir: dir,
         });
       }
     }
@@ -367,6 +404,46 @@ export class DesktopApps {
     return { data: readFileSync(path), contentType: ICON_CONTENT_TYPES[extname(path)] ?? "application/octet-stream" };
   }
 
+  /**
+   * The apps whose name, generic name, keywords, desktop id or Exec match
+   * `filter` (a case-insensitive regular expression, else plain text), by
+   * name, with how to start each; with a filter, also the matching programs
+   * on PATH.
+   */
+  find(filter?: string): FoundApps {
+    this.load();
+    const pattern = filterPattern(filter);
+    const apps: FoundApp[] = [];
+    for (const entry of this.entries.values()) {
+      if (pattern && !appMatches(entry, pattern)) continue;
+      let command;
+      try {
+        command = this.command(entry.id);
+      } catch {
+        // No terminal to run it in: listed as it is.
+        command = { argv: expandExec(entry), cwd: entry.workingDirectory || undefined };
+      }
+      if (!command || command.argv.length === 0) continue;
+      apps.push({
+        name: entry.name,
+        ...(entry.genericName ? { genericName: entry.genericName } : {}),
+        id: entry.id,
+        argv: command.argv,
+        ...(command.cwd ? { cwd: command.cwd } : {}),
+        source: appSource(entry),
+        desktopFile: entry.path,
+      });
+    }
+    apps.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    if (!pattern) return { apps };
+    const programs = pathPrograms(pattern);
+    return {
+      apps,
+      onPath: programs.slice(0, MAX_PATH_PROGRAMS),
+      ...(programs.length > MAX_PATH_PROGRAMS ? { moreOnPath: programs.length - MAX_PATH_PROGRAMS } : {}),
+    };
+  }
+
   /** How to start app `id`: argv and working directory. */
   command(id: string): { argv: string[]; cwd: string | undefined; name: string } | undefined {
     this.load();
@@ -380,6 +457,70 @@ export class DesktopApps {
       name: entry.name,
     };
   }
+}
+
+/** `filter` as a case-insensitive pattern: a regular expression, else the text itself. */
+export function filterPattern(filter: string | undefined): RegExp | undefined {
+  if (!filter) return undefined;
+  try {
+    return new RegExp(filter, "i");
+  } catch {
+    return new RegExp(filter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  }
+}
+
+/** Whether `pattern` matches the app's name, generic name, keywords, desktop id or Exec. */
+export function appMatches(
+  app: {
+    readonly name: string;
+    readonly genericName: string;
+    readonly keywords: readonly string[];
+    readonly id: string;
+    readonly exec: string;
+  },
+  pattern: RegExp,
+): boolean {
+  return [app.name, app.genericName, ...app.keywords, app.id, app.exec].some((value) => pattern.test(value));
+}
+
+function appSource(entry: Entry): AppSource {
+  const home = homedir();
+  const dir = entry.dataDir;
+  if (/(^|\/)flatpak\/exports\//.test(`${dir}/`) || /^flatpak\s+run\s/.test(entry.exec)) return "flatpak";
+  const nixProfiles = [
+    join(home, ".nix-profile"),
+    join(home, ".local", "state", "nix", "profile"),
+    `/etc/profiles/per-user/`,
+    "/nix/profile",
+    "/nix/var/nix/profiles/",
+  ];
+  if (nixProfiles.some((profile) => dir.startsWith(profile))) return "nix profile";
+  if (dir === (process.env.XDG_DATA_HOME || join(home, ".local", "share")) || dir.startsWith(`${home}/`)) return "user";
+  return "system";
+}
+
+/** The executables on PATH whose names match `pattern`, by name (the first of each name). */
+export function pathPrograms(pattern: RegExp): string[] {
+  const found = new Set<string>();
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    let names: string[];
+    try {
+      names = readdirSync(directory);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (found.has(name) || !pattern.test(name)) continue;
+      try {
+        const stat = statSync(join(directory, name));
+        if (stat.isFile() && (stat.mode & 0o111) !== 0) found.add(name);
+      } catch {
+        // Dangling link.
+      }
+    }
+  }
+  return [...found].sort((a, b) => a.localeCompare(b));
 }
 
 function* walk(dir: string): Generator<string> {

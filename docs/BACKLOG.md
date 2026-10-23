@@ -145,6 +145,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   desktop has no Apps panel content. The helper has window screencasts
   (`Plutonium.startWindowScreencast`) and input; T3 would stream them
   (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Agents had to guess program names for `launch_app`.** `find_apps`
+  lists the launcher's apps with an argv for `launch_app`, where each is
+  installed from, and matching programs on PATH; a program not on PATH
+  points to it (`features/AGENT_CONTROL.md`, "Finding apps").
+- [ ] **`find_apps` shows one install per desktop id.** S · Two desktop
+  files with the same id (a user override, or the same app in a Nix
+  profile and the system) show as the first, as in the launcher. Apps
+  installed with no desktop file (a Nix build off PATH) don't show at all.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the

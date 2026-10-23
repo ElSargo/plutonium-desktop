@@ -315,6 +315,19 @@ describe("helper end to end", () => {
     assert.ok(!shell.windows.some((window) => window.id === 4));
   });
 
+  test("an agent finds apps, and a program not on PATH points it to find_apps", async () => {
+    const found = await agent.call("find_apps", { filter: "^sh$" });
+    assert.equal(found.isError, undefined, found.content[0]?.text);
+    const { apps, onPath } = JSON.parse(found.content[0]!.text!);
+    assert.ok(Array.isArray(apps));
+    assert.deepEqual(onPath, ["sh"]);
+    const missing = await agent.call("launch_app", { argv: ["plutonium-no-such-app", "--calc"], wait_seconds: 0 });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0]!.text!, /^plutonium-no-such-app isn't on PATH; find_apps lists installed apps/);
+    const badCwd = await agent.call("launch_app", { argv: ["sh"], cwd: join(dir, "nowhere"), wait_seconds: 0 });
+    assert.match(badCwd.content[0]!.text!, /working directory .*nowhere doesn't exist/);
+  });
+
   test("launched apps get the thread environment, Electron's on Wayland", async () => {
     const out = join(dir, "env.txt");
     const { pid } = await helperJson<{ pid: number }>(socketPath, "POST", "/v1/launch", {
