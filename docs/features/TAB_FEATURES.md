@@ -271,7 +271,7 @@ So a tab and a native app show one picker with the same places and the same rece
 
 **Helpers.**
 - The download manager is the profile's (`ChromeDownloadManagerDelegate`), so tabs' downloads already happened. Its UI on ChromeOS is `DownloadNotificationManager` (Ash notifications), which shell mode doesn't show. Nothing is attached to the tab: `Tab::AttachHelpers()` only makes `PlutoniumDownloads` observe the tab's profile.
-- `CanDownload()` (`DownloadRequestLimiter`) is the permission prompts' business. Until they're built, a page's second automatic download is blocked, as Chrome blocks it while its "download several files" question is unanswered. A new navigation resets it.
+- `CanDownload()` (`DownloadRequestLimiter`) is the permission prompts' business: a page's second automatic download asks the `automatic-downloads` permission.
 
 **As built.**
 - `PlutoniumDownloads` (`chrome/browser/plutonium_downloads.{h,cc}`) is a `DownloadManager::Observer` and `DownloadItem::Observer`. At `OnDownloadCreated` it reads the tab from `DownloadItemUtils::GetWebContents()` and keeps the tab's id and its thread (the origin tag; for an untagged link a shell opened, its first tag). Both stay after the tab closes. It lists only this session's downloads: Chrome's history (earlier runs) isn't listed, nor transient ones.
@@ -321,7 +321,7 @@ The doc's earlier plan had the helper move each file into place after it complet
 | The library's list and toast | ✓ |
 | A dangerous file's keep and discard | not tried (no file type here that Chrome's local checks flag on a user gesture) |
 
-**Container paths.** In a container session the container's `$HOME` is `$DATA_DIR/container-home`, so `~/Downloads` is `$DATA_DIR/container-home/Downloads` on the host, and the helper on the host can't open those files ("isn't there (from here)"). The open and show test used a folder under `$DATA_DIR`, which has the same path on both sides. The same-path home mount (Decision 5, the file pickers' work) fixes this. So does `HOST=1`.
+**Container paths.** When this was tested, the container's `$HOME` was `$DATA_DIR/container-home`, so `~/Downloads` wasn't the host's and the helper couldn't open those files. The open and show test used a folder under `$DATA_DIR`. The same-path home mount (Decision 5, built with file pickers) fixes this in a recreated container; open and show on `~/Downloads` there is still to check by hand. `HOST=1` never had the problem.
 
 **Size.** M, as estimated.
 
@@ -377,13 +377,13 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `shell.printToPdf(tabId, {paper, landscape, scale, margins, background, headerFooter, pageRanges}) → Blob`. `paper` is one of `PAPER_SIZES` (letter, legal, tabloid, a3, a4, a5); `margins` is default, none or minimum; `scale` 1 is 100%.
 - `shell.printers(title?) → {available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}`.
 - `shell.printPdf(pdf, {printer, copies, duplex: "none" | "long-edge" | "short-edge", color, title}) → {job}`.
-- `shell.savePdf(pdf, {path, title}) → {path}`. It doesn't overwrite: the name gets " (1)", " (2)" and so on. The design's "Save as PDF through the file picker" waits for the picker. Until then the dialog has a path field, by default `~/Downloads/<title>.pdf`.
+- `shell.savePdf(pdf, {path, title}) → {path}`. It doesn't overwrite: the name gets " (1)", " (2)" and so on. The design's "Save as PDF through the file picker" isn't wired yet (a `BACKLOG.md` item; the picker exists now). The dialog has a path field, by default `~/Downloads/<title>.pdf`.
 - **The dialog**, over the tab's element: the PDF as its preview (Chrome's PDF viewer, in an iframe, re-made 300 ms after a setting changes), the page count, and the destination (the host's printers, or Save as PDF). Then pages (all or ranges), copies, layout, paper (Letter for en-US and similar locales, else A4), margins, scale, two-sided, colour, headers and footers, and background graphics. Escape or Cancel answers `"cancel"`. After printing or saving it answers `"done"`, and shows a toast ("Sent to …", "Saved …").
 
 **Helper** (`src/printing.ts`). It uses the host's CUPS client tools, `lpstat -l -p -d` and `lp`, so the user's default printer and server (`~/.cups/client.conf`, `$CUPS_SERVER`) apply.
 - `GET /v1/printers?title=`.
 - `POST /v1/print?printer&copies&duplex&color&title`, with a PDF body.
-- `POST /v1/print/save?path&title&overwrite`, with a PDF body. The helper writes the file, because Ash in the container doesn't see the user's home.
+- `POST /v1/print/save?path&title&overwrite`, with a PDF body. The helper writes the file, so it works in containers made before the same-path home mount.
 
 **Agents.**
 - `list_printers`.

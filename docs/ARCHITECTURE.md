@@ -85,7 +85,7 @@
 | Chrome's own UI in the shell: DevTools, context menus, browser and Ash keys | [features/CHROME_UI.md](features/CHROME_UI.md) |
 | Screenshots, screen sharing, recording (design) | [features/CAPTURE.md](features/CAPTURE.md) |
 | Password manager adapter (design) | [features/PASSWORDS.md](features/PASSWORDS.md) |
-| Find, zoom, printing, permissions, downloads, file pickers for tabs (design) | [features/TAB_FEATURES.md](features/TAB_FEATURES.md) |
+| Find, zoom, printing, permissions, downloads, file pickers for tabs | [features/TAB_FEATURES.md](features/TAB_FEATURES.md) |
 | Several monitors (design) | [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |

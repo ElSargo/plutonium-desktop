@@ -1,11 +1,11 @@
 # Backlog
 
 Everything known to be not done yet. Roadmap phases refer to
-[OPTION2_PLAN.md](OPTION2_PLAN.md); Phase 1 details are in
-[PHASE1_REPORT.md](PHASE1_REPORT.md).
+[OPTION2_PLAN.md](history/OPTION2_PLAN.md); Phase 1 details are in
+[PHASE1_REPORT.md](history/PHASE1_REPORT.md).
 
-Phase 2 details are in [PHASE2_REPORT.md](PHASE2_REPORT.md), Phase 3 in
-[PHASE3_REPORT.md](PHASE3_REPORT.md).
+Phase 2 details are in [PHASE2_REPORT.md](history/PHASE2_REPORT.md), Phase 3 in
+[PHASE3_REPORT.md](history/PHASE3_REPORT.md).
 
 Note: the phase numbers on the section headings below are the original ones.
 The roadmap was reordered since: DRM is now Phase 4, threads and agents
@@ -185,7 +185,8 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   stepped from the main thread each frame; a busy shell page makes it stutter.
   A cc opacity animation on its effect node (as LinkHighlightImpl does) would
   not.
-- [ ] **T3 browser features still missing.** M · Zoom, color scheme, mute,
+- [ ] **T3 browser features still missing.** M · The panel's zoom buttons
+  (zoom itself works, `TAB_FEATURES.md`), color scheme, mute,
   element picker, screenshots to file, recording, PiP windows, DevTools
   window, console/network entries in snapshots. T3 doesn't draw Chrome's
   context menus itself yet (`CHROME_UI.md`): it gets Chrome's, filtered.
@@ -285,7 +286,9 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   tabs' pickers (inputs, File System Access, Save As) to the shell as
   `filechooserrequest`. The library's picker over the helper's file listing.
   Container sessions mount the user's home at the same path until Ash runs
-  outside the container (decided). Uploads are cancelled in every tab today.
+  outside the container (decided). Done 2026-10-23 (`TAB_FEATURES.md`,
+  "File pickers"). Not done: pickers from hidden tabs are cancelled by
+  content, as in Chrome (lifting that is a content change; the user's call).
 - [x] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
   `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
   fails in tabs today), `permissionrequest`/`answerPermission`, devices in
@@ -304,9 +307,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   Done 2026-10-23 (same section): grants live in local state, and
   `request_permission` and `grantPermissions` ask the user. Grants go when
   a shell calls `forgetThreadPermissions(thread)` (broker
-  `permissionCommand`). Still to do: T3 Code calling it when it archives or
-  deletes a thread, and `grantPermissions` from the frontend server's tabs
-  (`serverTabs.ts`).
+  `permissionCommand`). T3's side is its own item below.
 - [x] **Downloads in threads.** M · A download observer that records the
   tab's thread, `download*` events to every shell, `downloadCommand`, open
   and show through the helper in the thread's environment, closing the empty
@@ -325,6 +326,27 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 - [x] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
   `printToPdf` for the shell's preview, host printers and jobs through the
   helper (CUPS); agents may print. Chrome's preview over the shell's window as the fallback.
+  Done 2026-10-24 (`TAB_FEATURES.md`, "Printing", "As built").
+- [ ] **Printing: Save as PDF through the file picker.** S · The print
+  dialog still has a path field (`~/Downloads/<title>.pdf`); the picker now
+  exists (`fileChooser`, `save` mode).
+- [ ] **T3 Code's agents get the tab tools.** S–M · T3 gives its agents only
+  the helper's window tools (`WINDOW_TOOLS`), so `print_tab`, `choose_files`,
+  `answer_permission`, `request_permission`, `list_downloads` and
+  `find_in_tab` don't reach them (T3 repo).
+- [ ] **T3 Code forgets a thread's permission grants on archive and delete**
+  (`shell.forgetThreadPermissions(thread)`). S · T3 repo. Also
+  `grantPermissions` from the frontend server's relay (`serverTabs.ts`),
+  which still acknowledges it without asking.
+- [ ] **Hands-on checks for the tab features.** S · What the workers
+  couldn't test, part of the DRM verification pass:
+  - find: F3 and Shift+F3 on a real keyboard;
+  - permissions: a real camera and microphone; the prompt's look in niri and T3;
+  - downloads: open and show on a file in `~/Downloads` in a container
+    session (needs the recreated container); keep and discard on a file
+    Chrome flags as dangerous;
+  - printing: a real printer through CUPS (two-sided, black and white);
+    printing on DRM.
 - [ ] **FileChooser and Print portals on the same picker and dialog.** M ·
   Part of "Our own portal backend for the rest": the same
   `filechooserrequest` and print dialog for native apps.
@@ -461,6 +483,12 @@ shells that want to span monitors run on each and sync themselves.
   apply to pinned upstream commits; the container, CLI and install guide are here.
 - [x] **A release build and a prebuilt image** (`ghcr.io/elsargo/plutonium`),
   so users needn't build Chromium.
+- [ ] **Rebuild and push the prebuilt image.** S (hours of build) · It lacks
+  patches 0031–0042 (broker follow-ups, DRM on a background VT, all the tab
+  features): `plutonium chromium build --release`, `image build`,
+  `image push`. Then recreate `plutonium-prebuilt` (`podman rm -f`, then
+  `plutonium container create`) so the live desktop gets the same-path home
+  mount that file pickers and downloads rely on.
 - [ ] **Build and push the image from CI** (GitHub Actions can't build Chromium
   in its time limits on free runners; a self-hosted runner could). M
 - [ ] **Start from a display manager** (a Wayland session entry that runs

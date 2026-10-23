@@ -169,12 +169,7 @@ Verified on Xvfb with the host's T3 data:
 | A popup from a click (`window.open(url, "auth", "width=500,…")`, cross-origin), with two T3 shell pages | ✅ one new panel tab, `window.opener` set; its `postMessage` reaches the opener; its `window.close()` closes the panel tab and brings the opener back |
 
 ## Limits and next steps
-- **No `Browser` behind a tab.** Some things go through a `Browser` window and are missing:
-  - keyboard shortcuts beyond DevTools, back, forward, reload and zoom (`CHROME_UI.md`, `TAB_FEATURES.md`), find-in-page, printing;
-  - permission prompts (they'd be denied), downloads UI, file pickers (`<input type=file>` untested);
-  - autofill and password manager tab helpers;
-  - fullscreen requests (they'd be refused).
-  Decided (2026-10-20): attach the needed tab helpers to the registry's `WebContents`, exposed to shells (`TAB_FEATURES.md`).
+- **No `Browser` behind a tab.** What Chrome reaches through a `Browser` window comes from tab helpers attached to the registry's `WebContents`, exposed to shells (`TAB_FEATURES.md`): find in page, zoom, permission prompts, downloads, file pickers and printing are built. Still missing: autofill (not wanted for now) and Chrome's password manager (`PASSWORDS.md` instead).
 - **Tabs don't survive a browser restart** (no session restore).
 - **DevTools:** tabs are CDP targets of type `page` (`other` before `CHROME_UI.md`). A tab's DevTools is a tab of its own (`openedBy: "devtools"`), listed as `other`.
 - A key typed within milliseconds of switching tabs can be lost while the tab re-attaches. No key was lost with a 50 ms gap.
