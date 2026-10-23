@@ -17,18 +17,54 @@ import { listenWebSocket, type WebSocketConnection, type WebSocketEndpoint } fro
 
 const BROWSER_CONTEXT_ID = "plutonium-thread";
 const IDLE_MS = 10 * 60_000;
+/** How long a refused Browser.grantPermissions is refused again without asking. */
+const REFUSAL_MEMORY_MS = 5_000;
 const debug = process.env.PLUTONIUM_DEBUG_PAGES ? (...args: unknown[]) => console.log("pages:", ...args) : () => {};
 
 /** Browser-level commands that only need acknowledging: the browser is the user's. */
 const ACKNOWLEDGED = new Set([
   "Target.setDiscoverTargets",
   "Target.activateTarget",
-  "Browser.grantPermissions",
+  // Revoking is the user's: Playwright resets a context's permissions as it
+  // closes, and the thread's grants outlive the connection.
   "Browser.resetPermissions",
   "Browser.cancelDownload",
   "Browser.setDownloadBehavior",
   "Browser.close",
 ]);
+
+/**
+ * DevTools' permission names (Browser.PermissionType, what Playwright sends)
+ * as the browser's prompt names them; null for those a page never asks for.
+ */
+const CDP_PERMISSIONS: Readonly<Record<string, string | null>> = {
+  videoCapture: "camera",
+  audioCapture: "microphone",
+  videoCapturePanTiltZoom: "camera-pan-tilt-zoom",
+  geolocation: "geolocation",
+  notifications: "notifications",
+  clipboardReadWrite: "clipboard-read",
+  clipboardSanitizedWrite: null,
+  midiSysex: "midi-sysex",
+  midi: null,
+  sensors: "sensors",
+  storageAccess: "storage-access",
+  topLevelStorageAccess: "top-level-storage-access",
+  localFonts: "local-fonts",
+  windowManagement: "window-management",
+  idleDetection: "idle-detection",
+  keyboardLock: "keyboard-lock",
+  pointerLock: "pointer-lock",
+  protectedMediaIdentifier: "protected-media-identifier",
+  backgroundSync: null,
+  backgroundFetch: null,
+  durableStorage: null,
+  paymentHandler: null,
+  wakeLockScreen: null,
+  wakeLockSystem: null,
+  displayCapture: null,
+  nfc: null,
+};
 
 interface CdpCommand {
   readonly id: number;
@@ -62,6 +98,8 @@ class ThreadRelay {
   private autoAttach = false;
   private readonly pages = new Map<string, RelayPage>();
   private readonly browserSessions = new Set<string>();
+  /** The last grantPermissions the user refused, and when (see grantPermissions()). */
+  private refused: { key: string; at: number } | null = null;
   private sequence = 0;
 
   constructor(threadId: string, cdp: BrowserCdp, desktop: Desktop) {
@@ -206,6 +244,8 @@ class ThreadRelay {
         this.announce(tab);
         return { targetId: tab.targetId };
       }
+      case "Browser.grantPermissions":
+        return this.grantPermissions(params);
       case "Target.closeTarget": {
         const tab = this.threadTabs().find((entry) => entry.targetId === params.targetId);
         if (!tab) return { success: false };
@@ -215,6 +255,50 @@ class ThreadRelay {
       default:
         throw new Error(`Not supported for a Plutonium thread: ${command.method}`);
     }
+  }
+
+  /**
+   * EXO-TAB-PERMISSIONS: an agent can't grant a permission itself; this asks
+   * the user, with the prompt a page's request gets, marked as the agent's,
+   * over one of the thread's tabs (one showing `origin` if there is one).
+   * It resolves once the user allows them, in the thread or everywhere.
+   */
+  private async grantPermissions(params: Record<string, unknown>): Promise<unknown> {
+    const names = Array.isArray(params.permissions) ? params.permissions : [];
+    const permissions: string[] = [];
+    for (const name of names) {
+      const mapped = typeof name === "string" ? CDP_PERMISSIONS[name] : undefined;
+      if (mapped === undefined) throw new Error(`Unknown permission: ${String(name)}`);
+      if (mapped && !permissions.includes(mapped)) permissions.push(mapped);
+    }
+    if (!permissions.length) return {};
+    const origin = typeof params.origin === "string" && params.origin ? params.origin : undefined;
+    const originOf = (url: string) => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return "";
+      }
+    };
+    // Playwright sends the command again when it fails (with another name
+    // for one permission): the user isn't asked twice.
+    const key = JSON.stringify([permissions, origin ?? ""]);
+    if (this.refused?.key === key && Date.now() - this.refused.at < REFUSAL_MEMORY_MS) {
+      throw new Error(`The user didn't allow ${permissions.join(", ")}.`);
+    }
+    const tabs = this.threadTabs();
+    const tab = (origin && tabs.find((entry) => originOf(entry.url) === originOf(origin))) || tabs.at(-1);
+    if (!tab) throw new Error("Open a page in this thread first: the user is asked over one of its tabs.");
+    const result = (await this.desktop.tabCommand(tab.id, "permission-request", {
+      permissions,
+      ...(origin ? { origin } : {}),
+      by: "agent",
+    })) as { answer?: string } | null;
+    if (result?.answer !== "allow") {
+      this.refused = { key, at: Date.now() };
+      throw new Error(`The user didn't allow ${permissions.join(", ")} (${result?.answer ?? "no answer"}).`);
+    }
+    return {};
   }
 
   private async pageCommand(command: CdpCommand, page: RelayPage): Promise<unknown> {

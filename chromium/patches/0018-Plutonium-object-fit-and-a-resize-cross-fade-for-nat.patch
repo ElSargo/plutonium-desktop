@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 11:08:49 +1300
-Subject: [PATCH 18/37] Plutonium: object-fit and a resize cross-fade for
+Subject: [PATCH 18/39] Plutonium: object-fit and a resize cross-fade for
  <native-window>
 
 Where a window's frame and its element's content box differ in size (the

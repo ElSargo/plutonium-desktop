@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: the common plumbing ("As built: adding a feature"), zoom and find in page are built; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing ("As built: adding a feature"), zoom, find in page, and permission prompts with per-thread grants are built; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -144,6 +144,51 @@ Chrome stores decisions per origin, in the profile, and every thread's tabs shar
 - To grant, an agent asks the user (`request_permission`), through the same prompt, marked as the agent's. Playwright's `Browser.grantPermissions` (`helper/src/serverTabs.ts`, `pages.ts`) becomes such a request and resolves once the user answers.
 
 **Size.** M–L. M in Chromium (the helpers, the prompt, the media delegate methods, indicators), M for thread grants (the store and the `PermissionContextBase` check), S for the library's prompt.
+
+### As built (2026-10-23)
+
+Patches "tabs' permission prompts ask the shell" and "per-thread permission grants" (`plutonium_permissions.{h,cc}`), with the library and helper parts here. It differs from the design above in these ways:
+
+- **The request** is the plumbing's tab request of kind `permission`, not a `permissionrequest` event. Its detail is `{origin, embeddingOrigin, thread, types, scopes, by?, files?, directory?}`. `scopes` lists only the scopes that hold for these types, in this order: `thread` (not for automatic downloads or file access), `once` (only if Chrome has one-time grants for every type), `everywhere`. `by: "agent"` marks an agent's request. The answer is `{answer: "allow" | "deny" | "dismiss", scope}`, or just the answer (`shell.answerPermission(requestId, answer, {scope})`). Without a scope, allow takes `thread` (else the first scope) and deny takes `once`.
+  - allow once: `AcceptThisTime`. Chrome's one-time grant covers the origin in every tab, across threads, while the origin stays open. That is Chrome's own behaviour.
+  - allow or deny everywhere: `Accept` or `Deny`, Chrome's content setting.
+  - deny once, or dismiss: `Dismiss`, which stores nothing.
+  - allow or deny for the thread: the decision is stored for the thread, and the request is dismissed. `PermissionContextBase` reports the thread's decision as the request's result, and the embargo counts are reset, so it doesn't count as a dismissal.
+- **Agents.** An agent can deny or dismiss, never allow (`on_answer` refuses it).
+- **File access.** The File System Access write prompt (`ShowFileSystemAccessPermissionDialog`) is the same kind of request, with types `file-write` or `file-read`, `files` (the names), and only the `once` scope. The restore-permissions bubble isn't hooked.
+- **Hidden tabs.** `PermissionRequestManager::set_prompt_while_hidden()` (a small patch to the component) lets a tab no `<embed>` shows ask anyway. Its shell and agents then see `pending.permission`. The library takes the request and draws it when the shell shows the tab.
+- **Fallback.** The request is dismissed and recorded as `blocked: [{origin, permission}]` on the tab. This also happens if the shell that took it goes away. The record clears when the page navigates to another document, or when a later request for the same origin and permission is answered.
+- **`inUse: {camera, microphone, screen}`** is in the tab's state while it captures (`MediaStreamCaptureIndicator`). Geolocation in use isn't reported.
+- **Thread grants** live in local state (`plutonium.thread_permissions`: thread → origin → permission → allow or block), so they are browser-wide, not per profile. `PermissionContextBase::SetThreadDecisionCallback()` is checked where Chrome's own setting says "ask", for frames of that thread's tabs only, so `navigator.permissions.query()` agrees. Requests the thread covers resolve without a prompt. Unlike the design, the prompt doesn't auto-answer with `AcceptThisTime`: that grant would reach other threads.
+- **Asking again, and agents granting.** The tab command `permission-request {permissions, origin?, by?}` asks the user through the same prompt, with the scopes `thread` and `everywhere`. It resolves once answered with `{answer, scope}`, or with `{answer: "allow", scope: "thread", asked: false}` if the thread already allows them all.
+  - The library calls it as `shell.requestPermission(tabId, permissions, {origin})`.
+  - The helper adds `by: "agent"` to an agent's call. Agents call it with the `request_permission` tool.
+  - Playwright's `Browser.grantPermissions` in the thread relay (`pages.ts`) maps DevTools' names (`videoCapture` → `camera`, ...) and asks over a tab of the thread (one at that origin if there is one). It returns once the user allows, and fails if they don't. Playwright sends the command again after a failure, so a refusal is remembered for 5 s rather than asked twice.
+  - `Browser.resetPermissions` is acknowledged and does nothing: the thread's grants are the user's.
+  - The frontend server's relay (`serverTabs.ts`) still acknowledges `grantPermissions` without asking.
+- **Listing and revoking.**
+  - The tab commands `permissions` (the tab's thread's decisions, plus Chrome's own for its origin) and `permission-revoke {scope, origin?, permission?}` replace `shell.permissions()` and `revokePermission()`. In the library they are `shell.tabPermissions(tabId)` and `shell.revokePermission(tabId, {...})`.
+  - For any thread: the broker's new `permissionCommand("list" | "revoke", argsJson)` (`WindowBroker.RunPermissionCommand`), as `shell.threadPermissions({thread?, origin?})` and `shell.revokeThreadPermissions(thread, {origin?, permission?})`.
+  - **Archive and delete:** the browser doesn't know about threads' lifecycles, so a shell calls `shell.forgetThreadPermissions(thread)` when it archives or deletes a thread. T3 Code doesn't yet (it lives in its own repo). The plain shell can't delete threads.
+- **The library's prompt** is a popover at the top left of the tab's element. It has the site, the list of permissions, the scopes (this thread first, with the thread's label), Block, Allow and × (not now; Escape too). It ignores clicks for its first 400 ms. `connect({permissions: false})` leaves requests to the fallback, and a function draws them itself.
+
+**Verified** on an X11 session in slot 23, with a test page on 127.0.0.1 and `--use-fake-device-for-media-stream`.
+
+| Check | Result |
+|---|---|
+| Notifications: the library's prompt over the tab, Allow (default "In this thread") | `granted`. `permissions.query` says `granted`. Chrome's own setting unchanged (`tabPermissions` lists only the thread's) |
+| The same origin in another thread | `prompt` |
+| Camera and microphone, Allow "Only this time" | stream with 2 tracks. `inUse {camera, microphone}` |
+| An agent's `allow` (POST `.../request`) | refused. The request stays open |
+| `answer_permission` dismiss | the page gets `default`. The shell's prompt closes |
+| `answer_permission` deny everywhere, on a tab the shell doesn't show | `pending.permission` while waiting (taken, not drawn). Then `denied` |
+| `connect({permissions: false})` | dismissed. `blocked: [{origin, permission: "notifications"}]`, cleared by a reload |
+| `request_permission` for notifications and geolocation | prompt marked `by: "agent"`. After allow (thread), the tool returns `{answer: "allow", scope: "thread"}` and both are `granted` in that thread only |
+| Playwright `context.grantPermissions(["camera", "microphone"])` | asks once. Refused: throws "The user didn't allow camera, microphone". Allowed (thread): resolves, and `getUserMedia` works without a prompt |
+| Deny for the thread | `getUserMedia` fails with `NotAllowedError` with no prompt |
+| Restarting Ash | thread grants still hold |
+| `forgetThreadPermissions(thread)` | `{revoked: 4}`. That thread goes back to `prompt`, the other keeps its grant |
+| `revokePermission(tabId, {permission})` | `{revoked: 1}`. Back to `prompt` |
 
 ## File pickers
 

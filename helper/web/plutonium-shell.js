@@ -1559,3 +1559,295 @@ export function connect(options = {}) {
   }
   return shell;
 }
+
+// Permission prompts (TAB_FEATURES.md, "Permission prompts"): a tab's page
+// asks for the camera, notifications, ... as a tab request of kind
+// "permission", with `detail` {origin, embeddingOrigin, thread, types,
+// scopes, by?, files?}. The library draws a prompt over the tab's element
+// (once this page shows the tab). connect({ permissions: false }) leaves
+// the requests to the browser, which dismisses them and records them in the
+// tab's `blocked`; a function draws them itself. Answer with
+// shell.answerPermission(requestId, "allow" | "deny" | "dismiss", { scope }).
+
+/** What a page may ask for, as the prompt says it ("<site> wants to …"). */
+export const PERMISSION_LABELS = {
+  camera: "Use your camera",
+  microphone: "Use your microphone",
+  "camera-pan-tilt-zoom": "Move your camera",
+  geolocation: "Know your location",
+  "geolocation-with-options": "Know your location",
+  notifications: "Show notifications",
+  "clipboard-read": "See text and images you copy",
+  "midi-sysex": "Control and reprogram your MIDI devices",
+  "storage-access": "Use cookies and site data",
+  "top-level-storage-access": "Use cookies and site data",
+  "automatic-downloads": "Download several files",
+  "window-management": "Manage windows on all your displays",
+  "local-fonts": "Use the fonts on your computer",
+  "idle-detection": "Know when you're actively using this device",
+  "keyboard-lock": "Take over your keyboard",
+  "pointer-lock": "Take over your mouse pointer",
+  "file-write": "Edit files",
+  "file-read": "View files",
+  sensors: "Use your motion sensors",
+  "protected-media-identifier": "Play protected content",
+  "local-network": "Reach devices on your local network",
+  "loopback-network": "Reach apps on this device",
+};
+
+/** How long a fresh prompt ignores clicks, so a click meant for the page doesn't answer it. */
+const PERMISSION_INPUT_DELAY_MS = 400;
+
+const PERMISSION_STYLE = `@layer plutonium {
+  .plutonium-permission { width: 340px; }
+  .plutonium-permission .title { font-weight: 600; margin: 0 22px 6px 0; overflow-wrap: anywhere; }
+  .plutonium-permission .by { font-size: .9em; opacity: .75; margin-bottom: 6px; }
+  .plutonium-permission ul { margin: 0 0 8px; padding-left: 1.2em; }
+  .plutonium-permission .files { font-size: .9em; opacity: .8; margin: -4px 0 8px; overflow-wrap: anywhere; }
+  .plutonium-permission fieldset { border: 0; margin: 0 0 10px; padding: 0; display: grid; gap: 3px; }
+  .plutonium-permission .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .plutonium-permission .close {
+    position: absolute; top: 6px; right: 6px; border: 0; background: none; color: inherit;
+    font: inherit; font-size: 16px; line-height: 1; opacity: .6; cursor: default;
+  }
+}`;
+
+let permissionStyle = null;
+
+/** The prompt's label for permission `type`. */
+export function permissionLabel(type) {
+  return PERMISSION_LABELS[type] ?? `Use ${type.replaceAll("-", " ")}`;
+}
+
+function originHost(origin) {
+  try {
+    return new URL(origin).host || origin;
+  } catch {
+    return origin || "This page";
+  }
+}
+
+/**
+ * Answers permission request `requestId` (a TabRequest of kind "permission" this page took).
+ * `scope` is one of the request's `detail.scopes` ("once", "thread", "everywhere"); left out,
+ * the browser stores the least it can.
+ */
+PlutoniumShell.prototype.answerPermission = function (requestId, answer, { scope } = {}) {
+  return this.answerTabRequest(requestId, scope ? { answer, scope } : { answer });
+};
+
+/**
+ * Asks the user (the same prompt a page's request gets) to allow `permissions` (names as in
+ * PERMISSION_LABELS) for `origin` (default: the tab's page) in tab `tabId`'s thread or
+ * everywhere: the way to ask again after a request was `blocked`. Resolves once answered, with
+ * {answer, scope?}, or {answer: "dismiss", fallback} if no shell took it, or {answer: "allow",
+ * scope: "thread", asked: false} if the thread allows them already.
+ */
+PlutoniumShell.prototype.requestPermission = function (tabId, permissions, { origin } = {}) {
+  return this.tabCommand(tabId, "permission-request", origin ? { permissions, origin } : { permissions });
+};
+
+/**
+ * The decisions that apply in tab `tabId`: {thread, decisions: [{origin, permission,
+ * decision: "allow" | "block", scope: "thread" | "everywhere"}]}, its thread's and the
+ * browser's own for its page's origin.
+ */
+PlutoniumShell.prototype.tabPermissions = function (tabId) {
+  return this.tabCommand(tabId, "permissions");
+};
+
+/**
+ * Takes back a decision for tab `tabId`: its thread's (scope "thread", the default; `origin`
+ * and `permission` left out match any), or the browser's own (scope "everywhere", for
+ * `permission` and `origin`, default the page's). Resolves with {revoked}.
+ */
+PlutoniumShell.prototype.revokePermission = function (tabId, { origin, permission, scope = "thread" } = {}) {
+  return this.tabCommand(tabId, "permission-revoke", { scope, ...(origin ? { origin } : {}), ...(permission ? { permission } : {}) });
+};
+
+async function permissionCommand(shell, command, args) {
+  if (typeof shell.broker?.permissionCommand !== "function") return null;
+  return JSON.parse(await shell.broker.permissionCommand(command, JSON.stringify(args)));
+}
+
+/**
+ * Every thread's decisions (`thread`, `origin` filter them): [{thread, origin, permission,
+ * decision, scope: "thread"}]. Null if this browser has no thread grants.
+ */
+PlutoniumShell.prototype.threadPermissions = function ({ thread, origin } = {}) {
+  return permissionCommand(this, "list", { ...(thread ? { thread } : {}), ...(origin ? { origin } : {}) });
+};
+
+/**
+ * Takes back thread `thread`'s decisions for `origin` and `permission` (left out: all of them).
+ * A shell calls forgetThreadPermissions(thread) when it archives or deletes a thread (a settled
+ * thread keeps them). Resolves with {revoked}.
+ */
+PlutoniumShell.prototype.revokeThreadPermissions = function (thread, { origin, permission } = {}) {
+  return permissionCommand(this, "revoke", { thread, ...(origin ? { origin } : {}), ...(permission ? { permission } : {}) });
+};
+
+PlutoniumShell.prototype.forgetThreadPermissions = function (thread) {
+  return this.revokeThreadPermissions(thread);
+};
+
+// The library's prompt: a popover at the top left of the tab's element, as
+// Chrome's bubble sits under its address bar. It waits while this page
+// doesn't show the tab, and goes away if the request ends some other way.
+class PermissionPrompt {
+  constructor(shell, request) {
+    if (!permissionStyle) {
+      ensureDialogStyle();
+      permissionStyle = document.createElement("style");
+      permissionStyle.textContent = PERMISSION_STYLE;
+      document.head.append(permissionStyle);
+    }
+    this.shell = shell;
+    this.request = request;
+    this.element = null;
+    this.shownAt = 0;
+    this.place = () => this._place();
+    shell.addEventListener("change", this.place);
+    window.addEventListener("resize", this.place);
+    request.signal.addEventListener("abort", () => this.close());
+    this._place();
+  }
+
+  _build() {
+    const { detail } = this.request;
+    const scopes = detail.scopes ?? [];
+    const element = document.createElement("div");
+    element.className = "plutonium-dialog plutonium-permission";
+    element.popover = "manual";
+    element.setAttribute("role", "alertdialog");
+
+    const title = document.createElement("div");
+    title.className = "title";
+    const host = originHost(detail.origin);
+    const embedder = detail.embeddingOrigin && detail.embeddingOrigin !== detail.origin
+      ? ` (on ${originHost(detail.embeddingOrigin)})` : "";
+    title.textContent = `${host}${embedder} wants to`;
+    element.append(title);
+    if (detail.by === "agent") {
+      const by = document.createElement("div");
+      by.className = "by";
+      by.textContent = "Asked by this thread's agent";
+      element.append(by);
+    }
+    const list = document.createElement("ul");
+    for (const type of detail.types ?? []) {
+      const item = document.createElement("li");
+      item.textContent = permissionLabel(type);
+      list.append(item);
+    }
+    element.append(list);
+    if (detail.files?.length) {
+      const files = document.createElement("div");
+      files.className = "files";
+      files.textContent = detail.files.join(", ");
+      element.append(files);
+    }
+
+    // The scopes, "this thread" first when there is one (TAB_FEATURES.md, Decisions 1).
+    this.scope = scopes.includes("thread") ? "thread" : scopes[0];
+    if (scopes.length > 1) {
+      const fieldset = document.createElement("fieldset");
+      const name = `plutonium-permission-${this.request.requestId}`;
+      const thread = this.shell.groups.get(detail.thread)?.label;
+      const labels = {
+        once: "Only this time",
+        thread: thread ? `In this thread (${thread})` : "In this thread",
+        everywhere: "Everywhere",
+      };
+      for (const scope of ["thread", "once", "everywhere"].filter((scope) => scopes.includes(scope))) {
+        const label = document.createElement("label");
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = name;
+        radio.value = scope;
+        radio.checked = scope === this.scope;
+        radio.addEventListener("change", () => (this.scope = scope));
+        label.append(radio, ` ${labels[scope] ?? scope}`);
+        fieldset.append(label);
+      }
+      element.append(fieldset);
+    }
+
+    const buttons = document.createElement("div");
+    buttons.className = "buttons";
+    const button = (text, onClick, className = "") => {
+      const node = document.createElement("button");
+      node.type = "button";
+      node.textContent = text;
+      if (className) node.className = className;
+      node.addEventListener("click", (event) => {
+        if (performance.now() - this.shownAt < PERMISSION_INPUT_DELAY_MS) return;
+        event.stopPropagation();
+        onClick();
+      });
+      return node;
+    };
+    buttons.append(
+      button("Block", () => this.answer("deny")),
+      button("Allow", () => this.answer("allow"), "default"),
+    );
+    element.append(buttons);
+    const close = button("×", () => this.answer("dismiss"), "close");
+    close.title = "Not now";
+    close.setAttribute("aria-label", "Not now");
+    element.append(close);
+    element.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.answer("dismiss");
+      }
+    });
+    document.body.append(element);
+    return element;
+  }
+
+  // Shows it over the tab's element, or hides it while this page doesn't show the tab.
+  _place() {
+    if (this.closed) return;
+    const target = this.shell.shownTabElement(this.request.tabId);
+    if (!target) {
+      if (this.element?.matches(":popover-open")) this.element.hidePopover();
+      return;
+    }
+    this.element ??= this._build();
+    if (!this.element.matches(":popover-open")) {
+      this.element.showPopover();
+      this.shownAt = performance.now();
+    }
+    const box = target.getBoundingClientRect();
+    const width = this.element.offsetWidth;
+    const height = this.element.offsetHeight;
+    const left = Math.max(8, Math.min(box.left + 12, innerWidth - width - 8));
+    const top = Math.max(8, Math.min(box.top + 12, innerHeight - height - 8));
+    this.element.style.left = `${left}px`;
+    this.element.style.top = `${top}px`;
+  }
+
+  async answer(answer) {
+    if (this.closed) return;
+    const scope = answer === "dismiss" ? undefined : this.scope;
+    const ok = await this.shell.answerPermission(this.request.requestId, answer, { scope });
+    if (ok || this.request.signal.aborted) this.close();
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.shell.removeEventListener("change", this.place);
+    window.removeEventListener("resize", this.place);
+    this.element?.remove();
+  }
+}
+
+registerTabRequestKind("permission", {
+  option: "permissions",
+  draw: (shell, request) => {
+    new PermissionPrompt(shell, request);
+    return true;
+  },
+});

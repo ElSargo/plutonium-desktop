@@ -286,16 +286,27 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `filechooserrequest`. The library's picker over the helper's file listing.
   Container sessions mount the user's home at the same path until Ash runs
   outside the container (decided). Uploads are cancelled in every tab today.
-- [ ] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
+- [x] **Permission prompts for tabs.** M–L · `PermissionRequestManager`,
   `PageSpecificContentSettings`, the media delegate methods (`getUserMedia`
   fails in tabs today), `permissionrequest`/`answerPermission`, devices in
   use on the tab. Fallback when no shell takes it: dismiss, and
   mark the request blocked on the tab.
-- [ ] **Per-thread permission grants.** M · Scopes once, this thread and
+  Done 2026-10-23 (TAB_FEATURES.md, "Permission prompts", "As built"): a
+  `permission` tab request with the library's prompt, `blocked` and
+  `inUse` on the tab, `answer_permission` for agents (deny or dismiss
+  only), and the File System Access write prompt. Not done: geolocation in
+  `inUse`, and the restore-permissions bubble.
+- [x] **Per-thread permission grants.** M · Scopes once, this thread and
   everywhere; a (thread, origin, permission) store and a check in
   `PermissionContextBase`. Default "this thread". Grants survive settling and go on archive or
   delete. Agents can deny; to grant they ask the user (also
   `Browser.grantPermissions`).
+  Done 2026-10-23 (same section): grants live in local state, and
+  `request_permission` and `grantPermissions` ask the user. Grants go when
+  a shell calls `forgetThreadPermissions(thread)` (broker
+  `permissionCommand`). Still to do: T3 Code calling it when it archives or
+  deletes a thread, and `grantPermissions` from the frontend server's tabs
+  (`serverTabs.ts`).
 - [ ] **Downloads in threads.** M · A download observer that records the
   tab's thread, `download*` events to every shell, `downloadCommand`, open
   and show through the helper in the thread's environment, closing the empty
