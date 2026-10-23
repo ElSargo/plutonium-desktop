@@ -1,0 +1,621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 09:09:52 +1300
+Subject: [PATCH 37/37] Plutonium: find in page for tabs
+
+EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Find in page"): the
+registry's tabs get Chrome's FindTabHelper (FindBarState::
+ConfigureWebContents()), and the shell draws the find bar in place of
+FindBarController's views bar, which needs a BrowserView.
+
+- "find" (Ctrl+F) asks the shell to open its bar: a "find" tab request
+  {initialText, fromSelection, matchCase}, the selection or else the last
+  search. It stays open while the bar is; the bar answers {action: "keep"
+  | "clear" | "activate"} as it closes, which stops the search. The shell
+  asked gets the keyboard focus from the tab, which its page can't take
+  itself, and gives it back if it doesn't take the request. With no shell
+  to take it, nothing happens. A bar whose shell goes away leaves no
+  highlights; a new page closes the bar, as in Chrome.
+- "find-text" {text, forward, matchCase, select, scroll} searches, or
+  moves to the next match of the same text, and resolves with the result
+  once every frame answered.
+- "find-next" and "find-previous" (F3, Ctrl+G, Shift+F3, Ctrl+Shift+G)
+  search again for the last text, or open the bar if there is none.
+- "stop-find" {action} stops the search and closes the bar.
+- Results are the tab's state "find": {text, matchCase, matches,
+  activeMatch, rect (the active match, in the tab's view), final}.
+---
+ chrome/browser/BUILD.gn          |   3 +
+ chrome/browser/plutonium_find.cc | 383 +++++++++++++++++++++++++++++++
+ chrome/browser/plutonium_find.h  | 131 +++++++++++
+ chrome/browser/plutonium_tabs.cc |   7 +-
+ 4 files changed, 523 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/plutonium_find.cc
+ create mode 100644 chrome/browser/plutonium_find.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 44a8ad9e9f..566124b3d6 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -779,6 +779,7 @@ if (is_chromeos) {
+       "exo_window_broker.h",
+       "plutonium_agent.h",
+       "plutonium_context_menu.h",
++      "plutonium_find.h",
+       "plutonium_groups.h",
+       "plutonium_keys.h",
+       "plutonium_shell.h",
+@@ -793,6 +794,7 @@ if (is_chromeos) {
+       "exo_window_broker.cc",
+       "plutonium_agent.cc",
+       "plutonium_context_menu.cc",
++      "plutonium_find.cc",
+       "plutonium_groups.cc",
+       "plutonium_keys.cc",
+       "plutonium_shell.cc",
+@@ -818,6 +820,7 @@ if (is_chromeos) {
+       "//components/renderer_context_menu",
+       "//components/prefs",
+       "//components/exo",
++      "//components/find_in_page",
+       "//components/surface_embed/browser",
+       "//components/url_formatter",
+       "//components/viz/common",
+diff --git a/chrome/browser/plutonium_find.cc b/chrome/browser/plutonium_find.cc
+new file mode 100644
+index 0000000000..9ae56f313c
+--- /dev/null
++++ b/chrome/browser/plutonium_find.cc
+@@ -0,0 +1,383 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_find.h"
++
++#include <algorithm>
++#include <optional>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/time/time.h"
++#include "chrome/browser/ui/find_bar/find_bar_state.h"
++#include "components/find_in_page/find_notification_details.h"
++#include "components/find_in_page/find_types.h"
++#include "content/public/browser/navigation_details.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/surface_embed_connector.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/gfx/geometry/rect.h"
++
++namespace {
++
++// Chrome's find bar takes the selection up to this long.
++constexpr size_t kMaxSelectionLength = 250;
++constexpr base::TimeDelta kWaitingTimeout = base::Seconds(5);
++
++std::optional<find_in_page::SelectionAction> ParseAction(
++    const std::string& action) {
++  if (action == "keep") {
++    return find_in_page::SelectionAction::kKeep;
++  }
++  if (action == "clear") {
++    return find_in_page::SelectionAction::kClear;
++  }
++  if (action == "activate") {
++    return find_in_page::SelectionAction::kActivate;
++  }
++  return std::nullopt;
++}
++
++}  // namespace
++
++PlutoniumFind::PlutoniumFind(content::WebContents* contents)
++    : content::WebContentsUserData<PlutoniumFind>(*contents),
++      content::WebContentsObserver(contents) {
++  if (find_in_page::FindTabHelper* find_helper = helper()) {
++    helper_observation_.Observe(find_helper);
++  }
++}
++
++PlutoniumFind::~PlutoniumFind() {
++  // A command always answers, even when its tab goes.
++  std::vector<PlutoniumTabs::CommandCallback> waiting = std::move(waiting_);
++  for (PlutoniumTabs::CommandCallback& done : waiting) {
++    std::move(done).Run(std::nullopt);
++  }
++}
++
++// static
++void PlutoniumFind::Attach(content::WebContents* contents) {
++  FindBarState::ConfigureWebContents(contents);
++  CreateForWebContents(contents);
++}
++
++// static
++void PlutoniumFind::AddCommands(PlutoniumTabs* tabs) {
++  tabs->AddCommand("find", base::BindRepeating(&PlutoniumFind::RunFind));
++  tabs->AddCommand("find-text",
++                   base::BindRepeating(&PlutoniumFind::RunFindText));
++  tabs->AddCommand("find-next",
++                   base::BindRepeating(&PlutoniumFind::RunFindNext, true));
++  tabs->AddCommand("find-previous",
++                   base::BindRepeating(&PlutoniumFind::RunFindNext, false));
++  tabs->AddCommand("stop-find",
++                   base::BindRepeating(&PlutoniumFind::RunStopFind));
++}
++
++// static
++void PlutoniumFind::RunFind(content::WebContents* contents,
++                            const base::DictValue& args,
++                            PlutoniumTabs::CommandCallback done) {
++  PlutoniumFind* find = FromWebContents(contents);
++  if (!find) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  const std::string* text = args.FindString("text");
++  find->OpenBar(text ? base::UTF8ToUTF16(*text) : std::u16string(),
++                std::move(done));
++}
++
++// static
++void PlutoniumFind::RunFindText(content::WebContents* contents,
++                                const base::DictValue& args,
++                                PlutoniumTabs::CommandCallback done) {
++  PlutoniumFind* find = FromWebContents(contents);
++  const std::string* text = args.FindString("text");
++  if (!find || !text) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  find->Find(base::UTF8ToUTF16(*text), args.FindBool("forward").value_or(true),
++             args.FindBool("matchCase").value_or(false),
++             args.FindBool("select").value_or(true),
++             args.FindBool("scroll").value_or(true), std::move(done));
++}
++
++// static
++void PlutoniumFind::RunFindNext(bool forward,
++                                content::WebContents* contents,
++                                const base::DictValue& args,
++                                PlutoniumTabs::CommandCallback done) {
++  PlutoniumFind* find = FromWebContents(contents);
++  find_in_page::FindTabHelper* find_helper = find ? find->helper() : nullptr;
++  if (!find_helper) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  std::u16string text = find_helper->find_text();
++  if (text.empty()) {
++    text = find_helper->GetInitialSearchText();
++  }
++  // Nothing searched for yet: open the bar, as Chrome's F3 does.
++  if (text.empty()) {
++    find->OpenBar(std::u16string(), std::move(done));
++    return;
++  }
++  find->Find(text, forward, find->match_case_, /*select=*/true,
++             /*scroll=*/true, std::move(done));
++}
++
++// static
++void PlutoniumFind::RunStopFind(content::WebContents* contents,
++                                const base::DictValue& args,
++                                PlutoniumTabs::CommandCallback done) {
++  PlutoniumFind* find = FromWebContents(contents);
++  const std::string* action = args.FindString("action");
++  const std::string stop_action = action ? *action : "clear";
++  if (!find || !ParseAction(stop_action)) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  find->Stop(stop_action, /*close_bar=*/true);
++  std::move(done).Run(base::Value());
++}
++
++void PlutoniumFind::OpenBar(const std::u16string& text,
++                            PlutoniumTabs::CommandCallback done) {
++  // Ctrl+F with the bar open: the bar opens again (and takes focus).
++  bar_.reset();
++  bool from_selection = false;
++  std::u16string initial = text;
++  if (initial.empty()) {
++    if (content::RenderWidgetHostView* view =
++            web_contents()->GetRenderWidgetHostView()) {
++      base::TrimWhitespace(view->GetSelectedText(), base::TRIM_ALL, &initial);
++      if (initial.size() > kMaxSelectionLength) {
++        initial.clear();
++      }
++      from_selection = !initial.empty();
++    }
++  }
++  if (initial.empty()) {
++    initial = InitialText();
++  }
++  const int generation = ++bar_generation_;
++  PlutoniumTabRequests::Params params;
++  params.kind = "find";
++  params.detail.Set("initialText", base::UTF16ToUTF8(initial));
++  params.detail.Set("fromSelection", from_selection);
++  params.detail.Set("matchCase", match_case_);
++  params.on_answer = base::BindRepeating(
++      [](base::WeakPtr<PlutoniumFind> find, PlutoniumTabRequests::From from,
++         const base::Value& answer) {
++        return find && find->OnAnswer(from, answer);
++      },
++      weak_factory_.GetWeakPtr());
++  params.on_fallback = base::BindOnce(&PlutoniumFind::OnFallback,
++                                      weak_factory_.GetWeakPtr(), generation);
++  // The tab is an inner WebContents of the shell page whose <embed> shows
++  // it; whether it, not the page, has the keyboard.
++  content::SurfaceEmbedConnector* embed =
++      web_contents()->GetSurfaceEmbedConnector();
++  const bool tab_focused =
++      embed && web_contents()->ContainsOrIsFocusedWebContents();
++  bar_ = PlutoniumTabRequests::Get()->Start(web_contents(), std::move(params));
++  if (!bar_) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  // The bar takes the keyboard, as Chrome's does. The shell's page can't
++  // take it from the tab itself (focusing its field only moves the focus
++  // within the page), so it moves from the tab to the page here, to the
++  // element the page focused; the tab gets it back if no shell takes the
++  // request.
++  bar_took_focus_ = tab_focused;
++  if (tab_focused) {
++    embed->ClearFocusOnInnerWebContents();
++  }
++  std::move(done).Run(
++      base::Value(base::DictValue().Set("requestId", bar_->id())));
++}
++
++void PlutoniumFind::Find(const std::u16string& text,
++                         bool forward,
++                         bool match_case,
++                         bool select,
++                         bool scroll,
++                         PlutoniumTabs::CommandCallback done) {
++  find_in_page::FindTabHelper* find_helper = helper();
++  if (!find_helper) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  // The same search again without selecting a match: the helper does
++  // nothing, and no result comes.
++  const bool no_reply = text.empty() || (!select &&
++                                         find_helper->find_text() == text &&
++                                         match_case_ == match_case);
++  match_case_ = match_case;
++  if (!no_reply) {
++    waiting_.push_back(std::move(done));
++    waiting_timeout_.Start(FROM_HERE, kWaitingTimeout,
++                           base::BindOnce(&PlutoniumFind::ResolveWaiting,
++                                          base::Unretained(this)));
++  }
++  find_helper->StartFinding(text, forward, match_case, select, scroll);
++  if (no_reply) {
++    std::move(done).Run(Result());
++  }
++}
++
++void PlutoniumFind::Stop(const std::string& action, bool close_bar) {
++  std::optional<find_in_page::SelectionAction> selection_action =
++      ParseAction(action);
++  if (find_in_page::FindTabHelper* find_helper = helper();
++      find_helper && selection_action) {
++    find_helper->StopFinding(*selection_action);
++  }
++  PlutoniumTabs::Get()->SetTabState(web_contents(), "find", base::Value());
++  ResolveWaiting();
++  if (close_bar) {
++    bar_.reset();
++  }
++}
++
++bool PlutoniumFind::OnAnswer(PlutoniumTabRequests::From from,
++                             const base::Value& answer) {
++  // {action}, or null: the bar closed (Escape keeps the match selected, as
++  // in Chrome).
++  std::string action = "keep";
++  if (answer.is_dict()) {
++    if (const std::string* given = answer.GetDict().FindString("action")) {
++      action = *given;
++    }
++  } else if (!answer.is_none()) {
++    return false;
++  }
++  if (!ParseAction(action)) {
++    return false;
++  }
++  VLOG(1) << "EXO-TAB-FEATURES find bar closed: " << action;
++  Stop(action, /*close_bar=*/true);
++  return true;
++}
++
++void PlutoniumFind::OnFallback(int generation,
++                               PlutoniumTabRequests::FallbackReason reason) {
++  // A bar opened since.
++  if (generation != bar_generation_) {
++    return;
++  }
++  bar_.reset();
++  if (reason == PlutoniumTabRequests::FallbackReason::kNotTaken &&
++      bar_took_focus_) {
++    if (content::SurfaceEmbedConnector* embed =
++            web_contents()->GetSurfaceEmbedConnector()) {
++      embed->FocusInnerWebContents();
++    }
++  }
++  bar_took_focus_ = false;
++  // There is no bar of Chrome's to fall back to. A bar that went away with
++  // its shell leaves no highlights behind.
++  if (reason == PlutoniumTabRequests::FallbackReason::kShellGone) {
++    Stop("clear", /*close_bar=*/false);
++  }
++}
++
++void PlutoniumFind::NavigationEntryCommitted(
++    const content::LoadCommittedDetails& load_details) {
++  if (!load_details.is_navigation_to_different_page()) {
++    return;
++  }
++  find_in_page::FindTabHelper* find_helper = helper();
++  // As Chrome's bar: a new page closes the bar.
++  if (bar_ || (find_helper && !find_helper->find_text().empty())) {
++    Stop("keep", /*close_bar=*/true);
++  }
++}
++
++void PlutoniumFind::OnFindResultAvailable(content::WebContents* contents) {
++  find_in_page::FindTabHelper* find_helper = helper();
++  if (!find_helper || find_helper->find_text().empty()) {
++    return;
++  }
++  PlutoniumTabs::Get()->SetTabState(web_contents(), "find", Result());
++  const find_in_page::FindNotificationDetails& result =
++      find_helper->find_result();
++  if (result.final_update() &&
++      result.request_id() >= find_helper->current_find_request_id()) {
++    ResolveWaiting();
++  }
++}
++
++void PlutoniumFind::OnFindEmptyText(content::WebContents* contents) {
++  PlutoniumTabs::Get()->SetTabState(web_contents(), "find", base::Value());
++  ResolveWaiting();
++}
++
++void PlutoniumFind::OnFindTabHelperDestroyed(
++    find_in_page::FindTabHelper* find_helper) {
++  helper_observation_.Reset();
++}
++
++base::Value PlutoniumFind::Result() const {
++  find_in_page::FindTabHelper* find_helper = helper();
++  if (!find_helper || find_helper->find_text().empty()) {
++    return base::Value(base::DictValue()
++                           .Set("text", "")
++                           .Set("matchCase", match_case_)
++                           .Set("matches", 0)
++                           .Set("activeMatch", 0)
++                           .Set("final", true));
++  }
++  const find_in_page::FindNotificationDetails& result =
++      find_helper->find_result();
++  const gfx::Rect rect = result.selection_rect();
++  base::DictValue dict;
++  dict.Set("text", base::UTF16ToUTF8(find_helper->find_text()));
++  dict.Set("matchCase", match_case_);
++  dict.Set("matches", std::max(result.number_of_matches(), 0));
++  dict.Set("activeMatch", std::max(result.active_match_ordinal(), 0));
++  if (!rect.IsEmpty()) {
++    dict.Set("rect", base::DictValue()
++                         .Set("x", rect.x())
++                         .Set("y", rect.y())
++                         .Set("width", rect.width())
++                         .Set("height", rect.height()));
++  }
++  dict.Set("final", result.final_update());
++  return base::Value(std::move(dict));
++}
++
++void PlutoniumFind::ResolveWaiting() {
++  waiting_timeout_.Stop();
++  if (waiting_.empty()) {
++    return;
++  }
++  std::vector<PlutoniumTabs::CommandCallback> waiting = std::move(waiting_);
++  waiting_.clear();
++  for (PlutoniumTabs::CommandCallback& done : waiting) {
++    std::move(done).Run(Result());
++  }
++}
++
++find_in_page::FindTabHelper* PlutoniumFind::helper() const {
++  return find_in_page::FindTabHelper::FromWebContents(web_contents());
++}
++
++std::u16string PlutoniumFind::InitialText() const {
++  find_in_page::FindTabHelper* find_helper = helper();
++  if (!find_helper) {
++    return std::u16string();
++  }
++  std::u16string text = find_helper->find_text();
++  return text.empty() ? find_helper->GetInitialSearchText() : text;
++}
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(PlutoniumFind);
+diff --git a/chrome/browser/plutonium_find.h b/chrome/browser/plutonium_find.h
+new file mode 100644
+index 0000000000..2d83a229fb
+--- /dev/null
++++ b/chrome/browser/plutonium_find.h
+@@ -0,0 +1,131 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_FIND_H_
++#define CHROME_BROWSER_PLUTONIUM_FIND_H_
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "base/timer/timer.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/find_in_page/find_result_observer.h"
++#include "components/find_in_page/find_tab_helper.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Find in page"): find in
++// a registry tab, with the shell's find bar in place of Chrome's
++// (FindBarController needs a BrowserView).
++//
++// - "find" (Ctrl+F) asks the shell to open its find bar: a "find" tab
++//   request {initialText} (the selection, else the last search). It stays
++//   open while the bar is; the bar answers {action: "keep" | "clear" |
++//   "activate"} when it closes, which stops the search. If no shell takes
++//   it, nothing happens: there is no bar to fall back to.
++// - "find-text" {text, forward, matchCase, select, scroll} searches, or moves
++//   to the next match of the same text (FindTabHelper::StartFinding()), and
++//   resolves with the result once all frames have answered.
++// - "find-next" and "find-previous" (F3, Ctrl+G, Shift+F3, Ctrl+Shift+G)
++//   search again for the last text; with none, they open the bar.
++// - "stop-find" {action} ends the search, and closes the bar.
++//
++// Every result is the tab's state "find": {text, matchCase, matches,
++// activeMatch, rect: {x, y, width, height} (the active match, in the tab's
++// view), final}; it goes when the search stops.
++class PlutoniumFind : public content::WebContentsUserData<PlutoniumFind>,
++                      public content::WebContentsObserver,
++                      public find_in_page::FindResultObserver {
++ public:
++  PlutoniumFind(const PlutoniumFind&) = delete;
++  PlutoniumFind& operator=(const PlutoniumFind&) = delete;
++  ~PlutoniumFind() override;
++
++  // Tab::AttachHelpers(): Chrome's FindTabHelper (with the profile's
++  // FindBarState, as FindBarState::ConfigureWebContents() does) and this.
++  static void Attach(content::WebContents* contents);
++  // The PlutoniumTabs constructor: the commands above.
++  static void AddCommands(PlutoniumTabs* tabs);
++
++  // content::WebContentsObserver:
++  void NavigationEntryCommitted(
++      const content::LoadCommittedDetails& load_details) override;
++
++  // find_in_page::FindResultObserver:
++  void OnFindResultAvailable(content::WebContents* contents) override;
++  void OnFindEmptyText(content::WebContents* contents) override;
++  void OnFindTabHelperDestroyed(find_in_page::FindTabHelper* helper) override;
++
++ private:
++  friend class content::WebContentsUserData<PlutoniumFind>;
++
++  explicit PlutoniumFind(content::WebContents* contents);
++
++  static void RunFind(content::WebContents* contents,
++                      const base::DictValue& args,
++                      PlutoniumTabs::CommandCallback done);
++  static void RunFindText(content::WebContents* contents,
++                          const base::DictValue& args,
++                          PlutoniumTabs::CommandCallback done);
++  static void RunFindNext(bool forward,
++                          content::WebContents* contents,
++                          const base::DictValue& args,
++                          PlutoniumTabs::CommandCallback done);
++  static void RunStopFind(content::WebContents* contents,
++                          const base::DictValue& args,
++                          PlutoniumTabs::CommandCallback done);
++
++  // Asks the shell to open its find bar, with |text| or the initial text.
++  void OpenBar(const std::u16string& text,
++               PlutoniumTabs::CommandCallback done);
++  // Searches for |text|; |done| gets the final result.
++  void Find(const std::u16string& text,
++            bool forward,
++            bool match_case,
++            bool select,
++            bool scroll,
++            PlutoniumTabs::CommandCallback done);
++  // Stops the search (|action|: "keep", "clear" or "activate"), and closes
++  // the bar unless |close_bar| is false.
++  void Stop(const std::string& action, bool close_bar);
++  // The bar's answer.
++  bool OnAnswer(PlutoniumTabRequests::From from, const base::Value& answer);
++  // |generation|: the bar it was for (a newer one may be open).
++  void OnFallback(int generation, PlutoniumTabRequests::FallbackReason reason);
++
++  // The search's result, as in the tab's "find" state.
++  base::Value Result() const;
++  // Resolves the "find-text" commands waiting on a final result.
++  void ResolveWaiting();
++
++  find_in_page::FindTabHelper* helper() const;
++
++  // The text the bar starts with: the selection, else this tab's last
++  // search, else the last search anywhere.
++  std::u16string InitialText() const;
++
++  // The bar's request, while it is open.
++  std::unique_ptr<PlutoniumTabRequests::Handle> bar_;
++  int bar_generation_ = 0;
++  // Opening the bar moved the keyboard focus from the tab to the shell.
++  bool bar_took_focus_ = false;
++  bool match_case_ = false;
++  std::vector<PlutoniumTabs::CommandCallback> waiting_;
++  // A final result that never comes (a frame went away) doesn't keep the
++  // commands waiting.
++  base::OneShotTimer waiting_timeout_;
++  base::ScopedObservation<find_in_page::FindTabHelper,
++                          find_in_page::FindResultObserver>
++      helper_observation_{this};
++  base::WeakPtrFactory<PlutoniumFind> weak_factory_{this};
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_FIND_H_
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 3eb33bb58f..aee84017d9 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -27,6 +27,7 @@
+ #include "chrome/browser/devtools/devtools_toggle_action.h"
+ #include "chrome/browser/devtools/devtools_window.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/plutonium_find.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_shell.h"
+@@ -764,7 +765,10 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+   // delegate, Tab implements below, as BrowserWebContentsDelegate does.
+   // Called once the tab is registered (so a helper may SetTabState()), for
+   // the tab's own page only.
+-  void AttachHelpers() { plutonium_zoom::AttachHelpers(contents_); }
++  void AttachHelpers() {
++    plutonium_zoom::AttachHelpers(contents_);
++    PlutoniumFind::Attach(contents_);
++  }
+ 
+  private:
+ 
+@@ -869,6 +873,7 @@ PlutoniumTabs::PlutoniumTabs() {
+   }
+   // EXO-TAB-FEATURES: their commands (AddCommand()), one line per feature.
+   plutonium_zoom::AddCommands(this);
++  PlutoniumFind::AddCommands(this);
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           "plutonium-test-tab-requests")) {
+     AddCommand("test-request",

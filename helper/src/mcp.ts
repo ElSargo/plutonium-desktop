@@ -321,6 +321,25 @@ const TOOLS = [
     },
   },
   {
+    name: "find_in_tab",
+    description:
+      "Find text in one of this thread's tabs, as Ctrl+F does: every match is highlighted and the page scrolls " +
+      "to the next one (call again with the same text for the one after). Returns the number of matches and " +
+      "which one is active. Use it to show the user a place in the page; to read the page, use read_tab. " +
+      "An empty text clears the highlights.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tab_id: { type: "integer", description: "A tab id from list_tabs or open_tab." },
+        text: { type: "string" },
+        match_case: { type: "boolean", description: "Match upper and lower case (default false)." },
+        backwards: { type: "boolean", description: "Go to the previous match instead (default false)." },
+      },
+      required: ["tab_id", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -646,6 +665,19 @@ export async function callTool(
           text: typeof args.text === "string" ? args.text : "",
         }),
       );
+    case "find_in_tab": {
+      if (typeof args.text !== "string") throw new Error("text is required.");
+      const { result } = await helperJson<{ result: unknown }>(
+        socket,
+        "POST",
+        `/v1/threads/${thread}/tabs/${tabId()}/command`,
+        {
+          command: "find-text",
+          args: { text: args.text, matchCase: args.match_case === true, forward: args.backwards !== true },
+        },
+      );
+      return text(result);
+    }
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
     case "focus_tab":

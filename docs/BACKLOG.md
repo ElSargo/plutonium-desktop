@@ -303,7 +303,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   for a `.downloads` in the thread's working directory or
   `~/Downloads/<thread>/`.
   `list_downloads` for agents; Playwright's download events in the relay.
-- [ ] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
+- [x] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
   `stopFind`, `findresult`, and the library's find bar.
 - [ ] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
   `printToPdf` for the shell's preview, host printers and jobs through the

@@ -57,6 +57,11 @@
 // dialogs' look comes from --plutonium-dialog-bg, -fg, -border, -radius,
 // -shadow, -font and -accent (DIALOG_STYLE).
 //
+// Find in page: Ctrl+F in a tab (or openFind()) opens the library's find
+// bar over the tab's element ("findBar" in connect()); find() and stopFind()
+// search and stop, and each result arrives as a "findresult" event and the
+// tab's `find`.
+//
 // Tags: every window and tab carries a list of tags, and items with the same
 // tag go together. The first is where the item came from: the thread that
 // started a window's app, or the thread a tab was created for (tabs its page
@@ -696,6 +701,10 @@ export class PlutoniumShell extends EventTarget {
       this.dispatchEvent(
         new CustomEvent("tabstatechange", { detail: { tab, key, value: after[key], previous: before[key] } }),
       );
+      // Find in page: each result as its own event too.
+      if (key === "find" && after.find) {
+        this.dispatchEvent(new CustomEvent("findresult", { detail: { tabId: tab.id, ...after.find } }));
+      }
     }
   }
 
@@ -730,6 +739,33 @@ export class PlutoniumShell extends EventTarget {
       toast.remove();
       if (this._toasts.get(tabId) === toast) this._toasts.delete(tabId);
     }, duration);
+  }
+
+  /**
+   * Find in page (TAB_FEATURES.md): asks for the find bar on tab `tabId` (as Ctrl+F does),
+   * with `text` in it or else the selection or the last search. The bar is a "find" tab
+   * request, drawn by the library unless connect() got `findBar` (false or a function).
+   */
+  openFind(tabId, text = undefined) {
+    return this.tabCommand(tabId, "find", text === undefined ? {} : { text });
+  }
+
+  /**
+   * Searches tab `tabId` for `text`, or moves to the next (or previous: `forward` false)
+   * match of the same text. `select` false only counts and highlights the matches, without
+   * making one active; `scroll` false doesn't scroll to it. Resolves with the result, as
+   * the tab's `find` state: {text, matchCase, matches, activeMatch, rect?, final}.
+   */
+  find(tabId, text, { forward = true, matchCase = false, select = true, scroll = true } = {}) {
+    return this.tabCommand(tabId, "find-text", { text, forward, matchCase, select, scroll });
+  }
+
+  /**
+   * Ends the search on tab `tabId`, and closes its find bar: "keep" leaves the active match
+   * selected, "clear" doesn't, "activate" clicks it (a link).
+   */
+  stopFind(tabId, action = "clear") {
+    return this.tabCommand(tabId, "stop-find", { action });
   }
 
   /** Draws `request` (Chrome's context menu) here; the choice goes back to Chrome. */
@@ -1024,6 +1060,160 @@ export function ensureDialogStyle() {
   dialogStyle.textContent = DIALOG_STYLE;
   document.head.append(dialogStyle);
 }
+
+// Find in page (TAB_FEATURES.md): the library's find bar, a popover at the
+// top right of the tab's element. It is the "find" tab request ("findBar"
+// in connect()): it stays open while the bar does, and is answered with
+// {action} as the bar closes. The count comes from the tab's `find` state.
+const FIND_STYLE = `@layer plutonium {
+  .plutonium-find-bar { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 10px; }
+  .plutonium-find-bar input {
+    width: 16em; min-width: 0; border: none; outline: none; background: transparent;
+    color: inherit; font: inherit;
+  }
+  .plutonium-find-bar .count { min-width: 4em; text-align: end; opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .plutonium-find-bar .count.none { color: var(--plutonium-find-none, #d33); opacity: 1; }
+  .plutonium-find-bar button {
+    border: none; border-radius: 4px; background: transparent; color: inherit; font: inherit;
+    min-width: 24px; height: 24px; padding: 0 4px; cursor: default;
+  }
+  .plutonium-find-bar button:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+  .plutonium-find-bar button[aria-pressed="true"] {
+    background: var(--plutonium-dialog-accent, AccentColor); color: AccentColorText;
+  }
+}`;
+
+let findStyle = null;
+
+/** The library's find bar for `request` (a "find" tab request); false if the page doesn't show the tab. */
+function drawFindBar(shell, request) {
+  const { tabId, detail } = request;
+  if (!shell.shownTabElement(tabId)) return false;
+  ensureDialogStyle();
+  if (!findStyle) {
+    findStyle = document.createElement("style");
+    findStyle.textContent = FIND_STYLE;
+    document.head.append(findStyle);
+  }
+  shell._findBars ??= new Map();
+  shell._findBars.get(tabId)?.dispose();
+
+  const bar = document.createElement("div");
+  bar.className = "plutonium-dialog plutonium-find-bar";
+  bar.popover = "manual";
+  bar.setAttribute("role", "search");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Find in page";
+  input.setAttribute("aria-label", "Find in page");
+  input.value = detail?.initialText ?? "";
+  const count = document.createElement("span");
+  count.className = "count";
+  count.setAttribute("aria-live", "polite");
+  const button = (text, title, onClick) => {
+    const element = document.createElement("button");
+    element.type = "button";
+    element.textContent = text;
+    element.title = title;
+    element.setAttribute("aria-label", title);
+    // Keep the focus in the field.
+    element.addEventListener("mousedown", (event) => event.preventDefault());
+    element.addEventListener("click", onClick);
+    return element;
+  };
+  let matchCase = !!detail?.matchCase;
+  const caseButton = button("Aa", "Match case", () => {
+    matchCase = !matchCase;
+    caseButton.setAttribute("aria-pressed", String(matchCase));
+    search({ select: true });
+  });
+  caseButton.setAttribute("aria-pressed", String(matchCase));
+  const previous = button("↑", "Previous match (Shift+Enter)", () => search({ forward: false }));
+  const next = button("↓", "Next match (Enter)", () => search({ forward: true }));
+  const close = button("×", "Close (Escape)", () => end("keep"));
+  bar.append(input, count, caseButton, previous, next, close);
+  document.body.append(bar);
+
+  const showCount = (result) => {
+    if (!input.value) {
+      count.textContent = "";
+      count.classList.remove("none");
+      return;
+    }
+    if (!result || result.text !== input.value) return;
+    count.textContent = `${result.activeMatch}/${result.matches}`;
+    count.classList.toggle("none", result.final && result.matches === 0);
+  };
+  const search = ({ forward = true, select = true, scroll = true } = {}) => {
+    const text = input.value;
+    if (!text) showCount(null);
+    shell.find(tabId, text, { forward, matchCase, select, scroll }).then(showCount, () => {});
+  };
+  const onResult = (event) => {
+    if (event.detail.tabId === tabId) showCount(event.detail);
+  };
+  shell.addEventListener("findresult", onResult);
+
+  // Follows the tab's element; hidden while this page doesn't show the tab.
+  let frame = 0;
+  const place = () => {
+    frame = requestAnimationFrame(place);
+    const element = shell.shownTabElement(tabId);
+    const box = element?.getBoundingClientRect();
+    if (!box || box.width === 0) {
+      bar.style.visibility = "hidden";
+      return;
+    }
+    bar.style.visibility = "";
+    bar.style.left = `${Math.max(box.left + 8, box.right - bar.offsetWidth - 12)}px`;
+    bar.style.top = `${box.top + 8}px`;
+  };
+
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    cancelAnimationFrame(frame);
+    shell.removeEventListener("findresult", onResult);
+    bar.remove();
+    if (shell._findBars.get(tabId)?.dispose === dispose) shell._findBars.delete(tabId);
+  };
+  // The bar closes: the search stops (`action`), and the tab gets the keys back.
+  const end = (action) => {
+    const hadFocus = bar.contains(document.activeElement);
+    dispose();
+    request.answer({ action });
+    if (hadFocus) shell.shownTabElement(tabId)?.focus();
+  };
+  request.signal.addEventListener("abort", dispose);
+  shell._findBars.set(tabId, { dispose });
+
+  input.addEventListener("input", () => search());
+  input.addEventListener("keydown", (event) => {
+    const key = event.key;
+    const ctrl = event.ctrlKey || event.metaKey;
+    if (key === "Escape") end("keep");
+    else if (key === "Enter" && ctrl) end("activate");
+    else if (key === "Enter" || key === "F3" || (ctrl && key.toLowerCase() === "g")) {
+      search({ forward: !event.shiftKey });
+    } else if (ctrl && key.toLowerCase() === "f") input.select();
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+
+  bar.showPopover();
+  place();
+  input.focus();
+  input.select();
+  // As Chrome's bar: the text it opens with is counted and highlighted, and the
+  // selection (already on screen) is the active match, without scrolling.
+  if (input.value) search({ select: !!detail?.fromSelection, scroll: false });
+  showCount(request.tab?.find);
+  return true;
+}
+
+registerTabRequestKind("find", { option: "findBar", draw: drawFindBar });
 
 // Chrome's context menu, drawn by the page: a popover (in the top layer, so
 // over fullscreen elements too) per open (sub)menu. The choice goes back to
