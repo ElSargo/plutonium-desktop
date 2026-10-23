@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 07:47:41 +1300
-Subject: [PATCH 07/34] Plutonium: browser tabs as SurfaceEmbed elements, DRM
+Subject: [PATCH 07/35] Plutonium: browser tabs as SurfaceEmbed elements, DRM
  mouse wheel
 
 - PlutoniumTabs registry: browser-owned WebContents shown in the shell
