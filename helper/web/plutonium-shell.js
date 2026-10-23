@@ -62,6 +62,16 @@
 // search and stop, and each result arrives as a "findresult" event and the
 // tab's `find`.
 //
+// Downloads: every download from a tab (or this page) is in `downloads()`,
+// with the thread it came from, and arrives as "downloadadded",
+// "downloadchanged" and "downloadremoved" events ({ download, previous }).
+// The library shows a toast when one starts and finishes and a list
+// (showDownloads()), unless connect() gets `downloads: false`, or a function
+// (download, type) => boolean that returns true for what it shows itself.
+// Files go to ~/Downloads; `downloadFolder` (this shell's threads) and
+// setDownloadFolder(thread, folder) choose "thread" (~/Downloads/<label>/)
+// or a path instead, such as the thread's working directory's ".downloads".
+//
 // Tags: every window and tab carries a list of tags, and items with the same
 // tag go together. The first is where the item came from: the thread that
 // started a window's app, or the thread a tab was created for (tabs its page
@@ -106,6 +116,13 @@ const HELPER = new URL(import.meta.url).origin;
  *   A tab's page needs the user. answer() answers it (resolves to false if it is over, or the
  *   kind doesn't take that answer); signal aborts if it ends otherwise (an agent answered it,
  *   the browser cancelled it, or the tab closed).
+ * @typedef {{ id: number, tabId: number, thread: string, url: string, filename: string, path: string,
+ *   mime: string, receivedBytes: number, totalBytes: number,
+ *   state: "in-progress" | "paused" | "complete" | "cancelled" | "interrupted",
+ *   danger?: string, error?: string, canResume: boolean, startTime: number }} BrowserDownload
+ *   thread: the origin tag of the tab that started it ("" for none); tabId: that tab (it may have
+ *   closed since). totalBytes: 0 if unknown. danger: Chrome's danger type, while a dangerous file
+ *   waits on downloadCommand(id, "keep" | "discard").
  * @typedef {{ id: string, name: string, genericName: string, comment: string,
  *   keywords: string[], categories: string[], hasIcon: boolean, terminal: boolean }} DesktopApp
  * @typedef {{ id: number, parentId: number, type: "command" | "checkbox" | "radio" | "separator" |
@@ -308,6 +325,8 @@ export class PlutoniumShell extends EventTarget {
         controller?.abort();
       });
     }
+    // Downloads (TAB_FEATURES.md, "Downloads").
+    if (typeof this.broker.downloadCommand === "function") this._startDownloads();
     // Chrome's context menus, drawn in this page's style.
     if (typeof this.broker.closeContextMenu === "function") {
       this.broker.addEventListener("contextmenurequest", (event) => this._onContextMenuRequest(event));
@@ -768,6 +787,121 @@ export class PlutoniumShell extends EventTarget {
     return this.tabCommand(tabId, "stop-find", { action });
   }
 
+  // Downloads: subscribing replays the current ones as "downloadadded".
+  _startDownloads() {
+    /** @type {Map<number, BrowserDownload>} */
+    this._downloads = new Map();
+    const onDownload = (event) => {
+      const download = event.download;
+      if (!download) return;
+      const previous = this._downloads.get(event.downloadId);
+      this._downloads.set(event.downloadId, download);
+      const type = event.type;
+      this.dispatchEvent(new CustomEvent(type, { detail: { download, previous } }));
+      // Replayed ones (from before this page subscribed) aren't news.
+      if (type === "downloadadded" && Date.now() - download.startTime > 10_000) return;
+      this._drawDownload(download, previous);
+    };
+    this.broker.addEventListener("downloadadded", onDownload);
+    this.broker.addEventListener("downloadchanged", onDownload);
+    this.broker.addEventListener("downloadremoved", (event) => {
+      const previous = this._downloads.get(event.downloadId);
+      if (!this._downloads.delete(event.downloadId)) return;
+      this.dispatchEvent(new CustomEvent("downloadremoved", { detail: { download: null, previous } }));
+      this._downloadList?.render();
+    });
+    const folder = this.options.downloadFolder;
+    if (typeof folder === "string") this.setDownloadFolder("", folder);
+  }
+
+  /** The downloads (this session's), oldest first; with `thread`, only that thread's. */
+  downloads({ thread } = {}) {
+    const all = [...(this._downloads?.values() ?? [])].sort((a, b) => a.id - b.id);
+    return thread === undefined ? all : all.filter((download) => download.thread === thread);
+  }
+
+  /**
+   * Runs `command` on download `id`: "pause", "resume", "cancel", "open", "show" (its folder),
+   * "keep" or "discard" (a dangerous file), "remove" (from the list; the file stays).
+   * Rejects with why it can't.
+   */
+  downloadCommand(id, command) {
+    if (typeof this.broker?.downloadCommand !== "function") {
+      return Promise.reject(new Error("This browser has no downloads API."));
+    }
+    return this.broker.downloadCommand(id, command);
+  }
+
+  /**
+   * Where `thread`'s downloads go (or with thread "", every thread this shell owns that has
+   * no folder of its own): "downloads" (~/Downloads, the default), "thread"
+   * (~/Downloads/<thread label>/), an absolute path ("~/" is the home folder), or "" for the
+   * default. Lasts until the browser restarts; set it again on connecting.
+   */
+  setDownloadFolder(thread, folder) {
+    this.broker?.setDownloadFolder?.(thread, folder);
+  }
+
+  // The library's toasts for a download that started, finished, failed or needs the user.
+  _drawDownload(download, previous) {
+    const option = this.options.downloads;
+    if (option === false) return;
+    const type = previous ? "downloadchanged" : "downloadadded";
+    if (typeof option === "function") {
+      try {
+        if (option(download, type)) return;
+      } catch (error) {
+        console.error("plutonium: drawing a download", error);
+      }
+    }
+    this._downloadList?.render();
+    const name = download.filename || download.url;
+    if (!previous) {
+      this._downloadToast(download, `Downloading ${name}`);
+    } else if (download.state !== previous.state) {
+      if (download.state === "complete") this._downloadToast(download, `Downloaded ${name}`);
+      else if (download.state === "interrupted") this._downloadToast(download, `Download failed: ${name}`);
+    }
+    if (download.danger && !previous?.danger) this.showDownloads();
+  }
+
+  // A toast over the tab that downloaded, or (a tab that closed) at the top of the page.
+  // Clicking it shows the list.
+  _downloadToast(download, text) {
+    ensureDialogStyle();
+    ensureDownloadStyle();
+    this._downloadToastElement?.remove();
+    const toast = document.createElement("div");
+    toast.className = "plutonium-toast plutonium-download-toast";
+    toast.popover = "manual";
+    toast.textContent = text;
+    toast.addEventListener("click", () => {
+      toast.remove();
+      this.showDownloads();
+    });
+    document.body.append(toast);
+    toast.showPopover();
+    const box = this.shownTabElement(download.tabId)?.getBoundingClientRect() ?? {
+      left: 0,
+      top: 0,
+      width: innerWidth,
+    };
+    toast.style.left = `${Math.max(8, box.left + box.width / 2 - toast.offsetWidth / 2)}px`;
+    toast.style.top = `${box.top + 12}px`;
+    this._downloadToastElement = toast;
+    setTimeout(() => toast.remove(), 4000);
+  }
+
+  /**
+   * Shows the library's download list (the newest first), with each one's actions; with
+   * `thread`, only that thread's. `anchor` (an element) places it below that, else at the
+   * top right.
+   */
+  showDownloads({ thread, anchor } = {}) {
+    this._downloadList?.close();
+    this._downloadList = new DownloadList(this, thread, anchor);
+  }
+
   /** Draws `request` (Chrome's context menu) here; the choice goes back to Chrome. */
   showContextMenu(request) {
     this._menu?.close(0);
@@ -1214,6 +1348,158 @@ function drawFindBar(shell, request) {
 }
 
 registerTabRequestKind("find", { option: "findBar", draw: drawFindBar });
+
+// The download list's look, on top of DIALOG_STYLE.
+const DOWNLOAD_STYLE = `@layer plutonium {
+  .plutonium-download-toast { pointer-events: auto; cursor: pointer; }
+  .plutonium-downloads { width: min(420px, calc(100vw - 16px)); max-height: min(480px, calc(100vh - 16px)); overflow-y: auto; }
+  .plutonium-downloads h2 { margin: 0 0 8px; font-size: 1em; }
+  .plutonium-downloads .empty { opacity: .65; }
+  .plutonium-download { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+  .plutonium-download .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plutonium-download .status { font-size: .9em; opacity: .75; font-variant-numeric: tabular-nums; }
+  .plutonium-download .danger { color: var(--plutonium-dialog-danger, #d33); font-size: .9em; }
+  .plutonium-download progress { width: 100%; height: 4px; }
+  .plutonium-download .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+}`;
+
+let downloadStyle = null;
+
+function ensureDownloadStyle() {
+  if (downloadStyle) return;
+  downloadStyle = document.createElement("style");
+  downloadStyle.textContent = DOWNLOAD_STYLE;
+  document.head.append(downloadStyle);
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+// The library's download list: a popover (light dismiss) with each download's progress and
+// actions. It redraws as downloads change, until it closes.
+class DownloadList {
+  constructor(shell, thread, anchor) {
+    ensureDialogStyle();
+    ensureDownloadStyle();
+    this.shell = shell;
+    this.thread = thread;
+    this.element = document.createElement("div");
+    this.element.className = "plutonium-dialog plutonium-downloads";
+    this.element.popover = "auto";
+    this.element.addEventListener("toggle", (event) => {
+      if (event.newState === "closed") this.close();
+    });
+    document.body.append(this.element);
+    this.render();
+    this.element.showPopover();
+    const box = anchor?.getBoundingClientRect();
+    if (box) {
+      this.element.style.left = `${Math.max(8, Math.min(box.left, innerWidth - this.element.offsetWidth - 8))}px`;
+      this.element.style.top = `${box.bottom + 4}px`;
+    } else {
+      this.element.style.right = "12px";
+      this.element.style.top = "12px";
+    }
+  }
+
+  close() {
+    if (this.shell._downloadList === this) this.shell._downloadList = null;
+    this.element.remove();
+  }
+
+  render() {
+    const downloads = this.shell.downloads({ thread: this.thread }).reverse();
+    const title = document.createElement("h2");
+    title.textContent = "Downloads";
+    const rows = downloads.map((download) => this._row(download));
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No downloads yet.";
+      rows.push(empty);
+    }
+    this.element.replaceChildren(title, ...rows);
+  }
+
+  _row(download) {
+    const row = document.createElement("div");
+    row.className = "plutonium-download";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = download.filename || download.url;
+    name.title = download.path || download.url;
+    const status = document.createElement("div");
+    status.className = "status";
+    const size = download.totalBytes ? formatBytes(download.totalBytes) : "";
+    status.textContent =
+      download.state === "in-progress"
+        ? `${formatBytes(download.receivedBytes)}${size ? ` of ${size}` : ""}`
+        : download.state === "complete"
+          ? `${size || formatBytes(download.receivedBytes)}${download.thread ? ` · ${this.shell.labelOf(download.thread) || download.thread}` : ""}`
+          : download.state === "interrupted"
+            ? `Failed${download.error ? ` (${download.error})` : ""}`
+            : download.state === "paused"
+              ? `Paused, ${formatBytes(download.receivedBytes)}${size ? ` of ${size}` : ""}`
+              : "Cancelled";
+    row.append(name, status);
+    if (download.state === "in-progress" || download.state === "paused") {
+      const progress = document.createElement("progress");
+      if (download.totalBytes) {
+        progress.max = download.totalBytes;
+        progress.value = download.receivedBytes;
+      }
+      row.append(progress);
+    }
+    if (download.danger) {
+      const danger = document.createElement("div");
+      danger.className = "danger";
+      danger.textContent = "This file may be dangerous. Keep it?";
+      row.append(danger);
+    }
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const button = (label, command, isDefault = false) => {
+      const element = document.createElement("button");
+      element.textContent = label;
+      if (isDefault) element.className = "default";
+      element.addEventListener("click", () => {
+        this.shell.downloadCommand(download.id, command).catch((error) => {
+          this.shell._downloadToast(download, error.message);
+        });
+      });
+      actions.append(element);
+    };
+    if (download.danger) {
+      button("Discard", "discard", true);
+      button("Keep", "keep");
+    } else if (download.state === "in-progress") {
+      button("Pause", "pause");
+      button("Cancel", "cancel");
+    } else if (download.state === "paused") {
+      button("Resume", "resume", true);
+      button("Cancel", "cancel");
+    } else if (download.state === "complete") {
+      button("Open", "open", true);
+      button("Show in folder", "show");
+    } else if (download.state === "interrupted" && download.canResume) {
+      button("Retry", "resume", true);
+    }
+    if (!download.danger && download.state !== "in-progress" && download.state !== "paused") {
+      button("Remove", "remove");
+    }
+    row.append(actions);
+    return row;
+  }
+}
 
 // Chrome's context menu, drawn by the page: a popover (in the top layer, so
 // over fullscreen elements too) per open (sub)menu. The choice goes back to

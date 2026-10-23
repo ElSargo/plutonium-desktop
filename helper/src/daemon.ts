@@ -30,7 +30,7 @@ import { A11yError, Accessibility } from "./a11y.ts";
 import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { BrowserCdp } from "./cdp.ts";
-import { Desktop, type DesktopTab, type DesktopWindow } from "./desktop.ts";
+import { Desktop, type DesktopDownload, type DesktopTab, type DesktopWindow } from "./desktop.ts";
 import { type GpuReport, probeGpu } from "./gpu.ts";
 import {
   type BrowserTabEntry,
@@ -729,6 +729,54 @@ export class Daemon {
     return threadTab(await this.ownedTab(threadId, tabId));
   }
 
+  // EXO-TAB-FEATURES: downloads (TAB_FEATURES.md, "Downloads").
+
+  /** The thread's downloads: from its tabs, or from a tab now in the thread. Oldest first. */
+  async threadDownloads(threadId: string): Promise<DesktopDownload[]> {
+    const desktop = await this.direct();
+    if (!desktop) return [];
+    const tabIds = new Set((await this.threadTabs(threadId)).map((tab) => tab.id));
+    return desktop.downloads().filter((download) => download.thread === threadId || tabIds.has(download.tabId));
+  }
+
+  /**
+   * Runs `command` on one of the thread's downloads, as an agent: pause,
+   * resume, cancel, discard, remove, or open and show (the helper's own).
+   * Not keep: a dangerous file is the user's to keep.
+   */
+  async downloadAction(threadId: string, id: number, command: string): Promise<DesktopDownload | { removed: true }> {
+    const download = (await this.threadDownloads(threadId)).find((entry) => entry.id === id);
+    if (!download) throw new HttpError(404, `This thread has no download ${id}.`);
+    if (command === "open" || command === "show") {
+      if (command === "open" && download.state !== "complete") throw new HttpError(409, "It hasn't finished.");
+      await this.openDownload(download.path, threadId, command === "show");
+      return download;
+    }
+    if (!["pause", "resume", "cancel", "discard", "remove"].includes(command)) {
+      throw new HttpError(400, "command must be pause, resume, cancel, open, show, discard or remove.");
+    }
+    const desktop = await this.requireDirect("Downloads");
+    await desktop.downloadCommand(id, command).catch((error: Error) => {
+      throw new HttpError(400, error.message);
+    });
+    await sleep(150);
+    return desktop.download(id) ?? { removed: true };
+  }
+
+  /**
+   * Opens a downloaded file (or with `show`, its folder) in `thread`, with
+   * the thread's environment (its xdg-open goes through the opener). Not
+   * FileManager1.ShowItems: D-Bus would start the file manager outside the
+   * session's display, and outside the thread.
+   */
+  async openDownload(path: string, thread: string, show: boolean): Promise<void> {
+    if (!path.startsWith("/")) throw new HttpError(400, "path must be absolute.");
+    const target = show ? dirname(path) : path;
+    if (!existsSync(target)) throw new HttpError(404, `${target} isn't there (from here).`);
+    console.log(`plutoniumd: ${show ? "showing" : "opening"} ${path} in thread ${thread || "(none)"}`);
+    await this.launch(thread, ["xdg-open", target], dirname(path), 0, true);
+  }
+
   async closeTab(threadId: string, tabId: number): Promise<{ closed: boolean }> {
     await this.ownedTab(threadId, tabId);
     const desktop = await this.direct();
@@ -1345,6 +1393,29 @@ export class Daemon {
         } catch (error) {
           return sendJson(response, 200, { content: [{ type: "text", text: (error as Error).message }], isError: true });
         }
+      }
+      // EXO-TAB-FEATURES: the browser's "open" and "show" for a download.
+      if (method === "POST" && path === "/v1/downloads/open") {
+        const { path: file, thread, show } = await readJson(request);
+        if (typeof file !== "string" || !file) throw new HttpError(400, "path is required.");
+        await this.openDownload(file, typeof thread === "string" ? thread : "", show === true);
+        return sendJson(response, 200, { ok: true });
+      }
+      const downloads = path.match(/^\/v1\/threads\/([^/]+)\/downloads$/);
+      if (method === "GET" && downloads) {
+        return sendJson(response, 200, await this.threadDownloads(decodeURIComponent(downloads[1]!)));
+      }
+      const downloadAction = path.match(/^\/v1\/threads\/([^/]+)\/downloads\/(\d+)\/(\w+)$/);
+      if (method === "POST" && downloadAction) {
+        return sendJson(
+          response,
+          200,
+          await this.downloadAction(
+            decodeURIComponent(downloadAction[1]!),
+            Number(downloadAction[2]),
+            downloadAction[3]!,
+          ),
+        );
       }
       const tabs = path.match(/^\/v1\/threads\/([^/]+)\/tabs$/);
       if (tabs) {

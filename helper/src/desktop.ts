@@ -46,6 +46,31 @@ export interface DesktopWindow {
   readonly tags: readonly string[];
 }
 
+/** EXO-TAB-FEATURES: a download (Plutonium.downloadAdded's JSON; TAB_FEATURES.md). */
+export interface DesktopDownload {
+  readonly id: number;
+  /** The tab that started it (it may have closed since), or 0. */
+  readonly tabId: number;
+  /** That tab's thread (its origin tag), or "". */
+  readonly thread: string;
+  readonly url: string;
+  readonly filename: string;
+  /** Where the file is (or goes); "" until the browser knows. */
+  readonly path: string;
+  readonly mime: string;
+  readonly receivedBytes: number;
+  /** 0 if unknown. */
+  readonly totalBytes: number;
+  readonly state: "in-progress" | "paused" | "complete" | "cancelled" | "interrupted";
+  /** Chrome's danger type, while a dangerous file waits on the user's keep or discard. */
+  readonly danger?: string;
+  /** Why it was interrupted. */
+  readonly error?: string;
+  readonly canResume: boolean;
+  /** ms since the epoch. */
+  readonly startTime: number;
+}
+
 export interface Capture {
   readonly data: Buffer;
   readonly width: number;
@@ -88,6 +113,7 @@ export class Desktop {
   private enabling: Promise<boolean> | null = null;
   private readonly tabMap = new Map<number, DesktopTab>();
   private readonly windowMap = new Map<number, DesktopWindow>();
+  private readonly downloadMap = new Map<number, DesktopDownload>();
   /** Screencast listeners, by window id. */
   private readonly frameListeners = new Map<number, Set<(frame: ScreencastFrame | null) => void>>();
   /** Tabs or windows came, changed or went. */
@@ -100,6 +126,7 @@ export class Desktop {
       this.enabling = null;
       this.tabMap.clear();
       this.windowMap.clear();
+      this.downloadMap.clear();
       for (const listeners of this.frameListeners.values()) for (const listener of listeners) listener(null);
       this.frameListeners.clear();
     });
@@ -150,6 +177,15 @@ export class Desktop {
       case "Plutonium.windowRemoved":
         this.windowMap.delete(value.id as number);
         break;
+      case "Plutonium.downloadAdded":
+      case "Plutonium.downloadChanged": {
+        const download = parseDownload(value.downloadJson);
+        if (download) this.downloadMap.set(download.id, download);
+        break;
+      }
+      case "Plutonium.downloadRemoved":
+        this.downloadMap.delete(value.id as number);
+        break;
       case "Plutonium.windowScreencastFrame": {
         const windowId = value.id as number;
         const listeners = this.frameListeners.get(windowId);
@@ -187,6 +223,23 @@ export class Desktop {
   /** Every window, oldest first. Call available() first. */
   windows(): DesktopWindow[] {
     return [...this.windowMap.values()].sort((a, b) => a.id - b.id);
+  }
+
+  /** Every download this session, oldest first. Call available() first. */
+  downloads(): DesktopDownload[] {
+    return [...this.downloadMap.values()].sort((a, b) => a.id - b.id);
+  }
+
+  download(id: number): DesktopDownload | undefined {
+    return this.downloadMap.get(id);
+  }
+
+  /**
+   * Runs a command on download `id`: pause, resume, cancel, discard or
+   * remove (open and show are the helper's own; keep is the user's).
+   */
+  async downloadCommand(id: number, command: string): Promise<void> {
+    await this.cdp.send("Plutonium.downloadCommand", { id, command });
   }
 
   tab(id: number): DesktopTab | undefined {
@@ -300,6 +353,16 @@ export class Desktop {
       this.frameListeners.delete(id);
       void this.cdp.send("Plutonium.stopWindowScreencast", { id }).catch(() => {});
     };
+  }
+}
+
+function parseDownload(json: unknown): DesktopDownload | undefined {
+  if (typeof json !== "string") return undefined;
+  try {
+    const download = JSON.parse(json) as DesktopDownload;
+    return typeof download?.id === "number" ? download : undefined;
+  } catch {
+    return undefined;
   }
 }
 

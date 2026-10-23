@@ -1,0 +1,1635 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 09:22:04 +1300
+Subject: [PATCH 40/40] Plutonium: downloads for the shells' tabs
+
+EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Downloads"): the
+profile's download manager already saves what tabs download, but its UI
+(Ash notifications) doesn't show in shell mode, and files went to the
+profile's own folder.
+
+- PlutoniumDownloads (plutonium_downloads.{h,cc}) lists this session's
+  downloads, each with the tab that started it and that tab's thread (its
+  origin tag), kept after the tab closes. Tab::AttachHelpers() and the
+  broker observe the profile's download manager.
+- Where files go: ~/Downloads (the XDG download folder) in shell mode,
+  unless a shell set a folder for the thread or a default for its own
+  threads (SetDownloadFolder): "thread" (~/Downloads/<thread label>/) or a
+  path. DownloadTargetDeterminer asks FolderFor() for downloads that don't
+  prompt.
+- Shells: "downloadadded", "downloadchanged", "downloadremoved"
+  (BrowserDownloadEvent, the current ones replayed on subscribing),
+  downloadCommand(id, pause|resume|cancel|open|show|keep|discard|remove)
+  and setDownloadFolder(tag, folder).
+- Open and show go to the helper (POST /v1/downloads/open), which opens
+  the file or its folder in the download's thread.
+- Agents: Plutonium.getDownloads, downloadCommand (not "keep": a dangerous
+  file is the user's to keep), downloadAdded/Changed/Removed.
+- A tab whose first navigation became a download closes, as Chrome closes
+  such a tab in its tab strip (not an agent's tab).
+---
+ chrome/browser/BUILD.gn                       |   4 +
+ chrome/browser/devtools/cros_protocol.pdl     |  27 ++
+ .../devtools/inspector_protocol_config.json   |   2 +-
+ .../devtools/protocol/plutonium_handler.cc    |  57 +++
+ .../devtools/protocol/plutonium_handler.h     |  17 +-
+ .../download/download_target_determiner.cc    |  10 +
+ chrome/browser/plutonium_downloads.cc         | 431 ++++++++++++++++++
+ chrome/browser/plutonium_downloads.h          | 166 +++++++
+ chrome/browser/plutonium_shell.cc             |  85 +++-
+ chrome/browser/plutonium_tabs.cc              |   3 +
+ .../chrome_browser_main_extra_parts_ash.cc    |  28 ++
+ .../mojom/native_window/window_broker.mojom   |  34 ++
+ .../renderer/bindings/generated_in_core.gni   |   2 +
+ .../blink/renderer/bindings/idl_in_core.gni   |   1 +
+ .../core/events/event_type_names.json5        |   3 +
+ .../core/html/browser_download_event.cc       |  36 ++
+ .../core/html/browser_download_event.h        |  38 ++
+ .../core/html/browser_download_event.idl      |  17 +
+ .../blink/renderer/core/html/build.gni        |   2 +
+ .../core/html/native_window_broker.cc         | 106 ++++-
+ .../renderer/core/html/native_window_broker.h |  22 +-
+ .../core/html/native_window_broker.idl        |  18 +
+ 22 files changed, 1104 insertions(+), 5 deletions(-)
+ create mode 100644 chrome/browser/plutonium_downloads.cc
+ create mode 100644 chrome/browser/plutonium_downloads.h
+ create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
+ create mode 100644 third_party/blink/renderer/core/html/browser_download_event.h
+ create mode 100644 third_party/blink/renderer/core/html/browser_download_event.idl
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 017002e439..0d811f6263 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -780,6 +780,7 @@ if (is_chromeos) {
+       "plutonium_agent.h",
+       "plutonium_context_menu.h",
+       "plutonium_find.h",
++      "plutonium_downloads.h",
+       "plutonium_groups.h",
+       "plutonium_keys.h",
+       "plutonium_permissions.h",
+@@ -796,6 +797,7 @@ if (is_chromeos) {
+       "plutonium_agent.cc",
+       "plutonium_context_menu.cc",
+       "plutonium_find.cc",
++      "plutonium_downloads.cc",
+       "plutonium_groups.cc",
+       "plutonium_keys.cc",
+       "plutonium_permissions.cc",
+@@ -815,12 +817,14 @@ if (is_chromeos) {
+       "//ash",
+       "//ash/constants",
+       "//base",
++      "//base:i18n",
+       "//chrome/app:command_ids",
+       "//chrome/browser/ash/exo",
+       "//chrome/browser/profiles:profile",
+       "//chromeos/ash/experiences/arc",
+       "//components/content_settings/browser",
+       "//components/permissions",
++      "//components/download/public/common:public",
+       "//components/renderer_context_menu",
+       "//components/prefs",
+       "//components/exo",
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index 19802268ce..15b51b08ce 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -132,6 +132,20 @@ experimental domain Plutonium
+       boolean accept
+       optional string promptText
+ 
++  # EXO-TAB-FEATURES: the downloads, each a JSON object: {id, tabId, thread,
++  # url, filename, path, mime, receivedBytes, totalBytes, state, danger?,
++  # error?, canResume, startTime} (docs/features/TAB_FEATURES.md).
++  command getDownloads
++    returns
++      array of string downloadsJson
++
++  # Runs a command on a download: pause, resume, cancel, open, show, discard
++  # or remove. Not keep: whether to keep a dangerous file is the user's call.
++  command downloadCommand
++    parameters
++      integer id
++      string command
++
+   # Keeps a tab rendering at full rate (animation frames, timers) while no
+   # page shows it, for as long as this client wants: an agent driving it
+   # waits on frames. The tab stays hidden from the user.
+@@ -284,6 +298,19 @@ experimental domain Plutonium
+     parameters
+       integer id
+ 
++  # EXO-TAB-FEATURES: a download started (or, on enable, was there).
++  event downloadAdded
++    parameters
++      string downloadJson
++
++  event downloadChanged
++    parameters
++      string downloadJson
++
++  event downloadRemoved
++    parameters
++      integer id
++
+   event windowAdded
+     parameters
+       Window window
+diff --git a/chrome/browser/devtools/inspector_protocol_config.json b/chrome/browser/devtools/inspector_protocol_config.json
+index e3eb6059e9..faae493904 100644
+--- a/chrome/browser/devtools/inspector_protocol_config.json
++++ b/chrome/browser/devtools/inspector_protocol_config.json
+@@ -39,7 +39,7 @@
+             },
+             {
+                 "domain": "Plutonium",
+-                "async": [ "captureTab", "captureWindow", "tabCommand" ]
++                "async": [ "captureTab", "captureWindow", "tabCommand", "downloadCommand" ]
+             },
+             {
+                 "domain": "Extensions",
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+index 067bf40df3..6fba2f2e6f 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.cc
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -7,6 +7,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/json/json_writer.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/plutonium_agent.h"
+ #include "chrome/browser/plutonium_tab_requests.h"
+@@ -186,6 +187,15 @@ Response PlutoniumHandler::Enable() {
+     frontend_->TabAdded(ToProtocol(tab));
+   }
+   tabs_observation_.Observe(PlutoniumTabs::Get());
++  // EXO-TAB-FEATURES: downloads, the shells' profile's included.
++  PlutoniumDownloads* downloads = PlutoniumDownloads::Get();
++  if (content::WebContents* shell = PlutoniumTabs::Get()->shell()) {
++    downloads->ObserveContext(shell->GetBrowserContext());
++  }
++  for (const base::DictValue& download : downloads->GetDownloads()) {
++    OnDownloadAdded(download);
++  }
++  downloads_observation_.Observe(downloads);
+   return Response::Success();
+ }
+ 
+@@ -193,6 +203,7 @@ Response PlutoniumHandler::Disable() {
+   enabled_ = false;
+   broker_observation_.Reset();
+   tabs_observation_.Reset();
++  downloads_observation_.Reset();
+   screencasts_.clear();
+   awake_tabs_.clear();
+   awake_windows_.clear();
+@@ -266,6 +277,36 @@ Response PlutoniumHandler::AnswerTabRequest(int request_id,
+                    "No such open request, or it doesn't take that answer");
+ }
+ 
++Response PlutoniumHandler::GetDownloads(
++    std::unique_ptr<protocol::Array<std::string>>* downloads_json) {
++  *downloads_json = std::make_unique<protocol::Array<std::string>>();
++  for (const base::DictValue& download :
++       PlutoniumDownloads::Get()->GetDownloads()) {
++    std::string json;
++    base::JSONWriter::Write(download, &json);
++    (*downloads_json)->push_back(std::move(json));
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::DownloadCommand(
++    int id,
++    const std::string& command,
++    std::unique_ptr<DownloadCommandCallback> callback) {
++  PlutoniumDownloads::Get()->RunCommand(
++      id, command, /*from_agent=*/true,
++      base::BindOnce(
++          [](std::unique_ptr<DownloadCommandCallback> callback, bool ok,
++             const std::string& error) {
++            if (!ok) {
++              callback->sendFailure(Response::InvalidParams(error));
++              return;
++            }
++            callback->sendSuccess();
++          },
++          std::move(callback)));
++}
++
+ Response PlutoniumHandler::AnswerTabDialog(
+     int id,
+     bool accept,
+@@ -644,3 +685,19 @@ void PlutoniumHandler::OnTabRemoved(int32_t tab_id) {
+   awake_tabs_.erase(tab_id);
+   frontend_->TabRemoved(tab_id);
+ }
++
++void PlutoniumHandler::OnDownloadAdded(const base::DictValue& download) {
++  std::string json;
++  base::JSONWriter::Write(download, &json);
++  frontend_->DownloadAdded(json);
++}
++
++void PlutoniumHandler::OnDownloadChanged(const base::DictValue& download) {
++  std::string json;
++  base::JSONWriter::Write(download, &json);
++  frontend_->DownloadChanged(json);
++}
++
++void PlutoniumHandler::OnDownloadRemoved(int32_t id) {
++  frontend_->DownloadRemoved(id);
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+index 17ac23605c..88c2b03bce 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.h
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -15,6 +15,7 @@
+ #include "base/scoped_observation.h"
+ #include "chrome/browser/devtools/protocol/plutonium.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ 
+ class SkBitmap;
+@@ -29,7 +30,8 @@ class WindowScreencast;
+ // target (see ChromeDevToolsSession).
+ class PlutoniumHandler : public protocol::Plutonium::Backend,
+                          public ExoWindowBroker::Observer,
+-                         public PlutoniumTabs::Observer {
++                         public PlutoniumTabs::Observer,
++                         public PlutoniumDownloads::Observer {
+  public:
+   explicit PlutoniumHandler(protocol::UberDispatcher* dispatcher);
+   PlutoniumHandler(const PlutoniumHandler&) = delete;
+@@ -58,6 +60,12 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       bool accept,
+       std::optional<std::string> prompt_text) override;
+   protocol::Response SetTabAwake(int id, bool awake) override;
++  protocol::Response GetDownloads(
++      std::unique_ptr<protocol::Array<std::string>>* downloads_json) override;
++  void DownloadCommand(
++      int id,
++      const std::string& command,
++      std::unique_ptr<DownloadCommandCallback> callback) override;
+   void CaptureTab(int id,
+                   std::optional<std::string> format,
+                   std::optional<int> quality,
+@@ -107,6 +115,11 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+   void OnTabChanged(const PlutoniumTabs::TabInfo& tab) override;
+   void OnTabRemoved(int32_t tab_id) override;
+ 
++  // PlutoniumDownloads::Observer:
++  void OnDownloadAdded(const base::DictValue& download) override;
++  void OnDownloadChanged(const base::DictValue& download) override;
++  void OnDownloadRemoved(int32_t id) override;
++
+  private:
+   struct Screencast {
+     Screencast();
+@@ -131,6 +144,8 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       broker_observation_{this};
+   base::ScopedObservation<PlutoniumTabs, PlutoniumTabs::Observer>
+       tabs_observation_{this};
++  base::ScopedObservation<PlutoniumDownloads, PlutoniumDownloads::Observer>
++      downloads_observation_{this};
+   std::map<int32_t, Screencast> screencasts_;
+   // Tabs kept awake (SetTabAwake): their capture handles.
+   std::map<int32_t, base::ScopedClosureRunner> awake_tabs_;
+diff --git a/chrome/browser/download/download_target_determiner.cc b/chrome/browser/download/download_target_determiner.cc
+index 6ee1db28e6..a1b9b9503b 100644
+--- a/chrome/browser/download/download_target_determiner.cc
++++ b/chrome/browser/download/download_target_determiner.cc
+@@ -74,6 +74,7 @@
+ #include "chrome/browser/chromeos/policy/dlp/dlp_file_destination.h"
+ #include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager.h"
+ #include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_factory.h"
++#include "chrome/browser/plutonium_downloads.h"
+ #include "components/download/public/common/base_file.h"
+ #endif
+ 
+@@ -343,6 +344,15 @@ DownloadTargetDeterminer::Result
+       target_directory = download_prefs_->DownloadPath();
+       RecordDownloadPathGeneration(
+           DownloadPathGenerationEvent::USE_DEFAULTL_DOWNLOAD_DIRECTORY, false);
++#if BUILDFLAG(IS_CHROMEOS)
++      // EXO-TAB-FEATURES: in shell mode, the folder for the download's thread
++      // (~/Downloads by default; plutonium_downloads.h).
++      if (std::optional<base::FilePath> folder =
++              PlutoniumDownloads::FolderFor(download_)) {
++        target_directory = *folder;
++        create_target_directory_ = true;
++      }
++#endif
+     }
+     should_notify_extensions_ = true;
+     virtual_path_ = target_directory.Append(generated_filename);
+diff --git a/chrome/browser/plutonium_downloads.cc b/chrome/browser/plutonium_downloads.cc
+new file mode 100644
+index 0000000000..153c9a1cdf
+--- /dev/null
++++ b/chrome/browser/plutonium_downloads.cc
+@@ -0,0 +1,431 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_downloads.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "base/environment.h"
++#include "base/functional/bind.h"
++#include "base/i18n/file_util_icu.h"
++#include "base/location.h"
++#include "base/logging.h"
++#include "base/nix/xdg_util.h"
++#include "base/strings/string_util.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/plutonium_groups.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/download/public/common/download_danger_type.h"
++#include "components/download/public/common/download_interrupt_reasons.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/download_item_utils.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++
++namespace {
++
++// The thread a tab belongs to: its origin tag, or for a link a shell opened
++// (untagged until the shell picks a thread) the first tag it was given.
++std::string ThreadOf(const PlutoniumTabs::TabInfo& tab) {
++  if (!tab.tag.empty() || tab.tags.empty()) {
++    return tab.tag;
++  }
++  return tab.tags.front();
++}
++
++base::FilePath HomeFolder() {
++  std::optional<std::string> home = base::Environment::Create()->GetVar("HOME");
++  return base::FilePath(home && !home->empty() ? *home : "/");
++}
++
++bool IsFolderSetting(const std::string& folder) {
++  return folder == "downloads" || folder == "thread" ||
++         base::StartsWith(folder, "/") || base::StartsWith(folder, "~/");
++}
++
++}  // namespace
++
++PlutoniumDownloads::Record::Record() = default;
++PlutoniumDownloads::Record::Record(Record&&) = default;
++PlutoniumDownloads::Record& PlutoniumDownloads::Record::operator=(Record&&) =
++    default;
++PlutoniumDownloads::Record::~Record() = default;
++
++// static
++PlutoniumDownloads* PlutoniumDownloads::Get() {
++  static base::NoDestructor<PlutoniumDownloads> instance;
++  return instance.get();
++}
++
++PlutoniumDownloads::PlutoniumDownloads() {
++  // ~/.config/user-dirs.dirs may name another folder; reading it blocks.
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++      base::BindOnce(
++          [] { return base::nix::GetXDGUserDirectory("DOWNLOAD", "Downloads"); }),
++      // Never destroyed (NoDestructor).
++      base::BindOnce(&PlutoniumDownloads::OnDefaultFolder,
++                     base::Unretained(this)));
++}
++
++PlutoniumDownloads::~PlutoniumDownloads() = default;
++
++// static
++std::optional<base::FilePath> PlutoniumDownloads::FolderFor(
++    download::DownloadItem* item) {
++  if (!plutonium_shell::IsShellMode()) {
++    return std::nullopt;
++  }
++  PlutoniumDownloads* self = Get();
++  std::string thread;
++  if (int32_t id = self->IdOf(item)) {
++    thread = self->records_[id].thread;
++  } else if (content::WebContents* contents =
++                 content::DownloadItemUtils::GetWebContents(item)) {
++    if (std::optional<PlutoniumTabs::TabInfo> tab =
++            PlutoniumTabs::Get()->GetTabFor(contents)) {
++      thread = ThreadOf(*tab);
++    }
++  }
++  base::FilePath folder = self->ResolveFolder(thread);
++  VLOG(1) << "EXO-TAB-FEATURES download from thread \"" << thread
++          << "\" goes to " << folder;
++  return folder;
++}
++
++void PlutoniumDownloads::SetOpener(Opener opener) {
++  opener_ = std::move(opener);
++}
++
++void PlutoniumDownloads::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void PlutoniumDownloads::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void PlutoniumDownloads::ObserveContext(content::BrowserContext* context) {
++  content::DownloadManager* manager =
++      context ? context->GetDownloadManager() : nullptr;
++  if (!manager || manager_observations_.IsObservingSource(manager)) {
++    return;
++  }
++  manager_observations_.AddObservation(manager);
++}
++
++std::vector<base::DictValue> PlutoniumDownloads::GetDownloads() const {
++  std::vector<base::DictValue> downloads;
++  for (const auto& [id, record] : records_) {
++    downloads.push_back(record.last.Clone());
++  }
++  return downloads;
++}
++
++void PlutoniumDownloads::RunCommand(int32_t id,
++                                    const std::string& command,
++                                    bool from_agent,
++                                    CommandCallback done) {
++  auto it = records_.find(id);
++  if (it == records_.end()) {
++    std::move(done).Run(false, "No such download");
++    return;
++  }
++  download::DownloadItem* item = it->second.item;
++  const bool in_progress =
++      item->GetState() == download::DownloadItem::IN_PROGRESS;
++  const bool dangerous =
++      in_progress && (item->IsDangerous() || item->IsInsecure());
++  VLOG(1) << "EXO-TAB-FEATURES download #" << id << ": " << command;
++  if (command == "pause") {
++    if (!in_progress) {
++      std::move(done).Run(false, "It isn't downloading");
++      return;
++    }
++    item->Pause();
++  } else if (command == "resume") {
++    if (!item->CanResume()) {
++      std::move(done).Run(false, "It can't be resumed");
++      return;
++    }
++    item->Resume(/*user_resume=*/true);
++  } else if (command == "cancel") {
++    if (item->IsDone()) {
++      std::move(done).Run(false, "It is over");
++      return;
++    }
++    item->Cancel(/*user_cancel=*/true);
++  } else if (command == "keep") {
++    if (from_agent) {
++      std::move(done).Run(false, "Only the user can keep a dangerous file");
++      return;
++    }
++    if (!dangerous) {
++      std::move(done).Run(false, "It isn't waiting to be kept");
++      return;
++    }
++    if (item->IsDangerous()) {
++      item->ValidateDangerousDownload();
++    } else {
++      item->ValidateInsecureDownload();
++    }
++  } else if (command == "discard") {
++    if (!dangerous) {
++      std::move(done).Run(false, "It isn't waiting to be kept");
++      return;
++    }
++    // Deletes the file and the entry (OnDownloadRemoved()).
++    item->Remove();
++  } else if (command == "remove") {
++    // In progress, it is cancelled first. A finished file stays.
++    item->Remove();
++  } else if (command == "open" || command == "show") {
++    const bool show = command == "show";
++    const base::FilePath path = item->GetTargetFilePath();
++    if (!show && item->GetState() != download::DownloadItem::COMPLETE) {
++      std::move(done).Run(false, "It hasn't finished");
++      return;
++    }
++    if (path.empty()) {
++      std::move(done).Run(false, "It has no file yet");
++      return;
++    }
++    if (!opener_) {
++      std::move(done).Run(false, "No helper to open files with");
++      return;
++    }
++    opener_.Run(path, it->second.thread, show, std::move(done));
++    return;
++  } else {
++    std::move(done).Run(false, "Unknown command: " + command);
++    return;
++  }
++  std::move(done).Run(true, std::string());
++}
++
++void PlutoniumDownloads::SetFolder(const std::string& shell_id,
++                                   const std::string& tag,
++                                   const std::string& folder) {
++  if (folder.empty()) {
++    auto shell = folders_.find(shell_id);
++    if (shell != folders_.end()) {
++      shell->second.erase(tag);
++      if (shell->second.empty()) {
++        folders_.erase(shell);
++      }
++    }
++    return;
++  }
++  if (!IsFolderSetting(folder)) {
++    LOG(WARNING) << "EXO-TAB-FEATURES: not a download folder: " << folder;
++    return;
++  }
++  VLOG(1) << "EXO-TAB-FEATURES shell \"" << shell_id << "\" downloads \""
++          << tag << "\" to " << folder;
++  folders_[shell_id][tag] = folder;
++}
++
++void PlutoniumDownloads::OnDownloadCreated(content::DownloadManager* manager,
++                                           download::DownloadItem* item) {
++  // Not earlier runs' downloads, nor ones nobody sees (DevTools', a
++  // background fetch's).
++  if (item->GetDownloadCreationType() ==
++          download::DownloadItem::TYPE_HISTORY_IMPORT ||
++      item->IsTransient() || ids_.contains(item)) {
++    return;
++  }
++  Record record;
++  record.item = item;
++  content::WebContents* contents =
++      content::DownloadItemUtils::GetWebContents(item);
++  std::optional<PlutoniumTabs::TabInfo> tab =
++      contents ? PlutoniumTabs::Get()->GetTabFor(contents) : std::nullopt;
++  if (tab) {
++    record.tab_id = tab->id;
++    record.thread = ThreadOf(*tab);
++  }
++  const int32_t id = next_id_++;
++  record.last = ToValue(id, record);
++  base::DictValue added = record.last.Clone();
++  ids_[item] = id;
++  records_.emplace(id, std::move(record));
++  item_observations_.AddObservation(item);
++  VLOG(1) << "EXO-TAB-FEATURES download #" << id << " from tab #"
++          << (tab ? tab->id : 0) << ": " << item->GetURL().spec();
++  for (Observer& observer : observers_) {
++    observer.OnDownloadAdded(added);
++  }
++  // A link opened in a new tab that turned out to be a download leaves an
++  // empty tab: close it, as Chrome does in its tab strip
++  // (DownloadUIController). Not an agent's: its automation holds the page.
++  if (tab && contents->GetController().IsInitialNavigation() &&
++      tab->opened_by != "agent" && tab->opened_by != "devtools") {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(
++                       [](int32_t tab_id) {
++                         if (PlutoniumTabs::Get()->GetTab(tab_id)) {
++                           PlutoniumTabs::Get()->RunCommand(
++                               tab_id, PlutoniumTabs::Command::kClose);
++                         }
++                       },
++                       tab->id));
++  }
++}
++
++void PlutoniumDownloads::ManagerGoingDown(content::DownloadManager* manager) {
++  // Its items are destroyed too (OnDownloadDestroyed()).
++  manager_observations_.RemoveObservation(manager);
++}
++
++void PlutoniumDownloads::OnDownloadUpdated(download::DownloadItem* item) {
++  const int32_t id = IdOf(item);
++  if (!id) {
++    return;
++  }
++  Record& record = records_[id];
++  base::DictValue value = ToValue(id, record);
++  if (value == record.last) {
++    return;
++  }
++  record.last = value.Clone();
++  for (Observer& observer : observers_) {
++    observer.OnDownloadChanged(value);
++  }
++}
++
++void PlutoniumDownloads::OnDownloadRemoved(download::DownloadItem* item) {
++  Forget(item);
++}
++
++void PlutoniumDownloads::OnDownloadDestroyed(download::DownloadItem* item) {
++  Forget(item);
++}
++
++base::DictValue PlutoniumDownloads::ToValue(int32_t id,
++                                            const Record& record) const {
++  const download::DownloadItem* item = record.item;
++  const char* state = "interrupted";
++  switch (item->GetState()) {
++    case download::DownloadItem::IN_PROGRESS:
++      state = item->IsPaused() ? "paused" : "in-progress";
++      break;
++    case download::DownloadItem::COMPLETE:
++      state = "complete";
++      break;
++    case download::DownloadItem::CANCELLED:
++      state = "cancelled";
++      break;
++    case download::DownloadItem::INTERRUPTED:
++    case download::DownloadItem::MAX_DOWNLOAD_STATE:
++      break;
++  }
++  base::DictValue value;
++  value.Set("id", id);
++  value.Set("tabId", record.tab_id);
++  value.Set("thread", record.thread);
++  value.Set("url", item->GetURL().possibly_invalid_spec());
++  value.Set("filename", item->GetFileNameToReportUser().AsUTF8Unsafe());
++  value.Set("path", item->GetTargetFilePath().AsUTF8Unsafe());
++  value.Set("mime", item->GetMimeType());
++  value.Set("receivedBytes", static_cast<double>(item->GetReceivedBytes()));
++  value.Set("totalBytes",
++            static_cast<double>(std::max<int64_t>(item->GetTotalBytes(), 0)));
++  value.Set("state", state);
++  value.Set("canResume", item->CanResume());
++  value.Set("startTime",
++            item->GetStartTime().InMillisecondsFSinceUnixEpochIgnoringNull());
++  if (item->GetState() == download::DownloadItem::IN_PROGRESS) {
++    if (item->IsDangerous()) {
++      value.Set("danger",
++                download::GetDownloadDangerTypeString(item->GetDangerType()));
++    } else if (item->IsInsecure()) {
++      value.Set("danger", "Insecure");
++    }
++  }
++  if (item->GetState() == download::DownloadItem::INTERRUPTED) {
++    value.Set("error",
++              download::DownloadInterruptReasonToString(item->GetLastReason()));
++  }
++  return value;
++}
++
++int32_t PlutoniumDownloads::IdOf(download::DownloadItem* item) const {
++  auto it = ids_.find(item);
++  return it == ids_.end() ? 0 : it->second;
++}
++
++void PlutoniumDownloads::Forget(download::DownloadItem* item) {
++  if (item_observations_.IsObservingSource(item)) {
++    item_observations_.RemoveObservation(item);
++  }
++  auto it = ids_.find(item);
++  if (it == ids_.end()) {
++    return;
++  }
++  const int32_t id = it->second;
++  ids_.erase(it);
++  records_.erase(id);
++  for (Observer& observer : observers_) {
++    observer.OnDownloadRemoved(id);
++  }
++}
++
++base::FilePath PlutoniumDownloads::ResolveFolder(
++    const std::string& thread) const {
++  const std::string* folder = nullptr;
++  std::optional<PlutoniumGroups::Group> group;
++  if (!thread.empty()) {
++    // The thread's own folder, from whichever shell set it.
++    for (const auto& [shell_id, folders] : folders_) {
++      auto it = folders.find(thread);
++      if (it != folders.end()) {
++        folder = &it->second;
++        break;
++      }
++    }
++    group = PlutoniumGroups::Get()->Find(thread);
++    // Else the default of the shell that owns the thread.
++    if (!folder && group) {
++      auto shell = folders_.find(group->shell_id);
++      if (shell != folders_.end()) {
++        auto it = shell->second.find(std::string());
++        if (it != shell->second.end()) {
++          folder = &it->second;
++        }
++      }
++    }
++  }
++  const base::FilePath downloads = DefaultFolder();
++  if (!folder || *folder == "downloads") {
++    return downloads;
++  }
++  if (*folder == "thread") {
++    if (thread.empty()) {
++      return downloads;
++    }
++    base::FilePath::StringType name =
++        group && !group->label.empty() ? group->label : thread;
++    base::i18n::ReplaceIllegalCharactersInPath(&name, '_');
++    name = std::string(base::TrimString(name, " .", base::TRIM_ALL));
++    return name.empty() ? downloads : downloads.Append(name);
++  }
++  if (base::StartsWith(*folder, "~/")) {
++    return HomeFolder().Append(folder->substr(2));
++  }
++  return base::FilePath(*folder);
++}
++
++base::FilePath PlutoniumDownloads::DefaultFolder() const {
++  return xdg_folder_.empty() ? HomeFolder().Append("Downloads") : xdg_folder_;
++}
++
++void PlutoniumDownloads::OnDefaultFolder(const base::FilePath& folder) {
++  // xdg-user-dirs falls back to the home folder itself; keep ~/Downloads.
++  if (!folder.empty() && folder != HomeFolder()) {
++    xdg_folder_ = folder;
++  }
++}
+diff --git a/chrome/browser/plutonium_downloads.h b/chrome/browser/plutonium_downloads.h
+new file mode 100644
+index 0000000000..65258468ee
+--- /dev/null
++++ b/chrome/browser/plutonium_downloads.h
+@@ -0,0 +1,166 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_DOWNLOADS_H_
++#define CHROME_BROWSER_PLUTONIUM_DOWNLOADS_H_
++
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "base/scoped_multi_source_observation.h"
++#include "base/values.h"
++#include "components/download/public/common/download_item.h"
++#include "content/public/browser/download_manager.h"
++
++namespace content {
++class BrowserContext;
++}
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Downloads"): the shells'
++// downloads. Chrome's download manager already saves what tabs download; its
++// UI (Ash notifications on ChromeOS) doesn't show in shell mode. This lists
++// the downloads for the shells (navigator.windowBroker's "downloadadded",
++// "downloadchanged" and "downloadremoved") and agents (the DevTools Plutonium
++// domain), with the thread each came from: the origin tag of the tab that
++// started it, kept even after the tab closes.
++//
++// Where files go (FolderFor()): ~/Downloads (the XDG download folder), unless
++// a shell set a folder for the thread, or a default for its own threads
++// (SetFolder()): "thread" (~/Downloads/<thread label>/) or a path, such as a
++// ".downloads" folder in the thread's working directory. An agent's tab
++// downloads where the user's tabs in its thread do.
++//
++// A tab whose first navigation became a download (a link opened in a new tab)
++// closes, as Chrome closes such a tab in its tab strip. Downloads from earlier
++// runs (Chrome's history) aren't listed.
++class PlutoniumDownloads : public content::DownloadManager::Observer,
++                           public download::DownloadItem::Observer {
++ public:
++  // Downloads as JSON objects (ToValue()): {id, tabId, thread, url,
++  // filename, path, mime, receivedBytes, totalBytes, state ("in-progress",
++  // "paused", "complete", "cancelled", "interrupted"), danger? (Chrome's
++  // danger type, while the file waits on "keep" or "discard"), error? (why
++  // it was interrupted), canResume, startTime (ms since the epoch)}.
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnDownloadAdded(const base::DictValue& download) {}
++    virtual void OnDownloadChanged(const base::DictValue& download) {}
++    virtual void OnDownloadRemoved(int32_t id) {}
++  };
++
++  // (ok, why not).
++  using CommandCallback =
++      base::OnceCallback<void(bool ok, const std::string& error)>;
++  // Opens a downloaded file (or, with |show|, its folder) in |thread| (its
++  // environment): the helper does, as the user. Set by Ash's main parts.
++  using Opener = base::RepeatingCallback<void(const base::FilePath& path,
++                                              const std::string& thread,
++                                              bool show,
++                                              CommandCallback done)>;
++
++  // Created on first use; lives until the browser exits.
++  static PlutoniumDownloads* Get();
++
++  PlutoniumDownloads(const PlutoniumDownloads&) = delete;
++  PlutoniumDownloads& operator=(const PlutoniumDownloads&) = delete;
++
++  // The folder |item| goes to (DownloadTargetDeterminer, for downloads that
++  // don't ask where), or nullopt outside shell mode (Chrome's own folder).
++  static std::optional<base::FilePath> FolderFor(download::DownloadItem* item);
++
++  void SetOpener(Opener opener);
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  // Lists |context|'s downloads from now on (once per context).
++  void ObserveContext(content::BrowserContext* context);
++
++  // Every download, oldest first.
++  std::vector<base::DictValue> GetDownloads() const;
++
++  // Runs |command| on download |id|: "pause", "resume", "cancel", "open",
++  // "show", "keep" (a dangerous file: keep it), "discard" (a dangerous file:
++  // delete it), or "remove" (from the list; the file stays). An agent
++  // (|from_agent|) may not "keep".
++  void RunCommand(int32_t id,
++                  const std::string& command,
++                  bool from_agent,
++                  CommandCallback done);
++
++  // Shell |shell_id|'s download folder for thread |tag|, or with an empty
++  // |tag| for every thread it owns (PlutoniumGroups) that has no folder of
++  // its own: "downloads" (~/Downloads), "thread" (~/Downloads/<label>/), an
++  // absolute path (a leading "~/" is the home folder), or "" to go back to
++  // the default.
++  void SetFolder(const std::string& shell_id,
++                 const std::string& tag,
++                 const std::string& folder);
++
++  // content::DownloadManager::Observer:
++  void OnDownloadCreated(content::DownloadManager* manager,
++                         download::DownloadItem* item) override;
++  void ManagerGoingDown(content::DownloadManager* manager) override;
++
++  // download::DownloadItem::Observer:
++  void OnDownloadUpdated(download::DownloadItem* item) override;
++  void OnDownloadRemoved(download::DownloadItem* item) override;
++  void OnDownloadDestroyed(download::DownloadItem* item) override;
++
++ private:
++  friend class base::NoDestructor<PlutoniumDownloads>;
++
++  struct Record {
++    Record();
++    Record(Record&&);
++    Record& operator=(Record&&);
++    ~Record();
++
++    raw_ptr<download::DownloadItem> item;
++    // The tab that started it (0 for the shell page or another page), and
++    // that tab's origin tag (its thread), or "".
++    int32_t tab_id = 0;
++    std::string thread;
++    // What observers last got.
++    base::DictValue last;
++  };
++
++  PlutoniumDownloads();
++  ~PlutoniumDownloads() override;
++
++  base::DictValue ToValue(int32_t id, const Record& record) const;
++  // |item|'s id here, or 0.
++  int32_t IdOf(download::DownloadItem* item) const;
++  void Forget(download::DownloadItem* item);
++  // The folder for a download from |thread| ("" for none).
++  base::FilePath ResolveFolder(const std::string& thread) const;
++  // ~/Downloads, or the XDG download folder once read.
++  base::FilePath DefaultFolder() const;
++  void OnDefaultFolder(const base::FilePath& folder);
++
++  int32_t next_id_ = 1;
++  std::map<int32_t, Record> records_;
++  std::map<download::DownloadItem*, int32_t> ids_;
++  // By shell id, then by tag ("" for the shell's default).
++  std::map<std::string, std::map<std::string, std::string>> folders_;
++  base::FilePath xdg_folder_;
++  Opener opener_;
++  base::ObserverList<Observer> observers_;
++  base::ScopedMultiSourceObservation<content::DownloadManager,
++                                     content::DownloadManager::Observer>
++      manager_observations_{this};
++  base::ScopedMultiSourceObservation<download::DownloadItem,
++                                     download::DownloadItem::Observer>
++      item_observations_{this};
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_DOWNLOADS_H_
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index 88e73fa6bf..ee75d162f9 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -13,6 +13,7 @@
+ 
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
++#include "base/json/json_writer.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
+ #include "base/scoped_observation.h"
+@@ -22,6 +23,7 @@
+ #include "chrome/browser/exo_embedder.h"
+ #include "chrome/browser/exo_window_broker.h"
+ #include "chrome/browser/plutonium_context_menu.h"
++#include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_permissions.h"
+@@ -155,6 +157,14 @@ std::vector<blink::mojom::ItemGroupPtr> CurrentGroups() {
+   return result;
+ }
+ 
++// EXO-TAB-FEATURES: a download (PlutoniumDownloads::Observer's JSON).
++blink::mojom::BrowserDownloadPtr ToMojo(const base::DictValue& download) {
++  auto result = blink::mojom::BrowserDownload::New();
++  result->id = download.FindInt("id").value_or(0);
++  base::JSONWriter::Write(download, &result->json);
++  return result;
++}
++
+ std::vector<blink::mojom::BrowserTabEntryPtr> CurrentTabs() {
+   std::vector<blink::mojom::BrowserTabEntryPtr> result;
+   for (const PlutoniumTabs::TabInfo& tab : PlutoniumTabs::Get()->GetTabs()) {
+@@ -225,7 +235,8 @@ class WindowBrokerImpl
+       public ExoWindowBroker::Observer,
+       public PlutoniumTabs::Observer,
+       public PlutoniumGroups::Observer,
+-      public PlutoniumShells::Observer {
++      public PlutoniumShells::Observer,
++      public PlutoniumDownloads::Observer {
+  public:
+   WindowBrokerImpl(content::RenderFrameHost& render_frame_host,
+                    mojo::PendingReceiver<blink::mojom::WindowBroker> receiver)
+@@ -630,6 +641,73 @@ class WindowBrokerImpl
+                                            std::move(callback));
+   }
+ 
++  void AddDownloadObserver(
++      mojo::PendingAssociatedRemote<blink::mojom::BrowserDownloadObserver>
++          observer,
++      AddDownloadObserverCallback callback) override {
++    if (!StillShell()) {
++      std::move(callback).Run({});
++      return;
++    }
++    PlutoniumDownloads* downloads = PlutoniumDownloads::Get();
++    // Downloads from the shell page too, before it opened any tab.
++    downloads->ObserveContext(contents()->GetBrowserContext());
++    if (!downloads_observation_.IsObserving()) {
++      downloads_observation_.Observe(downloads);
++    }
++    download_observers_.Add(std::move(observer));
++    std::vector<blink::mojom::BrowserDownloadPtr> result;
++    for (const base::DictValue& download : downloads->GetDownloads()) {
++      result.push_back(ToMojo(download));
++    }
++    std::move(callback).Run(std::move(result));
++  }
++
++  void RunDownloadCommand(int32_t download_id,
++                          const std::string& command,
++                          RunDownloadCommandCallback callback) override {
++    if (!StillShell()) {
++      std::move(callback).Run(false, "Not the shell");
++      return;
++    }
++    PlutoniumDownloads::Get()->RunCommand(download_id, command,
++                                          /*from_agent=*/false,
++                                          std::move(callback));
++  }
++
++  void SetDownloadFolder(const std::string& tag,
++                         const std::string& folder) override {
++    if (StillShell()) {
++      PlutoniumDownloads::Get()->SetFolder(ShellId(), tag, folder);
++    }
++  }
++
++  // PlutoniumDownloads::Observer:
++  void OnDownloadAdded(const base::DictValue& download) override {
++    if (!StillShell()) {
++      return;
++    }
++    for (auto& observer : download_observers_) {
++      observer->OnDownloadAdded(ToMojo(download));
++    }
++  }
++  void OnDownloadChanged(const base::DictValue& download) override {
++    if (!StillShell()) {
++      return;
++    }
++    for (auto& observer : download_observers_) {
++      observer->OnDownloadChanged(ToMojo(download));
++    }
++  }
++  void OnDownloadRemoved(int32_t download_id) override {
++    if (!StillShell()) {
++      return;
++    }
++    for (auto& observer : download_observers_) {
++      observer->OnDownloadRemoved(download_id);
++    }
++  }
++
+   // PlutoniumShells::Observer:
+   void OnShellsDestroying() override { shells_observation_.Reset(); }
+   void OnShellsChanged() override {
+@@ -762,6 +840,11 @@ class WindowBrokerImpl
+   bool asked_ = false;
+   base::ScopedObservation<PlutoniumShells, PlutoniumShells::Observer>
+       shells_observation_{this};
++  // EXO-TAB-FEATURES: downloads.
++  mojo::AssociatedRemoteSet<blink::mojom::BrowserDownloadObserver>
++      download_observers_;
++  base::ScopedObservation<PlutoniumDownloads, PlutoniumDownloads::Observer>
++      downloads_observation_{this};
+ };
+ 
+ }  // namespace
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 17a2be34ff..7ee8621a5c 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -29,6 +29,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/plutonium_find.h"
+ #include "chrome/browser/plutonium_groups.h"
++#include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_permissions.h"
+ #include "chrome/browser/plutonium_shell.h"
+@@ -787,6 +788,8 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     PlutoniumFind::Attach(contents_);
+     // Permission prompts (plutonium_permissions.h).
+     plutonium_permissions::AttachHelpers(contents_);
++    // Downloads: the profile's manager saves them; this lists them.
++    PlutoniumDownloads::Get()->ObserveContext(contents_->GetBrowserContext());
+   }
+ 
+  private:
+diff --git a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+index 8b70c5e069..84032b354d 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+@@ -27,11 +27,13 @@
+ #include "base/check_deref.h"
+ #include "base/check_op.h"
+ #include "base/command_line.h"
++#include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/scoped_observation.h"
+ #include "base/strings/strcat.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/values.h"
+ #include "chrome/browser/ash/app_list/app_list_client_impl.h"
+ #include "chrome/browser/ash/app_restore/browser_restore_observer.h"
+ #include "chrome/browser/ash/app_restore/full_restore_service.h"
+@@ -61,7 +63,9 @@
+ #include "chrome/browser/chromeos/tablet_mode/tablet_mode_page_behavior.h"
+ #include "chrome/browser/enterprise/connectors/device_trust/attestation/ash/ash_attestation_cleanup_manager.h"
+ #include "chrome/browser/exo_parts.h"
++#include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_helper_client.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.h"
+ #include "chrome/browser/global_features.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -138,6 +142,26 @@
+ 
+ namespace {
+ ChromeBrowserMainExtraPartsAsh* g_instance = nullptr;
++
++// EXO-TAB-FEATURES: a download's "open" and "show" go to the helper, which
++// opens the file (or its folder) in the download's thread, as the user.
++void OpenDownloadWithHelper(const base::FilePath& path,
++                            const std::string& thread,
++                            bool show,
++                            PlutoniumDownloads::CommandCallback done) {
++  plutonium_helper::Post(
++      "/v1/downloads/open",
++      base::DictValue()
++          .Set("path", path.AsUTF8Unsafe())
++          .Set("thread", thread)
++          .Set("show", show),
++      base::BindOnce(
++          [](PlutoniumDownloads::CommandCallback done,
++             std::optional<base::Value> value, const std::string& error) {
++            std::move(done).Run(value.has_value(), error);
++          },
++          std::move(done)));
++}
+ }  // namespace
+ 
+ using GameMode = ash::ResourcedClient::GameMode;
+@@ -254,6 +278,10 @@ void ChromeBrowserMainExtraPartsAsh::PreProfileInit() {
+   // EXO-SHELLS: before the startup browser too (it adopts it).
+   if (plutonium_shell::IsShellMode()) {
+     plutonium_shells_ = std::make_unique<PlutoniumShellsImpl>();
++    if (plutonium_helper::IsAvailable()) {
++      PlutoniumDownloads::Get()->SetOpener(
++          base::BindRepeating(&OpenDownloadWithHelper));
++    }
+   }
+ 
+   // Early init so that later objects can rely on this one.
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 1275b27aed..955f0fb915 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -219,6 +219,24 @@ interface TabRequestObserver {
+   OnTabRequestEnded(int32 id);
+ };
+ 
++// EXO-TAB-FEATURES (chrome/browser/plutonium_downloads.h): a download from
++// a tab or the shell page, with the thread it came from.
++struct BrowserDownload {
++  // The browser's id for it, stable for the session.
++  int32 id;
++  // A JSON object: {id, tabId, thread, url, filename, path, mime,
++  // receivedBytes, totalBytes, state, danger?, error?, canResume, startTime}
++  // (docs/features/TAB_FEATURES.md, "Downloads").
++  string json;
++};
++
++interface BrowserDownloadObserver {
++  // Surfaced as "downloadadded", "downloadchanged" and "downloadremoved".
++  OnDownloadAdded(BrowserDownload download);
++  OnDownloadChanged(BrowserDownload download);
++  OnDownloadRemoved(int32 download_id);
++};
++
+ interface WindowBroker {
+   // The current windows.
+   GetWindows() => (array<NativeWindowEntry> windows);
+@@ -347,4 +365,20 @@ interface WindowBroker {
+   // |result_json| is the result as JSON, or why it failed.
+   RunPermissionCommand(string command, string args_json)
+       => (bool ok, string result_json);
++
++  // EXO-TAB-FEATURES: the downloads now, then every later change through
++  // |observer| (ordered with the reply, as AddObserver()).
++  AddDownloadObserver(
++      pending_associated_remote<BrowserDownloadObserver> observer)
++      => (array<BrowserDownload> downloads);
++  // Runs |command| on download |download_id|: "pause", "resume", "cancel",
++  // "open", "show" (its folder), "keep" or "discard" (a dangerous file),
++  // "remove" (from the list). |error| says why it failed.
++  RunDownloadCommand(int32 download_id, string command)
++      => (bool ok, string error);
++  // Where this shell's thread |tag| downloads to, or with an empty |tag|
++  // every thread this shell owns that has no folder of its own: "downloads"
++  // (~/Downloads, the default), "thread" (~/Downloads/<thread label>/), an
++  // absolute path ("~/" for the home folder), or "" for the default.
++  SetDownloadFolder(string tag, string folder);
+ };
+diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
+index e374e7e048..28dbc3bb8d 100644
+--- a/third_party/blink/renderer/bindings/generated_in_core.gni
++++ b/third_party/blink/renderer/bindings/generated_in_core.gni
+@@ -1110,6 +1110,8 @@ generated_interface_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_tab_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_tab_request_event.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_tab_request_event.h",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_download_event.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_download_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_fence.cc",
+diff --git a/third_party/blink/renderer/bindings/idl_in_core.gni b/third_party/blink/renderer/bindings/idl_in_core.gni
+index 41d01a61c0..99798b5c37 100644
+--- a/third_party/blink/renderer/bindings/idl_in_core.gni
++++ b/third_party/blink/renderer/bindings/idl_in_core.gni
+@@ -499,6 +499,7 @@ static_idl_files_in_core = [
+   "//third_party/blink/renderer/core/html/item_group.idl",
+   "//third_party/blink/renderer/core/html/shell_entry.idl",
+   "//third_party/blink/renderer/core/html/tab_request_event.idl",
++  "//third_party/blink/renderer/core/html/browser_download_event.idl",
+   "//third_party/blink/renderer/core/html/html_object_element.idl",
+   "//third_party/blink/renderer/core/html/html_olist_element.idl",
+   "//third_party/blink/renderer/core/html/html_or_svg_or_mathml_element.idl",
+diff --git a/third_party/blink/renderer/core/events/event_type_names.json5 b/third_party/blink/renderer/core/events/event_type_names.json5
+index 189aea5bb8..c1cd21b1a8 100644
+--- a/third_party/blink/renderer/core/events/event_type_names.json5
++++ b/third_party/blink/renderer/core/events/event_type_names.json5
+@@ -375,6 +375,9 @@
+     // EXO-TAB-FEATURES: navigator.windowBroker.
+     "tabrequest",
+     "tabrequestend",
++    "downloadadded",
++    "downloadchanged",
++    "downloadremoved",
+     // EXO-BROKER: navigator.windowBroker.
+     "grantrevoked",
+     "windowadded",
+diff --git a/third_party/blink/renderer/core/html/browser_download_event.cc b/third_party/blink/renderer/core/html/browser_download_event.cc
+new file mode 100644
+index 0000000000..5eb529db52
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/browser_download_event.cc
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/html/browser_download_event.h"
++
++#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
++#include "third_party/blink/renderer/core/event_interface_names.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++
++namespace blink {
++
++BrowserDownloadEvent::BrowserDownloadEvent(const AtomicString& type,
++                                           int32_t download_id,
++                                           const String& download_json)
++    : Event(type, Bubbles::kNo, Cancelable::kNo),
++      download_id_(download_id),
++      download_json_(download_json) {}
++
++ScriptValue BrowserDownloadEvent::download(ScriptState* script_state) const {
++  v8::Isolate* isolate = script_state->GetIsolate();
++  if (download_json_.empty()) {
++    return ScriptValue(isolate, v8::Null(isolate));
++  }
++  v8::Local<v8::Value> value = FromJSONString(script_state, download_json_);
++  if (value.IsEmpty()) {
++    return ScriptValue(isolate, v8::Null(isolate));
++  }
++  return ScriptValue(isolate, value);
++}
++
++const AtomicString& BrowserDownloadEvent::InterfaceName() const {
++  return event_interface_names::kBrowserDownloadEvent;
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/browser_download_event.h b/third_party/blink/renderer/core/html/browser_download_event.h
+new file mode 100644
+index 0000000000..3f9c990a96
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/browser_download_event.h
+@@ -0,0 +1,38 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_BROWSER_DOWNLOAD_EVENT_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_BROWSER_DOWNLOAD_EVENT_H_
++
++#include "third_party/blink/renderer/bindings/core/v8/script_value.h"
++#include "third_party/blink/renderer/core/dom/events/event.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++
++namespace blink {
++
++class ScriptState;
++
++// EXO-TAB-FEATURES: a download came, changed or went.
++class BrowserDownloadEvent final : public Event {
++  DEFINE_WRAPPERTYPEINFO();
++
++ public:
++  // |download_json| is empty for "downloadremoved".
++  BrowserDownloadEvent(const AtomicString& type,
++                       int32_t download_id,
++                       const String& download_json);
++
++  int32_t downloadId() const { return download_id_; }
++  ScriptValue download(ScriptState*) const;
++
++  const AtomicString& InterfaceName() const override;
++
++ private:
++  const int32_t download_id_;
++  const String download_json_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_BROWSER_DOWNLOAD_EVENT_H_
+diff --git a/third_party/blink/renderer/core/html/browser_download_event.idl b/third_party/blink/renderer/core/html/browser_download_event.idl
+new file mode 100644
+index 0000000000..e52ca130a0
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/browser_download_event.idl
+@@ -0,0 +1,17 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// EXO-TAB-FEATURES: navigator.windowBroker's "downloadadded",
++// "downloadchanged" and "downloadremoved" (chrome/browser/plutonium_downloads.h).
++[
++    Exposed=Window,
++    RuntimeEnabled=PlutoniumShell,
++    SecureContext
++] interface BrowserDownloadEvent : Event {
++    readonly attribute long downloadId;
++    // The download, a fresh object on every read: {id, tabId, thread, url,
++    // filename, path, mime, receivedBytes, totalBytes, state, danger?,
++    // error?, canResume, startTime} (null for "downloadremoved").
++    [CallWith=ScriptState] readonly attribute any download;
++};
+diff --git a/third_party/blink/renderer/core/html/build.gni b/third_party/blink/renderer/core/html/build.gni
+index a32a052453..f25caa659b 100644
+--- a/third_party/blink/renderer/core/html/build.gni
++++ b/third_party/blink/renderer/core/html/build.gni
+@@ -408,6 +408,8 @@ blink_core_sources_html = [
+   "context_menu_request_event.h",
+   "tab_request_event.cc",
+   "tab_request_event.h",
++  "browser_download_event.cc",
++  "browser_download_event.h",
+   "html_no_embed_element.cc",
+   "html_no_embed_element.h",
+   "html_no_script_element.cc",
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 9d870273ab..8c9499ccc2 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -20,6 +20,7 @@
+ #include "third_party/blink/renderer/core/fileapi/blob.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/html/browser_download_event.h"
+ #include "third_party/blink/renderer/core/html/browser_tab_event.h"
+ #include "third_party/blink/renderer/core/html/context_menu_request_event.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+@@ -39,6 +40,12 @@ bool IsWindowEvent(const AtomicString& event_type) {
+          event_type == event_type_names::kGrantrevoked;
+ }
+ 
++bool IsDownloadEvent(const AtomicString& event_type) {
++  return event_type == event_type_names::kDownloadadded ||
++         event_type == event_type_names::kDownloadchanged ||
++         event_type == event_type_names::kDownloadremoved;
++}
++
+ bool IsTabEvent(const AtomicString& event_type) {
+   return event_type == event_type_names::kTabadded ||
+          event_type == event_type_names::kTabchanged ||
+@@ -114,7 +121,8 @@ NativeWindowBroker::NativeWindowBroker(ExecutionContext* context)
+       group_observer_receiver_(this, context),
+       shell_observer_receiver_(this, context),
+       context_menu_observer_receiver_(this, context),
+-      tab_request_observer_receiver_(this, context) {}
++      tab_request_observer_receiver_(this, context),
++      download_observer_receiver_(this, context) {}
+ 
+ bool NativeWindowBroker::BindRemote() {
+   ExecutionContext* context = GetExecutionContext();
+@@ -164,6 +172,9 @@ void NativeWindowBroker::AddedEventListener(
+       event_type == event_type_names::kTabrequestend) {
+     SubscribeTabRequests();
+   }
++  if (IsDownloadEvent(event_type)) {
++    SubscribeDownloads();
++  }
+ }
+ 
+ void NativeWindowBroker::RemovedEventListener(
+@@ -207,6 +218,12 @@ void NativeWindowBroker::RemovedEventListener(
+     tab_request_observer_receiver_.reset();
+     taken_tab_requests_.clear();
+   }
++  if (IsDownloadEvent(event_type) &&
++      !HasAnyEventListeners({event_type_names::kDownloadadded,
++                             event_type_names::kDownloadchanged,
++                             event_type_names::kDownloadremoved})) {
++    download_observer_receiver_.reset();
++  }
+ }
+ 
+ void NativeWindowBroker::SubscribeContextMenus() {
+@@ -330,6 +347,91 @@ ScriptPromise<IDLBoolean> NativeWindowBroker::answerTabRequest(
+   return promise;
+ }
+ 
++void NativeWindowBroker::SubscribeDownloads() {
++  if (download_observer_receiver_.is_bound() || !BindRemote()) {
++    return;
++  }
++  remote_->AddDownloadObserver(
++      download_observer_receiver_.BindNewEndpointAndPassRemote(
++          GetExecutionContext()->GetTaskRunner(TaskType::kInternalDefault)),
++      BindOnce(&NativeWindowBroker::OnDownloadSnapshot,
++               WrapWeakPersistent(this), ++download_subscription_));
++}
++
++void NativeWindowBroker::OnDownloadSnapshot(
++    int subscription,
++    Vector<mojom::blink::BrowserDownloadPtr> downloads) {
++  for (auto& download : downloads) {
++    if (subscription != download_subscription_ ||
++        !download_observer_receiver_.is_bound()) {
++      return;
++    }
++    OnDownloadAdded(std::move(download));
++  }
++}
++
++void NativeWindowBroker::OnDownloadAdded(
++    mojom::blink::BrowserDownloadPtr download) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<BrowserDownloadEvent>(
++      event_type_names::kDownloadadded, download->id, download->json));
++}
++
++void NativeWindowBroker::OnDownloadChanged(
++    mojom::blink::BrowserDownloadPtr download) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<BrowserDownloadEvent>(
++      event_type_names::kDownloadchanged, download->id, download->json));
++}
++
++void NativeWindowBroker::OnDownloadRemoved(int32_t download_id) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<BrowserDownloadEvent>(
++      event_type_names::kDownloadremoved, download_id, String()));
++}
++
++ScriptPromise<IDLUndefined> NativeWindowBroker::downloadCommand(
++    ScriptState* script_state,
++    int32_t download_id,
++    const String& command) {
++  auto* resolver =
++      MakeGarbageCollected<ScriptPromiseResolver<IDLUndefined>>(script_state);
++  auto promise = resolver->Promise();
++  if (!EnsureBound(resolver)) {
++    return promise;
++  }
++  remote_->RunDownloadCommand(
++      download_id, command,
++      BindOnce(
++          [](NativeWindowBroker* self,
++             ScriptPromiseResolver<IDLUndefined>* resolver, bool ok,
++             const String& error) {
++            self->pending_.erase(resolver);
++            if (!ok) {
++              resolver->RejectWithDOMException(
++                  DOMExceptionCode::kOperationError, error);
++              return;
++            }
++            resolver->Resolve();
++          },
++          WrapPersistent(this), WrapPersistent(resolver)));
++  return promise;
++}
++
++void NativeWindowBroker::setDownloadFolder(const String& tag,
++                                           const String& folder) {
++  if (!BindRemote()) {
++    return;
++  }
++  remote_->SetDownloadFolder(tag, folder);
++}
++
+ void NativeWindowBroker::SubscribeShells() {
+   if (shell_observer_receiver_.is_bound() || !BindRemote()) {
+     return;
+@@ -505,6 +607,7 @@ void NativeWindowBroker::OnDisconnected() {
+   context_menu_observer_receiver_.reset();
+   tab_request_observer_receiver_.reset();
+   taken_tab_requests_.clear();
++  download_observer_receiver_.reset();
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending;
+   pending.swap(pending_);
+   for (ScriptPromiseResolverBase* resolver : pending) {
+@@ -955,6 +1058,7 @@ void NativeWindowBroker::Trace(Visitor* visitor) const {
+   visitor->Trace(shell_observer_receiver_);
+   visitor->Trace(context_menu_observer_receiver_);
+   visitor->Trace(tab_request_observer_receiver_);
++  visitor->Trace(download_observer_receiver_);
+   visitor->Trace(pending_);
+   EventTarget::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index 46e347f904..63858c17bb 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -53,7 +53,8 @@ class CORE_EXPORT NativeWindowBroker final
+       public mojom::blink::GroupObserver,
+       public mojom::blink::ShellObserver,
+       public mojom::blink::ContextMenuObserver,
+-      public mojom::blink::TabRequestObserver {
++      public mojom::blink::TabRequestObserver,
++      public mojom::blink::BrowserDownloadObserver {
+   DEFINE_WRAPPERTYPEINFO();
+ 
+  public:
+@@ -117,6 +118,10 @@ class CORE_EXPORT NativeWindowBroker final
+   ScriptPromise<IDLString> permissionCommand(ScriptState*,
+                                              const String& command,
+                                              const String& args_json);
++  ScriptPromise<IDLUndefined> downloadCommand(ScriptState*,
++                                              int32_t download_id,
++                                              const String& command);
++  void setDownloadFolder(const String& tag, const String& folder);
+ 
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(contextmenurequest, kContextmenurequest)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(grantrevoked, kGrantrevoked)
+@@ -132,6 +137,9 @@ class CORE_EXPORT NativeWindowBroker final
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(tabremoved, kTabremoved)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(tabrequest, kTabrequest)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(tabrequestend, kTabrequestend)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadadded, kDownloadadded)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadchanged, kDownloadchanged)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadremoved, kDownloadremoved)
+ 
+   // EventTarget:
+   const AtomicString& InterfaceName() const override {
+@@ -172,6 +180,11 @@ class CORE_EXPORT NativeWindowBroker final
+                     OnTabRequestCallback callback) override;
+   void OnTabRequestEnded(int32_t request_id) override;
+ 
++  // mojom::blink::BrowserDownloadObserver:
++  void OnDownloadAdded(mojom::blink::BrowserDownloadPtr download) override;
++  void OnDownloadChanged(mojom::blink::BrowserDownloadPtr download) override;
++  void OnDownloadRemoved(int32_t download_id) override;
++
+   void Trace(Visitor*) const override;
+ 
+  protected:
+@@ -196,6 +209,9 @@ class CORE_EXPORT NativeWindowBroker final
+   void SubscribeShells();
+   void SubscribeContextMenus();
+   void SubscribeTabRequests();
++  void SubscribeDownloads();
++  void OnDownloadSnapshot(int subscription,
++                          Vector<mojom::blink::BrowserDownloadPtr> downloads);
+   ScriptPromise<IDLUndefined> UpdateTags(ScriptState*,
+                                          bool tab,
+                                          int32_t id,
+@@ -223,11 +239,15 @@ class CORE_EXPORT NativeWindowBroker final
+   // EXO-TAB-FEATURES: the requests this document took and hasn't answered:
+   // their tab and kind, for "tabrequestend".
+   HashMap<int32_t, std::pair<int32_t, String>> taken_tab_requests_;
++  HeapMojoAssociatedReceiver<mojom::blink::BrowserDownloadObserver,
++                             NativeWindowBroker>
++      download_observer_receiver_;
+   bool disconnected_ = false;
+   // Counts subscriptions, so a snapshot that arrives after its subscription
+   // ended (the page stopped and started listening again) is dropped.
+   int window_subscription_ = 0;
+   int tab_subscription_ = 0;
++  int download_subscription_ = 0;
+   // Calls in flight, rejected if the pipe closes.
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending_;
+ };
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index b121f285b6..338b0cd5b7 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -146,6 +146,24 @@
+     [CallWith=ScriptState] Promise<DOMString> permissionCommand(
+         DOMString command, optional DOMString argsJson = "");
+ 
++    // EXO-TAB-FEATURES: downloads (BrowserDownloadEvent), from tabs and this
++    // page, with the thread each came from. Adding the first listener for
++    // any of these subscribes; the current downloads then arrive as
++    // "downloadadded" events.
++    attribute EventHandler ondownloadadded;
++    attribute EventHandler ondownloadchanged;
++    attribute EventHandler ondownloadremoved;
++    // Runs |command| on download |downloadId|: "pause", "resume", "cancel",
++    // "open", "show" (its folder), "keep" or "discard" (a dangerous file),
++    // "remove" (from the list). Rejects (OperationError) if it can't.
++    [CallWith=ScriptState] Promise<undefined> downloadCommand(
++        long downloadId, DOMString command);
++    // Where this shell's thread |tag| downloads to, or with tag "" every
++    // thread this shell owns that has no folder of its own: "downloads"
++    // (~/Downloads, the default), "thread" (~/Downloads/<thread label>/), an
++    // absolute path ("~/" for the home folder), or "" for the default.
++    undefined setDownloadFolder(DOMString tag, DOMString folder);
++
+     // BrowserTabEvents. Adding the first listener for any of these
+     // subscribes; the current tabs then arrive as "tabadded" events.
+     attribute EventHandler ontabadded;

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 09:51:03 +1300
-Subject: [PATCH 10/39] Plutonium: parked windows don't occlude the page
+Subject: [PATCH 10/40] Plutonium: parked windows don't occlude the page
 
 A window parked for embedding is invisible (opacity 0), but opaque regions
 for occlusion count regardless of opacity. A hidden fullscreen opaque

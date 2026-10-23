@@ -307,13 +307,19 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `permissionCommand`). Still to do: T3 Code calling it when it archives or
   deletes a thread, and `grantPermissions` from the frontend server's tabs
   (`serverTabs.ts`).
-- [ ] **Downloads in threads.** M · A download observer that records the
+- [x] **Downloads in threads.** M · A download observer that records the
   tab's thread, `download*` events to every shell, `downloadCommand`, open
   and show through the helper in the thread's environment, closing the empty
   tab a download leaves. Files go to `~/Downloads` by default, with options
   for a `.downloads` in the thread's working directory or
   `~/Downloads/<thread>/`.
-  `list_downloads` for agents; Playwright's download events in the relay.
+  `list_downloads` for agents. (Done 2026-10-23, patch "downloads for the
+  shells' tabs"; `TAB_FEATURES.md`, "Downloads".)
+- [ ] **Playwright's download events in the relays.** S–M · Pass
+  `Browser.downloadWillBegin` and `downloadProgress` for a relayed tab's
+  downloads (from `Plutonium.downloadAdded/Changed`), and link the finished
+  file where `setDownloadBehavior` asked for it (`<downloadPath>/<guid>`), so
+  `waitForEvent("download")` and `download.path()` work.
 - [x] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
   `stopFind`, `findresult`, and the library's find bar.
 - [ ] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,

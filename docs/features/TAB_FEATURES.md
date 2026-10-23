@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: the common plumbing ("As built: adding a feature"), zoom, find in page, and permission prompts with per-thread grants are built; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing ("As built: adding a feature"), zoom, find in page, permission prompts with per-thread grants, and downloads are built; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -251,43 +251,63 @@ The answer is a host path, but Ash in the container doesn't see the user's home.
 
 ## Downloads
 
-**Helpers.**
-- The download manager is the profile's (`ChromeDownloadManagerDelegate`, `chrome/browser/download/chrome_download_manager_delegate.h`), so downloads from tabs already happen. They land in the profile's download folder, and nothing shows them.
-- On ChromeOS the download UI is `DownloadNotificationManager` (`chrome/browser/download/notification/download_notification_manager.h`, chosen in `download_ui_controller.cc`). It shows Ash notifications, and shell mode has none.
-- `CanDownload()` in the delegate goes to `DownloadRequestLimiter` (see Permissions).
-- A link opened in a new tab that turns out to be a download leaves an empty tab. `DownloadUIController` closes such a tab only when it is in a `Browser`'s tab strip. The registry should close it itself when the tab's first navigation becomes a download.
+**Status: built** (2026-10-23), patch "Plutonium: downloads for the shells' tabs", with the library, helper and plain shell parts in this repo. Tested on X11 in a container session (below).
 
-**Hook.**
-- A `content::DownloadManager::Observer` and `download::DownloadItem::Observer` in the browser (`plutonium_downloads.{h,cc}`).
-- At `OnDownloadCreated` it reads the tab from `content::DownloadItemUtils::GetWebContents()` and keeps its thread (the origin tag). The tab may be closed later.
-- `ChromeDownloadManagerDelegate::OpenDownload()` and `ShowDownloadInShell()` call `platform_util`, which opens the Files app on ChromeOS. For Plutonium they go to the helper instead.
-- A dangerous file's confirmation (`RequestConfirmation`) becomes a state of the download (below). Safe Browsing has no Google API keys here, so only Chrome's local file-type checks apply.
+**Helpers.**
+- The download manager is the profile's (`ChromeDownloadManagerDelegate`), so tabs' downloads already happened. Its UI on ChromeOS is `DownloadNotificationManager` (Ash notifications), which shell mode doesn't show. Nothing is attached to the tab: `Tab::AttachHelpers()` only makes `PlutoniumDownloads` observe the tab's profile.
+- `CanDownload()` (`DownloadRequestLimiter`) is the permission prompts' business. Until they're built, a page's second automatic download is blocked, as Chrome blocks it while its "download several files" question is unanswered. A new navigation resets it.
+
+**As built.**
+- `PlutoniumDownloads` (`chrome/browser/plutonium_downloads.{h,cc}`) is a `DownloadManager::Observer` and `DownloadItem::Observer`. At `OnDownloadCreated` it reads the tab from `DownloadItemUtils::GetWebContents()` and keeps the tab's id and its thread (the origin tag; for an untagged link a shell opened, its first tag). Both stay after the tab closes. It lists only this session's downloads: Chrome's history (earlier runs) isn't listed, nor transient ones.
+- **The empty tab.** When the tab's first navigation became the download (`IsInitialNavigation()`, Chrome's own test in `DownloadUIController`), the tab closes. Not an agent's tab (its automation holds the page) or DevTools'.
+- **Where files go.** `DownloadTargetDeterminer::DoGenerateTargetPath()` asks `PlutoniumDownloads::FolderFor()` in shell mode, for downloads that don't prompt (Save As keeps Chrome's prompt, which goes to the file picker). The folder is created if needed. If it can't be written, `DownloadPathReservationTracker` falls back to Chrome's own folder and prompts (from the code; not tried).
+- **Dangerous files** wait as Chrome's do: the download stays in progress with `danger` set (Chrome's danger type name) until `keep` (`ValidateDangerousDownload`, or `ValidateInsecureDownload` for an insecure one) or `discard` (`Remove`). Only Chrome's local file-type checks apply (no Safe Browsing keys).
+- **Open and show** go to the helper (`POST /v1/downloads/open {path, thread, show}` on its socket, through `plutonium_helper`, set up in `ChromeBrowserMainExtraPartsAsh`). It runs `xdg-open` on the file, or for show on its folder, with the thread's environment, so the app opens in the thread and links in it come back as the thread's tabs. Not `FileManager1.ShowItems`: D-Bus would start the file manager outside the session's display and outside the thread. Chrome's own `OpenDownload()` (auto-open of a file type) isn't routed: shell mode doesn't offer it.
 
 **Shell.**
-- `downloadadded`, `downloadchanged` and `downloadremoved`, sent to every shell. Subscribing replays the current ones, as tabs do. Each carries `{id, tabId, thread, url, filename, path, mime, receivedBytes, totalBytes, state: "in-progress" | "paused" | "complete" | "cancelled" | "interrupted", danger?}`.
-- `shell.downloads({ thread? })`.
-- `downloadCommand(id, "pause" | "resume" | "cancel" | "open" | "show" | "keep" | "discard" | "remove")`:
-  - `open` and `show` go to the helper, which opens the file in the download's thread: its `xdg-open`, with the thread's environment (`OPENING_LINKS.md`). Show uses `org.freedesktop.FileManager1.ShowItems`.
-  - `keep` and `discard` answer a dangerous file's confirmation.
-- Save As (Chrome's "ask where to save" setting, or "Save link as") opens the file picker in `save` mode.
+- `navigator.windowBroker`: `downloadadded`, `downloadchanged`, `downloadremoved` (`BrowserDownloadEvent {downloadId, download}`), to every shell; listening replays the current ones as `downloadadded`. A download is `{id, tabId, thread, url, filename, path, mime, receivedBytes, totalBytes, state: "in-progress" | "paused" | "complete" | "cancelled" | "interrupted", danger?, error?, canResume, startTime}`.
+- `downloadCommand(id, "pause" | "resume" | "cancel" | "open" | "show" | "keep" | "discard" | "remove")` rejects with the reason it can't. `remove` takes it off the list; the file stays.
+- `setDownloadFolder(tag, folder)`, below.
+- The library: `shell.downloads({thread?})`, `shell.downloadCommand(id, command)`, `shell.setDownloadFolder(thread, folder)`, `shell.showDownloads({thread?, anchor?})` (the list), and the same three events on the shell with `{download, previous}`.
 
 ### Downloads in a thread
 
-Every download records its thread, so a shell can list a thread's downloads with the thread (T3's sidebar, the plain shell's thread view). The file goes to `~/Downloads` by default; the per-thread folders are options (decided):
+Every download records its thread, so a shell can list a thread's downloads with the thread. The file goes to `~/Downloads` (the XDG download folder) by default; the per-thread folders are options (decided, Decision 6):
 
-- **One folder for everything** (`~/Downloads`, the user's choice), with the thread kept only as metadata. This is what users expect from a browser.
-- **A folder per thread** (`~/Downloads/<thread label>/`), or a T3 thread's project folder. This keeps a thread's files together, and an agent can find them.
+- `setDownloadFolder(tag, folder)` sets thread `tag`'s folder, or with tag `""` the default for every thread this shell owns (its groups) that has no folder of its own. `folder` is `"downloads"` (`~/Downloads`), `"thread"` (`~/Downloads/<thread label>/`, the group's label, or the tag, with `/` and other unsafe characters replaced), an absolute path (`~/` is the home folder), or `""` to clear it.
+- A thread's own folder wins, from whichever shell set it. Then its owning shell's default. A download with no thread, or from a thread no shell owns, goes to `~/Downloads`.
+- The settings live in the browser until it restarts. A shell sets them on connecting: `connect({downloadFolder: "thread"})` sets this shell's default. T3 can give a thread `<project>/.downloads` with `setDownloadFolder(thread, …)`.
+- Agents' tabs carry the thread's tag, so their downloads follow the same setting.
 
-Either way, in a container session Chrome writes inside the profile under `$DATA_DIR`, which the host can see. When the download completes, the helper moves the file to its folder (normally on the same filesystem, so it's a rename). The alternative is mounting the folder into the container (see "Paths in the container" above).
+The doc's earlier plan had the helper move each file into place after it completed. With Decision 5 (container sessions see the home at the same path), Chrome writes it there directly, and its paths stay true.
 
-**Fallback.** The library shows its own download list and a toast when a download starts and finishes. With `downloads: false` and no library, files land silently, as today.
+**Fallback.** The library shows a toast over the tab when a download starts and when it finishes or fails, at the top of the page if the tab closed (the empty-tab case). Clicking the toast opens the list. A dangerous file opens the list. The list (`.plutonium-dialog.plutonium-downloads`, a light-dismiss popover) shows progress and each download's actions. `connect({downloads: false})` turns the toasts off. A function `(download, type) => boolean` returns true for what it shows itself. The plain shell has a Downloads button for the current thread's. With no library, files land silently, as before.
 
 **Agents.**
-- `list_downloads` shows the thread's downloads with their paths.
-- `download_action` takes the same commands, except `keep` on a dangerous file, which is the user's decision.
-- Playwright's download events need `Browser.setDownloadBehavior` with events, and the helper's relays only acknowledge it today. The relay could pass on `Browser.downloadWillBegin` and `downloadProgress` for its own tab's frames, so `waitForEvent("download")` works.
+- `list_downloads`: the thread's downloads (its own, and those of tabs now in the thread) with their paths (`GET /v1/threads/<t>/downloads`).
+- `download_action {download_id, action}`: pause, resume, cancel, open, show, discard, remove (`POST /v1/threads/<t>/downloads/<id>/<action>`). Open and show are the helper's own. Not `keep`: a dangerous file is the user's decision. The browser refuses it from `Plutonium.downloadCommand` too (not tried: the helper refuses it first).
+- The Plutonium domain has `getDownloads`, `downloadCommand` and `downloadAdded`, `downloadChanged`, `downloadRemoved` (JSON strings, as above).
+- Not built: Playwright's download events (`Browser.downloadWillBegin`, `downloadProgress`) in the relays. It's a `BACKLOG.md` item of its own.
 
-**Size.** M: M in Chromium (the observer, the thread, the delegate overrides, the empty-tab close), S in the helper (moving, opening, showing), S for the library's list.
+**Verified** (X11, container session, slot 24):
+
+| | |
+|---|---|
+| A link download in a thread's tab: `downloadadded`, then `downloadchanged` up to `complete`, with `tabId`, `thread` and `path` | ✓ |
+| Default folder: `~/Downloads/report.txt`, the next one `report (1).txt` | ✓ |
+| A `target=_blank` link that is a download: the new tab closes, and the download keeps that tab's id and the opener's thread | ✓ |
+| Thread folder `"thread"` without a group: `~/Downloads/plain_thread_dltest/`; with a path: `~/proj/.downloads/` | ✓ |
+| The shell's default `"thread"`: a thread it owns goes to `~/Downloads/Thread 1/`, a thread it doesn't own to `~/Downloads` | ✓ |
+| pause, resume, cancel and remove on a slow download; `open` before it finished and `keep` on a safe file are refused with the reason | ✓ |
+| `open` and `show` through the helper: `xdg-open` in the thread (the file opened in a terminal editor window tagged with the thread) | ✓ |
+| Agents: `list_downloads` only lists the thread's downloads; another thread's id is "no download"; `remove` works; `keep` is refused | ✓ |
+| An agent's tab (`open_tab` on a download URL) downloads into the thread's folder and stays open | ✓ |
+| The library's list and toast | ✓ |
+| A dangerous file's keep and discard | not tried (no file type here that Chrome's local checks flag on a user gesture) |
+
+**Container paths.** In a container session the container's `$HOME` is `$DATA_DIR/container-home`, so `~/Downloads` is `$DATA_DIR/container-home/Downloads` on the host, and the helper on the host can't open those files ("isn't there (from here)"). The open and show test used a folder under `$DATA_DIR`, which has the same path on both sides. The same-path home mount (Decision 5, the file pickers' work) fixes this. So does `HOST=1`.
+
+**Size.** M, as estimated.
 
 ## Printing
 
