@@ -321,6 +321,33 @@ const TOOLS = [
     },
   },
   {
+    name: "answer_permission",
+    description:
+      "Answer the permission request (camera, notifications, location, ...) a tab's page is waiting on; " +
+      "list_tabs shows it as the tab's pending.permission. An agent may only deny or dismiss it: " +
+      "to allow one, ask the user with request_permission.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tab_id: { type: "integer", description: "A tab id from list_tabs or open_tab." },
+        answer: {
+          type: "string",
+          enum: ["deny", "dismiss"],
+          description: "dismiss (the default) stores nothing, so the page may ask again; deny refuses it.",
+        },
+        scope: {
+          type: "string",
+          enum: ["once", "thread", "everywhere"],
+          description:
+            "For deny: once (the default) stores nothing; thread blocks it in this thread; " +
+            "everywhere blocks it in the user's browser settings.",
+        },
+      },
+      required: ["tab_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -646,6 +673,16 @@ export async function callTool(
           text: typeof args.text === "string" ? args.text : "",
         }),
       );
+    case "answer_permission": {
+      const answer = args.answer === undefined ? "dismiss" : String(args.answer);
+      if (!["deny", "dismiss"].includes(answer)) throw new Error("answer must be deny or dismiss.");
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/request`, {
+          kind: "permission",
+          answer: typeof args.scope === "string" && answer === "deny" ? { answer, scope: args.scope } : { answer },
+        }),
+      );
+    }
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
     case "focus_tab":
