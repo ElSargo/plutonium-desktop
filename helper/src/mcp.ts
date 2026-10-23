@@ -321,6 +321,46 @@ const TOOLS = [
     },
   },
   {
+    name: "list_printers",
+    description: "List the printers of this machine (CUPS), with the default one, for print_tab.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "print_tab",
+    description:
+      "Print one of this thread's tabs on a printer (the default one unless you name one), or save it as a PDF " +
+      "file with save_to. A print the page is waiting on (list_tabs shows pending.print, from window.print() " +
+      "or Ctrl+P) is finished by this; cancel_print dismisses it instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tab_id: { type: "integer", description: "A tab id from list_tabs or open_tab." },
+        printer: { type: "string", description: "A printer name from list_printers; the default one if left out." },
+        save_to: {
+          type: "string",
+          description: "Save a PDF to this absolute path (or ~/...) instead of printing. An existing file isn't overwritten: the name gets (1), (2), ...",
+        },
+        copies: { type: "integer", minimum: 1, maximum: 999 },
+        duplex: { type: "string", enum: ["none", "long-edge", "short-edge"], description: "Two-sided printing." },
+        color: { type: "boolean", description: "false for black and white." },
+        paper: { type: "string", enum: ["letter", "legal", "tabloid", "a3", "a4", "a5"] },
+        landscape: { type: "boolean" },
+        scale: { type: "number", minimum: 0.1, maximum: 2, description: "1 is 100%." },
+        margins: { type: "string", enum: ["default", "none", "minimum"] },
+        background: { type: "boolean", description: "Print background colours and images." },
+        header_footer: { type: "boolean", description: "Print the date, title, URL and page numbers." },
+        page_ranges: { type: "string", description: "Pages to print, such as \"1-3, 5\"; all if left out." },
+      },
+      required: ["tab_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_print",
+    description: "Dismiss the print a tab's page is waiting on (pending.print in list_tabs), without printing.",
+    inputSchema: tabIdSchema,
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -644,6 +684,40 @@ export async function callTool(
         await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/dialog`, {
           accept: args.accept !== false,
           text: typeof args.text === "string" ? args.text : "",
+        }),
+      );
+    case "list_printers":
+      return text(await helperJson(socket, "GET", "/v1/printers"));
+    case "print_tab": {
+      const body: Record<string, unknown> = {};
+      const rename: Record<string, string> = {
+        save_to: "path",
+        header_footer: "headerFooter",
+        page_ranges: "pageRanges",
+      };
+      for (const key of [
+        "printer",
+        "save_to",
+        "copies",
+        "duplex",
+        "color",
+        "paper",
+        "landscape",
+        "scale",
+        "margins",
+        "background",
+        "header_footer",
+        "page_ranges",
+      ]) {
+        if (args[key] !== undefined) body[rename[key] ?? key] = args[key];
+      }
+      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/print`, body));
+    }
+    case "cancel_print":
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/request`, {
+          kind: "print",
+          answer: "cancel",
         }),
       );
     case "snapshot_tab":

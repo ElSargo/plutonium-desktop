@@ -302,7 +302,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `list_downloads` for agents; Playwright's download events in the relay.
 - [ ] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
   `stopFind`, `findresult`, and the library's find bar.
-- [ ] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
+- [x] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
   `printToPdf` for the shell's preview, host printers and jobs through the
   helper (CUPS); agents may print. Chrome's preview over the shell's window as the fallback.
 - [ ] **FileChooser and Print portals on the same picker and dialog.** M ·

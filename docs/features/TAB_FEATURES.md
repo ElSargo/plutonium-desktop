@@ -224,6 +224,8 @@ Either way, in a container session Chrome writes inside the profile under `$DATA
 
 ## Printing
 
+**Status: built (2026-10-24), see "As built" at the end of this section.** The design below is kept as it was; where it differs, "As built" holds.
+
 **Helpers.**
 - `printing::InitializePrintingForWebContents()` (`chrome/browser/printing/printing_init.cc`) creates `PrintViewManager` (`chrome/browser/printing/print_view_manager.h`), and `PrintCompositeClient` (`components/printing/browser/print_composite_client.h`) for pages with out-of-process frames.
 - Chrome's preview is `PrintPreviewDialogController` (`print_preview_dialog_controller.cc`). It is a tab-modal web dialog that needs a `WebContentsModalDialogHost`, found through `FindBrowserWithTab()` or the `WebContentsModalDialogManager`'s delegate.
@@ -251,6 +253,62 @@ Either way, in a container session Chrome writes inside the profile under `$DATA
 - M for the library's dialog and preview;
 - S–M for the helper's CUPS side;
 - M for the Print portal, later.
+
+### As built
+
+The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,cc}`), with the library, helper and agent parts in this repo.
+
+**Chromium.**
+- `Tab::AttachHelpers()` calls `plutonium_print::AttachHelpers()`. It attaches printing (`InitializePrintingForWebContents`), and a `WebContentsModalDialogManager` whose delegate hosts dialogs in the window of the shell that would be asked about the tab (`ShellDialogHost`). A tab no `<embed>` shows is hidden, so its dialog waits until one does.
+- **Hook.** `PrintViewManager::SetPreviewOverride()` (a small patch to `print_view_manager.{h,cc}`). Where `PrintViewManager` would open Chrome's preview, for a user's print (`OnRequestPrintPreviewCallback`) or the page's `window.print()` (`OnScriptedPrintPreviewCallback`), it asks the override first. For a registry tab, the override starts a tab request of kind `print`, with detail `{title, url, thread, hasSelection, scripted, pdf}`. There's no `printrequest` event of its own: it's `tabrequest` with `kind: "print"`.
+- **Answers.** `"done"` or `"cancel"`, from the shell or an agent (Decision 8). Either one ends the preview: the page gets `afterprint`, and `window.print()` returns.
+- **A renderer can't print while it is in a print preview:** it stops answering, and was later killed. So the request's first `print-to-pdf` ends the preview in the renderer at once: `window.print()` returns then, while the request stays open until it is answered. A page that waits for `window.print()` to return before changing itself back still prints as it looked.
+- **Fallback.** No shell takes it: Chrome's print preview opens over the shell's window (pinned to the top of it, as Chrome's tab-modal dialogs are). If the shell that took it goes away, printing is cancelled, and `window.print()` returns. `print-to-pdf` refuses while Chrome's preview is open.
+- **Commands.**
+  - `print`: Ctrl+P, and the shells' and agents' own buttons. It starts printing the way Chrome's Print command does, and resolves `true` if it started (`false` while a print is already open).
+  - `print-to-pdf`: takes `Page.printToPDF`'s options, in inches (`landscape`, `displayHeaderFooter`, `printBackground`, `scale`, `paperWidth`, `paperHeight`, `marginTop` … `marginRight`, `pageRanges`, `headerTemplate`, `footerTemplate`, `preferCSSPageSize`), and returns `{data: <base64 PDF>}`. While a request is open, it prints the frame that asked. It goes through `PrintViewManagerBase::PrintToPdf()` and `PdfPrintJob`. "Selection only" isn't offered: that path DCHECKs on it.
+- **Context menu.** A tab's menu keeps Print (`Keeps()`). `RenderViewContextMenu::IsPrintPreviewEnabled()` enables it for a page with no browser window in shell mode.
+
+**Library** (`plutonium-shell.js`, at its end).
+- `registerTabRequestKind("print", {option: "print"})`. `connect({print: false})` leaves printing to Chrome's preview; `print: (request) => true` draws it yourself.
+- `shell.printToPdf(tabId, {paper, landscape, scale, margins, background, headerFooter, pageRanges}) → Blob`. `paper` is one of `PAPER_SIZES` (letter, legal, tabloid, a3, a4, a5); `margins` is default, none or minimum; `scale` 1 is 100%.
+- `shell.printers(title?) → {available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}`.
+- `shell.printPdf(pdf, {printer, copies, duplex: "none" | "long-edge" | "short-edge", color, title}) → {job}`.
+- `shell.savePdf(pdf, {path, title}) → {path}`. It doesn't overwrite: the name gets " (1)", " (2)" and so on. The design's "Save as PDF through the file picker" waits for the picker. Until then the dialog has a path field, by default `~/Downloads/<title>.pdf`.
+- **The dialog**, over the tab's element: the PDF as its preview (Chrome's PDF viewer, in an iframe, re-made 300 ms after a setting changes), the page count, and the destination (the host's printers, or Save as PDF). Then pages (all or ranges), copies, layout, paper (Letter for en-US and similar locales, else A4), margins, scale, two-sided, colour, headers and footers, and background graphics. Escape or Cancel answers `"cancel"`. After printing or saving it answers `"done"`, and shows a toast ("Sent to …", "Saved …").
+
+**Helper** (`src/printing.ts`). It uses the host's CUPS client tools, `lpstat -l -p -d` and `lp`, so the user's default printer and server (`~/.cups/client.conf`, `$CUPS_SERVER`) apply.
+- `GET /v1/printers?title=`.
+- `POST /v1/print?printer&copies&duplex&color&title`, with a PDF body.
+- `POST /v1/print/save?path&title&overwrite`, with a PDF body. The helper writes the file, because Ash in the container doesn't see the user's home.
+
+**Agents.**
+- `list_printers`.
+- `print_tab {tab_id, printer?, save_to?, copies?, duplex?, color?, paper?, landscape?, scale?, margins?, background?, header_footer?, page_ranges?}`: `POST /v1/threads/<t>/tabs/<id>/print`. No approval (Decision 8). If the tab has a print waiting (`pending.print`), it answers it `"done"`, so the shell's dialog closes and `window.print()` returns.
+- `cancel_print`: answers it `"cancel"`.
+- T3 Code gives its agents only the native-window tools (`WINDOW_TOOLS`), so its agents don't get these yet.
+
+**Not built.** The Print portal (`BACKLOG.md`). Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
+
+**Verified** on Xvfb (slot 26, the plain shell, a local test page), 2026-10-23/24, with stand-ins for `lpstat` and `lp` (this machine has no CUPS):
+
+| | |
+|---|---|
+| `window.print()`: the library's dialog with the preview (4 pages, Letter), the two printers, the default selected; the tab's `pending.print` with its detail | ✓ |
+| Landscape re-renders the preview (5 pages); Print with 2 copies: `lp -d Office -n 2 -o sides=one-sided -o print-color-mode=color -t "Print test page"`, a 5-page landscape PDF; the page logs `before [beforeprint] [afterprint] after` | ✓ |
+| `tabCommand(id, "print")`, then Save as PDF to a path: a 4-page PDF written by the helper | ✓ |
+| A real Ctrl+P (xdotool) in the tab opens the dialog; Cancel closes it, `pending` is empty, the page answers again | ✓ |
+| The tab's context menu: Back, Forward, Reload, Print…; Print… opens the dialog | ✓ |
+| `connect({print: false})`: Chrome's preview over the shell's window, with its own preview and Save as PDF; its Cancel (a real click) closes it, and `window.print()` returns | ✓ |
+| `print-to-pdf` while Chrome's preview is open: refused | ✓ |
+| An agent (`POST …/print`, A4, pages 1-2, 3 copies, short edge) while the shell's dialog was open: the job sent, a 2-page A4 PDF; the request answered, the dialog closed | ✓ |
+| MCP `list_printers`, `print_tab {save_to, landscape}` (a 5-page landscape PDF), `cancel_print` on a waiting `window.print()` | ✓ |
+| `npm test`-style `test/printing.test.ts`: lpstat parsing, lp arguments, saving without overwriting | ✓ |
+
+**For a person to check:**
+- A real printer through CUPS: the job prints, and two-sided and black-and-white take effect.
+- Chrome's own preview on this ChromeOS build offers only Save as PDF ("Local printer not available").
+- On DRM. On X11, real input to Chrome's preview sometimes waited for the next X event, as `CHROME_UI.md` notes for context menus.
 
 ## Form autofill
 

@@ -70,6 +70,9 @@ Shared (socket and shell):
 | `GET /v1/apps` | launchable desktop apps (`.desktop` entries from the XDG data dirs): `{id, name, genericName, comment, keywords, categories, hasIcon, terminal}`, by name |
 | `GET /v1/apps/<id>/icon` | the app's icon (SVG or PNG; themes `PLUTONIUM_ICON_THEME`, breeze, hicolor, Adwaita) |
 | `POST /v1/apps/launch {thread, id, waitMs?, show?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot); shown unless `show: false` |
+| `GET /v1/printers?title=` | the host's printers through CUPS (`lpstat`): `{available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}` (`~/Downloads/<title>.pdf`) |
+| `POST /v1/print?printer&copies&duplex&color&title` (a PDF body) | prints it with `lp`: `{job}`; `duplex` none, long-edge or short-edge, `color` 1 or 0 |
+| `POST /v1/print/save?path&title&overwrite` (a PDF body) | writes it (absolute or `~/` path, default `defaultPdfPath`) without overwriting unless `overwrite=1`: `{path}` |
 
 The backup terminal. Its page and scripts (`GET /v1/terminal/`, `terminal.js`, `terminal.css`, `xterm.js`, `xterm.css`, `addon-fit.js`) are public and can't be framed. Its sessions are for the socket, or for this user's same-origin requests on the port: `Sec-Fetch-Site: same-origin`, which other pages can't send.
 
@@ -171,7 +174,7 @@ It keeps the window, tab and group lists from `navigator.windowBroker` events an
 
 Windows: `list_windows`, `launch_app {argv, cwd?, wait_seconds?, focus?}`, `snapshot_window {window_id}` (image content), `focus_window {window_id}`, `close_window {window_id}`, and, with a browser that has the Plutonium DevTools domain, `click_window {window_id, x, y, button?, count?}`, `hover_window {window_id, x, y}`, `drag_window {window_id, from, to, button?}`, `scroll_window {window_id, x, y, dy?, dx?}`, `type_window {window_id, text}`, `press_window {window_id, keys}` and `resize_window {window_id, width, height}`. Points are `snapshot_window`'s pixels.
 
-Tabs: `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab`, and (Playwright) `read_tab {tab_id}` (the page as an accessibility tree with `[ref=eN]`), `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab {key}`, `select_tab {values}`, `scroll_tab`, `evaluate_tab {expression}` and `wait_for_tab {text? | text_gone? | selector? | load?}`, each element by `ref` or `selector`.
+Tabs: `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab`, `list_printers`, `print_tab {printer?, save_to?, copies?, duplex?, color?, paper?, landscape?, scale?, margins?, background?, header_footer?, page_ranges?}` (finishes a print the page waits on), `cancel_print`, and (Playwright) `read_tab {tab_id}` (the page as an accessibility tree with `[ref=eN]`), `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab {key}`, `select_tab {values}`, `scroll_tab`, `evaluate_tab {expression}` and `wait_for_tab {text? | text_gone? | selector? | load?}`, each element by `ref` or `selector`.
 
 What an agent launches or opens waits in its thread unless it passes `focus: true` (`launch_app`, `open_tab`). See [docs/features/AGENT_CONTROL.md](../docs/features/AGENT_CONTROL.md).
 
