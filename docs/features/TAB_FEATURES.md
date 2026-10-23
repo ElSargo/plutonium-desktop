@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: the common plumbing is built ("As built: adding a feature"); the features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing is built ("As built: adding a feature"), and so is find in page; the other features are designs.** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -46,20 +46,33 @@ The raw broker API, for shells that don't use the library, is in `native_window_
 
 ## Find in page
 
-**Helpers.** `FindBarState::ConfigureWebContents()` (`chrome/browser/ui/find_bar/find_bar_state.cc`) creates `find_in_page::FindTabHelper` (`components/find_in_page/find_tab_helper.h`). `StartFinding()` and `StopFinding()` drive it, and results arrive through `FindResultObserver::OnFindResultAvailable()` (`components/find_in_page/find_result_observer.h`, from `WebContentsObserver::DidReceiveFindReply`). Chrome's find bar is `FindBarController` with a views `FindBarHost` in the `BrowserView`, and we don't use it.
+**Built** (the patch "Plutonium: find in page for tabs", `plutonium_find.{h,cc}`; the library's find bar; the agent tool `find_in_tab`).
 
-**Shell.**
-- `findrequest {requestId, tabId, initialText}` (cancelable), from Ctrl+F or `tabCommand(id, "find")`. `initialText` is the selection, or the last search (`GetInitialSearchText`).
-- `shell.find(tabId, text, { forward, matchCase })`: starting a new search or moving to the next match is the same call, as in `StartFinding`.
-- `shell.stopFind(tabId, "keep" | "clear" | "activate")`, matching `SelectionAction`. Activate clicks the match, as Enter in Chrome's bar does with a link.
-- `findresult {tabId, matches, activeMatch, rect, final}`, from `FindNotificationDetails`. The rect lets a shell draw its own marker beside the tab, or scroll its layout to it.
-- F3, Ctrl+G and Ctrl+Shift+G call `find` with the last text when no bar is open.
+**Helpers.** `PlutoniumFind::Attach()` in `Tab::AttachHelpers()`: `FindBarState::ConfigureWebContents()` (`chrome/browser/ui/find_bar/find_bar_state.cc`) creates `find_in_page::FindTabHelper` (`components/find_in_page/find_tab_helper.h`) with the profile's last search, and `PlutoniumFind`, a `WebContentsUserData` that drives it (`StartFinding()`, `StopFinding()`) and observes its results (`FindResultObserver::OnFindResultAvailable()`). Chrome's find bar is `FindBarController` with a views `FindBarHost` in the `BrowserView`, and we don't use it.
 
-**Fallback.** The shell library's find bar: a small popover at the top right of the tab's element, with a text field, a count, next and previous, match case, and Escape to close. A shell with `findBar: false` and no library gets nothing, as today: Chrome's bar needs a `BrowserView`.
+**Commands** (`PlutoniumFind::AddCommands()` in the `PlutoniumTabs` constructor):
 
-**Agents.** No need. They read the page (`read_tab`).
+| Command | Keys | Args | Does |
+|---|---|---|---|
+| `find` | Ctrl+F | `{text?}` | Asks the shell for its find bar: a `find` tab request. Resolves with `{requestId}`. |
+| `find-text` | | `{text, forward = true, matchCase = false, select = true, scroll = true}` | Searches, or moves to the next match of the same text, as `StartFinding`. `select: false` only counts and highlights (`find_match`). Resolves with the result once every frame has answered (at most 5 s). An empty text stops the search. |
+| `find-next`, `find-previous` | F3, Ctrl+G; Shift+F3, Ctrl+Shift+G | | Searches again for the tab's text, else the last search anywhere (`GetInitialSearchText`), without opening the bar. With no text at all, opens the bar, as Chrome's F3 does. |
+| `stop-find` | | `{action = "clear"}` | `StopFinding` with `"keep"`, `"clear"` or `"activate"` (`SelectionAction`; activate clicks the match, as Ctrl+Enter in Chrome's bar does with a link). Closes the bar. |
 
-**Size.** S–M. S in Chromium (the helper, keys, two broker calls and an event), S for the library's bar.
+**The bar's request.** Kind `find`, detail `{initialText, fromSelection, matchCase}`. `initialText` is the page's selection (trimmed, up to 250 characters, as in Chrome), else the tab's current or last search, else the last search in the profile. The request stays open while the bar is, so `pending.find` means "this tab's find bar is open". The bar answers `{action}` (or `null`, which is `"keep"`) as it closes, and the search stops with that action; an agent may answer it too. Ctrl+F with the bar open cancels the request and asks again, so the bar opens again with focus. The bar takes the keyboard, as Chrome's does. A shown tab is an inner `WebContents` of the shell page, and the page can't take the keyboard from it (focusing its field only moves the focus within the page; `WebContents::Focus()` on the shell doesn't either). So when the tab had it, `find` moves it to the page with the tab's `SurfaceEmbedConnector::ClearFocusOnInnerWebContents()`, where the bar's field has the page's focus, and gives it back with `FocusInnerWebContents()` if no shell takes the request. A new page (`NavigationEntryCommitted` to a different document) stops the search and closes the bar, as Chrome's does.
+
+**Fallback.** None: Chrome's bar needs a `BrowserView`. With no shell to take the request (`findBar: false` and no listener), Ctrl+F does nothing, as before. If the shell that took it goes away, the search stops and its highlights are cleared.
+
+**State.** Every result is the tab's `find`: `{text, matchCase, matches, activeMatch, rect?: {x, y, width, height}, final}`, removed when the search stops. `rect` is the active match in the tab's view, in DIPs, as Blink reports it: where the match was when it was found, before the page scrolled to it (a match below the fold has a `y` past the view's height), and for a match in an out-of-process frame, relative to that frame's local root. So it says which way the match lies more than where it ends up. Shells see `tab.find` and `tabstatechange`; agents see `state.find` in `list_tabs`.
+
+**Shell library.**
+- `shell.openFind(tabId, text?)`, `shell.find(tabId, text, {forward, matchCase, select, scroll})` (resolves with the result), `shell.stopFind(tabId, action)`.
+- A `findresult` event `{tabId, ...find}` for each new result, besides `tabstatechange`.
+- The find bar (`drawFindBar`, option `findBar`): a `.plutonium-dialog.plutonium-find-bar` popover at the top right of the tab's element. It follows the element, and hides while the page doesn't show the tab. A text field, the count (`2/7`; red with no matches, `--plutonium-find-none`), match case (`Aa`), previous and next. Enter and Shift+Enter, F3, Ctrl+G and Ctrl+Shift+G move between matches; Escape closes and keeps the match selected; Ctrl+Enter clicks it. The text it opens with is highlighted and counted without scrolling, and a selection becomes the active match, as in Chrome. Closing gives the tab its focus back. A page that doesn't show the tab doesn't take the request.
+
+**Keys on ChromeOS's top row.** Ash rewrites the top-row function keys of a keyboard it takes for a ChromeOS one into their media keys: F3 becomes refresh (which reloads the tab), unless Search is held. The X11 session's Xvfb keyboard is such a keyboard: there, Search+F3 and Ctrl+G find the next match. Ctrl+G and Ctrl+Shift+G work everywhere.
+
+**Agents.** They read the page (`read_tab`), so the design needed nothing. The commands come with the plumbing anyway, so `find_in_tab {tab_id, text, match_case?, backwards?}` runs `find-text`: it highlights the matches, scrolls to the next, and returns the count. It's for showing the user a place in a page.
 
 ## Zoom
 
