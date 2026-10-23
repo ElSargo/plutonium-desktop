@@ -1,0 +1,627 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 09:20:14 +1300
+Subject: [PATCH 42/42] Plutonium: printing in tabs goes to the shell
+
+EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Printing"): the
+registry's tabs had no PrintViewManager, so Ctrl+P, window.print() and
+the context menu's Print did nothing.
+
+- Tab::AttachHelpers() attaches printing (InitializePrintingForWebContents:
+  PrintViewManager, PrintCompositeClient) and a WebContentsModalDialogManager
+  whose host is the window of the shell that would be asked about the tab.
+- PrintViewManager::SetPreviewOverride(): where PrintViewManager would open
+  Chrome's preview (a user's print, or a scripted one), plutonium_print.cc
+  asks the shell instead, as a tab request of kind "print" with {title,
+  url, thread, hasSelection, scripted, pdf}. The answer, "done" or
+  "cancel" (from the shell or an agent), ends the preview: the page gets
+  "afterprint" and window.print() returns. If no shell takes it, Chrome's
+  preview opens over the shell's window; if the shell that took it goes
+  away, printing is cancelled.
+- Commands: "print" (Ctrl+P, as Chrome's Print command) and "print-to-pdf"
+  (Page.printToPDF's options, in inches; {data: base64}), which prints the
+  frame that asked while a request is open, for the shell's preview and
+  for printing through the helper. A renderer can't print while it is in
+  a print preview (it stops responding), so the request's first PDF ends
+  the preview there: the page gets "afterprint" and window.print()
+  returns then, while the request stays open until it is answered.
+  print-to-pdf refuses while Chrome's own preview is open.
+- A tab's context menu keeps Print.
+---
+ chrome/browser/BUILD.gn                       |   9 +
+ chrome/browser/plutonium_context_menu.cc      |   3 +
+ chrome/browser/plutonium_print.cc             | 342 ++++++++++++++++++
+ chrome/browser/plutonium_print.h              |  52 +++
+ chrome/browser/plutonium_tabs.cc              |   6 +
+ chrome/browser/printing/print_view_manager.cc |  29 +-
+ chrome/browser/printing/print_view_manager.h  |  14 +
+ .../render_view_context_menu.cc               |   6 +
+ 8 files changed, 460 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/plutonium_print.cc
+ create mode 100644 chrome/browser/plutonium_print.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index b460713e57..26dfb1e6b2 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -2018,8 +2018,17 @@ source_set("core") {
+     sources += [
+       "file_system_access/cloud_identifier/cloud_identifier_util_ash.cc",
+       "icon_loader_chromeos.cc",
++      "plutonium_print.cc",
++      "plutonium_print.h",
+       "shell_integration_chromeos.cc",
+     ]
++
++    # PLUTONIUM (EXO-TAB-FEATURES): plutonium_print.cc.
++    deps += [
++      "//chrome/browser/ui/browser_window",
++      "//components/printing/browser/print_to_pdf",
++      "//components/web_modal",
++    ]
+     deps += [
+       ":cloud_identifier_util_ash",
+       "//ash/webui/camera_app_ui",
+diff --git a/chrome/browser/plutonium_context_menu.cc b/chrome/browser/plutonium_context_menu.cc
+index c9870650d9..72c327a184 100644
+--- a/chrome/browser/plutonium_context_menu.cc
++++ b/chrome/browser/plutonium_context_menu.cc
+@@ -53,6 +53,9 @@ bool Keeps(int id, bool tab) {
+     case IDC_RELOAD:
+     case IDC_CONTENT_CONTEXT_RELOADFRAME:
+       return tab;
++    // EXO-TAB-FEATURES: printing goes to the shell (plutonium_print.h).
++    case IDC_PRINT:
++      return tab;
+     // Links and media open as tabs (plutonium_tabs.h). "New window",
+     // incognito and other profiles would be Chrome windows.
+     case IDC_CONTENT_CONTEXT_OPENLINKNEWTAB:
+diff --git a/chrome/browser/plutonium_print.cc b/chrome/browser/plutonium_print.cc
+new file mode 100644
+index 0000000000..474aa99a79
+--- /dev/null
++++ b/chrome/browser/plutonium_print.cc
+@@ -0,0 +1,342 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_print.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <variant>
++
++#include "base/base64.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/printing/print_preview_dialog_controller.h"
++#include "chrome/browser/printing/print_view_manager.h"
++#include "chrome/browser/printing/print_view_manager_common.h"
++#include "chrome/browser/printing/printing_init.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "components/guest_view/browser/guest_view_base.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_result.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_utils.h"
++#include "components/printing/common/print.mojom.h"
++#include "components/web_modal/web_contents_modal_dialog_host.h"
++#include "components/web_modal/web_contents_modal_dialog_manager.h"
++#include "components/web_modal/web_contents_modal_dialog_manager_delegate.h"
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "mojo/public/cpp/bindings/pending_associated_remote.h"
++
++namespace plutonium_print {
++
++namespace {
++
++using From = PlutoniumTabRequests::From;
++using FallbackReason = PlutoniumTabRequests::FallbackReason;
++
++// The fallback: Chrome's tab-modal print preview, which needs somewhere to
++// show (HasWebContentsModalDialogHost() in print_preview_dialog_controller.cc).
++// A tab's dialogs show over the window of the shell that would be asked about
++// it.
++class ShellDialogHost : public web_modal::WebContentsModalDialogManagerDelegate {
++ public:
++  static ShellDialogHost* Get() {
++    static base::NoDestructor<ShellDialogHost> instance;
++    return instance.get();
++  }
++
++  web_modal::WebContentsModalDialogHost* GetWebContentsModalDialogHost(
++      content::WebContents* contents) override {
++    content::WebContents* shell = PlutoniumTabRequests::ShellFor(contents);
++    if (!shell) {
++      return nullptr;
++    }
++    BrowserWindowInterface* browser =
++        GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(shell);
++    return browser ? browser->GetWebContentsModalDialogHostForWindow()
++                   : nullptr;
++  }
++
++  // A tab no <embed> shows is hidden: its dialog waits until one does, as a
++  // background tab's does in Chrome.
++  bool IsWebContentsVisible(content::WebContents* contents) override {
++    return contents->GetVisibility() != content::Visibility::HIDDEN;
++  }
++};
++
++// A tab's print request: from PrintViewManager's preview to the shell's
++// answer.
++class TabPrint : public content::WebContentsObserver,
++                 public content::WebContentsUserData<TabPrint> {
++ public:
++  ~TabPrint() override = default;
++
++  // Asks the shell about |initiator|'s print preview (|initiator| is the tab,
++  // or a page inside it, such as a PDF viewer). False to show Chrome's.
++  static bool ShowPreview(content::WebContents* initiator,
++                          content::RenderFrameHost* rfh,
++                          const printing::mojom::RequestPrintPreviewParams& params,
++                          bool is_pdf,
++                          bool scripted) {
++    content::WebContents* tab =
++        guest_view::GuestViewBase::GetTopLevelWebContents(initiator);
++    TabPrint* print = tab ? FromWebContents(tab) : nullptr;
++    return print && print->Start(initiator, rfh, params, is_pdf, scripted);
++  }
++
++  // The frame to print to PDF: the one that asked, while a request is open.
++  // Its renderer can't print while it is in a print preview (it stops
++  // responding), so the first PDF ends the preview there: the page gets
++  // "afterprint" and window.print() returns, while the request stays open
++  // until it is answered.
++  content::RenderFrameHost* FrameToPrint() {
++    content::RenderFrameHost* rfh =
++        request_ && request_->is_open()
++            ? content::RenderFrameHost::FromID(frame_)
++            : nullptr;
++    if (rfh && !page_released_) {
++      page_released_ = true;
++      EndPreview();
++    }
++    return rfh;
++  }
++
++  // content::WebContentsObserver:
++  void RenderFrameDeleted(content::RenderFrameHost* rfh) override {
++    // PrintViewManager ends its preview; so does the shell.
++    if (request_ && rfh->GetGlobalId() == frame_) {
++      request_.reset();
++    }
++  }
++
++ private:
++  friend class content::WebContentsUserData<TabPrint>;
++
++  explicit TabPrint(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<TabPrint>(*contents) {}
++
++  bool Start(content::WebContents* initiator,
++             content::RenderFrameHost* rfh,
++             const printing::mojom::RequestPrintPreviewParams& params,
++             bool is_pdf,
++             bool scripted) {
++    // PrintViewManager allows one preview at a time; a new one replaces an
++    // old request.
++    request_.reset();
++    weak_factory_.InvalidateWeakPtrs();
++    page_released_ = false;
++    initiator_ = initiator->GetWeakPtr();
++    frame_ = rfh->GetGlobalId();
++    params_ = params.Clone();
++    is_pdf_ = is_pdf;
++
++    std::optional<PlutoniumTabs::TabInfo> info =
++        PlutoniumTabs::Get()->GetTabFor(web_contents());
++    PlutoniumTabRequests::Params request;
++    request.kind = "print";
++    request.detail =
++        base::DictValue()
++            .Set("title", base::UTF16ToUTF8(web_contents()->GetTitle()))
++            .Set("url", web_contents()->GetLastCommittedURL().spec())
++            .Set("thread", info ? info->tag : std::string())
++            .Set("hasSelection", params.has_selection)
++            .Set("scripted", scripted)
++            .Set("pdf", is_pdf);
++    request.on_answer = base::BindRepeating(
++        [](base::WeakPtr<TabPrint> print, From from,
++           const base::Value& answer) {
++          return print && print->OnAnswer(from, answer);
++        },
++        weak_factory_.GetWeakPtr());
++    request.on_fallback = base::BindOnce(&TabPrint::OnFallback,
++                                         weak_factory_.GetWeakPtr());
++    request_ = PlutoniumTabRequests::Get()->Start(web_contents(),
++                                                  std::move(request));
++    return !!request_;
++  }
++
++  // "done" (printed or saved) or "cancel", from the shell or an agent:
++  // agents may print like any other program (TAB_FEATURES.md, Decision 8).
++  bool OnAnswer(From from, const base::Value& answer) {
++    const std::string* text = answer.GetIfString();
++    if (!text || (*text != "done" && *text != "cancel")) {
++      return false;
++    }
++    // Not from inside the answer.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&TabPrint::Finish, weak_factory_.GetWeakPtr()));
++    return true;
++  }
++
++  void OnFallback(FallbackReason reason) {
++    content::WebContents* initiator = initiator_.get();
++    if (!initiator) {
++      return;
++    }
++    // The shell that took it went away: printing is cancelled, and
++    // window.print() returns.
++    if (reason == FallbackReason::kShellGone) {
++      Finish();
++      return;
++    }
++    // No shell takes it: Chrome's preview, over the shell's window. It ends
++    // the preview itself if it can't show.
++    auto* controller = printing::PrintPreviewDialogController::GetInstance();
++    if (!controller) {
++      Finish();
++      return;
++    }
++    controller->PrintPreview(initiator, *params_, is_pdf_);
++  }
++
++  // Ends the preview: the page gets "afterprint" and window.print()
++  // returns.
++  void Finish() {
++    request_.reset();
++    if (!page_released_) {
++      page_released_ = true;
++      EndPreview();
++    }
++  }
++
++  void EndPreview() {
++    content::WebContents* initiator = initiator_.get();
++    if (!initiator) {
++      return;
++    }
++    if (auto* manager =
++            printing::PrintViewManager::FromWebContents(initiator)) {
++      manager->PrintPreviewDone();
++    }
++  }
++
++  std::unique_ptr<PlutoniumTabRequests::Handle> request_;
++  base::WeakPtr<content::WebContents> initiator_;
++  content::GlobalRenderFrameHostId frame_;
++  printing::mojom::RequestPrintPreviewParamsPtr params_;
++  bool is_pdf_ = false;
++  // EndPreview() ran for this request.
++  bool page_released_ = false;
++  base::WeakPtrFactory<TabPrint> weak_factory_{this};
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(TabPrint);
++
++std::optional<std::string> FindString(const base::DictValue& args,
++                                      const char* key) {
++  const std::string* value = args.FindString(key);
++  return value ? std::optional<std::string>(*value) : std::nullopt;
++}
++
++}  // namespace
++
++void AttachHelpers(content::WebContents* contents) {
++  static bool hooked = false;
++  if (!hooked) {
++    hooked = true;
++    printing::PrintViewManager::SetPreviewOverride(
++        base::BindRepeating(&TabPrint::ShowPreview));
++  }
++  printing::InitializePrintingForWebContents(contents);
++  TabPrint::CreateForWebContents(contents);
++  web_modal::WebContentsModalDialogManager::CreateForWebContents(contents);
++  web_modal::WebContentsModalDialogManager::FromWebContents(contents)
++      ->SetDelegate(ShellDialogHost::Get());
++}
++
++void RunPrintCommand(content::WebContents* contents,
++                     const base::DictValue& args,
++                     PlutoniumTabs::CommandCallback done) {
++  // As Chrome's Print command (chrome::Print()): the preview, which is the
++  // shell's request.
++  const bool started = printing::StartPrint(contents,
++                                            mojo::NullAssociatedRemote(),
++                                            /*print_preview_disabled=*/false,
++                                            /*has_selection=*/false);
++  std::move(done).Run(base::Value(started));
++}
++
++void RunPrintToPdfCommand(content::WebContents* contents,
++                          const base::DictValue& args,
++                          PlutoniumTabs::CommandCallback done) {
++  content::RenderFrameHost* rfh = nullptr;
++  if (TabPrint* print = TabPrint::FromWebContents(contents)) {
++    rfh = print->FrameToPrint();
++  }
++  if (!rfh) {
++    rfh = printing::GetFullPagePlugin(contents);
++  }
++  if (!rfh) {
++    rfh = contents->GetPrimaryMainFrame();
++  }
++  auto* manager = printing::PrintViewManager::FromWebContents(
++      content::WebContents::FromRenderFrameHost(rfh));
++  if (!manager || !rfh->IsRenderFrameLive()) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  // Not while Chrome's preview is open: the renderer would stop responding
++  // (FrameToPrint()).
++  if (manager->print_preview_rfh()) {
++    LOG(WARNING) << "EXO-TAB-FEATURES print-to-pdf: Chrome's print preview "
++                    "is open";
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  std::variant<printing::mojom::PrintPagesParamsPtr, std::string> params =
++      print_to_pdf::GetPrintPagesParams(
++          rfh->GetLastCommittedURL(), args.FindBool("landscape"),
++          args.FindBool("displayHeaderFooter"),
++          args.FindBool("printBackground"), args.FindDouble("scale"),
++          args.FindDouble("paperWidth"), args.FindDouble("paperHeight"),
++          args.FindDouble("marginTop"), args.FindDouble("marginBottom"),
++          args.FindDouble("marginLeft"), args.FindDouble("marginRight"),
++          FindString(args, "headerTemplate"),
++          FindString(args, "footerTemplate"),
++          args.FindBool("preferCSSPageSize"),
++          /*generate_tagged_pdf=*/std::nullopt,
++          /*generate_document_outline=*/std::nullopt);
++  if (std::holds_alternative<std::string>(params)) {
++    LOG(WARNING) << "EXO-TAB-FEATURES print-to-pdf: "
++                 << std::get<std::string>(params);
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  manager->PrintToPdf(
++      rfh, FindString(args, "pageRanges").value_or(""),
++      std::move(std::get<printing::mojom::PrintPagesParamsPtr>(params)),
++      base::BindOnce(
++          [](PlutoniumTabs::CommandCallback done,
++             print_to_pdf::PdfPrintResult result,
++             scoped_refptr<base::RefCountedMemory> data) {
++            if (result != print_to_pdf::PdfPrintResult::kPrintSuccess ||
++                !data) {
++              LOG(WARNING) << "EXO-TAB-FEATURES print-to-pdf: "
++                           << print_to_pdf::PdfPrintResultToString(result);
++              std::move(done).Run(std::nullopt);
++              return;
++            }
++            std::move(done).Run(base::Value(base::DictValue().Set(
++                "data", base::Base64Encode(base::span<const uint8_t>(*data)))));
++          },
++          std::move(done)));
++}
++
++}  // namespace plutonium_print
+diff --git a/chrome/browser/plutonium_print.h b/chrome/browser/plutonium_print.h
+new file mode 100644
+index 0000000000..a3e8a7237d
+--- /dev/null
++++ b/chrome/browser/plutonium_print.h
+@@ -0,0 +1,52 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_PRINT_H_
++#define CHROME_BROWSER_PLUTONIUM_PRINT_H_
++
++#include "base/values.h"
++#include "chrome/browser/plutonium_tabs.h"
++
++namespace content {
++class WebContents;
++}
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Printing"): printing in
++// the registry's tabs, which have no Browser.
++//
++// Ctrl+P, tabCommand(id, "print") and the page's window.print() all reach
++// PrintViewManager, which would open Chrome's print preview. For a registry
++// tab it asks the shell instead: a tab request of kind "print", with detail
++// {title, url, thread, hasSelection, scripted, pdf}. The shell builds its
++// preview with the "print-to-pdf" command, prints or saves the PDF through
++// the helper, and answers "done" or "cancel" (agents may answer too). Until
++// then the page's window.print() doesn't return.
++//
++// If no shell takes it, Chrome's print preview opens over the shell's window
++// (the tab's WebContentsModalDialogManager hosts it there). If the shell that
++// took it goes away, printing is cancelled.
++namespace plutonium_print {
++
++// Attaches printing to tab |contents| (Tab::AttachHelpers()).
++void AttachHelpers(content::WebContents* contents);
++
++// The "print" command (Ctrl+P): starts printing the tab, as Chrome's Print
++// command does. Resolves with whether it started (false while printing).
++void RunPrintCommand(content::WebContents* contents,
++                     const base::DictValue& args,
++                     PlutoniumTabs::CommandCallback done);
++
++// The "print-to-pdf" command: the tab (or, while it waits on a print request,
++// the frame that asked) as a PDF, {"data": <base64>}. |args| are those of the
++// DevTools protocol's Page.printToPDF, in inches: landscape,
++// displayHeaderFooter, printBackground, scale, paperWidth, paperHeight,
++// marginTop, marginBottom, marginLeft, marginRight, pageRanges,
++// headerTemplate, footerTemplate, preferCSSPageSize.
++void RunPrintToPdfCommand(content::WebContents* contents,
++                          const base::DictValue& args,
++                          PlutoniumTabs::CommandCallback done);
++
++}  // namespace plutonium_print
++
++#endif  // CHROME_BROWSER_PLUTONIUM_PRINT_H_
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index 9cb36b51e1..c0ce4bb22e 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_keys.h"
+ #include "chrome/browser/plutonium_permissions.h"
++#include "chrome/browser/plutonium_print.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/plutonium_tab_requests.h"
+@@ -808,6 +809,8 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     plutonium_permissions::AttachHelpers(contents_);
+     // Downloads: the profile's manager saves them; this lists them.
+     PlutoniumDownloads::Get()->ObserveContext(contents_->GetBrowserContext());
++    // Printing (plutonium_print.h).
++    plutonium_print::AttachHelpers(contents_);
+   }
+ 
+  private:
+@@ -921,6 +924,9 @@ PlutoniumTabs::PlutoniumTabs() {
+              base::BindRepeating(&plutonium_permissions::RunListCommand));
+   AddCommand("permission-revoke",
+              base::BindRepeating(&plutonium_permissions::RunRevokeCommand));
++  AddCommand("print", base::BindRepeating(&plutonium_print::RunPrintCommand));
++  AddCommand("print-to-pdf",
++             base::BindRepeating(&plutonium_print::RunPrintToPdfCommand));
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+           "plutonium-test-tab-requests")) {
+     AddCommand("test-request",
+diff --git a/chrome/browser/printing/print_view_manager.cc b/chrome/browser/printing/print_view_manager.cc
+index 25f1aa604a..f20a0293bc 100644
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -67,6 +67,12 @@ PrintManager* g_receiver_for_testing = nullptr;
+ using ScriptedPrintPreviewClosureMap =
+     std::map<content::RenderProcessHost*, base::OnceClosure>;
+ 
++// PLUTONIUM: SetPreviewOverride().
++PrintViewManager::PreviewOverride& GetPreviewOverride() {
++  static base::NoDestructor<PrintViewManager::PreviewOverride> preview_override;
++  return *preview_override;
++}
++
+ ScriptedPrintPreviewClosureMap& GetScriptedPrintPreviewClosureMap() {
+   // No locking, only access on the UI thread.
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+@@ -336,6 +342,11 @@ void PrintViewManager::SetReceiverImplForTesting(PrintManager* impl) {
+   g_receiver_for_testing = impl;
+ }
+ 
++// static
++void PrintViewManager::SetPreviewOverride(PreviewOverride preview_override) {
++  GetPreviewOverride() = std::move(preview_override);
++}
++
+ bool PrintViewManager::PrintPreview(
+     content::RenderFrameHost* rfh,
+ #if BUILDFLAG(IS_CHROMEOS)
+@@ -576,9 +587,17 @@ void PrintViewManager::OnScriptedPrintPreviewCallback(
+     }
+   }
+ 
++  mojom::RequestPrintPreviewParams params;
++  if (GetPreviewOverride() &&
++      GetPreviewOverride().Run(web_contents(), print_preview_rfh_, params,
++                               print_preview_rfh_->GetProcess()->IsPdf(),
++                               /*scripted=*/true)) {
++    PrintPreviewAllowedForTesting();
++    return;
++  }
++
+   auto* dialog_controller = PrintPreviewDialogController::GetInstance();
+   CHECK(dialog_controller);
+-  mojom::RequestPrintPreviewParams params;
+   // Note that this PrintPreview() call will not exit fullscreen, since the code
+   // above just did that. So no need to check if `this` got destroyed.
+   dialog_controller->PrintPreview(web_contents(), params,
+@@ -631,6 +650,14 @@ void PrintViewManager::OnRequestPrintPreviewCallback(
+     PrintPreviewForWebNode(render_frame_host);
+   }
+ 
++  if (GetPreviewOverride() &&
++      GetPreviewOverride().Run(web_contents(), render_frame_host, *params,
++                               render_frame_host->GetProcess()->IsPdf(),
++                               /*scripted=*/false)) {
++    PrintPreviewAllowedForTesting();
++    return;
++  }
++
+   auto* dialog_controller = PrintPreviewDialogController::GetInstance();
+   CHECK(dialog_controller);
+   // Note that this PrintPreview() call may exit fullscreen, so `this` may get
+diff --git a/chrome/browser/printing/print_view_manager.h b/chrome/browser/printing/print_view_manager.h
+index fa223e1add..a5d478307d 100644
+--- a/chrome/browser/printing/print_view_manager.h
++++ b/chrome/browser/printing/print_view_manager.h
+@@ -8,6 +8,7 @@
+ #include <memory>
+ 
+ #include "base/containers/queue.h"
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/printing/print_view_manager_base.h"
+@@ -96,6 +97,19 @@ class PrintViewManager : public PrintViewManagerBase,
+   // Sets the target object for BindPrintManagerHost() for tests.
+   static void SetReceiverImplForTesting(PrintManager* impl);
+ 
++  // PLUTONIUM (EXO-TAB-FEATURES): shows |initiator|'s print preview some
++  // other way instead of Chrome's dialog (plutonium_print.cc: the shell's, for
++  // the tab registry's tabs). |rfh| is the frame being printed, |scripted|
++  // whether the page called window.print(). Returns false to show Chrome's.
++  // If it returns true, it calls PrintPreviewDone() once printing is over.
++  using PreviewOverride = base::RepeatingCallback<bool(
++      content::WebContents* initiator,
++      content::RenderFrameHost* rfh,
++      const mojom::RequestPrintPreviewParams& params,
++      bool is_pdf,
++      bool scripted)>;
++  static void SetPreviewOverride(PreviewOverride preview_override);
++
+  protected:
+   explicit PrintViewManager(content::WebContents* web_contents);
+ 
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 610b7504b0..d9b0901228 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -4757,6 +4757,12 @@ bool RenderViewContextMenu::IsPrintPreviewEnabled() const {
+   }
+ 
+   BrowserWindowInterface* browser = GetBrowser();
++  // PLUTONIUM (EXO-TAB-FEATURES): a page with no browser window (a shell's
++  // tab) prints through the shell (plutonium_print.h).
++  if (!browser && plutonium_shell::IsShellMode()) {
++    return GetPrefs(browser_context_)->GetBoolean(prefs::kPrintingEnabled) &&
++           source_web_contents_ && !source_web_contents_->IsCrashed();
++  }
+   return browser && chrome::CanPrint(browser);
+ }
+ 

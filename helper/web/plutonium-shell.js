@@ -1349,6 +1349,416 @@ function drawFindBar(shell, request) {
 
 registerTabRequestKind("find", { option: "findBar", draw: drawFindBar });
 
+// EXO-TAB-FEATURES: printing (TAB_FEATURES.md, "Printing"). Ctrl+P,
+// tabCommand(id, "print") and a page's window.print() come as a "print" tab
+// request ({title, url, thread, hasSelection, scripted, pdf}). The library's
+// dialog previews the tab as a PDF ("print-to-pdf"), and prints it on one of
+// the host's printers or saves it, through the helper; then it answers
+// "done" (or "cancel"), and the page's window.print() returns.
+// connect({ print: false }) leaves it to Chrome's preview; print: (request) =>
+// true draws it yourself, with the methods below.
+
+/** Paper sizes by name, in inches (as the "print-to-pdf" command takes them). */
+export const PAPER_SIZES = {
+  letter: [8.5, 11],
+  legal: [8.5, 14],
+  tabloid: [11, 17],
+  a3: [11.69, 16.54],
+  a4: [8.27, 11.69],
+  a5: [5.83, 8.27],
+};
+const PRINT_MARGINS = { default: undefined, none: 0, minimum: 0.25 };
+
+/**
+ * @typedef {{ paper?: keyof PAPER_SIZES, landscape?: boolean, scale?: number,
+ *   margins?: "default" | "none" | "minimum", background?: boolean, headerFooter?: boolean,
+ *   pageRanges?: string }} PdfOptions
+ *   scale: 1 is 100% (0.1 to 2); pageRanges: "1-3, 5", all if left out.
+ * @typedef {{ name: string, description: string, state: string, isDefault: boolean }} Printer
+ */
+
+/**
+ * Tab `tabId` as a PDF, laid out for printing with `options`. While the tab waits on a
+ * print request, this is the frame that asked (window.print() in a frame).
+ * @param {number} tabId
+ * @param {PdfOptions} options
+ * @returns {Promise<Blob>}
+ */
+PlutoniumShell.prototype.printToPdf = async function (tabId, options = {}) {
+  const args = {};
+  if (options.paper) {
+    const size = PAPER_SIZES[options.paper];
+    if (!size) throw new Error(`unknown paper ${options.paper}`);
+    [args.paperWidth, args.paperHeight] = size;
+  }
+  if (options.landscape !== undefined) args.landscape = options.landscape;
+  if (options.scale !== undefined) args.scale = options.scale;
+  const margin = PRINT_MARGINS[options.margins ?? "default"];
+  if (margin !== undefined) args.marginTop = args.marginBottom = args.marginLeft = args.marginRight = margin;
+  if (options.background !== undefined) args.printBackground = options.background;
+  if (options.headerFooter !== undefined) args.displayHeaderFooter = options.headerFooter;
+  if (options.pageRanges) args.pageRanges = options.pageRanges;
+  const result = await this.tabCommand(tabId, "print-to-pdf", args);
+  if (typeof result?.data !== "string") throw new Error("this browser can't print tabs to PDF");
+  const bytes = Uint8Array.from(atob(result.data), (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: "application/pdf" });
+};
+
+/**
+ * The host's printers (CUPS, through the helper). `available` is false without a CUPS
+ * client or server; `defaultPdfPath` is where "Save as PDF" puts a page called `title`.
+ * @returns {Promise<{ available: boolean, printers: Printer[], error?: string, defaultPdfPath: string }>}
+ */
+PlutoniumShell.prototype.printers = async function (title = "") {
+  const response = await fetch(`${HELPER}/v1/printers?title=${encodeURIComponent(title)}`);
+  if (!response.ok) throw new Error(await errorOf(response));
+  return response.json();
+};
+
+/**
+ * Prints `pdf` on the host's printer `printer` (its default one if left out).
+ * @param {Blob} pdf
+ * @param {{ printer?: string, copies?: number, duplex?: "none" | "long-edge" | "short-edge",
+ *   color?: boolean, title?: string }} options
+ * @returns {Promise<{ job: string }>}
+ */
+PlutoniumShell.prototype.printPdf = async function (pdf, options = {}) {
+  const query = new URLSearchParams();
+  if (options.printer) query.set("printer", options.printer);
+  if (options.copies !== undefined) query.set("copies", String(options.copies));
+  if (options.duplex) query.set("duplex", options.duplex);
+  if (options.color !== undefined) query.set("color", options.color ? "1" : "0");
+  if (options.title) query.set("title", options.title);
+  const response = await fetch(`${HELPER}/v1/print?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/pdf" },
+    body: pdf,
+  });
+  if (!response.ok) throw new Error(await errorOf(response));
+  return response.json();
+};
+
+/**
+ * Saves `pdf` on the host: at `path` (absolute or "~/..."), else in ~/Downloads, named
+ * after `title`. An existing file isn't overwritten: the name gets " (1)", " (2)", ...
+ * @param {Blob} pdf
+ * @returns {Promise<{ path: string }>}
+ */
+PlutoniumShell.prototype.savePdf = async function (pdf, { path = "", title = "" } = {}) {
+  const query = new URLSearchParams();
+  if (path) query.set("path", path);
+  if (title) query.set("title", title);
+  const response = await fetch(`${HELPER}/v1/print/save?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/pdf" },
+    body: pdf,
+  });
+  if (!response.ok) throw new Error(await errorOf(response));
+  return response.json();
+};
+
+async function errorOf(response) {
+  try {
+    return (await response.json()).error ?? `${response.status}`;
+  } catch {
+    return `${response.status}`;
+  }
+}
+
+const PRINT_STYLE = `@layer plutonium {
+  .plutonium-dialog.plutonium-print {
+    max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 0;
+    display: grid; grid-template-columns: minmax(0, 1fr) 260px; width: min(900px, calc(100vw - 16px));
+    height: min(640px, calc(100vh - 16px)); overflow: hidden;
+  }
+  .plutonium-print .preview { background: color-mix(in srgb, currentColor 12%, transparent); position: relative; }
+  .plutonium-print .preview iframe { border: 0; width: 100%; height: 100%; display: block; }
+  .plutonium-print .preview .note { position: absolute; inset: 0; display: grid; place-items: center; opacity: .7; }
+  .plutonium-print form { display: flex; flex-direction: column; gap: 8px; padding: 14px; overflow: auto; }
+  .plutonium-print h2 { font-size: 1.15em; margin: 0 0 2px; }
+  .plutonium-print .pages { opacity: .7; min-height: 1.3em; }
+  .plutonium-print label.field { display: grid; grid-template-columns: 90px minmax(0, 1fr); align-items: center; gap: 6px; }
+  .plutonium-print label.check { display: flex; align-items: center; gap: 6px; }
+  .plutonium-print input, .plutonium-print select, .plutonium-print button { font: inherit; min-width: 0; }
+  .plutonium-print [hidden] { display: none !important; }
+  .plutonium-print .error { color: var(--plutonium-dialog-error, #d33); }
+  .plutonium-print .buttons { margin-top: auto; display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+}`;
+
+let printStyle = null;
+
+// The library's print dialog for one request.
+class PrintDialog {
+  /** @param {PlutoniumShell} shell @param {TabRequest} request */
+  constructor(shell, request) {
+    ensureDialogStyle();
+    if (!printStyle) {
+      printStyle = document.createElement("style");
+      printStyle.textContent = PRINT_STYLE;
+      document.head.append(printStyle);
+    }
+    this.shell = shell;
+    this.request = request;
+    this.title = request.detail?.title || request.tab?.title || "";
+    this.closed = false;
+    this.pdf = null;
+    this.pdfKey = "";
+    this.url = "";
+    this.rendering = null;
+    this.opener = document.activeElement;
+    this._build();
+    request.signal.addEventListener("abort", () => this.close());
+    this._loadPrinters();
+    this._render();
+  }
+
+  _build() {
+    const us = /^(en-(US|CA|PH)|es-(MX|US)|fr-CA)\b/.test(navigator.language);
+    const element = document.createElement("div");
+    element.className = "plutonium-dialog plutonium-print";
+    element.popover = "manual";
+    element.setAttribute("role", "dialog");
+    element.setAttribute("aria-label", "Print");
+    element.innerHTML = `
+      <div class="preview"><iframe title="Preview"></iframe><div class="note">Preparing preview…</div></div>
+      <form>
+        <h2>Print</h2>
+        <div class="pages"></div>
+        <label class="field">Destination <select name="destination"><option value="">Save as PDF</option></select></label>
+        <label class="field" data-for="pdf">Save to <input name="path" spellcheck="false"></label>
+        <label class="field">Pages <select name="pages"><option value="all">All</option><option value="custom">Custom</option></select></label>
+        <label class="field" hidden data-for="custom">Ranges <input name="ranges" placeholder="1-3, 5" spellcheck="false"></label>
+        <label class="field" data-for="printer">Copies <input name="copies" type="number" min="1" max="999" value="1"></label>
+        <label class="field">Layout <select name="layout"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+        <label class="field">Paper <select name="paper">${Object.keys(PAPER_SIZES)
+          .map((name) => `<option value="${name}">${name[0].toUpperCase()}${name.slice(1)}</option>`)
+          .join("")}</select></label>
+        <label class="field">Margins <select name="margins"><option value="default">Default</option><option value="minimum">Minimum</option><option value="none">None</option></select></label>
+        <label class="field">Scale <input name="scale" type="number" min="10" max="200" value="100"></label>
+        <label class="field" data-for="printer">Two-sided <select name="duplex"><option value="none">Off</option><option value="long-edge">Long edge</option><option value="short-edge">Short edge</option></select></label>
+        <label class="field" data-for="printer">Colour <select name="color"><option value="1">Colour</option><option value="0">Black and white</option></select></label>
+        <label class="check"><input name="headerFooter" type="checkbox"> Headers and footers</label>
+        <label class="check"><input name="background" type="checkbox"> Background graphics</label>
+        <div class="status" role="status"></div>
+        <div class="buttons"><button type="button" name="cancel">Cancel</button><button type="submit" class="default" name="go">Save</button></div>
+      </form>`;
+    this.element = element;
+    this.form = element.querySelector("form");
+    this.iframe = element.querySelector("iframe");
+    this.note = element.querySelector(".note");
+    this.status = element.querySelector(".status");
+    this.form.paper.value = us ? "letter" : "a4";
+    this.form.path.value = `~/Downloads/${fileNameOf(this.title)}`;
+    this.form.addEventListener("input", (event) => this._changed(event.target));
+    this.form.addEventListener("change", (event) => this._changed(event.target));
+    this.form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      this._go();
+    });
+    this.form.cancel.addEventListener("click", () => this.cancel());
+    element.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        this.cancel();
+      }
+    });
+    document.body.append(element);
+    element.showPopover();
+    this._place();
+    this._onResize = () => this._place();
+    window.addEventListener("resize", this._onResize);
+    this._showDestination();
+    this.form.destination.focus({ preventScroll: true });
+  }
+
+  // Over the tab's element if this page shows it, else in the middle.
+  _place() {
+    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect();
+    const width = this.element.offsetWidth;
+    const height = this.element.offsetHeight;
+    const centreX = box && box.width ? box.left + box.width / 2 : innerWidth / 2;
+    const centreY = box && box.height ? box.top + box.height / 2 : innerHeight / 2;
+    this.element.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, centreX - width / 2))}px`;
+    this.element.style.top = `${Math.max(8, Math.min(innerHeight - height - 8, centreY - height / 2))}px`;
+  }
+
+  async _loadPrinters() {
+    try {
+      const { available, printers, error, defaultPdfPath } = await this.shell.printers(this.title);
+      if (this.closed) return;
+      if (defaultPdfPath && !this._pathEdited) this.form.path.value = defaultPdfPath;
+      const select = this.form.destination;
+      for (const printer of printers) {
+        const option = document.createElement("option");
+        option.value = printer.name;
+        option.textContent = printer.description || printer.name;
+        if (printer.state === "disabled") option.disabled = true;
+        select.append(option);
+      }
+      const preferred = printers.find((printer) => printer.isDefault && printer.state !== "disabled");
+      if (preferred) select.value = preferred.name;
+      if (!available && error) console.info(`plutonium: no printers (${error})`);
+      this._showDestination();
+    } catch (error) {
+      console.warn("plutonium: listing printers", error);
+    }
+  }
+
+  _changed(target) {
+    if (target === this.form.path) this._pathEdited = true;
+    if (target === this.form.destination) return this._showDestination();
+    if (target === this.form.pages) {
+      this.form.querySelector('[data-for="custom"]').hidden = this.form.pages.value !== "custom";
+    }
+    if (["copies", "duplex", "color", "path"].includes(target.name)) return;
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._render(), 300);
+  }
+
+  _showDestination() {
+    const printing = !!this.form.destination.value;
+    for (const field of this.form.querySelectorAll('[data-for="printer"]')) field.hidden = !printing;
+    this.form.querySelector('[data-for="pdf"]').hidden = printing;
+    this.form.go.textContent = printing ? "Print" : "Save";
+  }
+
+  /** @returns {PdfOptions} */
+  _pdfOptions() {
+    const form = this.form;
+    const scale = Number(form.scale.value);
+    return {
+      paper: form.paper.value,
+      landscape: form.layout.value === "landscape",
+      scale: Number.isFinite(scale) && scale > 0 ? Math.min(2, Math.max(0.1, scale / 100)) : 1,
+      margins: form.margins.value,
+      background: form.background.checked,
+      headerFooter: form.headerFooter.checked,
+      pageRanges: form.pages.value === "custom" ? form.ranges.value.trim() : "",
+    };
+  }
+
+  // The PDF for the current settings (made once per settings).
+  async _pdfNow() {
+    const options = this._pdfOptions();
+    const key = JSON.stringify(options);
+    if (this.pdf && this.pdfKey === key) return this.pdf;
+    if (this.rendering?.key === key) return this.rendering.promise;
+    const promise = this.shell.printToPdf(this.request.tabId, options);
+    this.rendering = { key, promise };
+    try {
+      const pdf = await promise;
+      if (this.rendering?.key === key) {
+        this.pdf = pdf;
+        this.pdfKey = key;
+      }
+      return pdf;
+    } finally {
+      if (this.rendering?.key === key) this.rendering = null;
+    }
+  }
+
+  async _render() {
+    try {
+      const pdf = await this._pdfNow();
+      if (this.closed || pdf !== this.pdf) return;
+      if (this.url) URL.revokeObjectURL(this.url);
+      this.url = URL.createObjectURL(pdf);
+      this.iframe.src = `${this.url}#toolbar=0&navpanes=0`;
+      this.note.hidden = true;
+      const pages = countPdfPages(new Uint8Array(await pdf.arrayBuffer()));
+      if (!this.closed) {
+        this.element.querySelector(".pages").textContent = pages ? `${pages} page${pages === 1 ? "" : "s"}` : "";
+      }
+      this._error("");
+    } catch (error) {
+      if (this.closed) return;
+      this.note.hidden = false;
+      this.note.textContent = "No preview";
+      this._error(this.form.pages.value === "custom" ? "Check the page ranges." : error.message);
+    }
+  }
+
+  _error(text) {
+    this.status.textContent = text;
+    this.status.className = text ? "status error" : "status";
+  }
+
+  async _go() {
+    if (this.busy) return;
+    this.busy = true;
+    this.form.go.disabled = true;
+    const printer = this.form.destination.value;
+    this._error("");
+    this.status.textContent = printer ? "Printing…" : "Saving…";
+    try {
+      const pdf = await this._pdfNow();
+      let message;
+      if (printer) {
+        const copies = Math.floor(Number(this.form.copies.value));
+        await this.shell.printPdf(pdf, {
+          printer,
+          copies: copies >= 1 ? copies : 1,
+          duplex: this.form.duplex.value,
+          color: this.form.color.value === "1",
+          title: this.title,
+        });
+        message = `Sent to ${this.form.destination.selectedOptions[0]?.textContent ?? printer}`;
+      } else {
+        const { path } = await this.shell.savePdf(pdf, { path: this.form.path.value.trim(), title: this.title });
+        message = `Saved ${path}`;
+      }
+      const tabId = this.request.tabId;
+      await this.request.answer("done");
+      this.close();
+      this.shell.showTabToast(tabId, message, { duration: 3000 });
+    } catch (error) {
+      if (this.closed) return;
+      this._error(error.message);
+      this.busy = false;
+      this.form.go.disabled = false;
+    }
+  }
+
+  cancel() {
+    if (this.closed) return;
+    this.request.answer("cancel");
+    this.close();
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    clearTimeout(this._timer);
+    window.removeEventListener("resize", this._onResize);
+    this.element.remove();
+    if (this.url) URL.revokeObjectURL(this.url);
+    if (this.opener?.isConnected && document.activeElement !== this.opener) {
+      this.opener.focus?.({ preventScroll: true });
+    }
+  }
+}
+
+function fileNameOf(title) {
+  const name = title.replace(/[/\\\0:*?"<>|\n\r\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+  return `${name || "page"}.pdf`;
+}
+
+// Pages in a PDF from Chrome (Skia writes each page as a "/Type /Page"
+// object, uncompressed); 0 if it can't tell.
+function countPdfPages(bytes) {
+  const text = new TextDecoder("latin1").decode(bytes);
+  return (text.match(/\/Type\s*\/Page(?![a-zA-Z])/g) ?? []).length;
+}
+
+registerTabRequestKind("print", {
+  option: "print",
+  draw: (shell, request) => {
+    new PrintDialog(shell, request);
+    return true;
+  },
+});
+
 // File pickers (TAB_FEATURES.md, "File pickers"): a tab's <input type=file>,
 // File System Access picker or Save As asks the shell ("fileChooser"
 // requests). The library's picker lists the host's files through the helper

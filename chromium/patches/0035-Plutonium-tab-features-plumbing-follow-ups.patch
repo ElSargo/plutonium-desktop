@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 09:01:03 +1300
-Subject: [PATCH 35/41] Plutonium: tab features plumbing follow-ups
+Subject: [PATCH 35/42] Plutonium: tab features plumbing follow-ups
 
 EXO-TAB-FEATURES:
 - A feature's command that waits on the user (through a tab request)

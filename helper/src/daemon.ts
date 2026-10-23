@@ -44,6 +44,7 @@ import { comboKeys, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
+import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import {
@@ -778,6 +779,57 @@ export class Daemon {
     await this.launch(thread, ["xdg-open", target], dirname(path), 0, true);
   }
 
+  /**
+   * EXO-TAB-FEATURES: prints one of the thread's tabs, as an agent: to the host's
+   * printer (CUPS), or to a PDF file with `path`. Agents may print like any other
+   * program (TAB_FEATURES.md, Decision 8). A print the page asked for (its
+   * pending.print, from window.print() or Ctrl+P) is answered "done".
+   */
+  async printTab(
+    threadId: string,
+    tabId: number,
+    body: Record<string, unknown>,
+  ): Promise<{ job?: string; path?: string; bytes: number; tab: ThreadTab }> {
+    const string = (key: string) => (typeof body[key] === "string" && body[key] ? (body[key] as string) : undefined);
+    const boolean = (key: string) => (typeof body[key] === "boolean" ? (body[key] as boolean) : undefined);
+    const number = (key: string) => (typeof body[key] === "number" ? (body[key] as number) : undefined);
+    let args;
+    try {
+      args = pdfArguments({
+        paper: string("paper"),
+        landscape: boolean("landscape"),
+        scale: number("scale"),
+        margins: string("margins"),
+        background: boolean("background"),
+        headerFooter: boolean("headerFooter"),
+        pageRanges: string("pageRanges"),
+      });
+    } catch (error) {
+      throw new HttpError(400, (error as Error).message);
+    }
+    const { result, tab } = await this.runTabCommand(threadId, tabId, "print-to-pdf", args);
+    const data = (result as { data?: unknown } | null)?.data;
+    if (typeof data !== "string" || !data) throw new HttpError(502, `Tab ${tabId} couldn't be printed to PDF.`);
+    const pdf = Buffer.from(data, "base64");
+    let outcome: { job?: string; path?: string };
+    try {
+      const path = string("path");
+      outcome = path
+        ? savePdf(pdf, path, { overwrite: boolean("overwrite") === true })
+        : await printPdf(pdf, {
+            printer: string("printer"),
+            copies: number("copies"),
+            duplex: string("duplex") as "none" | "long-edge" | "short-edge" | undefined,
+            color: boolean("color"),
+            title: tab.title,
+          });
+    } catch (error) {
+      throw new HttpError(400, (error as Error).message);
+    }
+    if (tab.pending?.print) await this.answerTabRequest(threadId, tabId, "print", "done").catch(() => {});
+    return { ...outcome, bytes: pdf.length, tab: threadTab(await this.ownedTab(threadId, tabId)) };
+  }
+
   async closeTab(threadId: string, tabId: number): Promise<{ closed: boolean }> {
     await this.ownedTab(threadId, tabId);
     const desktop = await this.direct();
@@ -1344,6 +1396,39 @@ export class Daemon {
       response.end(found.data);
       return;
     }
+    // EXO-TAB-FEATURES: printing (src/printing.ts).
+    if (method === "GET" && path === "/v1/printers") {
+      return sendJson(response, 200, {
+        ...(await listPrinters()),
+        defaultPdfPath: defaultPdfPath(url.searchParams.get("title") ?? ""),
+      });
+    }
+    if (method === "POST" && (path === "/v1/print" || path === "/v1/print/save")) {
+      const pdf = await readBody(request);
+      if (!pdf.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw new HttpError(400, "Expected a PDF.");
+      const query = url.searchParams;
+      try {
+        if (path === "/v1/print/save") {
+          const target = query.get("path") || defaultPdfPath(query.get("title") ?? "");
+          return sendJson(response, 200, savePdf(pdf, target, { overwrite: query.get("overwrite") === "1" }));
+        }
+        const copies = query.get("copies");
+        const color = query.get("color");
+        return sendJson(
+          response,
+          200,
+          await printPdf(pdf, {
+            printer: query.get("printer") || undefined,
+            copies: copies ? Number(copies) : undefined,
+            duplex: (query.get("duplex") || undefined) as "none" | "long-edge" | "short-edge" | undefined,
+            color: color === null ? undefined : color === "1",
+            title: query.get("title") || undefined,
+          }),
+        );
+      } catch (error) {
+        throw new HttpError(400, (error as Error).message);
+      }
+    }
     if (method === "POST" && path === "/v1/apps/launch") {
       const { thread, id, waitMs, show } = await readJson(request);
       if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread is required.");
@@ -1496,6 +1581,7 @@ export class Daemon {
             if (typeof body.kind !== "string" || !body.kind) throw new HttpError(400, "kind is required.");
             return sendJson(response, 200, await this.answerTabRequest(threadId, tabId, body.kind, body.answer));
           }
+          if (what === "print") return sendJson(response, 200, await this.printTab(threadId, tabId, body));
           if (what === "page") return sendJson(response, 200, await this.pageAction(threadId, tabId, body));
         }
       }
