@@ -409,6 +409,22 @@ const TOOLS = [
     },
   },
   {
+    name: "choose_files",
+    description:
+      "Answer the file picker a tab's page is waiting on (list_tabs shows it as the tab's pending.fileChooser, " +
+      "with its mode: open, open-multiple, folder or save). Give absolute paths on this machine: one for open, " +
+      "folder and save (the file to write), one or more for open-multiple. Pass no paths to cancel the picker.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tab_id: { type: "integer", description: "A tab id from list_tabs or open_tab." },
+        paths: { type: "array", items: { type: "string" }, description: "Absolute paths; empty to cancel." },
+      },
+      required: ["tab_id", "paths"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -734,6 +750,18 @@ export async function callTool(
           text: typeof args.text === "string" ? args.text : "",
         }),
       );
+    case "choose_files": {
+      const paths = args.paths;
+      if (!Array.isArray(paths) || !paths.every((path) => typeof path === "string")) {
+        throw new Error("paths must be an array of strings.");
+      }
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/request`, {
+          kind: "fileChooser",
+          answer: paths.length > 0 ? { paths } : null,
+        }),
+      );
+    }
     case "list_downloads":
       return text(await helperJson(socket, "GET", `/v1/threads/${thread}/downloads`));
     case "download_action": {

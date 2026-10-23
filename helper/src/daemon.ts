@@ -39,6 +39,7 @@ import {
   ShellRelay,
   type NativeWindowEntry,
 } from "./relay.ts";
+import { FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
 import { comboKeys, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
@@ -1315,6 +1316,25 @@ export class Daemon {
     }
     if (method === "GET" && path === "/v1/apps") {
       return sendJson(response, 200, this.apps.list());
+    }
+    // EXO-TAB-FEATURES: the host's files, for the file picker.
+    if (path === "/v1/files" || path.startsWith("/v1/files/")) {
+      try {
+        if (method === "GET" && path === "/v1/files") {
+          const hidden = url.searchParams.get("hidden") === "1";
+          return sendJson(response, 200, await listDirectory(url.searchParams.get("dir") ?? "", { hidden }));
+        }
+        if (method === "GET" && path === "/v1/files/places") {
+          return sendJson(response, 200, { places: places(), recent: recentFiles() });
+        }
+        if (method === "POST" && path === "/v1/files/folder") {
+          const { path: folder } = await readJson(request);
+          return sendJson(response, 200, await makeFolder(typeof folder === "string" ? folder : ""));
+        }
+      } catch (error) {
+        if (error instanceof FilesError) throw new HttpError(error.status, error.message);
+        throw error;
+      }
     }
     const icon = path.match(/^\/v1\/apps\/([^/]+)\/icon$/);
     if (method === "GET" && icon) {

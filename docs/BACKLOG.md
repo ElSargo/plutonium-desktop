@@ -280,7 +280,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   Done (2026-10-23): see `TAB_FEATURES.md`, "As built" and Zoom. T3 has zoom
   through the keys, the wheel and the toast; its panel's own zoom controls
   are still ignored (its bridge, patch 0012).
-- [ ] **File pickers for tabs.** L · `RunFileChooser` through
+- [x] **File pickers for tabs.** L · `RunFileChooser` through
   `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
   tabs' pickers (inputs, File System Access, Save As) to the shell as
   `filechooserrequest`. The library's picker over the helper's file listing.
