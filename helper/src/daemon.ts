@@ -697,6 +697,8 @@ export class Daemon {
     args?: Record<string, unknown>,
   ): Promise<{ result: unknown; tab: ThreadTab }> {
     await this.ownedTab(threadId, tabId);
+    // EXO-TAB-PERMISSIONS: the prompt says an agent asked.
+    if (command === "permission-request") args = { ...args, by: "agent" };
     const desktop = await this.direct();
     let result: unknown;
     try {

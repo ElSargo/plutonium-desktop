@@ -1425,6 +1425,61 @@ PlutoniumShell.prototype.answerPermission = function (requestId, answer, { scope
   return this.answerTabRequest(requestId, scope ? { answer, scope } : { answer });
 };
 
+/**
+ * Asks the user (the same prompt a page's request gets) to allow `permissions` (names as in
+ * PERMISSION_LABELS) for `origin` (default: the tab's page) in tab `tabId`'s thread or
+ * everywhere: the way to ask again after a request was `blocked`. Resolves once answered, with
+ * {answer, scope?}, or {answer: "dismiss", fallback} if no shell took it, or {answer: "allow",
+ * scope: "thread", asked: false} if the thread allows them already.
+ */
+PlutoniumShell.prototype.requestPermission = function (tabId, permissions, { origin } = {}) {
+  return this.tabCommand(tabId, "permission-request", origin ? { permissions, origin } : { permissions });
+};
+
+/**
+ * The decisions that apply in tab `tabId`: {thread, decisions: [{origin, permission,
+ * decision: "allow" | "block", scope: "thread" | "everywhere"}]}, its thread's and the
+ * browser's own for its page's origin.
+ */
+PlutoniumShell.prototype.tabPermissions = function (tabId) {
+  return this.tabCommand(tabId, "permissions");
+};
+
+/**
+ * Takes back a decision for tab `tabId`: its thread's (scope "thread", the default; `origin`
+ * and `permission` left out match any), or the browser's own (scope "everywhere", for
+ * `permission` and `origin`, default the page's). Resolves with {revoked}.
+ */
+PlutoniumShell.prototype.revokePermission = function (tabId, { origin, permission, scope = "thread" } = {}) {
+  return this.tabCommand(tabId, "permission-revoke", { scope, ...(origin ? { origin } : {}), ...(permission ? { permission } : {}) });
+};
+
+async function permissionCommand(shell, command, args) {
+  if (typeof shell.broker?.permissionCommand !== "function") return null;
+  return JSON.parse(await shell.broker.permissionCommand(command, JSON.stringify(args)));
+}
+
+/**
+ * Every thread's decisions (`thread`, `origin` filter them): [{thread, origin, permission,
+ * decision, scope: "thread"}]. Null if this browser has no thread grants.
+ */
+PlutoniumShell.prototype.threadPermissions = function ({ thread, origin } = {}) {
+  return permissionCommand(this, "list", { ...(thread ? { thread } : {}), ...(origin ? { origin } : {}) });
+};
+
+/**
+ * Takes back thread `thread`'s decisions for `origin` and `permission` (left out: all of them).
+ * A shell calls forgetThreadPermissions(thread) when it archives or deletes a thread (a settled
+ * thread keeps them). Resolves with {revoked}.
+ */
+PlutoniumShell.prototype.revokeThreadPermissions = function (thread, { origin, permission } = {}) {
+  return permissionCommand(this, "revoke", { thread, ...(origin ? { origin } : {}), ...(permission ? { permission } : {}) });
+};
+
+PlutoniumShell.prototype.forgetThreadPermissions = function (thread) {
+  return this.revokeThreadPermissions(thread);
+};
+
 // The library's prompt: a popover at the top left of the tab's element, as
 // Chrome's bubble sits under its address bar. It waits while this page
 // doesn't show the tab, and goes away if the request ends some other way.

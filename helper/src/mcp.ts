@@ -348,6 +348,24 @@ const TOOLS = [
     },
   },
   {
+    name: "request_permission",
+    description:
+      "Ask the user to allow permissions (camera, microphone, geolocation, notifications, clipboard-read, " +
+      "midi-sysex, storage-access, local-fonts, window-management, idle-detection, sensors, ...) for a site " +
+      "in one of this thread's tabs. The user sees a prompt marked as yours and chooses this thread or " +
+      "everywhere, or refuses; this waits for the answer ({answer, scope}).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tab_id: { type: "integer", description: "A tab id from list_tabs or open_tab." },
+        permissions: { type: "array", items: { type: "string" }, minItems: 1 },
+        origin: { type: "string", description: "The site, such as https://meet.example.com (default: the tab's page)." },
+      },
+      required: ["tab_id", "permissions"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -682,6 +700,17 @@ export async function callTool(
           answer: typeof args.scope === "string" && answer === "deny" ? { answer, scope: args.scope } : { answer },
         }),
       );
+    }
+    case "request_permission": {
+      const permissions = args.permissions;
+      if (!Array.isArray(permissions) || !permissions.length || !permissions.every((p) => typeof p === "string")) {
+        throw new Error("permissions must be a non-empty array of names.");
+      }
+      const result = await helperJson<{ result: unknown }>(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/command`, {
+        command: "permission-request",
+        args: typeof args.origin === "string" ? { permissions, origin: args.origin } : { permissions },
+      });
+      return text(result.result);
     }
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
