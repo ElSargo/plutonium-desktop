@@ -48,6 +48,7 @@ import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from ".
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import {
+  explainPid,
   rememberLaunch,
   SHOW_VARIABLE,
   showsForPids,
@@ -236,6 +237,9 @@ function waitMsOf(value: unknown): number {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Seconds since `start` (ms), for the logs. */
+const seconds = (start: number) => `${((Date.now() - start) / 1000).toFixed(1)} s`;
+
 // type_window: key events per batch, and the pause between batches.
 const TYPE_BATCH = 64;
 const TYPE_BATCH_GAP_MS = 25;
@@ -338,6 +342,12 @@ export class Daemon {
   private reportedOrigins = new Set<string>();
   /** gpu.ts's answer for the Exo instance behind the socket's inode. */
   private gpuProbe: { inode: number; report: Promise<GpuReport> } | null = null;
+  /**
+   * The thread each untagged window's client was started by, by window id.
+   * The browser can't read the environment of every client (a sandbox's own
+   * user namespace, Flatpak's), the helper can, and knows what it started.
+   */
+  private readonly pidThreads = new Map<number, { pid: number; threadId: string | undefined }>();
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -378,11 +388,13 @@ export class Daemon {
         const windows = desktop.windows();
         const existing = new Set(windows.map((window) => window.id));
         this.agentWindows.prune(existing);
+        for (const id of this.pidThreads.keys()) if (!existing.has(id)) this.pidThreads.delete(id);
         for (const window of windows) {
           if (!window.embedded) this.agentWindows.follow(window.id, window.width, window.height);
         }
         this.a11y.prune(existing);
       });
+      desktop.windowListeners.add((window, previous) => this.logWindow(window, previous));
     }
     // Links a thread's apps open become tabs in the thread (opener.ts).
     try {
@@ -461,8 +473,37 @@ export class Daemon {
   async threadWindows(threadId: string): Promise<NativeWindowEntry[]> {
     const windows = await this.allWindows();
     return windows
-      .filter((entry) => (entry.tags ? entry.tags.includes(threadId) : threadForPid(entry.pid) === threadId))
+      .filter((entry) => (entry.tags?.length ? entry.tags.includes(threadId) : this.pidThread(entry) === threadId))
       .sort((a, b) => a.id - b.id);
+  }
+
+  /** An untagged window's thread: the one that started its client, if any. */
+  private pidThread(entry: { readonly id: number; readonly pid: number }): string | undefined {
+    const known = this.pidThreads.get(entry.id);
+    if (known?.pid === entry.pid) return known.threadId;
+    const threadId = threadForPid(entry.pid);
+    this.pidThreads.set(entry.id, { pid: entry.pid, threadId });
+    return threadId;
+  }
+
+  /** Logs a new window's client and thread, and later changes to its tags. */
+  private logWindow(window: DesktopWindow, previous: DesktopWindow | undefined): void {
+    const tags = `[${window.tags.join(", ")}]`;
+    const what = `window #${window.id} ${JSON.stringify(window.appId)} pid ${window.pid}`;
+    if (previous) {
+      if (previous.tags.join("\0") !== window.tags.join("\0")) console.log(`plutoniumd: ${what}: tags now ${tags}`);
+      return;
+    }
+    if (window.tags.length > 0) {
+      console.log(`plutoniumd: ${what}: tags ${tags}, thread ${window.tags[0]}`);
+      return;
+    }
+    const { threadId, how } = explainPid(window.pid);
+    this.pidThreads.set(window.id, { pid: window.pid, threadId });
+    console.log(
+      `plutoniumd: ${what}: no tags from the browser; ` +
+        (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
+    );
   }
 
   private isShellOrigin(origin: string): boolean {
@@ -515,6 +556,8 @@ export class Daemon {
       this.relay.connected || (await this.direct())
       ? new Set((await this.threadWindows(threadId)).map((entry) => entry.id))
       : undefined;
+    const allBefore = before ? new Set((await this.allWindows()).map((entry) => entry.id)) : undefined;
+    const started = Date.now();
     void this.gpu();
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd: cwd || process.env.HOME,
@@ -525,10 +568,14 @@ export class Daemon {
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);
       child.once("error", (error) => reject(new HttpError(400, `Could not start ${argv[0]}: ${error.message}`)));
+    }).catch((error: Error) => {
+      console.log(`plutoniumd: could not launch ${JSON.stringify(argv)} in thread ${threadId}: ${error.message}`);
+      throw error;
     });
     child.unref();
     rememberLaunch(child, threadId, show);
     const pid = child.pid ?? 0;
+    console.log(`plutoniumd: launched pid ${pid} in thread ${threadId}: ${JSON.stringify(argv)}`);
     const holds = agent !== undefined && (agent.size !== undefined || !show);
     // Windows that come after the wait (a slow first start, the main window
     // after a splash) are held too.
@@ -543,10 +590,25 @@ export class Daemon {
         await sleep(300);
         let settled = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
         if (holds) settled = await this.holdNew(settled, agent.size);
+        console.log(
+          `plutoniumd: pid ${pid}'s windows after ${seconds(started)}: ` +
+            settled.map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)}`).join(", "),
+        );
         return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
       }
       if (child.exitCode !== null && child.exitCode !== 0) break;
     }
+    // What came instead, if anything: windows the thread didn't get.
+    const others = (await this.allWindows().catch(() => [])).filter((entry) => !allBefore?.has(entry.id));
+    console.log(
+      `plutoniumd: no window in thread ${threadId} from pid ${pid} after ${seconds(started)}` +
+        (child.exitCode !== null ? ` (it exited with ${child.exitCode})` : "") +
+        (others.length > 0
+          ? `; other new windows: ${others
+              .map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)} pid ${entry.pid} tags [${(entry.tags ?? []).join(", ")}]`)
+              .join("; ")}`
+          : "; no other new windows"),
+    );
     return { pid, windows: [] };
   }
 

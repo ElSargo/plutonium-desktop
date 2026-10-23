@@ -367,6 +367,31 @@ describe("helper end to end", () => {
     }
   });
 
+  test("a window the browser couldn't tag goes to the thread that launched its client", async () => {
+    // As a Flatpak's: the browser can't read the sandboxed client's
+    // environment and reports no tags; the helper started its process.
+    const { pid } = await helperJson<{ pid: number }>(socketPath, "POST", "/v1/launch", {
+      thread: "t-a",
+      argv: ["env", "-i", "sleep", "30"],
+    });
+    const stranger = spawn("sleep", ["30"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
+    await new Promise((resolve) => stranger.once("spawn", resolve));
+    const saved = shell.windows;
+    try {
+      shell.windows = [...saved, windowEntry(5, "Sandboxed", pid, []), windowEntry(6, "Someone else's", stranger.pid!, [])];
+      const result = await agent.call("list_windows");
+      const windows = JSON.parse(result.content[0]!.text!) as { id: number }[];
+      assert.deepEqual(
+        windows.map((window) => window.id),
+        [1, 3, 5],
+      );
+    } finally {
+      shell.windows = saved;
+      stranger.kill();
+      process.kill(pid);
+    }
+  });
+
   test("the thread setup a frontend asks for", async () => {
     const setup = await helperJson<{ env: Record<string, string>; terminalEnv: Record<string, string>; mcpServer: { args: string[] } }>(
       socketPath,

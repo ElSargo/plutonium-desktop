@@ -42,6 +42,20 @@ LibreOffice drew its own title bar and close buttons before; it draws none now.
 
 The helper tells the shells (`agent_windows` notice; `shell.agentWindows` and `"agentwindowschange"` in the shell library): the held size, and `busy` while an agent gave the window input in the last 4 s. T3 Code shows a held window at its size, scaled down to fit the panel without stretching, behind a lock that says the agent is using it and offers **Take control**. That releases the hold (`shell.releaseWindow()`, `POST /v1/shell/windows/<id>/release`): the panel sizes the window again, and `resize_window` refuses while the panel shows it. An agent working in a window the user controls shows as "Agent working" in its tab's header. `list_windows` gives `agentSize` and `userControl`.
 
+## Which windows are a thread's (2026-10-24)
+
+A window is a thread's when its tags include the thread's tag. The browser tags a new window with `PLUTONIUM_THREAD_ID` from its client's `/proc/<pid>/environ`, walking up its parents (patch 0014). Ash runs in a podman user namespace, so it can't read the environment of processes in other user namespaces: every host app, and every sandboxed one (a Flatpak's bwrap makes its own). For those it logs `EXO-TAGS can't read window #N's client environment` and adds the window untagged. A shell then asks the helper (`/v1/window-threads`) and names the window's origin (`setWindowOriginTag`).
+
+The helper runs on the host, so it can read the sandboxed app's environment, and it knows which processes it started (`rememberLaunch`). The agent tools no longer depend on a shell naming the origin. A window with no tags belongs to the thread that started its client (`threadForPid`, cached per window), in direct (DevTools) mode as well as through a shell. Before, that fallback ran only when a shell sent no tag list at all. The browser always sends one, so a Flatpak's untagged window never reached its thread when no shell had named it.
+
+The helper's log answers "why didn't my window show up":
+
+- each launch: `launched pid N in thread T: [argv]`, or `could not launch [argv] in thread T: …`;
+- each new window: its app id, pid and tags, and the thread it went to and how (`from pid N's environment`, `pid N is one the helper started`), or why it got none (`the client's pid is unknown`, `pid N is gone`, `no thread tag in pid N or its parents (k environment(s) unreadable)`); later tag changes as `tags now […]`;
+- the end of `launch_app`'s wait: the windows it returns, or `no window in thread T from pid N after S s`, with whether the process exited and every other window that came in the meantime (with pid and tags).
+
+A launch that exits 0 at once with no window has usually handed its arguments to an instance already running, and the new window belongs to that instance's session and thread. The Flatpak LibreOffice does this over D-Bus: whoever owns `org.libreoffice.LibreOfficeIpc0` on the session bus gets every later start, in any Plutonium session, whatever `-env:UserInstallation` says. If that instance doesn't answer (2026-10-24: it was restarting after a crash), the new soffice.bin waits on D-Bus without connecting to Wayland, and no window comes. A private session bus (`env DBUS_SESSION_BUS_ADDRESS=… org.libreoffice.LibreOffice …`) does give a separate instance.
+
 ## Accessibility
 
 `read_window` reads a window as an accessibility tree over AT-SPI, for apps that have one (GTK, Qt, LibreOffice; not terminals): role, name, states, text, value, its center in snapshot pixels and a ref (`a12`). `act_window` acts on a ref: its default action, `focus`, `set_text`, `set_value`, `select`, `scroll_into_view`, or any action the app lists; with no action of its own, `click` clicks the element's center.
