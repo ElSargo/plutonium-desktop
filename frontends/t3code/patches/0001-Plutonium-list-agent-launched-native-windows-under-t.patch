@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Thu, 15 Oct 2026 22:14:49 +1300
-Subject: [PATCH 01/18] Plutonium: list agent-launched native windows under
+Subject: [PATCH 01/20] Plutonium: list agent-launched native windows under
  their thread
 
 Agents get PLUTONIUM_THREAD_ID and the Exo display when PLUTONIUM_WAYLAND_DISPLAY is set; /api/plutonium/window-threads maps client pids to threads; the web app lists each thread's windows in the sidebar and embeds one in a pane when running as the Plutonium shell.

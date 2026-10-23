@@ -145,6 +145,13 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   desktop has no Apps panel content. The helper has window screencasts
   (`Plutonium.startWindowScreencast`) and input; T3 would stream them
   (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
+  `preview_drag` drags along a path of points; snapshot images are in click
+  coordinates on desktop tabs; the panel's cursor follows a resized tab
+  (`features/AGENT_CONTROL.md`, "In T3 Code").
+- [ ] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
+  reports `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
+  cursor off by the zoom. Not seen yet.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
