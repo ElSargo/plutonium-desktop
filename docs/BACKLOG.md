@@ -277,7 +277,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `pending` on `BrowserTabEntry`, the new `tabCommand`s and keys, the
   library's `connect()` options and dialog styles. Zoom: `ZoomController`,
   `ContentsZoomChange`, `BrowserTabEntry.zoom`, `setTabZoom`; T3's zoom.
-- [ ] **File pickers for tabs.** L · `RunFileChooser` through
+- [x] **File pickers for tabs.** L · `RunFileChooser` through
   `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
   tabs' pickers (inputs, File System Access, Save As) to the shell as
   `filechooserrequest`. The library's picker over the helper's file listing.

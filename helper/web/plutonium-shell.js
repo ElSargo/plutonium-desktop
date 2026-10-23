@@ -1348,3 +1348,533 @@ export function connect(options = {}) {
   }
   return shell;
 }
+
+// File pickers (TAB_FEATURES.md, "File pickers"): a tab's <input type=file>,
+// File System Access picker or Save As asks the shell ("fileChooser"
+// requests). The library's picker lists the host's files through the helper
+// (it runs as the user), over the tab's element. connect({ fileChooser: false })
+// leaves it to the browser's fallback (the Files app's picker); a function
+// draws it yourself, answering {paths, filter?} or null. `filePlaces`, an
+// array or (request) => array of {name, path}, adds the shell's own places
+// (a thread's project folder, say) to the picker's.
+//
+// request.detail: {mode: "open" | "open-multiple" | "folder" | "save", upload,
+// title, origin, filters: [{name, patterns}], currentFilter, currentName,
+// currentFolder, defaultExtension}.
+registerTabRequestKind("fileChooser", {
+  option: "fileChooser",
+  draw: (shell, request) => {
+    new FileChooser(shell, request).open();
+    return true;
+  },
+});
+
+const FILE_CHOOSER_STYLE = `@layer plutonium {
+  .plutonium-file-chooser { display: grid; grid-template: auto auto 1fr auto / 150px 1fr; gap: 8px 10px;
+    width: min(720px, calc(100vw - 16px)); height: min(480px, calc(100vh - 16px)); max-width: none; }
+  .plutonium-file-chooser:not(:popover-open) { display: none; }
+  .plutonium-file-chooser header { grid-column: 1 / -1; display: flex; gap: 8px; align-items: baseline; }
+  .plutonium-file-chooser header b { font-size: 1.1em; }
+  .plutonium-file-chooser header span { opacity: .65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plutonium-file-chooser nav { grid-row: 2 / 4; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+  .plutonium-file-chooser nav button, .plutonium-file-chooser li { all: unset; box-sizing: border-box; display: block;
+    padding: 4px 8px; border-radius: 4px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plutonium-file-chooser nav button:hover, .plutonium-file-chooser li:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+  .plutonium-file-chooser nav button.current, .plutonium-file-chooser li[aria-selected="true"] {
+    background: var(--plutonium-dialog-accent, AccentColor); color: AccentColorText; }
+  .plutonium-file-chooser nav hr { border: 0; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); width: 100%; }
+  .plutonium-file-chooser .path { display: flex; gap: 6px; }
+  .plutonium-file-chooser .path input { flex: 1; min-width: 0; }
+  .plutonium-file-chooser ul { margin: 0; padding: 0; overflow: auto; list-style: none; outline: none;
+    border: 1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius: 4px; }
+  .plutonium-file-chooser li { display: grid; grid-template-columns: 1fr 80px 130px; gap: 8px; }
+  .plutonium-file-chooser li .size, .plutonium-file-chooser li .date { opacity: .7; text-align: right; font-variant-numeric: tabular-nums; }
+  .plutonium-file-chooser li.dir .name::before { content: "▸ "; opacity: .6; }
+  .plutonium-file-chooser li.disabled { opacity: .45; }
+  .plutonium-file-chooser .empty { padding: 12px; opacity: .6; }
+  .plutonium-file-chooser footer { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .plutonium-file-chooser footer .name { flex: 1; min-width: 120px; }
+  .plutonium-file-chooser footer .message { flex-basis: 100%; color: var(--plutonium-dialog-accent, AccentColor); }
+  .plutonium-file-chooser footer .spacer { flex: 1; }
+}`;
+
+let fileChooserStyle = null;
+
+/** A filter's name: its own, else its patterns ("All files" for *). */
+function fileFilterName(filter) {
+  if (filter.name) return filter.name;
+  if (filter.patterns.includes("*")) return "All files";
+  return filter.patterns.join(", ");
+}
+
+function fileMatches(filter, name) {
+  if (!filter || filter.patterns.includes("*")) return true;
+  const lower = name.toLowerCase();
+  return filter.patterns.some((pattern) => lower.endsWith(pattern.replace(/^\*/, "").toLowerCase()));
+}
+
+function fileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+function joinPath(dir, name) {
+  return name.startsWith("/") ? name : `${dir.replace(/\/$/, "")}/${name}`;
+}
+
+async function helperFiles(path, init) {
+  const response = await fetch(`${HELPER}${path}`, init);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `${response.status}`);
+  return body;
+}
+
+// The library's file picker: places on the left, a folder's files on the
+// right, the path above and the name, filter and buttons below.
+class FileChooser {
+  constructor(shell, request) {
+    this.shell = shell;
+    this.request = request;
+    const detail = request.detail ?? {};
+    this.mode = detail.mode ?? "open";
+    this.filters = Array.isArray(detail.filters) ? detail.filters : [];
+    this.filter = this.filters.length ? Math.min(Math.max(detail.currentFilter ?? 0, 0), this.filters.length - 1) : -1;
+    this.dir = "";
+    this.entries = [];
+    this.selected = new Set();
+    this.anchor = -1;
+    this.hidden = false;
+    this.confirmReplace = "";
+  }
+
+  get isFolder() {
+    return this.mode === "folder";
+  }
+
+  get isSave() {
+    return this.mode === "save";
+  }
+
+  open() {
+    ensureDialogStyle();
+    if (!fileChooserStyle) {
+      fileChooserStyle = document.createElement("style");
+      fileChooserStyle.textContent = FILE_CHOOSER_STYLE;
+      document.head.append(fileChooserStyle);
+    }
+    const detail = this.request.detail ?? {};
+    const titles = {
+      open: "Open file",
+      "open-multiple": "Open files",
+      folder: detail.upload ? "Upload folder" : "Select folder",
+      save: "Save as",
+    };
+    const accept = { open: "Open", "open-multiple": "Open", folder: detail.upload ? "Upload" : "Select", save: "Save" };
+
+    const element = document.createElement("div");
+    element.className = "plutonium-dialog plutonium-file-chooser";
+    element.popover = "manual";
+    element.tabIndex = -1;
+    element.setAttribute("role", "dialog");
+    element.innerHTML = `
+      <header><b></b><span class="origin"></span></header>
+      <nav></nav>
+      <div class="path"><button class="up" title="Up">↑</button><input class="dir" spellcheck="false"></div>
+      <ul role="listbox" tabindex="0"></ul>
+      <footer>
+        <input class="name" spellcheck="false" placeholder="Name">
+        <select class="filter"></select>
+        <label><input type="checkbox" class="hidden"> Hidden files</label>
+        <span class="spacer"></span>
+        <button class="new-folder">New folder</button>
+        <button class="cancel">Cancel</button>
+        <button class="accept default"></button>
+        <span class="message" hidden></span>
+      </footer>`;
+    const $ = (selector) => element.querySelector(selector);
+    this.element = element;
+    this.list = $("ul");
+    this.dirInput = $(".dir");
+    this.nameInput = $(".name");
+    this.acceptButton = $(".accept");
+    this.message = $(".message");
+    $("header b").textContent = detail.title || titles[this.mode] || titles.open;
+    $(".origin").textContent = detail.origin ?? this.request.tab?.url ?? "";
+    this.acceptButton.textContent = accept[this.mode] ?? "Open";
+    this.list.setAttribute("aria-multiselectable", String(this.mode === "open-multiple"));
+    if (!this.isSave) this.nameInput.hidden = true;
+    else this.nameInput.value = detail.currentName ?? "";
+    if (!this.isSave && !this.isFolder) $(".new-folder").hidden = true;
+    const filterSelect = $(".filter");
+    if (this.filters.length === 0 || this.isFolder) filterSelect.hidden = true;
+    for (const [index, filter] of this.filters.entries()) {
+      filterSelect.append(new Option(fileFilterName(filter), String(index), false, index === this.filter));
+    }
+
+    filterSelect.addEventListener("change", () => {
+      this.filter = Number(filterSelect.value);
+      this.render();
+    });
+    $(".hidden").addEventListener("change", (event) => {
+      this.hidden = event.target.checked;
+      this.load(this.dir);
+    });
+    $(".up").addEventListener("click", () => this.dir !== "/" && this.load(this.dir.replace(/\/[^/]*\/?$/, "") || "/"));
+    $(".cancel").addEventListener("click", () => this.finish(null));
+    $(".new-folder").addEventListener("click", () => this.newFolder());
+    this.acceptButton.addEventListener("click", () => this.accept());
+    this.dirInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.goTo(this.dirInput.value.trim());
+    });
+    this.nameInput.addEventListener("input", () => this.setMessage(""));
+    this.list.addEventListener("click", (event) => this.onClick(event));
+    this.list.addEventListener("dblclick", (event) => this.onDoubleClick(event));
+    element.addEventListener("keydown", (event) => this.onKey(event));
+    this.request.signal.addEventListener("abort", () => this.close());
+
+    document.body.append(element);
+    element.showPopover();
+    this.place();
+    this.onResize = () => this.place();
+    window.addEventListener("resize", this.onResize);
+    if (this.isSave) {
+      this.nameInput.focus({ preventScroll: true });
+      // The name, without its extension, ready to type over.
+      this.nameInput.setSelectionRange(0, this.nameInput.value.replace(/\.[^.]*$/, "").length || undefined);
+    } else {
+      this.list.focus({ preventScroll: true });
+    }
+    this.start(detail.currentFolder);
+  }
+
+  // Over the tab's element, else in the middle of the page.
+  place() {
+    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect() ?? {
+      left: 0,
+      top: 0,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+    const { offsetWidth: width, offsetHeight: height } = this.element;
+    const left = Math.min(Math.max(box.left + (box.width - width) / 2, 8), window.innerWidth - width - 8);
+    const top = Math.min(Math.max(box.top + (box.height - height) / 2, 8), window.innerHeight - height - 8);
+    this.element.style.left = `${Math.max(left, 0)}px`;
+    this.element.style.top = `${Math.max(top, 0)}px`;
+  }
+
+  async loadPlaces() {
+    const nav = this.element.querySelector("nav");
+    let found = { places: [], recent: [] };
+    try {
+      found = await helperFiles("/v1/files/places");
+    } catch (error) {
+      console.error("plutonium: the file picker's places", error);
+    }
+    this.home = found.places.find((place) => place.kind === "home")?.path ?? "/";
+    this.recent = found.recent ?? [];
+    const own = this.shell.options.filePlaces;
+    let extra = [];
+    try {
+      extra = (typeof own === "function" ? own(this.request) : own) ?? [];
+    } catch (error) {
+      console.error("plutonium: filePlaces", error);
+    }
+    const button = (name, title, onClick) => {
+      const element = document.createElement("button");
+      element.textContent = name;
+      element.title = title;
+      element.addEventListener("click", onClick);
+      nav.append(element);
+      return element;
+    };
+    for (const place of extra) button(place.name, place.path, () => this.load(place.path)).dataset.path = place.path;
+    if (extra.length) nav.append(document.createElement("hr"));
+    if (this.recent.length && !this.isFolder) button("Recent", "Recently opened files", () => this.showRecent());
+    for (const place of found.places) button(place.name, place.path, () => this.load(place.path)).dataset.path = place.path;
+    this.markPlace();
+  }
+
+  markPlace() {
+    for (const button of this.element.querySelectorAll("nav button")) {
+      button.classList.toggle("current", button.dataset.path === this.dir || (!this.dir && button.textContent === "Recent"));
+    }
+  }
+
+  // The folder the page suggests, else the last one used here, else home.
+  async start(folder) {
+    const places = this.loadPlaces();
+    for (const dir of [folder, this.shell._lastFileFolder]) {
+      if (dir && (await this.load(dir, { quiet: true }))) return;
+    }
+    await places;
+    if (!this.closed && !this.dir) this.load(this.home);
+  }
+
+  // Typed in the path field: a folder opens; a file (open modes) is chosen.
+  async goTo(path) {
+    if (!path) return;
+    if (!path.startsWith("/")) path = joinPath(this.dir || "/", path);
+    if (path.startsWith("~")) path = path.replace(/^~/, this.home ?? "");
+    if (await this.load(path, { quiet: true })) return;
+    const parent = path.replace(/\/[^/]*$/, "") || "/";
+    const name = path.slice(parent.length).replace(/^\//, "");
+    if (!(await this.load(parent, { quiet: true }))) {
+      this.setMessage(`${path} can't be opened.`);
+      return;
+    }
+    const entry = this.entries.find((candidate) => candidate.name === name);
+    if (this.isSave) {
+      this.nameInput.value = name;
+      this.accept();
+    } else if (entry && entry.kind === "file" && !this.isFolder) {
+      this.finish([entry.path]);
+    } else {
+      this.setMessage(`${path} doesn't exist.`);
+    }
+  }
+
+  async load(dir, { quiet = false } = {}) {
+    try {
+      const listing = await helperFiles(`/v1/files?dir=${encodeURIComponent(dir)}${this.hidden ? "&hidden=1" : ""}`);
+      this.dir = listing.dir;
+      this.entries = listing.entries;
+      this.recentShown = false;
+    } catch (error) {
+      if (!quiet) this.setMessage(error.message);
+      return false;
+    }
+    this.selected.clear();
+    this.anchor = -1;
+    this.dirInput.value = this.dir;
+    this.setMessage("");
+    this.markPlace();
+    this.render();
+    return true;
+  }
+
+  showRecent() {
+    this.dir = "";
+    this.entries = this.recent;
+    this.recentShown = true;
+    this.selected.clear();
+    this.anchor = -1;
+    this.dirInput.value = "";
+    this.markPlace();
+    this.render();
+  }
+
+  // What the list shows: folders, and the files the filter lets through
+  // (none in folder mode: they show, but can't be chosen).
+  visible() {
+    const filter = this.filters[this.filter];
+    return this.entries.filter((entry) => entry.kind === "dir" || this.isFolder || fileMatches(filter, entry.name));
+  }
+
+  selectable(entry) {
+    return this.isFolder ? entry.kind === "dir" : true;
+  }
+
+  render() {
+    this.shown = this.visible();
+    this.list.replaceChildren();
+    if (this.shown.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = this.recentShown ? "No recent files" : "This folder is empty";
+      this.list.append(empty);
+    }
+    const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+    for (const [index, entry] of this.shown.entries()) {
+      const item = document.createElement("li");
+      item.role = "option";
+      item.dataset.index = String(index);
+      item.className = entry.kind;
+      if (this.isFolder && entry.kind === "file") item.classList.add("disabled");
+      item.setAttribute("aria-selected", String(this.selected.has(entry.path)));
+      item.title = entry.path;
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = entry.name;
+      const size = document.createElement("span");
+      size.className = "size";
+      size.textContent = entry.kind === "file" ? fileSize(entry.size) : "";
+      const date = document.createElement("span");
+      date.className = "date";
+      date.textContent = entry.modified ? dateFormat.format(entry.modified) : "";
+      item.append(name, size, date);
+      this.list.append(item);
+    }
+  }
+
+  select(index, { extend = false, toggle = false } = {}) {
+    const entry = this.shown[index];
+    if (!entry) return;
+    const multiple = this.mode === "open-multiple";
+    if (multiple && extend && this.anchor >= 0) {
+      this.selected.clear();
+      const [from, to] = [Math.min(this.anchor, index), Math.max(this.anchor, index)];
+      for (let i = from; i <= to; i++) if (this.shown[i].kind === "file") this.selected.add(this.shown[i].path);
+    } else if (multiple && toggle) {
+      if (this.selected.has(entry.path)) this.selected.delete(entry.path);
+      else this.selected.add(entry.path);
+      this.anchor = index;
+    } else {
+      this.selected = new Set([entry.path]);
+      this.anchor = index;
+    }
+    if (this.isSave && entry.kind === "file") this.nameInput.value = entry.name;
+    this.confirmReplace = "";
+    this.setMessage("");
+    for (const item of this.list.querySelectorAll("li")) {
+      item.setAttribute("aria-selected", String(this.selected.has(this.shown[Number(item.dataset.index)].path)));
+    }
+    this.list.querySelector(`li[data-index="${index}"]`)?.scrollIntoView({ block: "nearest" });
+  }
+
+  onClick(event) {
+    const item = event.target.closest("li");
+    if (!item) return;
+    this.select(Number(item.dataset.index), { extend: event.shiftKey, toggle: event.ctrlKey || event.metaKey });
+  }
+
+  onDoubleClick(event) {
+    const item = event.target.closest("li");
+    const entry = item && this.shown[Number(item.dataset.index)];
+    if (!entry) return;
+    if (entry.kind === "dir") this.load(entry.path);
+    else if (!this.isFolder) {
+      if (this.isSave) this.nameInput.value = entry.name;
+      this.accept([entry]);
+    }
+  }
+
+  onKey(event) {
+    const inField = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.finish(null);
+    } else if (event.key === "Enter" && event.target !== this.dirInput && !(event.target instanceof HTMLButtonElement)) {
+      event.preventDefault();
+      const entries = this.selectedEntries();
+      if (!this.isSave && entries.length === 1 && entries[0].kind === "dir" && !this.isFolder) this.load(entries[0].path);
+      else this.accept();
+    } else if (!inField && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      const next = Math.min(Math.max(this.anchor + step, 0), this.shown.length - 1);
+      this.select(next, { extend: event.shiftKey });
+    } else if (!inField && event.key === "Backspace") {
+      event.preventDefault();
+      if (this.dir && this.dir !== "/") this.load(this.dir.replace(/\/[^/]*\/?$/, "") || "/");
+    } else if (!inField && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      // Type to jump to a name.
+      const key = event.key.toLowerCase();
+      const start = this.anchor + 1;
+      const order = [...this.shown.keys()].map((i) => (i + start) % this.shown.length);
+      const index = order.find((i) => this.shown[i].name.toLowerCase().startsWith(key));
+      if (index !== undefined) this.select(index);
+    }
+  }
+
+  selectedEntries() {
+    return this.shown?.filter((entry) => this.selected.has(entry.path)) ?? [];
+  }
+
+  async newFolder() {
+    if (!this.dir) return;
+    const name = this.isSave && this.nameInput.value.trim() && !this.nameInput.value.includes(".")
+      ? this.nameInput.value.trim()
+      : "New folder";
+    let path = joinPath(this.dir, name);
+    for (let n = 2; this.entries.some((entry) => entry.path === path); n++) path = joinPath(this.dir, `${name} ${n}`);
+    try {
+      await helperFiles("/v1/files/folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+    } catch (error) {
+      this.setMessage(error.message);
+      return;
+    }
+    await this.load(path);
+  }
+
+  accept(entries = this.selectedEntries()) {
+    if (this.isFolder) {
+      const chosen = entries.find((entry) => entry.kind === "dir")?.path ?? this.dir;
+      if (chosen) this.finish([chosen]);
+      return;
+    }
+    if (this.isSave) {
+      const name = this.nameInput.value.trim();
+      if (!name) {
+        this.setMessage("Type a name.");
+        this.nameInput.focus();
+        return;
+      }
+      if (!this.dir && !name.startsWith("/")) {
+        this.setMessage("Choose a folder.");
+        return;
+      }
+      const path = joinPath(this.dir, name);
+      const existing = this.entries.find((entry) => entry.path === path);
+      if (existing?.kind === "dir") {
+        this.load(path);
+        return;
+      }
+      if (existing && this.confirmReplace !== path) {
+        this.confirmReplace = path;
+        this.setMessage(`${name} already exists. Save again to replace it.`);
+        this.acceptButton.textContent = "Replace";
+        return;
+      }
+      this.finish([path]);
+      return;
+    }
+    const files = entries.filter((entry) => entry.kind === "file");
+    const dirs = entries.filter((entry) => entry.kind === "dir");
+    if (files.length === 0) {
+      if (dirs.length === 1) this.load(dirs[0].path);
+      else this.setMessage("Choose a file.");
+      return;
+    }
+    this.finish(files.map((entry) => entry.path));
+  }
+
+  setMessage(text) {
+    if (!this.message) return;
+    this.message.textContent = text;
+    this.message.hidden = !text;
+    if (!text && this.isSave) this.acceptButton.textContent = "Save";
+  }
+
+  async finish(paths) {
+    if (this.closed) return;
+    if (paths && this.dir) this.shell._lastFileFolder = this.dir;
+    const answer = paths ? { paths, ...(this.filter >= 0 && !this.isFolder ? { filter: this.filter } : {}) } : null;
+    const ok = await this.request.answer(answer);
+    if (!ok && paths) {
+      this.setMessage("The page didn't take that.");
+      return;
+    }
+    this.close();
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    window.removeEventListener("resize", this.onResize);
+    this.element?.remove();
+  }
+}

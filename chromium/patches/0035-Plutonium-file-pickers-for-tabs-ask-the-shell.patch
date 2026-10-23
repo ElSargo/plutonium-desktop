@@ -1,0 +1,682 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 23 Oct 2026 09:13:18 +1300
+Subject: [PATCH 35/35] Plutonium: file pickers for tabs ask the shell
+
+EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "File pickers"): every
+picker a registry tab opens goes to the shell, as a "fileChooser" tab
+request. Until now the default delegate cancelled every <input type=file>.
+
+- Tab::RunFileChooser() and EnumerateDirectory() call FileSelectHelper,
+  as BrowserWebContentsDelegate does.
+- In shell mode, PlutoniumSelectFileDialogFactory wraps the Files app's
+  factory. For a picker whose ChromeSelectFilePolicy names a registry tab
+  (inputs, the File System Access pickers, a download's Save As), it makes
+  a dialog that sends {mode, upload, title, origin, filters, currentFilter,
+  currentName, currentFolder, defaultExtension} and takes {paths, filter?}
+  or null. Agents may answer too. If no shell takes it, or the shell that
+  took it goes away, the Files app's picker opens instead.
+- ChromeSelectFilePolicy::GetSourceContents() tells the factory which page
+  a picker is for.
+- FileSelectHelper doesn't cancel a registry tab's picker when the tab
+  gets too small: a shell that reloads drops the tab's embed, and the
+  picker falls back to the Files app. A hidden tab's picker is still
+  cancelled (WebContentsImpl::RunFileChooser), as in Chrome.
+---
+ chrome/browser/BUILD.gn                       |   5 +
+ chrome/browser/file_select_helper.cc          |  40 +-
+ chrome/browser/plutonium_file_chooser.cc      | 343 ++++++++++++++++++
+ chrome/browser/plutonium_file_chooser.h       |  49 +++
+ chrome/browser/plutonium_tabs.cc              |  18 +
+ .../chrome_browser_main_extra_parts_ash.cc    |  12 +-
+ .../chrome_select_file_policy.cc              |  32 +-
+ .../chrome_select_file_policy.h               |   6 +
+ 8 files changed, 488 insertions(+), 17 deletions(-)
+ create mode 100644 chrome/browser/plutonium_file_chooser.cc
+ create mode 100644 chrome/browser/plutonium_file_chooser.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f098672184..f5d21d9e8f 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -779,6 +779,7 @@ if (is_chromeos) {
+       "exo_window_broker.h",
+       "plutonium_agent.h",
+       "plutonium_context_menu.h",
++      "plutonium_file_chooser.h",
+       "plutonium_groups.h",
+       "plutonium_keys.h",
+       "plutonium_shell.h",
+@@ -792,6 +793,7 @@ if (is_chromeos) {
+       "exo_window_broker.cc",
+       "plutonium_agent.cc",
+       "plutonium_context_menu.cc",
++      "plutonium_file_chooser.cc",
+       "plutonium_groups.cc",
+       "plutonium_keys.cc",
+       "plutonium_shell.cc",
+@@ -802,14 +804,17 @@ if (is_chromeos) {
+     public_deps = [
+       "//components/input",
+       "//third_party/blink/public/mojom:native_window_mojo_bindings",
++      "//ui/shell_dialogs",
+       "//url",
+     ]
+     deps = [
+       ":browser_process",
++      ":file_select_helper",
+       "//ash",
+       "//ash/constants",
+       "//base",
+       "//chrome/app:command_ids",
++      "//chrome/browser/ui/select_file_policy",
+       "//chrome/browser/ash/exo",
+       "//chrome/browser/profiles:profile",
+       "//chromeos/ash/experiences/arc",
+diff --git a/chrome/browser/file_select_helper.cc b/chrome/browser/file_select_helper.cc
+index 4d1dc53d4e..6e869e1e24 100644
+--- a/chrome/browser/file_select_helper.cc
++++ b/chrome/browser/file_select_helper.cc
+@@ -54,6 +54,8 @@
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chrome/browser/ash/file_manager/fileapi_util.h"
+ #include "chrome/browser/ash/fusebox/fusebox_server.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "content/public/browser/site_instance.h"
+ #endif
+ 
+@@ -778,20 +780,32 @@ void FileSelectHelper::RunFileChooserOnUIThread(
+     RunFileChooserEnd();
+     return;
+   }
+-  content::RenderFrameHost* rfh = render_frame_host_
+-                                      ? render_frame_host_.get()
+-                                      : web_contents_->GetPrimaryMainFrame();
+-  web_contents_based_canceller_ = content::WebContentsBasedCanceller::Create(
+-      rfh, content::WebContentsBasedCanceller::CancelCondition::kWindowSize,
+-      GetMinFileChooserWindowSize());
+-  LogFileChooserSuppressedByWindowSize(
+-      web_contents_, /*suppressed=*/!web_contents_based_canceller_);
+-  if (!web_contents_based_canceller_) {
+-    RunFileChooserEnd();
+-    return;
++  bool size_guard = true;
++#if BUILDFLAG(IS_CHROMEOS)
++  // PLUTONIUM (EXO-TAB-FEATURES): a registry tab's picker asks the shell, and
++  // doesn't end when the tab's size changes: a shell that reloads drops the
++  // tab's embed, and the picker then falls back to the Files app.
++  if (plutonium_shell::IsShellMode() &&
++      PlutoniumTabs::Get()->IsTab(web_contents_)) {
++    size_guard = false;
++  }
++#endif
++  if (size_guard) {
++    content::RenderFrameHost* rfh = render_frame_host_
++                                        ? render_frame_host_.get()
++                                        : web_contents_->GetPrimaryMainFrame();
++    web_contents_based_canceller_ = content::WebContentsBasedCanceller::Create(
++        rfh, content::WebContentsBasedCanceller::CancelCondition::kWindowSize,
++        GetMinFileChooserWindowSize());
++    LogFileChooserSuppressedByWindowSize(
++        web_contents_, /*suppressed=*/!web_contents_based_canceller_);
++    if (!web_contents_based_canceller_) {
++      RunFileChooserEnd();
++      return;
++    }
++    web_contents_based_canceller_->SetCancelCallback(base::BindOnce(
++        &FileSelectHelper::OnCancelledByWindowSize, base::Unretained(this)));
+   }
+-  web_contents_based_canceller_->SetCancelCallback(base::BindOnce(
+-      &FileSelectHelper::OnCancelledByWindowSize, base::Unretained(this)));
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
+   select_file_dialog_ = ui::SelectFileDialog::Create(
+diff --git a/chrome/browser/plutonium_file_chooser.cc b/chrome/browser/plutonium_file_chooser.cc
+new file mode 100644
+index 0000000000..5311930678
+--- /dev/null
++++ b/chrome/browser/plutonium_file_chooser.cc
+@@ -0,0 +1,343 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_file_chooser.h"
++
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tracker.h"
++#include "ui/shell_dialogs/select_file_dialog.h"
++#include "ui/shell_dialogs/select_file_policy.h"
++#include "ui/shell_dialogs/selected_file_info.h"
++#include "url/gurl.h"
++#include "url/origin.h"
++
++namespace {
++
++using From = PlutoniumTabRequests::From;
++using FallbackReason = PlutoniumTabRequests::FallbackReason;
++
++const char* ModeName(ui::SelectFileDialog::Type type) {
++  switch (type) {
++    case ui::SelectFileDialog::SELECT_OPEN_MULTI_FILE:
++      return "open-multiple";
++    case ui::SelectFileDialog::SELECT_FOLDER:
++    case ui::SelectFileDialog::SELECT_UPLOAD_FOLDER:
++    case ui::SelectFileDialog::SELECT_EXISTING_FOLDER:
++      return "folder";
++    case ui::SelectFileDialog::SELECT_SAVEAS_FILE:
++      return "save";
++    case ui::SelectFileDialog::SELECT_NONE:
++    case ui::SelectFileDialog::SELECT_OPEN_FILE:
++      return "open";
++  }
++  return "open";
++}
++
++// A tab's picker: asks the shell (a "fileChooser" tab request), and opens
++// the fallback factory's picker if no shell takes it.
++class PlutoniumSelectFileDialog : public ui::SelectFileDialog {
++ public:
++  PlutoniumSelectFileDialog(Listener* listener,
++                            std::unique_ptr<ui::SelectFilePolicy> policy,
++                            content::WebContents* contents,
++                            ui::SelectFileDialogFactory* fallback)
++      : SelectFileDialog(listener, std::move(policy)),
++        contents_(contents->GetWeakPtr()),
++        fallback_factory_(fallback) {}
++
++  PlutoniumSelectFileDialog(const PlutoniumSelectFileDialog&) = delete;
++  PlutoniumSelectFileDialog& operator=(const PlutoniumSelectFileDialog&) =
++      delete;
++
++  // ui::BaseShellDialog:
++  bool IsRunning(gfx::NativeWindow owning_window) const override {
++    if (fallback_dialog_) {
++      return fallback_dialog_->IsRunning(owning_window);
++    }
++    return handle_ && handle_->is_open() &&
++           owning_window_.Contains(owning_window);
++  }
++
++  void ListenerDestroyed() override {
++    listener_ = nullptr;
++    handle_.reset();
++    if (fallback_dialog_) {
++      fallback_dialog_->ListenerDestroyed();
++    }
++  }
++
++ protected:
++  ~PlutoniumSelectFileDialog() override = default;
++
++  // ui::SelectFileDialog:
++  void SelectFileImpl(Type type,
++                      const std::u16string& title,
++                      const base::FilePath& default_path,
++                      const FileTypeInfo* file_types,
++                      int file_type_index,
++                      const base::FilePath::StringType& default_extension,
++                      gfx::NativeWindow owning_window,
++                      const GURL* caller) override {
++    type_ = type;
++    title_ = title;
++    default_path_ = default_path;
++    file_types_.reset();
++    if (file_types) {
++      file_types_.emplace(*file_types);
++    }
++    file_type_index_ = file_type_index;
++    default_extension_ = default_extension;
++    owning_window_.RemoveAll();
++    if (owning_window) {
++      owning_window_.Add(owning_window);
++    }
++    if (caller) {
++      caller_ = *caller;
++    }
++
++    PlutoniumTabRequests::Params params;
++    params.kind = "fileChooser";
++    params.detail = Detail();
++    params.on_answer = base::BindRepeating(
++        &PlutoniumSelectFileDialog::OnAnswer, base::Unretained(this));
++    // The fallback is posted, and may arrive after the handle is gone.
++    params.on_fallback = base::BindOnce(&PlutoniumSelectFileDialog::OnFallback,
++                                        weak_factory_.GetWeakPtr());
++    // on_answer only runs while the request (our handle) is open.
++    handle_ = PlutoniumTabRequests::Get()->Start(contents_.get(),
++                                                 std::move(params));
++    if (!handle_) {
++      // Not a tab after all (it closed meanwhile).
++      PostCancel();
++    }
++  }
++
++  bool HasMultipleFileTypeChoicesImpl() override {
++    return filters_count_ > 1;
++  }
++
++ private:
++  // The request's detail (see plutonium_file_chooser.h).
++  base::DictValue Detail() {
++    base::DictValue detail;
++    detail.Set("mode", ModeName(type_));
++    detail.Set("upload", type_ == SELECT_UPLOAD_FOLDER);
++    detail.Set("title", title_);
++    if (caller_.is_valid()) {
++      detail.Set("origin", url::Origin::Create(caller_).Serialize());
++    }
++    base::ListValue filters;
++    if (file_types_) {
++      const std::vector<std::vector<base::FilePath::StringType>>& extensions =
++          file_types_->extensions;
++      for (size_t i = 0; i < extensions.size(); ++i) {
++        base::ListValue patterns;
++        for (const base::FilePath::StringType& extension : extensions[i]) {
++          patterns.Append("*." + extension);
++        }
++        std::string name;
++        if (i < file_types_->extension_description_overrides.size()) {
++          name = base::UTF16ToUTF8(
++              file_types_->extension_description_overrides[i]);
++        }
++        filters.Append(base::DictValue()
++                           .Set("name", name)
++                           .Set("patterns", std::move(patterns)));
++      }
++      if (file_types_->include_all_files && !extensions.empty()) {
++        filters.Append(
++            base::DictValue()
++                .Set("name", "")
++                .Set("patterns", base::ListValue().Append("*")));
++      }
++    }
++    filters_count_ = filters.size();
++    detail.Set("currentFilter",
++               file_type_index_ > 0 &&
++                       static_cast<size_t>(file_type_index_) <= filters_count_
++                   ? file_type_index_ - 1
++                   : 0);
++    detail.Set("filters", std::move(filters));
++    // A folder and a name, either of which may be missing: the default path
++    // is a folder, a file in one, or (Chrome's default) just a name.
++    std::string name;
++    std::string folder;
++    if (!default_path_.empty()) {
++      if (type_ == SELECT_FOLDER || type_ == SELECT_UPLOAD_FOLDER ||
++          type_ == SELECT_EXISTING_FOLDER) {
++        folder = default_path_.value();
++      } else if (default_path_.IsAbsolute()) {
++        folder = default_path_.DirName().value();
++        name = default_path_.BaseName().value();
++      } else {
++        name = default_path_.BaseName().value();
++      }
++    }
++    detail.Set("currentName", type_ == SELECT_SAVEAS_FILE ? name : "");
++    detail.Set("currentFolder", folder);
++    detail.Set("defaultExtension", default_extension_);
++    return detail;
++  }
++
++  // {paths: [...], filter?}, or null (or no paths) to cancel. False if it
++  // isn't an answer this picker takes.
++  bool OnAnswer(From from, const base::Value& answer) {
++    std::vector<ui::SelectedFileInfo> files;
++    int filter = file_type_index_;
++    if (answer.is_dict()) {
++      const base::DictValue& dict = answer.GetDict();
++      const base::ListValue* paths = dict.FindList("paths");
++      if (!paths && dict.Find("paths")) {
++        return false;
++      }
++      if (paths) {
++        for (const base::Value& value : *paths) {
++          if (!value.is_string()) {
++            return false;
++          }
++          base::FilePath path(value.GetString());
++          if (!path.IsAbsolute() || path.ReferencesParent()) {
++            return false;
++          }
++          path = path.StripTrailingSeparators();
++          if (type_ == SELECT_SAVEAS_FILE && !default_extension_.empty() &&
++              path.Extension().empty()) {
++            path = path.AddExtension(default_extension_);
++          }
++          files.emplace_back(path);
++        }
++      }
++      if (files.size() > 1 && type_ != SELECT_OPEN_MULTI_FILE) {
++        return false;
++      }
++      if (std::optional<int> index = dict.FindInt("filter")) {
++        if (*index < 0 || static_cast<size_t>(*index) >= filters_count_) {
++          return false;
++        }
++        filter = *index + 1;
++      }
++    } else if (!answer.is_none()) {
++      return false;
++    }
++    VLOG(1) << "EXO-TAB-FEATURES fileChooser answered by the "
++            << (from == From::kShell ? "shell" : "agent") << ": "
++            << files.size() << " path(s)";
++    // The listener may let go of us: tell it later, keeping us alive.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&PlutoniumSelectFileDialog::Notify,
++                                  base::WrapRefCounted(this), std::move(files),
++                                  filter));
++    return true;
++  }
++
++  void Notify(std::vector<ui::SelectedFileInfo> files, int filter) {
++    if (!listener_) {
++      return;
++    }
++    if (files.empty()) {
++      listener_->FileSelectionCanceled();
++    } else if (type_ == SELECT_OPEN_MULTI_FILE) {
++      listener_->MultiFilesSelected(files);
++    } else {
++      listener_->FileSelected(files.front(), filter);
++    }
++  }
++
++  // No shell took it: the fallback factory's picker (the Files app's).
++  void OnFallback(FallbackReason reason) {
++    if (!listener_) {
++      return;
++    }
++    if (!fallback_factory_ || !contents_) {
++      Notify({}, 0);
++      return;
++    }
++    VLOG(1) << "EXO-TAB-FEATURES fileChooser: no shell took it, opening the "
++               "fallback picker";
++    fallback_dialog_ = fallback_factory_->Create(
++        listener_, std::make_unique<ChromeSelectFilePolicy>(contents_.get()));
++    if (!fallback_dialog_) {
++      Notify({}, 0);
++      return;
++    }
++    gfx::NativeWindow owning_window = gfx::NativeWindow();
++    if (!owning_window_.windows().empty()) {
++      owning_window = owning_window_.windows().front().get();
++    }
++    fallback_dialog_->SelectFile(
++        type_, title_, default_path_,
++        file_types_ ? &file_types_.value() : nullptr, file_type_index_,
++        default_extension_, owning_window,
++        caller_.is_valid() ? &caller_ : nullptr);
++  }
++
++  void PostCancel() {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PlutoniumSelectFileDialog::Notify,
++                       base::WrapRefCounted(this),
++                       std::vector<ui::SelectedFileInfo>(), 0));
++  }
++
++  base::WeakPtr<content::WebContents> contents_;
++  raw_ptr<ui::SelectFileDialogFactory, LeakedDanglingUntriaged>
++      fallback_factory_;
++  std::unique_ptr<PlutoniumTabRequests::Handle> handle_;
++  scoped_refptr<ui::SelectFileDialog> fallback_dialog_;
++
++  // What SelectFile() got, for the request and the fallback.
++  Type type_ = SELECT_NONE;
++  std::u16string title_;
++  base::FilePath default_path_;
++  std::optional<FileTypeInfo> file_types_;
++  int file_type_index_ = 0;
++  base::FilePath::StringType default_extension_;
++  aura::WindowTracker owning_window_;
++  GURL caller_;
++  size_t filters_count_ = 0;
++  base::WeakPtrFactory<PlutoniumSelectFileDialog> weak_factory_{this};
++};
++
++}  // namespace
++
++PlutoniumSelectFileDialogFactory::PlutoniumSelectFileDialogFactory(
++    std::unique_ptr<ui::SelectFileDialogFactory> fallback)
++    : fallback_(std::move(fallback)) {}
++
++PlutoniumSelectFileDialogFactory::~PlutoniumSelectFileDialogFactory() =
++    default;
++
++ui::SelectFileDialog* PlutoniumSelectFileDialogFactory::Create(
++    ui::SelectFileDialog::Listener* listener,
++    std::unique_ptr<ui::SelectFilePolicy> policy) {
++  content::WebContents* contents =
++      ChromeSelectFilePolicy::GetSourceContents(policy.get());
++  if (contents && PlutoniumTabs::Get()->IsTab(contents)) {
++    return new PlutoniumSelectFileDialog(listener, std::move(policy), contents,
++                                         fallback_.get());
++  }
++  if (fallback_) {
++    return fallback_->Create(listener, std::move(policy));
++  }
++  return nullptr;
++}
+diff --git a/chrome/browser/plutonium_file_chooser.h b/chrome/browser/plutonium_file_chooser.h
+new file mode 100644
+index 0000000000..3f14a881e1
+--- /dev/null
++++ b/chrome/browser/plutonium_file_chooser.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_FILE_CHOOSER_H_
++#define CHROME_BROWSER_PLUTONIUM_FILE_CHOOSER_H_
++
++#include <memory>
++
++#include "ui/shell_dialogs/select_file_dialog_factory.h"
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "File pickers"): every
++// file picker a registry tab opens (<input type=file> through
++// FileSelectHelper, the File System Access pickers, a download's Save As)
++// asks the shell, as a "fileChooser" tab request (PlutoniumTabRequests):
++//
++//   detail: {mode: "open" | "open-multiple" | "folder" | "save", upload,
++//            title, origin, filters: [{name, patterns: ["*.png", ...]}],
++//            currentFilter, currentName, currentFolder, defaultExtension}
++//   answer: {paths: ["/abs/path", ...], filter?} (filter: an index into
++//           filters), or null (or no paths) to cancel.
++//
++// Paths are host paths: they must be visible to the browser (Ash outside the
++// container, or a container that mounts the user's home at the same path).
++// An agent may answer too (it can read the files anyway).
++//
++// If no shell takes the request, or the one that took it goes away, the
++// picker the factory this wraps makes (the Files app's) opens instead.
++// Pickers for anything but a registry tab go straight to it.
++class PlutoniumSelectFileDialogFactory : public ui::SelectFileDialogFactory {
++ public:
++  explicit PlutoniumSelectFileDialogFactory(
++      std::unique_ptr<ui::SelectFileDialogFactory> fallback);
++  PlutoniumSelectFileDialogFactory(const PlutoniumSelectFileDialogFactory&) =
++      delete;
++  PlutoniumSelectFileDialogFactory& operator=(
++      const PlutoniumSelectFileDialogFactory&) = delete;
++  ~PlutoniumSelectFileDialogFactory() override;
++
++  // ui::SelectFileDialogFactory:
++  ui::SelectFileDialog* Create(
++      ui::SelectFileDialog::Listener* listener,
++      std::unique_ptr<ui::SelectFilePolicy> policy) override;
++
++ private:
++  std::unique_ptr<ui::SelectFileDialogFactory> fallback_;
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_FILE_CHOOSER_H_
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index a694932588..ff7fa2e9b1 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -26,6 +26,7 @@
+ #include "base/values.h"
+ #include "chrome/browser/devtools/devtools_toggle_action.h"
+ #include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/file_select_helper.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_keys.h"
+@@ -46,6 +47,7 @@
+ #include "components/url_formatter/url_fixer.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/file_select_listener.h"
+ #include "content/public/browser/focused_node_details.h"
+ #include "content/public/browser/javascript_dialog_manager.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -650,6 +652,22 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     return this;
+   }
+ 
++  // EXO-TAB-FEATURES: file pickers, as in a Browser. The picker itself asks
++  // the shell (PlutoniumSelectFileDialogFactory).
++  void RunFileChooser(content::RenderFrameHost* render_frame_host,
++                      scoped_refptr<content::FileSelectListener> listener,
++                      const blink::mojom::FileChooserParams& params) override {
++    FileSelectHelper::RunFileChooser(render_frame_host, std::move(listener),
++                                     params);
++  }
++
++  void EnumerateDirectory(content::WebContents* web_contents,
++                          scoped_refptr<content::FileSelectListener> listener,
++                          const base::FilePath& path) override {
++    FileSelectHelper::EnumerateDirectory(web_contents, std::move(listener),
++                                         path);
++  }
++
+   // content::JavaScriptDialogManager: the shell shows the dialog (it sees
+   // it in the tab's state) and answers through AnswerDialog().
+   void RunJavaScriptDialog(content::WebContents* web_contents,
+diff --git a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+index 8b70c5e069..db418eee00 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+@@ -61,6 +61,7 @@
+ #include "chrome/browser/chromeos/tablet_mode/tablet_mode_page_behavior.h"
+ #include "chrome/browser/enterprise/connectors/device_trust/attestation/ash/ash_attestation_cleanup_manager.h"
+ #include "chrome/browser/exo_parts.h"
++#include "chrome/browser/plutonium_file_chooser.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.h"
+ #include "chrome/browser/global_features.h"
+@@ -396,8 +397,15 @@ void ChromeBrowserMainExtraPartsAsh::PreProfileInit() {
+   chrome_shelf_controller_initializer_ =
+       std::make_unique<internal::ChromeShelfControllerInitializer>();
+ 
+-  ui::SelectFileDialog::SetFactory(
+-      std::make_unique<SelectFileDialogExtensionFactory>());
++  // EXO-TAB-FEATURES: in shell mode, the registry's tabs ask the shell.
++  if (plutonium_shell::IsShellMode()) {
++    ui::SelectFileDialog::SetFactory(
++        std::make_unique<PlutoniumSelectFileDialogFactory>(
++            std::make_unique<SelectFileDialogExtensionFactory>()));
++  } else {
++    ui::SelectFileDialog::SetFactory(
++        std::make_unique<SelectFileDialogExtensionFactory>());
++  }
+ 
+   exo_parts_ = ExoParts::CreateIfNecessary();
+   if (exo_parts_) {
+diff --git a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
+index a49a797e4c..6f2144ec74 100644
+--- a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
++++ b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
+@@ -4,7 +4,10 @@
+ 
+ #include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
+ 
++#include <set>
++
+ #include "base/check.h"
++#include "base/no_destructor.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -25,11 +28,36 @@
+ #include "components/tabs/public/tab_interface.h"
+ #endif
+ 
++namespace {
++
++// PLUTONIUM: the live policies, for GetSourceContents() (no RTTI to tell a
++// ChromeSelectFilePolicy from another ui::SelectFilePolicy).
++std::set<const ui::SelectFilePolicy*>& LivePolicies() {
++  static base::NoDestructor<std::set<const ui::SelectFilePolicy*>> policies;
++  return *policies;
++}
++
++}  // namespace
++
+ ChromeSelectFilePolicy::ChromeSelectFilePolicy(
+     content::WebContents* source_contents)
+-    : source_contents_(source_contents) {}
++    : source_contents_(source_contents) {
++  LivePolicies().insert(this);
++}
+ 
+-ChromeSelectFilePolicy::~ChromeSelectFilePolicy() = default;
++ChromeSelectFilePolicy::~ChromeSelectFilePolicy() {
++  LivePolicies().erase(this);
++}
++
++// static
++content::WebContents* ChromeSelectFilePolicy::GetSourceContents(
++    const ui::SelectFilePolicy* policy) {
++  if (!policy || !LivePolicies().contains(policy)) {
++    return nullptr;
++  }
++  return static_cast<const ChromeSelectFilePolicy*>(policy)
++      ->source_contents_.get();
++}
+ 
+ bool ChromeSelectFilePolicy::CanOpenSelectFileDialog() {
+   if (source_contents_) {
+diff --git a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.h b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.h
+index 993b89dca3..4549cd0fb0 100644
+--- a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.h
++++ b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.h
+@@ -30,6 +30,12 @@ class ChromeSelectFilePolicy : public ui::SelectFilePolicy {
+   // Returns true if local state allows showing file pickers.
+   static bool FileSelectDialogsAllowed();
+ 
++  // PLUTONIUM (EXO-TAB-FEATURES): the page |policy| was made for, if it is a
++  // live ChromeSelectFilePolicy, so a SelectFileDialogFactory can tell which
++  // page a picker is for (PlutoniumSelectFileDialogFactory).
++  static content::WebContents* GetSourceContents(
++      const ui::SelectFilePolicy* policy);
++
+  private:
+   raw_ptr<content::WebContents, AcrossTasksDanglingUntriaged> source_contents_;
+ };
