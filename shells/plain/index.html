@@ -117,6 +117,7 @@
     <button id="launch" class="primary">Launch</button>
     <button id="open-tab" title="Open the address as a browser tab of this thread">Open tab</button>
     <button id="agent" title="Claude Code in a terminal, with the Plutonium MCP server">Start agent</button>
+    <button id="downloads" title="This thread's downloads">Downloads</button>
     <span id="status"></span>
   </header>
   <div id="apps"></div>
@@ -544,6 +545,9 @@ $("web-url").onkeydown = (event) => {
   shell.navigateTab(t.id, event.target.value).catch((error) => setStatus(error.message));
   event.target.blur();
 };
+// The library's download list, for this thread.
+$("downloads").onclick = () => shell?.showDownloads?.({ thread: state.current, anchor: $("downloads") });
+
 $("agent").onclick = async () => {
   // Claude Code in a terminal that belongs to the thread, with the agent bridge.
   const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(state.current)}`).then((r) => r.json());

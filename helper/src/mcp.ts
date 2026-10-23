@@ -321,6 +321,30 @@ const TOOLS = [
     },
   },
   {
+    name: "list_downloads",
+    description:
+      "List this thread's downloads (files its tabs downloaded): id, filename, path, url, state " +
+      "(in-progress, paused, complete, cancelled, interrupted), bytes, and danger when a dangerous file " +
+      "waits for the user to keep or discard it. Files go where the user's downloads for this thread go.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "download_action",
+    description:
+      "Act on one of this thread's downloads: pause, resume, cancel, open (the file, with its default app), " +
+      "show (its folder), discard (a dangerous file) or remove (from the list; the file stays). " +
+      "Keeping a dangerous file is the user's decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        download_id: { type: "integer", description: "A download id from list_downloads." },
+        action: { type: "string", enum: ["pause", "resume", "cancel", "open", "show", "discard", "remove"] },
+      },
+      required: ["download_id", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "snapshot_tab",
     description:
       "Take a screenshot of one of this thread's browser tabs (the visible part of the page), even if the user isn't looking at it.",
@@ -646,6 +670,13 @@ export async function callTool(
           text: typeof args.text === "string" ? args.text : "",
         }),
       );
+    case "list_downloads":
+      return text(await helperJson(socket, "GET", `/v1/threads/${thread}/downloads`));
+    case "download_action": {
+      if (typeof args.download_id !== "number") throw new Error("download_id is required.");
+      const action = String(args.action);
+      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/downloads/${args.download_id}/${action}`));
+    }
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
     case "focus_tab":
