@@ -13,7 +13,7 @@ Native window tools: launching an app, snapshots, typing, keys, clicks, `read_wi
 ```text
 Can you open up LibreOffice, create a new spreadsheet, and fill in a table of index, x = mean + index / 10, and then the normal distribution CDF of x? Use mean = 100 and sd = 16. Then create a line chart of that.
 
-This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can.
+This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can. Don't stop to ask me anything (nobody is watching); make a sensible choice and say what you chose.
 ```
 
 ## Checks

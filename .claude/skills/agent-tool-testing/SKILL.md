@@ -33,6 +33,8 @@ Pick the target from what changed:
   2. If the user answers no before the timer ends, don't run it. Kill the timer and ask how they want it tested. If the timer ends with no answer (or "vetoed" doesn't show), go ahead.
   3. `tools/agent-tests/session.sh --name at-<fixer> up --ref <fixer branch> [--t3 <T3 worktree>] --vt N` (in the background; building Chromium can take a while), then `tools/agent-tests/run.sh --checkout .worktrees/at-<fixer> --show <scenario>`, then `session.sh --name at-<fixer> down`. Always run `down`, even when something failed.
 
+  Bring the session up again (`session.sh up`, quick once built) before each run: it starts with a fresh browser profile, so no run sees what an earlier one left.
+
   Several sessions can be up at once, one per VT, but only the one on screen works, so `run.sh` takes turns (it waits for the screen and brings its session to the front). Chromium builds are serialized too.
 
 `run.sh` takes up to the scenario's timeout, so run it in the background. It prints the run directory. If the thread ends early with "You've hit your session limit" as its last message, that Claude account is spent; the run isn't a result. Run it again with `--instance claudeAgent_claude_2` (or another instance from `orchestrator_capabilities`), and use the same instance for the fixer and reviewer tasks.

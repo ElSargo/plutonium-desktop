@@ -14,7 +14,7 @@ Tests of the tools agents use to drive their thread's native apps and browser ta
 - **The live desktop** (`run.sh <scenario>` from the main checkout): the tester's thread is in the user's T3 Code, and its apps and tabs are in the live session. Good for changes that apply live (T3 Code's web app, the shells: `plutonium live apply`). The screen isn't recorded unless `--capture` is given, since it's the user's screen.
 - **The test session** (`session.sh up`, then `run.sh --checkout .worktrees/agent-tests <scenario>`): a DRM session on a spare VT (tty5), in the worktree `.worktrees/agent-tests` (slot 1), at a given commit (`--ref`). It runs a dev build of that commit's Chromium patches (`chromium ensure`), its helper, and its own T3 Code server, with its own data (`~/.local/share/plutonium/agent-tests/t3-home`) and its own T3 checkout built from the `plutonium` branch, or a fixer's (`--t3-ref`, `--t3`). `--show` opens the tester's thread in the shell, so the panel shows what it does. `session.sh down` stops it and switches back. It takes over the screen while it runs.
 
-Runs in one test session share its browser profile, so a site keeps what an earlier run stored there (an Excalidraw canvas, say). Reviewers should allow for it; `session.sh up` again for a clean profile.
+`session.sh up` starts the session with a new browser profile. Runs in one session share it, so a site keeps what an earlier run stored there (an Excalidraw canvas, say): bring the session up again before each run.
 
 ## Files
 
@@ -37,6 +37,6 @@ Front matter: `name`, `model` (default `claude-opus-5-5`), `timeout` in minutes 
 
 The prompt ends with the line every scenario uses, so the tester reports failures instead of spending the run on workarounds, and one failure doesn't end the run (asked only to report, a tester stopped at the first one):
 
-> This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can.
+> This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can. Don't stop to ask me anything (nobody is watching); make a sensible choice and say what you chose.
 
 Don't add hints to a prompt to get past a failure: a hint the tester needs is a description gap, fixed in the tool's description.

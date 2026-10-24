@@ -98,8 +98,11 @@ EOF
   # The same provider accounts as the user's T3 Code (only those settings), so
   # testers can run on whichever isn't at its limit (run.sh --instance).
   mkdir -p "$STATE/t3-home/userdata"
-  if [[ -f $HOME/.t3/userdata/settings.json && ! -f $STATE/t3-home/userdata/settings.json ]]; then
-    jq '{providerInstances, defaultModelSelection}' "$HOME/.t3/userdata/settings.json" > "$STATE/t3-home/userdata/settings.json"
+  local settings=$STATE/t3-home/userdata/settings.json
+  if [[ -f $HOME/.t3/userdata/settings.json ]]; then
+    jq -s '(.[1] // {}) + (.[0] | {providerInstances, defaultModelSelection})' \
+      "$HOME/.t3/userdata/settings.json" <(cat "$settings" 2>/dev/null || echo '{}') > "$settings.new" &&
+      mv "$settings.new" "$settings"
   fi
 
   # A dev build of the worktree's Chromium patches: kept already, or built.
@@ -112,8 +115,12 @@ EOF
   exec 9> "$DATA_DIR/agent-tests-screen.lock"
   flock -n 9 || { say "waiting for the screen (another test session's run)"; flock 9; }
 
-  # Start fresh: no session or T3 server of this slot left from before.
+  # Start fresh: no session or T3 server of this slot left from before, and a
+  # new browser profile, so no site has what an earlier run stored (test slots
+  # only; slot 0's is the user's).
   down_session
+  local slot; slot=$(cat "$WT/.plutonium-slot")
+  (( slot > 0 )) && rm -rf "$DATA_DIR/profile-drm-s$slot"
   # A logind session on the spare VT, so Ash can take it: the user's login
   # there, or one of our own.
   # Return to the VT on screen now, unless that's this one (a failed start

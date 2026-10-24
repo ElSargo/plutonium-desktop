@@ -13,7 +13,7 @@ Browser tab tools at a viewport the agent sets: `preview_resize`, path drags wit
 ```text
 Open excalidraw.com with the page at exactly 1024×768, and draw a spiral freehand with the pencil, about three turns, in the middle of the canvas. Then put a small red dot at the spiral's centre. Show me the result when you're done.
 
-This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can.
+This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can. Don't stop to ask me anything (nobody is watching); make a sensible choice and say what you chose.
 ```
 
 ## Checks

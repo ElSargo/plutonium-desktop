@@ -13,7 +13,7 @@ Browser tab tools: opening, snapshots, clicks by ref and by coordinates, keys, d
 ```text
 Can you open up excalidraw and record a video of you using your tools to draw a cloud? Use a mix of cursor actions, keys, and js eval. When you're done, tell me where the video is.
 
-This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can.
+This is a test of the tools in this build. If a tool fails or behaves strangely, tell me exactly what happened. Don't build a workaround for it; carry on with the rest of the task as best you can. Don't stop to ask me anything (nobody is watching); make a sensible choice and say what you chose.
 ```
 
 ## Checks
