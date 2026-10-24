@@ -1,6 +1,8 @@
 // A small D-Bus client: method calls over a bus connection, for AT-SPI
 // (a11y.ts). Authenticates as the user (EXTERNAL), marshals the basic and
-// container types, and matches replies to calls. No signals, no fds.
+// container types, and matches replies to calls. It can also serve method
+// calls and send signals, for the portal backend (portal.ts). No incoming
+// signals, no fds.
 import { createConnection, type Socket } from "node:net";
 import { userInfo } from "node:os";
 
@@ -10,6 +12,7 @@ export type Variant = readonly [signature: string, value: unknown];
 export const METHOD_CALL = 1;
 export const METHOD_RETURN = 2;
 export const ERROR = 3;
+export const SIGNAL = 4;
 
 const FIELD = {
   path: 1,
@@ -308,6 +311,15 @@ interface Pending {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+/** What a served method call returns: its reply's signature and values. */
+export interface Reply {
+  readonly signature?: string;
+  readonly body?: readonly unknown[];
+}
+
+/** Serves an incoming method call; throw a DBusError to answer with that error. */
+export type CallHandler = (message: Message) => Reply | Promise<Reply>;
+
 export interface Call {
   readonly destination: string;
   readonly path: string;
@@ -340,6 +352,8 @@ export class DBusConnection {
   private closed: Error | null = null;
   /** Our unique name on the bus. */
   name = "";
+  /** Serves the method calls that come in; without one, they get UnknownMethod. */
+  onCall: CallHandler | null = null;
 
   private readonly socket: Socket;
 
@@ -422,6 +436,49 @@ export class DBusConnection {
     });
   }
 
+  /** Sends a signal. */
+  emit(path: string, iface: string, member: string, signature = "", body: readonly unknown[] = []): void {
+    if (this.closed) return;
+    this.socket.write(
+      encodeMessage({ type: SIGNAL, serial: this.serial++, path, interface: iface, member, signature, body }),
+    );
+  }
+
+  private send(message: Omit<Message, "serial">): void {
+    if (this.closed) return;
+    this.socket.write(encodeMessage({ ...message, serial: this.serial++ }));
+  }
+
+  private async serve(message: Message): Promise<void> {
+    const answer = (reply: Reply) =>
+      this.send({
+        type: METHOD_RETURN,
+        replySerial: message.serial,
+        destination: message.sender,
+        signature: reply.signature ?? "",
+        body: reply.body ?? [],
+      });
+    const refuse = (errorName: string, text: string) =>
+      this.send({
+        type: ERROR,
+        replySerial: message.serial,
+        destination: message.sender,
+        errorName,
+        signature: "s",
+        body: [text],
+      });
+    if (!this.onCall) {
+      refuse("org.freedesktop.DBus.Error.UnknownMethod", `No such method ${message.interface}.${message.member}`);
+      return;
+    }
+    try {
+      answer(await this.onCall(message));
+    } catch (error) {
+      if (error instanceof DBusError) refuse(error.errorName, error.message);
+      else refuse("org.freedesktop.DBus.Error.Failed", String((error as Error)?.message ?? error));
+    }
+  }
+
   private fail(error: Error): void {
     if (this.closed) return;
     this.closed = error;
@@ -448,6 +505,10 @@ export class DBusConnection {
   }
 
   private onMessage(message: Message): void {
+    if (message.type === METHOD_CALL) {
+      void this.serve(message);
+      return;
+    }
     if (message.type !== METHOD_RETURN && message.type !== ERROR) return;
     const serial = message.replySerial;
     const pending = serial === undefined ? undefined : this.pending.get(serial);

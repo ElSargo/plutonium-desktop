@@ -109,6 +109,19 @@ export interface ScreencastFrame {
   readonly height: number;
 }
 
+/** EXO-CAPTURE: a capture (Plutonium.captureEvent's JSON; docs/features/CAPTURE.md). */
+export interface DesktopCapture {
+  readonly id: number;
+  readonly kind: "stream" | "pipewire" | "display";
+  readonly source: { readonly type: "output" | "window" | "tab"; readonly id: number | string };
+  readonly label: string;
+  readonly consumer: Record<string, unknown>;
+  readonly size?: { readonly width: number; readonly height: number };
+  readonly cursor: string;
+  readonly nodeId?: number;
+  readonly startTime: number;
+}
+
 export class Desktop {
   private readonly cdp: BrowserCdp;
   /** Plutonium.enable's outcome for this connection; null before the first try. */
@@ -122,6 +135,8 @@ export class Desktop {
   readonly changeListeners = new Set<() => void>();
   /** A window came (`previous` undefined) or changed. */
   readonly windowListeners = new Set<(window: DesktopWindow, previous: DesktopWindow | undefined) => void>();
+  /** EXO-CAPTURE: a capture started, changed or stopped. */
+  readonly captureListeners = new Set<(type: "start" | "change" | "stop", capture: DesktopCapture) => void>();
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -207,6 +222,18 @@ export class Desktop {
           height: value.height as number,
         };
         for (const listener of listeners) listener(frame);
+        return;
+      }
+      case "Plutonium.captureEvent": {
+        const type = value.type as string;
+        if (type !== "start" && type !== "change" && type !== "stop") return;
+        let capture: DesktopCapture;
+        try {
+          capture = JSON.parse(value.json as string) as DesktopCapture;
+        } catch {
+          return;
+        }
+        for (const listener of this.captureListeners) listener(type, capture);
         return;
       }
       case "Plutonium.windowScreencastStopped": {
@@ -375,6 +402,34 @@ export class Desktop {
       void this.cdp.send("Plutonium.stopWindowScreencast", { id }).catch(() => {});
     };
   }
+
+  /**
+   * EXO-CAPTURE: runs capture command `command` (Plutonium.captureCommand:
+   * "sources", "list", "settings", "stop", "setSize", "request",
+   * "cancelRequest", "start"); resolves to its result.
+   */
+  async captureCommand(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    const { resultJson } = (await this.cdp.send("Plutonium.captureCommand", {
+      command,
+      argsJson: JSON.stringify(args),
+    })) as { resultJson: string };
+    return JSON.parse(resultJson) as unknown;
+  }
+
+  async captureSources(): Promise<CaptureSourceList> {
+    return (await this.captureCommand("sources")) as CaptureSourceList;
+  }
+
+  /** A PNG of a capture source ({type, id, region?}). */
+  async screenshot(source: Record<string, unknown>): Promise<Capture> {
+    return decodeCapture(await this.cdp.send("Plutonium.screenshot", { sourceJson: JSON.stringify(source) }));
+  }
+}
+
+export interface CaptureSourceList {
+  readonly outputs: readonly { id: string; name: string; width: number; height: number; scaleFactor: number; primary: boolean }[];
+  readonly windows: readonly { id: number; title: string; appId: string; width: number; height: number; tags: string[] }[];
+  readonly tabs: readonly { id: number; title: string; url: string; tags: string[] }[];
 }
 
 function parseDownload(json: unknown): DesktopDownload | undefined {

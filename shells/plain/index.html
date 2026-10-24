@@ -240,7 +240,14 @@ try {
     },
   });
   shell.addEventListener("change", render);
-  shell.ready.then(() => { listed = true; describeThreads(); render(); });
+  shell.ready.then(() => {
+    listed = true;
+    describeThreads();
+    render();
+    // Print: the screenshot UI (docs/features/CAPTURE.md), also while an
+    // app or a tab has the keyboard.
+    if (shell.captureAvailable) shell.setShellShortcuts(["PrintScreen"]);
+  });
 } catch (error) {
   console.error(error);
 }
@@ -476,6 +483,24 @@ async function renderStage(active) {
     setStatus("no grant for this window");
   }
 }
+
+// Print: a region, the shown window or tab (a click on it), or the screen
+// (Enter), saved to ~/Pictures/Screenshots.
+addEventListener("keydown", async (event) => {
+  if (event.code !== "PrintScreen" || event.repeat || !shell?.captureAvailable) return;
+  event.preventDefault();
+  const targets = [];
+  if (shown) {
+    const source = shown.tabId !== undefined ? { type: "tab", id: shown.tabId } : { type: "window", id: shown.windowId };
+    targets.push({ source, rect: shown.element.getBoundingClientRect() });
+  }
+  try {
+    const shot = await shell.takeScreenshot({ targets });
+    if (shot) setStatus(`screenshot saved to ${shot.path}`);
+  } catch (error) {
+    setStatus(`screenshot failed: ${error.message}`);
+  }
+});
 
 function showSnapshot(windowId) {
   return showBlob(() => shell.snapshot(windowId));
