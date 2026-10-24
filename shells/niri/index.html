@@ -811,7 +811,8 @@ function reclaim(key) {
 function focusItem(key) {
   const at = find(key);
   if (!at) return false;
-  if (document.visibilityState === "visible") reclaim(key);
+  // A hidden page asking gets it when it's shown (the browser decides).
+  reclaim(key);
   const ws = layout.workspaces[at.wi];
   layout.cur = at.wi;
   if (at.fi !== undefined) {

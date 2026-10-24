@@ -240,6 +240,7 @@ try {
       state.current = threadId;
       openTab(threadId, window.id);
       render();
+      bringBack(window.id);
       return true;
     },
     // A link this page opened (Ctrl+click, target=_blank): a tab in the
@@ -508,6 +509,8 @@ function draggable(button, item) {
         await shell.tagWindow(item.windowId, [threadId]).catch((e) => setStatus(e.message));
       }
       openTab(threadId, item.windowId);
+      render();
+      bringBack(item.windowId);
     } else if (item.tabId && shell.tabs.has(item.tabId)) {
       if (!shell.tabs.get(item.tabId).tags.includes(threadId)) {
         await shell.tagTab(item.tabId, [threadId]).catch((e) => setStatus(e.message));
@@ -526,6 +529,15 @@ function renderWebStage(tab) {
   shown = { tabId: tab.id, element };
   $("stage").classList.remove("taken");
   $("stage").replaceChildren(element);
+}
+
+// The shown window, if another page took it, comes back (attaching again is a new claim).
+function bringBack(windowId) {
+  const element = shown?.windowId === windowId ? shown.element : null;
+  const grant = element?.getAttribute("grant");
+  if (!grant || element.windowState !== "taken") return;
+  element.removeAttribute("grant");
+  element.setAttribute("grant", grant);
 }
 
 // One <native-window> for the active tab, replaced when the tab changes.
@@ -552,12 +564,7 @@ async function renderStage(active) {
   const taken = document.createElement("div");
   taken.className = "taken";
   const back = Object.assign(document.createElement("button"), { textContent: "Bring it back" });
-  back.onclick = () => {
-    // Attaching again is a new claim.
-    const grant = element.getAttribute("grant");
-    element.removeAttribute("grant");
-    element.setAttribute("grant", grant);
-  };
+  back.onclick = () => bringBack(active.id);
   taken.append(Object.assign(document.createElement("div"), { textContent: "Shown on another display." }), back);
   const update = () => stage.classList.toggle("taken", element.windowState === "taken");
   element.addEventListener("windowtaken", update);
