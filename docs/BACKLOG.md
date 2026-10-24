@@ -194,6 +194,22 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and the "tab the user is looking at" fallback (`latestThreadTab`) count only
   streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
   `visible` now uses. The sweep may close an agent's tab the user is watching.
+- [ ] **The floating preview doesn't follow the tab an agent drives.** S · It
+  switches only to a new tab or one the server asks to show (`ChatView.tsx`),
+  so an agent back on an older tab works out of sight (run
+  `20261024-194129-excalidraw-incognito`).
+- [ ] **Nothing marks a private tab as private.** S · An incognito tab looks
+  like any other in the panel and the floating preview.
+- [ ] **A hidden background embed may count as `visible`.** S · An agent acting
+  on a tab nobody looks at gets an embed at opacity 0; if Chromium reports it
+  `embedded`, `preview_status` says the user sees it. Check with
+  `preview_open {open:false}`, an action, then `preview_status`.
+- [ ] **`preview_press` and `preview_drag` say nothing back.** S · They return
+  only the tool icon, so agents check each with a snapshot or a storage read.
+- [ ] **Calc test runs start in crash recovery.** S · `run.sh` kills the
+  tester's LibreOffice with unsaved documents, so the next run opens them
+  recovered. The recovery list is in the user's own Flatpak profile, which
+  also holds their backups; clearing it needs the user's say.
 - [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
   `preview_drag` drags along a path of points; snapshot images are in click
   coordinates on desktop tabs without flashing on screen; the panel's and the
