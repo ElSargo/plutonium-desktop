@@ -3,6 +3,7 @@
 // their windows on the accessibility bus; this finds a window's frame there by
 // the app's pid and the window's title, reads it as an outline with refs, and
 // acts on an element by its ref (its action, focus, text, value, selection).
+import { readFileSync } from "node:fs";
 import { DBusConnection, DBusError } from "./dbus.ts";
 
 const ACCESSIBLE = "org.a11y.atspi.Accessible";
@@ -32,6 +33,9 @@ const STATE = {
   readOnly: 43,
 } as const;
 
+// The most a frame's extents may exceed its window's size by (both sides'
+// client-side shadow).
+const MAX_SHADOW = 120;
 // An outline's limits.
 const MAX_NODES = 1500;
 const MAX_DEPTH = 40;
@@ -66,6 +70,19 @@ export interface A11yWindow {
 
 export class A11yError extends Error {}
 
+/**
+ * The Flatpak instance `pid` runs in, if any. A sandboxed app reaches the
+ * accessibility bus through its instance's D-Bus proxy, so its connection's
+ * pid is the proxy's; both have the instance's `.flatpak-info`.
+ */
+export function flatpakInstanceOf(pid: number): string | undefined {
+  try {
+    return readFileSync(`/proc/${pid}/root/.flatpak-info`, "utf8").match(/^instance-id=(.+)$/m)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 /** A call the app didn't answer in time. */
 class NoAnswer extends Error {
   readonly bus: string;
@@ -77,6 +94,15 @@ class NoAnswer extends Error {
 
 function hasState(states: readonly number[], bit: number): boolean {
   return ((states[bit >> 5] ?? 0) & (1 << (bit & 31))) !== 0;
+}
+
+/**
+ * Where a window starts in its frame, given how much bigger than the window
+ * the frame is: a GTK frame includes its window's client-side shadow, the
+ * same margin around it.
+ */
+function shadowOf(dw: number, dh: number): [number, number] {
+  return dw > 2 && dw <= MAX_SHADOW && Math.abs(dw - dh) <= 2 ? [dw / 2, dh / 2] : [0, 0];
 }
 
 function quote(text: string, max = 120): string {
@@ -140,12 +166,19 @@ export class Accessibility {
   private readonly readBudgetMs: number;
   private connecting: Promise<DBusConnection> | null = null;
   private readonly roleNames = new Map<number, string>();
+  /** Per window: where it starts in its frame (its shadow), in the frame's units. */
+  private readonly shadows = new Map<number, [number, number]>();
   /** Per window: ref name ↔ object, stable across reads. */
   private readonly refs = new Map<number, { byName: Map<string, Ref>; byKey: Map<string, string>; next: number }>();
 
-  constructor(options: { callTimeoutMs?: number; readBudgetMs?: number } = {}) {
+  private readonly sandboxOf: (pid: number) => string | undefined;
+
+  constructor(
+    options: { callTimeoutMs?: number; readBudgetMs?: number; sandboxOf?: (pid: number) => string | undefined } = {},
+  ) {
     this.callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS;
     this.readBudgetMs = options.readBudgetMs ?? READ_BUDGET_MS;
+    this.sandboxOf = options.sandboxOf ?? flatpakInstanceOf;
   }
 
   /** The accessibility bus (found through the session bus), connected once. */
@@ -241,8 +274,24 @@ export class Accessibility {
     return children.filter(([, path]) => path !== "/org/a11y/atspi/null").map(([bus, path]) => ({ bus, path }));
   }
 
-  /** The frame on the accessibility bus that is `window`. */
+  /** The frame on the accessibility bus that is `window`, and where the window starts in it. */
   private async frameOf(window: A11yWindow): Promise<Ref> {
+    const frame = await this.findFrame(window);
+    let shadow: [number, number] = [0, 0];
+    try {
+      const [[, , w, h]] = (await this.call(frame, "org.a11y.atspi.Component", "GetExtents", "u", [COORD_WINDOW])) as [
+        [number, number, number, number],
+      ];
+      shadow = shadowOf(w - window.width, h - window.height);
+    } catch (error) {
+      if (error instanceof NoAnswer) throw error;
+      // No Component.
+    }
+    this.shadows.set(window.id, shadow);
+    return frame;
+  }
+
+  private async findFrame(window: A11yWindow): Promise<Ref> {
     const bus = await this.bus();
     const apps = await this.children(REGISTRY_ROOT);
     const pidOf = async (app: Ref) => {
@@ -263,7 +312,11 @@ export class Accessibility {
     const pids = await Promise.all(apps.map(pidOf));
     // An app that didn't answer, said when its window isn't found otherwise.
     let silent: NoAnswer | undefined;
-    const own = apps.filter((_, index) => pids[index] === window.pid);
+    // The app's own: its pid's, or its sandbox's (a Flatpak's proxy).
+    const sandbox = this.sandboxOf(window.pid);
+    const own = apps.filter(
+      (_, index) => pids[index] === window.pid || (!!sandbox && !!pids[index] && this.sandboxOf(pids[index]!) === sandbox),
+    );
     // The app's own first; another process's (a wrapper's child, an X11 app
     // through Xwayland) by title.
     for (const candidates of [own, apps.filter((app) => !own.includes(app))]) {
@@ -296,16 +349,24 @@ export class Accessibility {
       if (pool.length === 1) return pool[0]!.ref;
       if (pool.length > 1) {
         // Several windows of the app: the one its size matches, else the active one.
+        // A GTK frame can include its window's shadow: the same margin on
+        // both axes.
+        let shadowed: { ref: Ref; margin: number } | undefined;
         for (const frame of pool) {
           try {
             const [[, , w, h]] = (await this.call(frame.ref, "org.a11y.atspi.Component", "GetExtents", "u", [COORD_WINDOW])) as [
               [number, number, number, number],
             ];
-            if (Math.abs(w - window.width) <= 2 && Math.abs(h - window.height) <= 2) return frame.ref;
+            const [dw, dh] = [w - window.width, h - window.height];
+            if (Math.abs(dw) <= 2 && Math.abs(dh) <= 2) return frame.ref;
+            if (shadowOf(dw, dh)[0] > 0 && (!shadowed || dw < shadowed.margin)) {
+              shadowed = { ref: frame.ref, margin: dw };
+            }
           } catch {
             // No Component.
           }
         }
+        if (shadowed) return shadowed.ref;
         const active = pool.find((frame) => hasState(frame.states, STATE.active));
         return (active ?? pool[0]!).ref;
       }
@@ -318,7 +379,10 @@ export class Accessibility {
           "Use snapshot_window instead.",
       );
     }
-    throw new A11yError("The app is on the accessibility bus, but none of its windows is this one.");
+    throw new A11yError(
+      "The app is on the accessibility bus, but this window isn't among its windows there (it may have just " +
+        "closed or not be ready yet): list_windows, then read again, or use snapshot_window.",
+    );
   }
 
   private async node(ref: Ref, limiter: Limiter): Promise<Node> {
@@ -420,9 +484,14 @@ export class Accessibility {
     return found;
   }
 
+  private gone(ref: string): A11yError {
+    return new A11yError(`${ref} is gone: the app closed or replaced it. read_window the window again for its refs now.`);
+  }
+
   /** Forgets the refs of windows that are gone. */
   prune(existing: ReadonlySet<number>): void {
     for (const id of this.refs.keys()) if (!existing.has(id)) this.refs.delete(id);
+    for (const id of this.shadows.keys()) if (!existing.has(id)) this.shadows.delete(id);
   }
 
   /**
@@ -440,6 +509,7 @@ export class Accessibility {
     }
     const limiter = new Limiter(CONCURRENCY);
     const scale = window.deviceScaleFactor || 1;
+    const [sx, sy] = this.shadows.get(window.id) ?? [0, 0];
     const deadline = Date.now() + this.readBudgetMs;
     let count = 0;
     let truncated = false;
@@ -478,8 +548,8 @@ export class Accessibility {
       }
       if (node.extents) {
         const [x, y, w, h] = node.extents;
-        if (w > 0 && h > 0 && x + w > 0 && y + h > 0 && x < window.width && y < window.height) {
-          parts.push(`@${Math.round((x + w / 2) * scale)},${Math.round((y + h / 2) * scale)}`);
+        if (w > 0 && h > 0 && x - sx + w > 0 && y - sy + h > 0 && x - sx < window.width && y - sy < window.height) {
+          parts.push(`@${Math.round((x - sx + w / 2) * scale)},${Math.round((y - sy + h / 2) * scale)}`);
         }
       }
       const others = node.actions?.filter((action) => action && !CLICK_ACTIONS.includes(action.toLowerCase())) ?? [];
@@ -580,11 +650,17 @@ export class Accessibility {
       try {
         node = await this.node(ref, limiter);
       } catch (error) {
-        if (error instanceof DBusError) return [];
+        if (error instanceof DBusError) {
+          if (depth === 0 && options.ref) stop(this.gone(options.ref));
+          return [];
+        }
         stop(error);
         return [];
       }
-      if (node.defunct) return [];
+      if (node.defunct) {
+        if (depth === 0 && options.ref) stop(this.gone(options.ref));
+        return [];
+      }
       if (depth > 0 && !options.all && !hasState(node.states, STATE.showing)) return [];
       if (NOISE.has(node.role)) return [];
       const skip =
@@ -641,7 +717,7 @@ export class Accessibility {
     ref: string,
     action: string,
     args: { text?: string; value?: number },
-  ): Promise<{ done: string } | { click: [number, number] }> {
+  ): Promise<{ done: string } | { click: [number, number]; why?: string }> {
     try {
       return await this.actOn(window, ref, action, args);
     } catch (error) {
@@ -655,9 +731,20 @@ export class Accessibility {
     ref: string,
     action: string,
     args: { text?: string; value?: number },
-  ): Promise<{ done: string } | { click: [number, number] }> {
+  ): Promise<{ done: string } | { click: [number, number]; why?: string }> {
     const target = this.resolve(window.id, ref);
-    const [interfacesReply] = (await this.call(target, ACCESSIBLE, "GetInterfaces")) as [string[]];
+    let interfacesReply: string[];
+    try {
+      const [[states], [interfaces]] = (await Promise.all([
+        this.call(target, ACCESSIBLE, "GetState"),
+        this.call(target, ACCESSIBLE, "GetInterfaces"),
+      ])) as [[number[]], [string[]]];
+      if (hasState(states, STATE.defunct)) throw this.gone(ref);
+      interfacesReply = interfaces;
+    } catch (error) {
+      if (error instanceof DBusError) throw this.gone(ref);
+      throw error;
+    }
     const has = (name: string) => interfacesReply.includes(`org.a11y.atspi.${name}`);
     const center = async (): Promise<[number, number] | null> => {
       if (!has("Component")) return null;
@@ -666,27 +753,33 @@ export class Accessibility {
       ];
       if (w <= 0 || h <= 0) return null;
       const scale = window.deviceScaleFactor || 1;
-      return [Math.round((x + w / 2) * scale), Math.round((y + h / 2) * scale)];
+      const [sx, sy] = this.shadows.get(window.id) ?? [0, 0];
+      return [Math.round((x - sx + w / 2) * scale), Math.round((y - sy + h / 2) * scale)];
     };
     const ok = (value: unknown, what: string) => {
       if (value === false) throw new A11yError(`The app refused to ${what}.`);
       return { done: what };
     };
-    switch (action) {
-      case "click": {
-        if (has("Action")) {
-          const [list] = (await this.call(target, "org.a11y.atspi.Action", "GetActions")) as [[string, string, string][]];
-          const names = list.map(([name]) => name.toLowerCase());
-          const index = CLICK_ACTIONS.map((name) => names.indexOf(name)).find((at) => at >= 0) ?? (names.length ? 0 : -1);
-          if (index >= 0) {
-            const [done] = await this.call(target, "org.a11y.atspi.Action", "DoAction", "i", [index]);
-            return ok(done, list[index]![0] || "click");
-          }
+    // Its click-like action (or, with `anyAction`, its first action), else a
+    // pointer click at its center.
+    const click = async (anyAction: boolean, why?: string): Promise<{ done: string } | { click: [number, number]; why?: string }> => {
+      if (has("Action")) {
+        const [list] = (await this.call(target, "org.a11y.atspi.Action", "GetActions")) as [[string, string, string][]];
+        const names = list.map(([name]) => name.toLowerCase());
+        const index =
+          CLICK_ACTIONS.map((name) => names.indexOf(name)).find((at) => at >= 0) ?? (anyAction && names.length ? 0 : -1);
+        if (index >= 0) {
+          const [done] = await this.call(target, "org.a11y.atspi.Action", "DoAction", "i", [index]);
+          return ok(done, list[index]![0] || "click");
         }
-        const point = await center();
-        if (!point) throw new A11yError("The element has no action and no place on screen to click.");
-        return { click: point };
       }
+      const point = await center();
+      if (!point) throw new A11yError("The element has no action and no place on screen to click.");
+      return why ? { click: point, why } : { click: point };
+    };
+    switch (action) {
+      case "click":
+        return click(true);
       case "focus": {
         if (!has("Component")) throw new A11yError("The element can't take focus.");
         const [done] = await this.call(target, "org.a11y.atspi.Component", "GrabFocus");
@@ -712,10 +805,24 @@ export class Accessibility {
           const [parentInterfaces] = (await this.call(parentRef, ACCESSIBLE, "GetInterfaces")) as [string[]];
           if (parentInterfaces.includes("org.a11y.atspi.Selection")) {
             const [done] = await this.call(parentRef, "org.a11y.atspi.Selection", "SelectChild", "i", [index]);
-            return ok(done, "select it");
+            if (done !== false) return { done: "select it" };
+          }
+          // A table's cell: its row (GTK 3's lists of more than one column
+          // refuse SelectChild).
+          if (parentInterfaces.includes("org.a11y.atspi.Table")) {
+            try {
+              const [row] = (await this.call(parentRef, "org.a11y.atspi.Table", "GetRowAtIndex", "i", [index])) as [number];
+              if (row >= 0) {
+                const [done] = await this.call(parentRef, "org.a11y.atspi.Table", "AddRowSelection", "i", [row]);
+                if (done !== false) return { done: "select its row" };
+              }
+            } catch (error) {
+              if (!(error instanceof DBusError)) throw error;
+            }
           }
         }
-        return this.actOn(window, ref, "click", args);
+        // Not its first action: a list cell's is "Expand or contract".
+        return click(false, "the app didn't select it through accessibility");
       }
       case "scroll_into_view": {
         if (!has("Component")) throw new A11yError("The element can't be scrolled to.");

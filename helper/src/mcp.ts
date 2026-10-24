@@ -250,8 +250,10 @@ const TOOLS = [
     description:
       "Act on an element of one of this thread's windows by its ref from read_window, through the app's accessibility: " +
       '"click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace ' +
-      'an editable text\'s contents with text), "set_value" (a slider\'s or spin button\'s value), "select" (pick it ' +
-      'in its list or tabs), "scroll_into_view", or one of the actions read_window lists for it. Read again to see the result.',
+      "an editable text's contents with text; the keyboard stays where it was, so to commit a field that acts on " +
+      'Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its ' +
+      'list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the ' +
+      "actions read_window lists for it. Read again to see the result.",
     inputSchema: {
       type: "object",
       properties: {

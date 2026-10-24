@@ -41,6 +41,10 @@ export interface FakeNode {
   children?: FakeNode[];
   /** A table of rows × columns cells (a spreadsheet's), made as they're asked for. */
   table?: { rows: number; columns: number; cellSize: [number, number]; cell: (row: number, column: number) => FakeNode };
+  /** Has Selection over its children; `refuses` answers false to SelectChild (GTK 3's lists of several columns). */
+  selection?: { refuses?: boolean };
+  /** Its children are a table's cells, this many to a row: Table's row calls. */
+  columns?: number;
   /** Never answers (an app that hangs). */
   hangs?: boolean;
   /** Never answers, and its process leaves the bus (an app that crashes on the call). */
@@ -212,7 +216,8 @@ export class FakeBus {
       }
       return cell;
     };
-    if (table) interfaces.push("org.a11y.atspi.Table");
+    if (table || node.columns) interfaces.push("org.a11y.atspi.Table");
+    if (node.selection) interfaces.push("org.a11y.atspi.Selection");
     switch (method) {
       case `${ACCESSIBLE}.GetChildren`:
         if (table) throw new Error("GetChildren on a table of millions");
@@ -298,7 +303,13 @@ export class FakeBus {
         return { signature: "(so)", body: [[cell.bus, cell.path]] };
       }
       case "org.a11y.atspi.Table.GetRowAtIndex":
-        return { signature: "i", body: [Math.floor(Number(body[0]) / table!.columns)] };
+        return { signature: "i", body: [Math.floor(Number(body[0]) / (node.columns ?? table!.columns))] };
+      case "org.a11y.atspi.Table.AddRowSelection":
+        log(`AddRowSelection ${body[0]}`);
+        return { signature: "b", body: [true] };
+      case "org.a11y.atspi.Selection.SelectChild":
+        log(`SelectChild ${body[0]}`);
+        return { signature: "b", body: [!node.selection?.refuses] };
       case "org.a11y.atspi.Table.GetColumnAtIndex":
         return { signature: "i", body: [Number(body[0]) % table!.columns] };
       case "org.a11y.atspi.Table.GetAccessibleAt": {

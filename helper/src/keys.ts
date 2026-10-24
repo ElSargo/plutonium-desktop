@@ -135,6 +135,36 @@ export function textKeys(text: string): WindowKeyEvent[] {
   return events;
 }
 
+/** Keys that commit what's being typed (a spreadsheet cell, a form field) and move on. */
+const COMMIT_KEYS = new Set(["Tab", "Enter", "NumpadEnter"]);
+
+/**
+ * `events` in runs that each end with a stroke of a key that commits (Tab,
+ * Enter) once every key is up again. An app can lose the next key while it
+ * commits (LibreOffice Calc loses the second of two Tabs after typing in a
+ * cell), so a caller waits between runs.
+ */
+export function commitRuns(events: readonly WindowKeyEvent[]): WindowKeyEvent[][] {
+  const runs: WindowKeyEvent[][] = [[]];
+  let down = 0;
+  let commits = false;
+  for (const event of events) {
+    runs.at(-1)!.push(event);
+    if (event.type === "keyDown") {
+      down++;
+      if (COMMIT_KEYS.has(event.code)) commits = true;
+    } else {
+      down = Math.max(0, down - 1);
+      if (down === 0 && commits) {
+        runs.push([]);
+        commits = false;
+      }
+    }
+  }
+  if (runs.at(-1)!.length === 0) runs.pop();
+  return runs;
+}
+
 /**
  * A key combination: "Enter", "ctrl+s", "Ctrl+Shift+T", "alt+F4", "a", or a
  * KeyboardEvent.code ("KeyA", "F5", "ArrowDown").
