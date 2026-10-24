@@ -32,4 +32,4 @@ In the screen recording (session runs with `--show`):
 
 ## Known issues
 
-(none yet)
+- 2026-10-24 (run `20261024-200603-excalidraw-spiral-sized`, final test on main): all checks pass; the floating preview's cursor follows the stroke. The side panel never opened, so its own cursor on a scaled tab is still unseen. `preview_navigate`'s reply lists itself as busy; `[active]` in snapshots (focused) was read as "selected".

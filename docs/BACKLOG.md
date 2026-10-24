@@ -219,7 +219,24 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Calc test runs start in crash recovery.** S · `run.sh` kills the
   tester's LibreOffice with unsaved documents, so the next run opens them
   recovered. The recovery list is in the user's own Flatpak profile, which
-  also holds their backups; clearing it needs the user's say.
+  also holds their backups; clearing it needs the user's say. A recovered
+  window has come back at 1×28 px twice; why isn't known.
+- [ ] **Tab recordings have no duration.** S · The WebM the encoder writes
+  has no length in its header (ffprobe shows none), so players can't seek
+  well. Remuxing it after the stop (`ffmpeg -c copy`) would fix it (run
+  `20261024-201052-excalidraw-cloud`).
+- [ ] **`preview_evaluate` isn't in a snapshot's `actionTimeline`.** S ·
+  Clicks, presses and drags are; evaluates aren't.
+- [ ] **`preview_navigate` lists itself as busy.** S · Its reply is built
+  inside the action (`ServerBrowser.ts`, `tab.control.agent`), so `busy`
+  shows the navigate next to `loading:false`.
+- [ ] **A snapshot's `[active]` means focused; nothing says so.** S · A tester
+  took Hachure `[active]` for the chosen fill while Solid was chosen.
+- [ ] **Agent tool paths no run has reached yet.** S · Scenarios to write: a
+  stuck action (a long drag while the session's display is paused); the side
+  panel open on a resized tab (its cursor, the narrow viewport); in Calc, a
+  menu and a hover with the window shown and hidden, `act_window` `select` on
+  the chart type list, the untitled "discard?" box, and a stale ref.
 - [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
   `preview_drag` drags along a path of points; snapshot images are in click
   coordinates on desktop tabs without flashing on screen; the panel's and the

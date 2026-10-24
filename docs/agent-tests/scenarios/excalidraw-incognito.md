@@ -33,4 +33,4 @@ In the screen recording (session runs with `--show`):
 
 ## Known issues
 
-(none yet)
+- 2026-10-24 (runs `20261024-194129`, `20261024-200843`): passes; storage stays apart, including after a reload. The agent sent no input to the first tab after switching back. The floating preview stays on the private tab while the agent works in the first one; nothing marks a tab as private. The private tab's first load was once aborted (`net::ERR_ABORTED`) and retried.
