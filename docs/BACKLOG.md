@@ -151,6 +151,13 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   session's keymap (xkb) instead of assuming US keycodes. Characters the
   layout lacks need the temporary keymap that password auto-type needs too
   (`PASSWORDS.md`, "Native windows"); build it once for both.
+- [ ] **Usage-limit warnings in `orchestrator_capabilities`.** S · Agents
+  choosing a provider instance for a new thread or child task can't see
+  which ones are close to their limits. T3 already tracks session and weekly
+  usage per Claude instance (`provider/claudeUsageLimits.ts`), but only the
+  UI gets it. Add a warning field to each instance in the list (e.g. near or
+  at a limit, and when it resets), not the full usage data. Asked for
+  2026-10-23.
 - [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
   the browser.
@@ -166,6 +173,27 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 
 ## App compatibility and features (Phase 5)
 
+- [ ] **Web pages should see generic Linux Chromium, not ChromeOS.** S ·
+  High priority: some sites already break. The user wants no ChromeOS
+  fingerprint (`ARCHITECTURE.md`, "ChromeOS is an implementation detail").
+  In `components/embedder_support/user_agent_utils.cc`, the `IS_CHROMEOS`
+  branches give:
+  - the user agent `X11; CrOS x86_64 14541.0.0` (`GetUnifiedPlatform()`,
+    and `BuildOSCpuInfoFromOSVersionAndCpuType()`);
+  - `Sec-CH-UA-Platform` / `userAgentData.platform` `"Chromium OS"`
+    (`GetPlatformForUAMetadata()`);
+  - a non-empty `platformVersion` (`GetPlatformVersion()`).
+
+  Linux gives `X11; Linux x86_64`, `"Linux"` and `""`. `navigator.platform`
+  is already `Linux x86_64`. Then compare the remaining fingerprint with
+  Linux Chromium on the same machine, using a fingerprinting test page:
+  ChromeOS-only web APIs, fonts and WebGL strings.
+- [ ] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
+  tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
+  WebRTC (`rtc_use_pipewire`), printing (Linux's CUPS backend instead of
+  Ash's printer manager), IME, notifications, branding strings, web APIs.
+  Turn what we find into items here, each saying whether to switch on the
+  Linux path or patch the ChromeOS one out.
 - [x] **Port the real shell web app** onto `<native-window>` and the broker.
   Done twice: T3 Code (`T3_SHELL_TEST.md`) and the plain shell (`shells/plain/`).
 - [x] **Browser tabs as elements.** Real pages as SurfaceEmbed `<embed>`s,

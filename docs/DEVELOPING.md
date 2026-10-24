@@ -131,10 +131,15 @@ out/Cros/content_unittests --ozone-platform=headless --gtest_filter='RenderWidge
 
 **Process-matching rule.** In the container, and on the host, `pkill -f`/`pgrep -f` see every process of yours. A pattern that appears literally in your own command line matches your shell too. The scripts anchor their patterns (`^<chrome> --enable-wayland-server … --user-data-dir=<profile>`); do the same, or use a bracket (`'weston-dn[d]'`).
 
+## Agent tool tests
+
+The tools agents drive apps and tabs with are tested by an agent doing a real task with them, in a standalone thread, on the live desktop or a test session on a spare VT; another agent reviews the run (`agent-tests/README.md`). Changing those tools follows the skill `.claude/skills/agent-tool-testing`: a fixer, a real run, a review, until it passes, then a final run on a fresh build.
+
 ## Docs
 
 - **`docs/features/`**: what each feature does and how it was verified. Their test records sometimes name the old research repository's scripts and patch files. The patch numbers in `chromium/README.md` map them to the series here.
 - **`docs/history/`**: the project's reports in the order they happened, from the viability study to Phase 4. They describe the code as it was then.
+- **`docs/agent-tests/`**: the agent tool tests' scenarios, review brief and reports.
 - **`docs/BACKLOG.md`**: everything not done.
 
 When you change behaviour, update the feature doc and the backlog.

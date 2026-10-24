@@ -24,6 +24,7 @@
 - Chromium built with `target_os = "chromeos"` is Ash, the ChromeOS desktop, as a Linux program. With `--ozone-platform=drm` it drives the display through KMS and reads input from evdev and libinput, like a Wayland compositor.
 - **Shell mode** (`--plutonium-shell-url`, patch 0006) turns Ash's own UI off: no shelf, tray, notifications, desks or window frames. The shell page opens as the single fullscreen window. Ash runs in kiosk mode, so only a few system keys remain.
 - **Several shells:** `--plutonium-shells` runs more shell pages behind the first one. Super+Tab switches between them, and its overlay lists every window and tab.
+- **ChromeOS is an implementation detail.** We build ChromeOS only because that's where Ash and Exo are. Anything a user, an app or a website can see should look like ordinary Linux Chromium: web pages see Linux Chromium (user agent, client hints, web APIs), audio goes to the host's PipeWire through its PulseAudio server, and screen capture goes over PipeWire. Where a ChromeOS behaviour shows through, we switch on the Linux one or patch it out.
 
 **Exo** is ChromeOS's Wayland server.
 - Apps connect to its socket (`$XDG_RUNTIME_DIR/wayland-plutonium`).
