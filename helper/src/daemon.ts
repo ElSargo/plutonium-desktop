@@ -96,6 +96,9 @@ const INPUT_SETTLE_MS = 200;
 // How long after launch_app's wait an agent's app's new windows are still held
 // at its size (a slow first start; the main window after a splash).
 const LATE_WINDOWS_MS = 60_000;
+// A launch's wait ends once the app's windows have stayed the same this long
+// (a splash or a recovery dialog closing doesn't end it).
+const LAUNCH_SETTLE_MS = 1_000;
 // How long a window an agent drove stays at full frame rate (setWindowAwake).
 const AWAKE_MS = 60_000;
 
@@ -537,8 +540,9 @@ export class Daemon {
   }
 
   /**
-   * Starts `argv` as one of the thread's processes. With `waitMs`, waits that
-   * long for the thread's first new window(s). With `show`, the shell brings
+   * Starts `argv` as one of the thread's processes. With `waitMs`, waits up to
+   * that long for the thread's new windows to appear and stop changing, and
+   * returns those open then. With `show`, the shell brings
    * its windows to the front (PLUTONIUM_SHOW). With `agent`, an agent started
    * it to work in: its windows are held at `agent.size`, or at the size the
    * app picks (shells show them scaled at that size until the user takes
@@ -582,21 +586,35 @@ export class Daemon {
     if (before && holds) void this.holdLate(threadId, before, agent.size, Date.now() + Math.max(waitMs, 0) + LATE_WINDOWS_MS);
     if (!before || waitMs <= 0) return { pid, windows: [] };
     const deadline = Date.now() + waitMs;
+    // The new windows and since when they've been these; windows that came and went.
+    let current = "";
+    let since = 0;
+    const gone = new Map<number, string>();
+    let fresh: NativeWindowEntry[] = [];
     while (Date.now() < deadline) {
       await sleep(200);
-      const fresh = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
-      if (fresh.length > 0) {
-        // Apps often map a second window (a dialog, a splash) right after.
-        await sleep(300);
-        let settled = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
-        if (holds) settled = await this.holdNew(settled, agent.size);
-        console.log(
-          `plutoniumd: pid ${pid}'s windows after ${seconds(started)}: ` +
-            settled.map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)}`).join(", "),
-        );
-        return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
-      }
-      if (child.exitCode !== null && child.exitCode !== 0) break;
+      const now = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
+      for (const entry of fresh) if (!now.some((other) => other.id === entry.id)) gone.set(entry.id, entry.appId);
+      fresh = now;
+      const ids = fresh.map((entry) => entry.id).join(",");
+      if (ids !== current) [current, since] = [ids, Date.now()];
+      // Some windows, the same for a while: the app has settled.
+      if (fresh.length > 0 && Date.now() - since >= LAUNCH_SETTLE_MS) break;
+      if (fresh.length === 0 && child.exitCode !== null && child.exitCode !== 0) break;
+    }
+    if (gone.size > 0) {
+      console.log(
+        `plutoniumd: pid ${pid}'s windows that closed while it started: ` +
+          [...gone].map(([id, appId]) => `#${id} ${JSON.stringify(appId)}`).join(", "),
+      );
+    }
+    if (fresh.length > 0) {
+      const settled = holds ? await this.holdNew(fresh, agent.size) : fresh;
+      console.log(
+        `plutoniumd: pid ${pid}'s windows after ${seconds(started)}: ` +
+          settled.map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)}`).join(", "),
+      );
+      return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
     }
     // What came instead, if anything: windows the thread didn't get.
     const others = (await this.allWindows().catch(() => [])).filter((entry) => !allBefore?.has(entry.id));

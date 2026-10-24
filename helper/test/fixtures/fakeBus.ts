@@ -18,6 +18,7 @@ const REGISTRY = "org.a11y.atspi.Registry";
 export const STATE = {
   active: 1,
   checked: 4,
+  defunct: 6,
   editable: 7,
   enabled: 8,
   focused: 12,
@@ -38,6 +39,12 @@ export interface FakeNode {
   value?: { current: number; min: number; max: number };
   actions?: string[];
   children?: FakeNode[];
+  /** A table of rows × columns cells (a spreadsheet's), made as they're asked for. */
+  table?: { rows: number; columns: number; cellSize: [number, number]; cell: (row: number, column: number) => FakeNode };
+  /** Never answers (an app that hangs). */
+  hangs?: boolean;
+  /** Never answers, and its process leaves the bus (an app that crashes on the call). */
+  crashes?: boolean;
   /** What the app did, in order: "DoAction click", "SetTextContents hi", … */
   log?: string[];
 }
@@ -48,6 +55,8 @@ interface Placed {
   readonly path: string;
   readonly parent?: Placed;
   readonly index: number;
+  /** A table's cells made so far, by index. */
+  cells?: Map<number, Placed>;
   readonly children: Placed[];
 }
 
@@ -144,6 +153,9 @@ export class FakeBus {
 
   private answer(socket: Socket, sender: string, message: Message): void {
     this.calls.push(message);
+    const target = this.objects.get(`${message.destination}${message.path}`);
+    if (target?.node.crashes) this.pids.delete(target.bus);
+    if (target?.node.hangs || target?.node.crashes) return;
     let reply: Reply;
     try {
       reply = this.dispatch(sender, message);
@@ -188,8 +200,22 @@ export class FakeBus {
       ...(node.value ? ["org.a11y.atspi.Value"] : []),
       ...(node.actions ? ["org.a11y.atspi.Action"] : []),
     ];
+    const table = node.table;
+    const cellAt = (row: number, column: number): Placed => {
+      const index = row * table!.columns + column;
+      placed.cells ??= new Map();
+      let cell = placed.cells.get(index);
+      if (!cell) {
+        cell = { node: table!.cell(row, column), bus: placed.bus, path: `${placed.path}/cell/${index}`, parent: placed, index, children: [] };
+        placed.cells.set(index, cell);
+        this.objects.set(`${cell.bus}${cell.path}`, cell);
+      }
+      return cell;
+    };
+    if (table) interfaces.push("org.a11y.atspi.Table");
     switch (method) {
       case `${ACCESSIBLE}.GetChildren`:
+        if (table) throw new Error("GetChildren on a table of millions");
         return { signature: "a(so)", body: [placed.children.map((child) => [child.bus, child.path])] };
       case `${ACCESSIBLE}.GetRole`:
         return { signature: "u", body: [roleNumber(node.role)] };
@@ -204,6 +230,15 @@ export class FakeBus {
       case `${PROPERTIES}.Get`: {
         const [on, name] = body as [string, string];
         if (on === ACCESSIBLE && name === "Name") return { signature: "v", body: [["s", node.name ?? ""]] };
+        if (on === ACCESSIBLE && name === "Description") return { signature: "v", body: [["s", node.description ?? ""]] };
+        if (on === ACCESSIBLE && name === "ChildCount") {
+          // An int32: a spreadsheet's count is capped.
+          const count = table ? Math.min(table.rows * table.columns, 2 ** 31 - 1) : placed.children.length;
+          return { signature: "v", body: [["i", count]] };
+        }
+        if (on === "org.a11y.atspi.Table" && table && (name === "NRows" || name === "NColumns")) {
+          return { signature: "v", body: [["i", name === "NRows" ? table.rows : table.columns]] };
+        }
         if (on === ACCESSIBLE && name === "Parent") {
           const parent = placed.parent;
           return { signature: "v", body: [["(so)", parent ? [parent.bus, parent.path] : ["", "/org/a11y/atspi/null"]]] };
@@ -223,6 +258,8 @@ export class FakeBus {
                 ["Name", ["s", node.name ?? ""]],
                 ["Description", ["s", node.description ?? ""]],
                 ["ChildCount", ["i", placed.children.length]],
+                // LibreOffice Calc aborts on this for its cells.
+                ["Locale", ["s", "en_US"]],
               ]),
             ],
           };
@@ -253,6 +290,21 @@ export class FakeBus {
       }
       case "org.a11y.atspi.Component.GetExtents":
         return { signature: "(iiii)", body: [node.extents ?? [0, 0, 0, 0]] };
+      case "org.a11y.atspi.Component.GetAccessibleAtPoint": {
+        const [x, y] = body as [number, number];
+        const [left, top] = node.extents ?? [0, 0];
+        if (!table) return { signature: "(so)", body: [["", "/org/a11y/atspi/null"]] };
+        const cell = cellAt(Math.floor((y - top) / table.cellSize[1]), Math.floor((x - left) / table.cellSize[0]));
+        return { signature: "(so)", body: [[cell.bus, cell.path]] };
+      }
+      case "org.a11y.atspi.Table.GetRowAtIndex":
+        return { signature: "i", body: [Math.floor(Number(body[0]) / table!.columns)] };
+      case "org.a11y.atspi.Table.GetColumnAtIndex":
+        return { signature: "i", body: [Number(body[0]) % table!.columns] };
+      case "org.a11y.atspi.Table.GetAccessibleAt": {
+        const cell = cellAt(Number(body[0]), Number(body[1]));
+        return { signature: "(so)", body: [[cell.bus, cell.path]] };
+      }
       case "org.a11y.atspi.Component.GrabFocus":
         log("GrabFocus");
         return { signature: "b", body: [true] };

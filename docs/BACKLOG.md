@@ -173,6 +173,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   2026-10-24 between test slots). `-env:UserInstallation` doesn't separate
   them; a private session bus does. `launch_app` could say who has it, or
   give each thread's LibreOffice its own bus.
+- [x] **`read_window` crashed LibreOffice Calc.** S · `GetAll` on an
+  element includes `Locale`, which aborts Calc on its defunct cell and input
+  line objects. The reader skips defunct elements and never asks for
+  `Locale`. A sheet's visible cells are listed, and an app that doesn't
+  answer stops the read with a message that says whether it's still
+  running (`features/AGENT_CONTROL.md`, "Accessibility").
+- [x] **`launch_app` returned no windows when its first one closed.** S ·
+  The wait ended at the first window: a splash or recovery dialog gone by
+  then gave `[]`. It now waits for the windows to settle.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the

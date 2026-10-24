@@ -143,3 +143,96 @@ describe("Accessibility", () => {
     }
   });
 });
+
+describe("Accessibility on a spreadsheet and on apps that don't answer", () => {
+  let bus: FakeBus;
+  let calc: string;
+  const previous = process.env.DBUS_SESSION_BUS_ADDRESS;
+  const sheet: A11yWindow = { id: 8, pid: 7000, title: "Untitled 1 - LibreOffice Calc", width: 1000, height: 700, deviceScaleFactor: 1 };
+  const columnName = (column: number) => String.fromCharCode(65 + column);
+  // The formula bar's input line after the sheet changed: defunct.
+  const inputLine: FakeNode = { role: "paragraph", name: "Input line", states: [STATE.defunct] };
+  const table: FakeNode = {
+    role: "table",
+    name: "Sheet1",
+    states: SHOWN,
+    extents: [36, 168, 800, 400],
+    table: {
+      rows: 1_048_576,
+      columns: 16_384,
+      cellSize: [80, 20],
+      cell: (row, column) => ({
+        role: "table cell",
+        name: `${columnName(column)}${row + 1}`,
+        states: row === 0 && column === 0 ? [...SHOWN, STATE.focused] : SHOWN,
+        extents: [36 + column * 80, 168 + row * 20, 80, 20],
+        text: row === 1 && column === 1 ? "0.8413" : "",
+      }),
+    },
+  };
+
+  before(async () => {
+    bus = await FakeBus.start();
+    calc = bus.addApp(7000, [
+      { role: "frame", name: sheet.title, states: SHOWN, extents: [0, 0, 1000, 700], children: [
+        { role: "push button", name: "Bold", states: SHOWN, actions: ["press"] },
+        inputLine,
+        table,
+      ] },
+    ]);
+    bus.addApp(7100, [
+      { role: "frame", name: "Busy", states: SHOWN, children: [
+        { role: "push button", name: "OK", states: SHOWN },
+        { role: "panel", name: "Stuck", states: SHOWN, hangs: true },
+      ] },
+    ]);
+    bus.addApp(7200, [{ role: "frame", name: "Frozen", states: SHOWN, hangs: true }]);
+    process.env.DBUS_SESSION_BUS_ADDRESS = bus.address;
+  });
+  after(async () => {
+    process.env.DBUS_SESSION_BUS_ADDRESS = previous;
+    await bus.stop();
+  });
+
+  test("reads a spreadsheet's visible cells, never its Locale, nothing of what's defunct", async () => {
+    bus.calls.length = 0;
+    const outline = await new Accessibility().read(sheet);
+    assert.match(outline, /- push button "Bold"/);
+    // 10 columns × 20 rows are visible.
+    assert.match(outline, /- \(1048576 rows × 16384 columns; read the visible cells, A1 to J20: the empty ones left out\./);
+    assert.match(outline, /- table cell "B2" \[ref=a\d+\] @156,198: "0.8413"/);
+    assert.match(outline, /- table cell "A1" \[ref=a\d+\] \(focused\)/);
+    assert.ok(!outline.includes('"C3"'), "empty cells are left out");
+    assert.ok(!outline.includes("Input line"));
+    const accessibleGetAll = bus.calls.filter((call) => call.member === "GetAll" && call.body?.[0] === "org.a11y.atspi.Accessible");
+    assert.equal(accessibleGetAll.length, 0, "GetAll(Accessible) includes Locale, which aborts Calc");
+    assert.ok(!bus.calls.some((call) => call.body?.[1] === "Locale"));
+    // The frame is /1, then Bold, the input line and the table.
+    const on = (path: string) => bus.calls.filter((call) => call.destination === calc && call.path === `/org/a11y/atspi/accessible/${path}`);
+    assert.deepEqual([...new Set(on("3").map((call) => call.member))], ["GetState"], "a defunct object is asked nothing else");
+    assert.ok(!on("4").some((call) => call.member === "GetChildren"), "no GetChildren on the table");
+    assert.ok(bus.calls.length < 3000, `${bus.calls.length} calls`);
+  });
+
+  test("an app that stops answering: what was read, and that it's still running", async () => {
+    const started = Date.now();
+    const outline = await new Accessibility({ callTimeoutMs: 200 }).read({ ...sheet, pid: 7100, title: "Busy" });
+    assert.ok(Date.now() - started < 2000, "one stuck call doesn't hold the read");
+    assert.match(outline, /^- frame "Busy"/);
+    assert.match(outline, /- push button "OK"/);
+    assert.match(outline, /The app didn't answer \(org\.a11y\.atspi\.Accessible\.GetState: no reply in 0\.2 s\) after \d+ elements\. It's still running but busy or hung/);
+  });
+
+  test("an app whose window doesn't answer at all, running or gone", async () => {
+    const a11y = new Accessibility({ callTimeoutMs: 200 });
+    const frozen = { ...sheet, pid: 7200, title: "Frozen" };
+    await assert.rejects(a11y.read(frozen), (error: unknown) => {
+      return error instanceof A11yError && /didn't answer .*It's still running/.test(error.message);
+    });
+    // Gone while being read, as Calc was when it aborted.
+    bus.addApp(7300, [{ role: "frame", name: "Crashing", states: SHOWN, children: [{ role: "panel", crashes: true }] }]);
+    const outline = await a11y.read({ ...sheet, pid: 7300, title: "Crashing" });
+    assert.match(outline, /^- frame "Crashing"/);
+    assert.match(outline, /didn't answer .*, and it's gone: it quit or crashed\./);
+  });
+});

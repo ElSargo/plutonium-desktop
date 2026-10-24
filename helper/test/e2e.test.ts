@@ -405,6 +405,38 @@ describe("helper end to end", () => {
     }
   });
 
+  test("a launch waits for the app's windows to settle: a splash that closes doesn't end it", async () => {
+    const saved = shell.windows;
+    const timers: NodeJS.Timeout[] = [];
+    let pid = 0;
+    try {
+      const launching = helperJson<{ pid: number; windows: { id: number }[] }>(socketPath, "POST", "/v1/launch", {
+        thread: "t-a",
+        argv: ["env", "-i", "sleep", "30"],
+        waitMs: 8_000,
+      });
+      // The splash, gone before the main window (and a recovery dialog) come.
+      const at = (ms: number, windows: () => NativeWindowEntry[]) => timers.push(setTimeout(() => (shell.windows = windows()), ms));
+      const own = (id: number, title: string) => windowEntry(id, title, process.pid, ["t-a"]);
+      at(300, () => [...saved, own(21, "Splash")]);
+      at(900, () => saved);
+      at(1_600, () => [...saved, own(22, "Main")]);
+      at(1_900, () => [...saved, own(22, "Main"), own(23, "Recovery")]);
+      const started = Date.now();
+      const result = await launching;
+      pid = result.pid;
+      assert.deepEqual(
+        result.windows.map((window) => window.id),
+        [22, 23],
+      );
+      assert.ok(Date.now() - started < 6_000, "returns once they've settled, not at the end of the wait");
+    } finally {
+      for (const timer of timers) clearTimeout(timer);
+      shell.windows = saved;
+      if (pid) process.kill(pid);
+    }
+  });
+
   test("the thread setup a frontend asks for", async () => {
     const setup = await helperJson<{ env: Record<string, string>; terminalEnv: Record<string, string>; mcpServer: { args: string[] } }>(
       socketPath,

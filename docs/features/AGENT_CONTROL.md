@@ -42,6 +42,8 @@ LibreOffice drew its own title bar and close buttons before; it draws none now.
 
 The filter is a case-insensitive regular expression (or plain text, if it isn't one) matched against the name, generic name, keywords, desktop id and Exec: `spreadsheet` finds Calc, `office` LibreOffice. With a filter, `onPath` lists the matching executables on PATH too, separately (they're mostly command-line programs), at most 20, with `moreOnPath` counting the rest.
 
+`launch_app` waits up to `wait_seconds` for the app's new windows to appear and then stay the same for a second, and returns the ones open then. A window that closes meanwhile (a splash screen, LibreOffice's document recovery) doesn't end the wait; the helper logs it. An empty list means no window was open when the wait ran out.
+
 When an agent's `launch_app` can't find `argv[0]`, the error says it isn't on PATH, points to `find_apps`, and lists up to three apps `find_apps` gives for its name, with their argv.
 
 ## Sizes agents hold
@@ -60,7 +62,7 @@ The helper's log answers "why didn't my window show up":
 
 - each launch: `launched pid N in thread T: [argv]`, or `could not launch [argv] in thread T: …`;
 - each new window: its app id, pid and tags, and the thread it went to and how (`from pid N's environment`, `pid N is one the helper started`), or why it got none (`the client's pid is unknown`, `pid N is gone`, `no thread tag in pid N or its parents (k environment(s) unreadable)`); later tag changes as `tags now […]`;
-- the end of `launch_app`'s wait: the windows it returns, or `no window in thread T from pid N after S s`, with whether the process exited and every other window that came in the meantime (with pid and tags).
+- the end of `launch_app`'s wait: the windows that closed during it, the windows it returns, or `no window in thread T from pid N after S s`, with whether the process exited and every other window that came in the meantime (with pid and tags).
 
 A launch that exits 0 at once with no window has usually handed its arguments to an instance already running, and the new window belongs to that instance's session and thread. The Flatpak LibreOffice does this over D-Bus: whoever owns `org.libreoffice.LibreOfficeIpc0` on the session bus gets every later start, in any Plutonium session, whatever `-env:UserInstallation` says. If that instance doesn't answer (2026-10-24: it was restarting after a crash), the new soffice.bin waits on D-Bus without connecting to Wayland, and no window comes. A private session bus (`env DBUS_SESSION_BUS_ADDRESS=… org.libreoffice.LibreOffice …`) does give a separate instance.
 
@@ -69,6 +71,12 @@ A launch that exits 0 at once with no window has usually handed its arguments to
 `read_window` reads a window as an accessibility tree over AT-SPI, for apps that have one (GTK, Qt, LibreOffice; not terminals): role, name, states, text, value, its center in snapshot pixels and a ref (`a12`). `act_window` acts on a ref: its default action, `focus`, `set_text`, `set_value`, `select`, `scroll_into_view`, or any action the app lists; with no action of its own, `click` clicks the element's center.
 
 The helper talks D-Bus itself (`helper/src/dbus.ts`: the session bus for the accessibility bus's address, then that bus). It finds the window's frame among the applications whose bus connection belongs to the window's pid, matched by title and size (`helper/src/a11y.ts`). Hidden elements are left out unless `all` is set; subtrees that manage their descendants are read only when small (Writer's paragraphs are). Writer's whole window reads in about 160 ms.
+
+Each element's state is read first, and a defunct one is asked nothing more. Name, description and child count are read one by one, never with `GetAll` on `Accessible`: that includes `Locale`, and LibreOffice Calc aborts (`IllegalAccessibleComponentStateException` out of `ScAccessibleContextBase::getLocale`) when asked for it on its cells' or input line's defunct objects. That was the crash on 2026-10-24.
+
+A table with more than 400 children (a sheet: 1048576 × 16384 cells) is read through its `Table` interface: the cells at its visible corners give the visible rows and columns, and of those cells (at most 1000) the outline lists the ones with text and the focused one, after a line with the table's size and the visible range. Calc's whole window, cells with values included, reads in about 300 ms.
+
+Each call has 4 s. The first one the app doesn't answer stops the read (calls not yet made aren't sent), and so does 20 s in all. The result says which call got no answer, after how many elements, and whether the app is still on the accessibility bus (busy or hung) or gone (it quit or crashed). With nothing read, `read_window` fails with that.
 
 ## Tabs
 
@@ -113,6 +121,7 @@ All tools act on the calling thread's windows and tabs only.
 | foot without a size: maps at 8×29, then settles | ✅ held at 696×488 |
 | T3 panel: the held window scaled into a 539 px panel, the lock, "working" while typing, **Take control** | ✅ the app took the panel's size (539×916), `userControl`; `resize_window` refused after |
 | `read_window` on Writer; `act_window` `set_text` on the paragraph, `click` on Italic; an unknown ref and action | ✅ 157 ms; text replaced; Italic checked; clear errors |
+| `read_window` on the Flatpak Calc with a CSV open (X11 test session, private bus), 6 times with and without `all` | ✅ 220–330 ms, the cells' values listed, Calc alive; the reader from before aborted it on the first read |
 
 ## Limits
 
