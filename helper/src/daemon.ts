@@ -876,13 +876,13 @@ export class Daemon {
    */
   private openServerTabs(serverTabs: ServerTabs, desktop: Desktop): void {
     const opening = new Set<string>();
-    serverTabs.onOpen = (key, tag) => {
+    serverTabs.onOpen = (key, tag, incognito) => {
       const id = `${key.threadId}\u0000${key.tabId}`;
       if (opening.has(id)) return;
       opening.add(id);
       void (async () => {
         if (!(await desktop.available())) return;
-        const tab = await desktop.createTab("about:blank", [tag]);
+        const tab = await desktop.createTab("about:blank", [tag], { incognito });
         const shownTabId = serverTabs.attach(
           key,
           {

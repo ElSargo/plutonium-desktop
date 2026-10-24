@@ -11,13 +11,14 @@
 //   server → helper  {type: "cdp", threadId, tabId, message}
 //                    {type: "release", threadId, tabId}
 //                    {type: "pointer", threadId, tabId, phase, x, y}
-//                    {type: "open", threadId, tabId, tag}   (Plutonium's own)
+//                    {type: "open", threadId, tabId, tag, incognito?} (Plutonium's own)
 //                    {type: "close", threadId, tabId}       (Plutonium's own)
 // (threadId and tabId are the server's names for the tab.)
 //
 // "open": the server has a tab no shell page shows (none is open, or none
 // shows the thread). The helper opens one itself, tagged `tag` (the thread's
-// Plutonium tag), and attaches it as the page HELPER_PAGE: the server drives
+// Plutonium tag; with `incognito`, in throwaway storage of its own), and
+// attaches it as the page HELPER_PAGE: the server drives
 // it at once instead of waiting for a page and then going headless. A shell
 // page that shows the tab later adopts it, as it would another page's.
 // "close": the server's tab closed; the helper closes the tab if it opened it
@@ -250,7 +251,7 @@ export class ServerTabs {
   /** A page that showed `key` went away: another page that shows it may take over. */
   onOrphaned: (key: ServerTabKey) => void = () => {};
   /** The server wants a tab for `key`, tagged `tag`, and no page shows one. */
-  onOpen: (key: ServerTabKey, tag: string) => void = () => {};
+  onOpen: (key: ServerTabKey, tag: string, incognito: boolean) => void = () => {};
   /** The server's tab `key` closed; it was the helper's (HELPER_PAGE). */
   onClose: (key: ServerTabKey, browserTabId: number) => void = () => {};
 
@@ -453,6 +454,7 @@ export class ServerTabs {
       x?: number;
       y?: number;
       tag?: string;
+      incognito?: boolean;
     };
     try {
       command = JSON.parse(line);
@@ -463,7 +465,8 @@ export class ServerTabs {
     const key = { threadId: command.threadId, tabId: command.tabId };
     const tab = this.tabs.get(keyOf(key));
     if (command.type === "open") {
-      if (!tab && typeof command.tag === "string" && command.tag) this.onOpen(key, command.tag);
+      if (!tab && typeof command.tag === "string" && command.tag)
+        this.onOpen(key, command.tag, command.incognito === true);
       return;
     }
     if (!tab) return;

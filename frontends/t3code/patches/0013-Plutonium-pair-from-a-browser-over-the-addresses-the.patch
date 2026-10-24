@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 20:31:31 +1300
-Subject: [PATCH 13/21] Plutonium: pair from a browser over the addresses the
+Subject: [PATCH 13/23] Plutonium: pair from a browser over the addresses the
  server reports
 
 T3's pairing QR lists only the desktop app's endpoints, so a browser on
