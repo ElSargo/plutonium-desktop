@@ -129,9 +129,11 @@ EOF
   local fg; fg=$(sudo -n fgconsole 2>/dev/null || echo 4)
   if [[ $fg == "$vt" ]]; then fg=4; sudo -n chvt 4; fi
   echo "$fg" > "$STATE/return-vt"
-  if systemctl -q is-active "plutonium-test-tty$vt" 2>/dev/null; then
-    touch "$STATE/own-login"   # ours, from before: keep it
-  elif logged_in; then
+  # Ours from before (another session's, maybe): a new one. Reused, it can
+  # still be under an earlier Ash's control, and the next can't take it
+  # (2026-10-24: TakeControl EBUSY on a login 7 h old, Ash aborted).
+  sudo -n systemctl stop "plutonium-test-tty$vt" 2>/dev/null || true
+  if logged_in; then
     rm -f "$STATE/own-login"
   else
     touch "$STATE/own-login"
