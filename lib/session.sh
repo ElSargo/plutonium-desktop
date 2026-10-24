@@ -12,6 +12,8 @@
 #   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
 #         seconds), NO_KILLSWITCH
 #   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
+#         (--ash-host-window-bounds: several, comma-separated, for several
+#         displays), XVFB_SIZE (the private Xvfb's screen, default 1600x1000)
 #   EXTRA_FLAGS  more Chromium flags, VMODULE
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -118,7 +120,7 @@ if [[ $MODE == x11 ]]; then
     # Detached: a background process of an attached exec keeps its session
     # (and pm's systemd-run --wait) from ever ending. Under a shell: as the
     # detached exec's own process, Xvfb dies within a second.
-    xvfb=(sh -c '"$@" > /dev/null 2>&1' sh Xvfb "$XDISP" -screen 0 1600x1000x24 +extension XInputExtension)
+    xvfb=(sh -c '"$@" > /dev/null 2>&1' sh Xvfb "$XDISP" -screen 0 "${XVFB_SIZE:-1600x1000}x24" +extension XInputExtension)
     if [[ -n ${HOST:-} ]]; then setsid "${xvfb[@]}" </dev/null >/dev/null 2>&1 &
     else pm exec -d "$CONTAINER" "${xvfb[@]}" > /dev/null; fi
     for _ in $(seq 1 20); do on_ash test -S "/tmp/.X11-unix/X${XDISP#:}" && break; sleep 0.5; done
