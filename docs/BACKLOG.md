@@ -153,6 +153,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   NixOS refuses; the agent now gets NixOS's message. Point Playwright at a
   Chromium that runs here (the way Plutonium finds its own) if that case
   matters.
+- [ ] **Idle agent tabs a shell shows.** S · T3's idle sweep (`closeIdleAgentTabs`)
+  and the "tab the user is looking at" fallback (`latestThreadTab`) count only
+  streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
+  `visible` now uses. The sweep may close an agent's tab the user is watching.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the

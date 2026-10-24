@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 15:10:13 +1300
-Subject: [PATCH 07/20] Plutonium: thread tags, groups and the Elsewhere list
+Subject: [PATCH 07/21] Plutonium: thread tags, groups and the Elsewhere list
 
 Threads are tagged t3:thread/<id> and described to the browser as
 groups. The Apps panel lists windows from other shells under
