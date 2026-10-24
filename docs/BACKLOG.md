@@ -182,6 +182,18 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **`launch_app` returned no windows when its first one closed.** S ·
   The wait ended at the first window: a splash or recovery dialog gone by
   then gave `[]`. It now waits for the windows to settle.
+- [x] **Tab recordings on NixOS.** M · `preview_recording_start` needed T3's
+  downloaded headless shell, which NixOS can't run. The encoder now runs in a
+  hidden page of Plutonium's browser (`features/AGENT_CONTROL.md`).
+- [ ] **T3's headless shell on NixOS.** S · Without a Plutonium helper (T3
+  Code alone), headless tabs and recordings still launch T3's download, which
+  NixOS refuses; the agent now gets NixOS's message. Point Playwright at a
+  Chromium that runs here (the way Plutonium finds its own) if that case
+  matters.
+- [ ] **Idle agent tabs a shell shows.** S · T3's idle sweep (`closeIdleAgentTabs`)
+  and the "tab the user is looking at" fallback (`latestThreadTab`) count only
+  streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
+  `visible` now uses. The sweep may close an agent's tab the user is watching.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
