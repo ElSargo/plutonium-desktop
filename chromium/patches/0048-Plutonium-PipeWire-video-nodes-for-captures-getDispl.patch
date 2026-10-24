@@ -565,7 +565,7 @@ index 6108a7cbec..3c29c08dcd 100644
        content::RenderFrameHost* frame);
 diff --git a/chrome/browser/plutonium_pipewire.cc b/chrome/browser/plutonium_pipewire.cc
 new file mode 100644
-index 0000000000..db6e5f397f
+index 0000000000..59a4411acc
 --- /dev/null
 +++ b/chrome/browser/plutonium_pipewire.cc
 @@ -0,0 +1,778 @@
@@ -597,7 +597,6 @@ index 0000000000..db6e5f397f
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/read_only_shared_memory_region.h"
 +#include "base/memory/weak_ptr.h"
-+#include "base/no_destructor.h"
 +#include "base/numerics/safe_conversions.h"
 +#include "base/synchronization/lock.h"
 +#include "base/task/sequenced_task_runner.h"
@@ -610,6 +609,7 @@ index 0000000000..db6e5f397f
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "media/base/video_frame.h"
++#include "media/capture/mojom/video_capture_buffer.mojom.h"
 +#include "mojo/public/cpp/bindings/remote.h"
 +#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
@@ -656,8 +656,8 @@ index 0000000000..db6e5f397f
 +
 +  // Null if there's no libpipewire.
 +  static const PipeWire* Get() {
-+    static const base::NoDestructor<std::optional<PipeWire>> instance(Load());
-+    return instance->has_value() ? &instance->value() : nullptr;
++    static const std::optional<PipeWire> instance = Load();
++    return instance ? &instance.value() : nullptr;
 +  }
 +
 + private:
@@ -911,12 +911,12 @@ index 0000000000..db6e5f397f
 +    params[count++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
 +        &builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
 +        SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header), SPA_PARAM_META_size,
-+        SPA_POD_Int(sizeof(spa_meta_header))));
++        SPA_POD_Int(static_cast<int>(sizeof(spa_meta_header)))));
 +    if (self->cursor_metadata_) {
 +      params[count++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
 +          &builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
 +          SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
-+          SPA_PARAM_META_size, SPA_POD_Int(kCursorMetaSize)));
++          SPA_PARAM_META_size, SPA_POD_Int(static_cast<int>(kCursorMetaSize))));
 +    }
 +    self->pw_->stream_update_params(self->stream_, params, count);
 +  }
