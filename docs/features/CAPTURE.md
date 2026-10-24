@@ -1,6 +1,6 @@
 # Screenshots, screen sharing and recording
 
-Status: design, nothing built yet. The tasks are in `BACKLOG.md`, "Capture and sharing".
+Status: built on branch `capture` (patches "screen capture for shells, capture requests to the focused shell" and "PipeWire video nodes for captures, getDisplayMedia asks the shell"); being verified. What's left is in `BACKLOG.md`, "Capture and sharing". "How it's built" below says where each part is.
 
 There's one capture primitive in Ash, and three kinds of consumer use it: native apps through the desktop portal, shell pages, and agents. The shell the user has in focus runs the UI: the picker, the indicators and the stop buttons.
 
@@ -132,6 +132,39 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 - Cursor metadata mode should be supported.
 - Window capture of parked windows works.
 - Hotkeys go through GlobalShortcuts.
+
+## How it's built
+
+**Ash: `chrome/browser/plutonium_capture.{h,cc}`** (`PlutoniumCapture`), one registry of captures and requests.
+- **Sources** are JSON objects `{type: "output" | "window" | "tab", id, region?}`. An output's id is the display id as a string (display ids don't fit in a JSON number); outputs come from the display list (`display::Screen`). `region` is in the source's pixels.
+- **Screenshots:** an output is a copy of its root window's layer (`ui::GrabWindowSnapshot`), a window is `EmbeddedWindows::Snapshot()` (also parked), a tab is `PlutoniumTabs::Snapshot()`; then cropped.
+- **A shell's MediaStream:** the "stream" command registers a desktop stream id for the shell document (`DesktopStreamsRegistry`), and the library calls `getUserMedia({video: {mandatory: {chromeMediaSource: "desktop", chromeMediaSourceId}}})`. Chrome's own capture devices do the rest: an output is its root window, a window is its widget's aura window (a subtree capture of the root's frame: `MakeWindowCapturable()` keeps it drawn while parked at zero opacity), a tab is its `WebContents`. `DesktopCaptureAccessHandler` hands the capture its `MediaStreamUI`, wrapped (`WrapStreamUI()`), so the capture starts and stops with the stream and `stopCapture()` really stops it; Chrome's "is sharing your screen" notification is left out, since the shells show it. A region is cropped in the library (`MediaStreamTrackProcessor`, `VideoFrame.visibleRect`).
+- **PipeWire** (`chrome/browser/plutonium_pipewire.{h,cc}`, `PlutoniumScreencast`): the "start" command, for the portal. A `FrameSinkVideoCapturer` on the same targets, ARGB in shared memory, each frame copied into a PipeWire buffer (MemFd, else MemPtr; BGRx or BGRA) of a driver stream (`PW_STREAM_FLAG_DRIVER`, `pw_stream_trigger_process()` per frame), at the source's size when it started, letterboxed after. Cursor: hidden, embedded (a capturer overlay with the cursor image), or metadata (`SPA_META_Cursor`, the image only when it changes). libpipewire is `dlopen()`ed; the images have `libpipewire-0.3-0t64`. No dmabuf yet (see BACKLOG).
+- **Requests:** `Request()` sends a "capturerequest" to `FocusedShell()` (one function, for EXO-MULTIMON to make per-display). If it doesn't take it (no listener, or no `preventDefault()`), or goes away before answering, Ash's own picker asks (`chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.{h,cc}`). An answer is checked against the request's types and against the sources there are.
+- **The indicator:** every capture goes to every shell; the focused shell's library says it shows it ("acknowledge"). After 2 s unacknowledged, Ash shows its own strip in the top right corner, a Stop button per capture.
+- **The switches:** `plutonium.capture` in local state, `{recording, screenshots}`. Switching recording off stops every capture. They cover shells, the portal and tabs' getDisplayMedia. Agents' `snapshot_window` and `snapshot_tab` are views of their own thread's items, not screenshots of the user's screen, and stay on.
+- **A window's capture size** (`EmbeddedWindows::SetCaptureSize()`): the newest running capture that holds one sets the size the app is asked for, whatever its elements ask; a captured window keeps drawing at full rate (`KeepDrawing()`).
+- **getDisplayMedia** (shell mode): `DesktopMediaPickerFactoryImpl` makes a picker that sends the same request; the answer is a `DesktopMediaID`, and `DisplayMediaAccessHandler` wraps its UI as for a shell's stream (a capture of kind "display").
+
+**The broker** (`navigator.windowBroker`): `screenshot(sourceJson) → Blob`, `captureCommand(command, argsJson) → JSON`, and `ShellCaptureEvent`s: "capturerequest" (cancelable), "capturerequestend", "capturestart", "capturechange", "capturestop", "capturesettingschange". Commands: "sources", "list", "settings", "setSettings", "stream", "stop", "acknowledge", "setSize", "answer".
+
+**The DevTools Plutonium domain** (the helper): `captureCommand` ("sources", "list", "settings", "stop", "setSize", "request", "cancelRequest", "start"), `screenshot`, and the `captureEvent` event.
+
+**The shell library** (`helper/web/plutonium-shell.js`): `capture(source, {region, size, cursor, frameRate})`, `screenshot(source, {region})`, `saveScreenshot(blob)`, `takeScreenshot({targets})` (the Print UI: the output frozen under a shade; drag a region, click a target, Enter for all of it), `outputSource()`, `captureSources()`, `captures()`, `stopCapture(id)`, `setCaptureSize(id, size)`, `acknowledgeCapture(id)`, `answerCapture(requestId, answer)`, `setCaptureSettings()`, and events "capturestart", "capturechange", "capturestop", "capturesettingschange", "screenshot". connect() options `capturePicker` and `captureIndicator`: the library's own (a dialog with thumbnails; a strip with Stop buttons), `false` (Ash's), or a function.
+
+**Shells:** niri binds Print (region or window), Ctrl+Print (the screen) and Alt+Print (the focused window), as niri does; plain binds Print. Files go to `~/Pictures/Screenshots` (`POST /v1/screenshots`).
+
+**The portal backend** (`helper/src/portal.ts`): `org.freedesktop.impl.portal.ScreenCast` (version 5) and `Screenshot` (version 2) as `org.freedesktop.impl.portal.desktop.plutonium`, on `$PLUTONIUM_PORTAL_BUS` or the session bus.
+- The app's pid comes from the request handle (`/…/request/1_42/…` is `:1.42`) and the bus's `GetConnectionUnixProcessID`; its thread from `/proc`, its name from its desktop entry.
+- Restore data is `("plutonium", 1, <JSON>)`: the output by name, a window by app id and title, a tab by URL.
+- A capture a shell stops ends its portal session (`Session.Closed`).
+- `PickColor` isn't there yet.
+- Files: `helper/portal/plutonium.portal` and `plutonium-portals.conf`. DRM sessions install them; `PORTAL_SESSION=1` sets `XDG_CURRENT_DESKTOP=Plutonium` for the session and restarts xdg-desktop-portal.
+
+## Testing
+
+- `cd helper && node --test test/portal.test.ts`: restore data, screenshots on disk, and the backend end to end on a private `dbus-daemon`, called as xdg-desktop-portal calls it.
+- `tools/portal-bus.sh start` gives a private bus with its own xdg-desktop-portal that uses this backend; run the session's helper with `PLUTONIUM_PORTAL_BUS` set to it, and apps with `DBUS_SESSION_BUS_ADDRESS`. Its xdg-desktop-portal finds the files through `XDG_DATA_DIRS` and `XDG_CONFIG_HOME` (checked with 1.22.1). Its Screenshot portal wants the permission store and an access dialog for non-interactive screenshots, which a bare bus doesn't have.
 
 ## Not planned
 
