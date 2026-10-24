@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 08:04:33 +1300
-Subject: [PATCH 34/44] Plutonium: common plumbing for tab features
+Subject: [PATCH 34/45] Plutonium: common plumbing for tab features
 
 EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "The common shape"):
 what find, zoom, printing, permissions, file pickers and downloads share,
