@@ -1,0 +1,372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sat, 24 Oct 2026 17:08:27 +1300
+Subject: [PATCH 46/46] Plutonium: incognito tabs, each in a throwaway
+ off-the-record profile
+
+createTab (the shell API and the DevTools Plutonium domain) takes
+incognito: the tab opens in a new off-the-record profile of the DevTools
+kind, which its page's own new tabs share. The profile is destroyed once
+no tab uses it. Tabs report incognito.
+
+EXO-INCOGNITO
+---
+ chrome/browser/devtools/cros_protocol.pdl     |  6 +++
+ .../devtools/protocol/plutonium_handler.cc    |  5 +-
+ .../devtools/protocol/plutonium_handler.h     |  1 +
+ chrome/browser/plutonium_shell.cc             |  5 +-
+ chrome/browser/plutonium_tabs.cc              | 50 +++++++++++++++++--
+ chrome/browser/plutonium_tabs.h               | 18 +++++--
+ .../mojom/native_window/window_broker.mojom   |  8 ++-
+ .../renderer/core/html/browser_tab_entry.idl  |  3 ++
+ .../core/html/native_window_broker.cc         |  6 ++-
+ .../renderer/core/html/native_window_broker.h |  3 +-
+ .../core/html/native_window_broker.idl        |  6 ++-
+ 11 files changed, 94 insertions(+), 17 deletions(-)
+
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index 15b51b08ce..9abc60318c 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -38,6 +38,9 @@ experimental domain Plutonium
+       integer openerId
+       # "shell", "shell:<id>", "page", "devtools" or "agent".
+       string openedBy
++      # In a throwaway off-the-record profile of its own (createTab incognito,
++      # or opened by such a tab's page).
++      boolean incognito
+       # The dialog the page waits on: alert, confirm, prompt or beforeunload.
+       optional string dialogType
+       optional string dialogMessage
+@@ -97,6 +100,9 @@ experimental domain Plutonium
+       string url
+       # The first is its origin tag (its thread).
+       optional array of string tags
++      # In a throwaway off-the-record profile of its own, gone when it and
++      # the tabs its page opens close.
++      optional boolean incognito
+     returns
+       Tab tab
+ 
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+index 6fba2f2e6f..7a2da2cdc2 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.cc
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -121,6 +121,7 @@ std::unique_ptr<Plutonium::Tab> ToProtocol(const PlutoniumTabs::TabInfo& tab) {
+           .SetTags(std::move(tags))
+           .SetOpenerId(tab.opener_id)
+           .SetOpenedBy(tab.opened_by)
++          .SetIncognito(tab.incognito)
+           .SetStateJson(tab.state_json)
+           .Build();
+   if (!tab.dialog_type.empty()) {
+@@ -223,10 +224,12 @@ Response PlutoniumHandler::GetTabs(
+ Response PlutoniumHandler::CreateTab(
+     const std::string& url,
+     std::unique_ptr<protocol::Array<std::string>> tags,
++    std::optional<bool> incognito,
+     std::unique_ptr<Plutonium::Tab>* tab) {
+   std::optional<PlutoniumTabs::TabInfo> created =
+       PlutoniumTabs::Get()->CreateAgentTab(
+-          url, tags ? *tags : std::vector<std::string>());
++          url, tags ? *tags : std::vector<std::string>(),
++          incognito.value_or(false));
+   if (!created) {
+     return Response::ServerError(
+         "Can't open that URL (or no shell page has started)");
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+index 88c2b03bce..78e98e96f1 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.h
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -47,6 +47,7 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+   protocol::Response CreateTab(
+       const std::string& url,
+       std::unique_ptr<protocol::Array<std::string>> tags,
++      std::optional<bool> incognito,
+       std::unique_ptr<protocol::Plutonium::Tab>* tab) override;
+   protocol::Response NavigateTab(int id, const std::string& url) override;
+   void TabCommand(int id,
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index ee75d162f9..43fea6ecf6 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -132,7 +132,7 @@ blink::mojom::BrowserTabEntryPtr ToMojo(const PlutoniumTabs::TabInfo& tab) {
+       tab.focused, tab.tag, tab.opener_id, tab.opened_by, tab.dialog_type,
+       base::UTF16ToUTF8(tab.dialog_message),
+       base::UTF16ToUTF8(tab.dialog_default_prompt), tab.tags,
+-      tab.state_json);
++      tab.state_json, tab.incognito);
+ }
+ 
+ std::vector<blink::mojom::ShellEntryPtr> CurrentShells() {
+@@ -421,6 +421,7 @@ class WindowBrokerImpl
+ 
+   void CreateTab(const std::string& url,
+                  const std::string& tag,
++                 bool incognito,
+                  CreateTabCallback callback) override {
+     if (!StillShell()) {
+       std::move(callback).Run(nullptr);
+@@ -428,7 +429,7 @@ class WindowBrokerImpl
+     }
+     std::optional<PlutoniumTabs::TabInfo> tab = PlutoniumTabs::Get()->CreateTab(
+         content::WebContents::FromRenderFrameHost(&render_frame_host()), url,
+-        tag);
++        tag, "shell", incognito);
+     std::move(callback).Run(tab ? ToMojo(*tab) : nullptr);
+   }
+ 
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+index c0ce4bb22e..a51f3ba6e3 100644
+--- a/chrome/browser/plutonium_tabs.cc
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -28,6 +28,7 @@
+ #include "chrome/browser/devtools/devtools_window.h"
+ #include "chrome/browser/file_select_helper.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_destroyer.h"
+ #include "chrome/browser/plutonium_find.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_downloads.h"
+@@ -336,6 +337,7 @@ class PlutoniumTabs::Tab : public content::WebContentsDelegate,
+     info_.tags = std::move(tags);
+     info_.opener_id = opener_id;
+     info_.opened_by = opened_by;
++    info_.incognito = contents_->GetBrowserContext()->IsOffTheRecord();
+     if (owned_contents_) {
+       contents_->SetDelegate(this);
+     }
+@@ -1046,7 +1048,8 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateTab(
+     content::WebContents* shell,
+     const std::string& url_text,
+     const std::string& tag,
+-    const std::string& opened_by) {
++    const std::string& opened_by,
++    bool incognito) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   content::BrowserContext* browser_context = shell->GetBrowserContext();
+   // In shell mode PlutoniumShells says which shell is visible.
+@@ -1062,6 +1065,18 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateTab(
+     VLOG(1) << "EXO-TABS refusing to open \"" << url_text << "\"";
+     return std::nullopt;
+   }
++  if (incognito) {
++    // EXO-INCOGNITO: a profile of its own, as DevTools makes for
++    // Target.createBrowserContext (which may open windows, unlike other
++    // non-primary off-the-record profiles).
++    Profile* otr =
++        Profile::FromBrowserContext(browser_context)
++            ->GetOffTheRecordProfile(
++                Profile::OTRProfileID::CreateUniqueForDevTools(),
++                /*create_if_needed=*/true);
++    incognito_profiles_.push_back(otr->GetWeakPtr());
++    browser_context = otr;
++  }
+   content::WebContents::CreateParams params(browser_context);
+   params.initially_hidden = true;
+   std::unique_ptr<content::WebContents> contents =
+@@ -1078,7 +1093,8 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateTab(
+ 
+ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateAgentTab(
+     const std::string& url,
+-    const std::vector<std::string>& tags) {
++    const std::vector<std::string>& tags,
++    bool incognito) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   content::WebContents* shell = this->shell();
+   if (!shell) {
+@@ -1091,7 +1107,7 @@ std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateAgentTab(
+   }
+   std::optional<TabInfo> tab =
+       CreateTab(shell, url, tags.empty() ? std::string() : tags.front(),
+-                "agent");
++                "agent", incognito);
+   if (tab && tags.size() > 1) {
+     UpdateTags(tab->id, std::vector<std::string>(tags.begin() + 1, tags.end()),
+                {});
+@@ -1508,6 +1524,34 @@ void PlutoniumTabs::RemoveTab(int32_t tab_id) {
+   // (CloseContents): destroy it once that has returned.
+   base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
+                                                             std::move(tab));
++  // EXO-INCOGNITO: and then its profile, if it was the last incognito tab
++  // in it.
++  if (!incognito_profiles_.empty()) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PlutoniumTabs::DestroyUnusedIncognitoProfiles,
++                       base::Unretained(this)));
++  }
++}
++
++void PlutoniumTabs::DestroyUnusedIncognitoProfiles() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  std::vector<base::WeakPtr<Profile>> kept;
++  for (base::WeakPtr<Profile>& profile : incognito_profiles_) {
++    if (!profile) {
++      continue;
++    }
++    bool used = false;
++    for (const auto& [id, tab] : tabs_) {
++      used = used || tab->contents()->GetBrowserContext() == profile.get();
++    }
++    if (used) {
++      kept.push_back(std::move(profile));
++    } else {
++      ProfileDestroyer::DestroyOTRProfileWhenAppropriate(profile.get());
++    }
++  }
++  incognito_profiles_ = std::move(kept);
+ }
+ 
+ void PlutoniumTabs::TabChanged(Tab* tab) {
+diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
+index 34bffb64ab..20b23443a7 100644
+--- a/chrome/browser/plutonium_tabs.h
++++ b/chrome/browser/plutonium_tabs.h
+@@ -87,6 +87,9 @@ class PlutoniumTabs : public ProfileObserver {
+     // "devtools" (EXO-CHROME: the DevTools of tab |opener_id|) or "agent"
+     // (EXO-AGENT: CreateAgentTab()).
+     std::string opened_by;
++    // EXO-INCOGNITO: in a throwaway off-the-record profile of its own
++    // (CreateTab(..., incognito)), shared only with the tabs its page opens.
++    bool incognito = false;
+     // The dialog the page waits on ("alert", "confirm", "prompt",
+     // "beforeunload"), or empty.
+     std::string dialog_type;
+@@ -142,17 +145,20 @@ class PlutoniumTabs : public ProfileObserver {
+   // GURL if they would refuse it.
+   static GURL ToLoadableUrl(const std::string& text);
+ 
+-  // Opens a tab at |url| in |shell|'s profile. Nullopt if the URL isn't
+-  // loadable.
++  // Opens a tab at |url| in |shell|'s profile, or with |incognito| in a new
++  // off-the-record profile that goes when its last tab does. Nullopt if the
++  // URL isn't loadable.
+   std::optional<TabInfo> CreateTab(content::WebContents* shell,
+                                    const std::string& url,
+                                    const std::string& tag,
+-                                   const std::string& opened_by = "shell");
++                                   const std::string& opened_by = "shell",
++                                   bool incognito = false);
+   // EXO-AGENT: opens a tab for the helper (the DevTools Plutonium domain), in
+   // the shells' profile, opened by "agent". |tags| starts with its origin
+   // tag. Nullopt if the URL isn't loadable or there is no shell yet.
+   std::optional<TabInfo> CreateAgentTab(const std::string& url,
+-                                        const std::vector<std::string>& tags);
++                                        const std::vector<std::string>& tags,
++                                        bool incognito = false);
+   bool Navigate(int32_t tab_id, const std::string& url);
+   // PLUTONIUM: in shell mode, a shell page's new tab or window (Ctrl+click,
+   // middle click, target=_blank, window.open) becomes one of these tabs
+@@ -301,6 +307,10 @@ class PlutoniumTabs : public ProfileObserver {
+   base::ObserverList<Observer> observers_;
+   base::ScopedMultiSourceObservation<Profile, ProfileObserver>
+       profile_observations_{this};
++  // EXO-INCOGNITO: the profiles incognito tabs were opened in; each is
++  // destroyed once no tab uses it (DestroyUnusedIncognitoProfiles()).
++  std::vector<base::WeakPtr<Profile>> incognito_profiles_;
++  void DestroyUnusedIncognitoProfiles();
+   SEQUENCE_CHECKER(sequence_checker_);
+ };
+ 
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 955f0fb915..1bd486709b 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -103,6 +103,9 @@ struct BrowserTabEntry {
+   // the tab's features report, a JSON object: "zoom", "pending" (the tab
+   // requests it waits on, by kind) and the like (TAB_FEATURES.md).
+   string state_json;
++  // EXO-INCOGNITO: in a throwaway off-the-record profile of its own
++  // (CreateTab with incognito, or opened by such a tab's page).
++  bool incognito;
+ };
+ 
+ // EXO-TAGS: a tag a shell has described.
+@@ -274,8 +277,9 @@ interface WindowBroker {
+   AddTabObserver(pending_associated_remote<BrowserTabObserver> observer)
+       => (array<BrowserTabEntry> tabs);
+   // Opens a new tab at |url| (anything the omnibox would load, except
+-  // javascript:), tagged |tag|. Null if |url| isn't loadable.
+-  CreateTab(string url, string tag) => (BrowserTabEntry? tab);
++  // javascript:), tagged |tag|; with |incognito|, in a throwaway
++  // off-the-record profile of its own. Null if |url| isn't loadable.
++  CreateTab(string url, string tag, bool incognito) => (BrowserTabEntry? tab);
+   // Loads |url| in |tab_id|, as typed in the omnibox. False if there is no
+   // such tab or |url| isn't loadable.
+   NavigateTab(int32 tab_id, string url) => (bool ok);
+diff --git a/third_party/blink/renderer/core/html/browser_tab_entry.idl b/third_party/blink/renderer/core/html/browser_tab_entry.idl
+index 287c1dfa69..0ab7aba05b 100644
+--- a/third_party/blink/renderer/core/html/browser_tab_entry.idl
++++ b/third_party/blink/renderer/core/html/browser_tab_entry.idl
+@@ -34,4 +34,7 @@ dictionary BrowserTabEntry {
+     // EXO-TAB-FEATURES: what the tab's features report, a JSON object:
+     // "zoom", "pending" (the requests it waits on, by kind) and the like.
+     required DOMString stateJson;
++    // EXO-INCOGNITO: in throwaway storage of its own (createTab() with
++    // incognito, or opened by such a tab's page).
++    required boolean incognito;
+ };
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 8c9499ccc2..919749b906 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -88,6 +88,7 @@ BrowserTabEntry* ToEntry(const mojom::blink::BrowserTabEntry& tab) {
+   entry->setDialogDefaultPrompt(tab.dialog_default_prompt);
+   entry->setTags(tab.tags);
+   entry->setStateJson(tab.state_json);
++  entry->setIncognito(tab.incognito);
+   return entry;
+ }
+ 
+@@ -752,7 +753,8 @@ ScriptPromise<IDLSequence<BrowserTabEntry>> NativeWindowBroker::getTabs(
+ ScriptPromise<BrowserTabEntry> NativeWindowBroker::createTab(
+     ScriptState* script_state,
+     const String& url,
+-    const String& tag) {
++    const String& tag,
++    bool incognito) {
+   auto* resolver =
+       MakeGarbageCollected<ScriptPromiseResolver<BrowserTabEntry>>(
+           script_state);
+@@ -761,7 +763,7 @@ ScriptPromise<BrowserTabEntry> NativeWindowBroker::createTab(
+     return promise;
+   }
+   remote_->CreateTab(
+-      url, tag,
++      url, tag, incognito,
+       BindOnce(
+           [](NativeWindowBroker* self,
+              ScriptPromiseResolver<BrowserTabEntry>* resolver,
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index 63858c17bb..d440d52637 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -72,7 +72,8 @@ class CORE_EXPORT NativeWindowBroker final
+   ScriptPromise<IDLSequence<BrowserTabEntry>> getTabs(ScriptState*);
+   ScriptPromise<BrowserTabEntry> createTab(ScriptState*,
+                                            const String& url,
+-                                           const String& tag);
++                                           const String& tag,
++                                           bool incognito);
+   ScriptPromise<IDLUndefined> navigateTab(ScriptState*,
+                                           int32_t tab_id,
+                                           const String& url);
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index 338b0cd5b7..4760b30580 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -53,9 +53,11 @@
+     [CallWith=ScriptState] Promise<sequence<BrowserTabEntry>> getTabs();
+     // Opens a tab at |url| (anything the omnibox would load, except
+     // javascript:), tagged |tag|. Rejects (SyntaxError) if |url| can't be
+-    // loaded.
++    // loaded. With |incognito|, the tab gets throwaway storage of its own
++    // (shared only with the tabs its page opens), gone when they close.
+     [CallWith=ScriptState] Promise<BrowserTabEntry> createTab(
+-        DOMString url, optional DOMString tag = "");
++        DOMString url, optional DOMString tag = "",
++        optional boolean incognito = false);
+     // Loads |url| in tab |tabId| as if typed in the omnibox. Rejects
+     // (NotFoundError) if there is no such tab or |url| can't be loaded.
+     [CallWith=ScriptState] Promise<undefined> navigateTab(long tabId,

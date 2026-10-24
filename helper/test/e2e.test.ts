@@ -315,6 +315,19 @@ describe("helper end to end", () => {
     assert.ok(!shell.windows.some((window) => window.id === 4));
   });
 
+  test("an agent finds apps, and a program not on PATH points it to find_apps", async () => {
+    const found = await agent.call("find_apps", { filter: "^sh$" });
+    assert.equal(found.isError, undefined, found.content[0]?.text);
+    const { apps, onPath } = JSON.parse(found.content[0]!.text!);
+    assert.ok(Array.isArray(apps));
+    assert.deepEqual(onPath, ["sh"]);
+    const missing = await agent.call("launch_app", { argv: ["plutonium-no-such-app", "--calc"], wait_seconds: 0 });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0]!.text!, /^plutonium-no-such-app isn't on PATH; find_apps lists installed apps/);
+    const badCwd = await agent.call("launch_app", { argv: ["sh"], cwd: join(dir, "nowhere"), wait_seconds: 0 });
+    assert.match(badCwd.content[0]!.text!, /working directory .*nowhere doesn't exist/);
+  });
+
   test("launched apps get the thread environment, Electron's on Wayland", async () => {
     const out = join(dir, "env.txt");
     const { pid } = await helperJson<{ pid: number }>(socketPath, "POST", "/v1/launch", {
@@ -364,6 +377,63 @@ describe("helper end to end", () => {
       assert.deepEqual(shows, { [pid]: true });
     } finally {
       process.kill(pid);
+    }
+  });
+
+  test("a window the browser couldn't tag goes to the thread that launched its client", async () => {
+    // As a Flatpak's: the browser can't read the sandboxed client's
+    // environment and reports no tags; the helper started its process.
+    const { pid } = await helperJson<{ pid: number }>(socketPath, "POST", "/v1/launch", {
+      thread: "t-a",
+      argv: ["env", "-i", "sleep", "30"],
+    });
+    const stranger = spawn("sleep", ["30"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
+    await new Promise((resolve) => stranger.once("spawn", resolve));
+    const saved = shell.windows;
+    try {
+      shell.windows = [...saved, windowEntry(5, "Sandboxed", pid, []), windowEntry(6, "Someone else's", stranger.pid!, [])];
+      const result = await agent.call("list_windows");
+      const windows = JSON.parse(result.content[0]!.text!) as { id: number }[];
+      assert.deepEqual(
+        windows.map((window) => window.id),
+        [1, 3, 5],
+      );
+    } finally {
+      shell.windows = saved;
+      stranger.kill();
+      process.kill(pid);
+    }
+  });
+
+  test("a launch waits for the app's windows to settle: a splash that closes doesn't end it", async () => {
+    const saved = shell.windows;
+    const timers: NodeJS.Timeout[] = [];
+    let pid = 0;
+    try {
+      const launching = helperJson<{ pid: number; windows: { id: number }[] }>(socketPath, "POST", "/v1/launch", {
+        thread: "t-a",
+        argv: ["env", "-i", "sleep", "30"],
+        waitMs: 8_000,
+      });
+      // The splash, gone before the main window (and a recovery dialog) come.
+      const at = (ms: number, windows: () => NativeWindowEntry[]) => timers.push(setTimeout(() => (shell.windows = windows()), ms));
+      const own = (id: number, title: string) => windowEntry(id, title, process.pid, ["t-a"]);
+      at(300, () => [...saved, own(21, "Splash")]);
+      at(900, () => saved);
+      at(1_600, () => [...saved, own(22, "Main")]);
+      at(1_900, () => [...saved, own(22, "Main"), own(23, "Recovery")]);
+      const started = Date.now();
+      const result = await launching;
+      pid = result.pid;
+      assert.deepEqual(
+        result.windows.map((window) => window.id),
+        [22, 23],
+      );
+      assert.ok(Date.now() - started < 6_000, "returns once they've settled, not at the end of the wait");
+    } finally {
+      for (const timer of timers) clearTimeout(timer);
+      shell.windows = saved;
+      if (pid) process.kill(pid);
     }
   });
 

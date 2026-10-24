@@ -145,8 +145,80 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   desktop has no Apps panel content. The helper has window screencasts
   (`Plutonium.startWindowScreencast`) and input; T3 would stream them
   (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Agents had to guess program names for `launch_app`.** `find_apps`
+  lists the launcher's apps with an argv for `launch_app`, where each is
+  installed from, and matching programs on PATH; a program not on PATH
+  points to it (`features/AGENT_CONTROL.md`, "Finding apps").
+- [ ] **`find_apps` shows one install per desktop id.** S · Two desktop
+  files with the same id (a user override, or the same app in a Nix
+  profile and the system) show as the first, as in the launcher. Apps
+  installed with no desktop file (a Nix build off PATH) don't show at all.
+- [x] **A Flatpak's window never reaches its thread.** S · Ash can't read a
+  sandboxed client's environment (another user namespace), so the window
+  comes untagged, and the helper's pid fallback ran only when there was no
+  tag list at all. The helper now gives an untagged window to the thread
+  that started its client, and logs launches and each new window's
+  attribution (`features/AGENT_CONTROL.md`, "Which windows are a thread's").
+  The live run's window was never seen in a log, so whether it was mapped
+  isn't known: the next run's helper log says.
+- [ ] **The browser can't name an untagged window's origin itself.** S · The
+  tag the helper finds by pid is used by the helper only. The shells' panels
+  rely on a shell calling `setWindowOriginTag`. A DevTools command
+  (`Plutonium.setWindowOriginTag`) would let the helper name it once for all.
+- [ ] **One LibreOffice for every thread.** M · A second start of the
+  Flatpak LibreOffice hands its arguments to whichever instance owns
+  `org.libreoffice.LibreOfficeIpc0` on the session bus, in any session, and
+  exits 0. The window opens in that instance's session and thread. If the
+  owner doesn't answer, the new one waits on D-Bus with no window (seen
+  2026-10-24 between test slots). `-env:UserInstallation` doesn't separate
+  them; a private session bus does. `launch_app` could say who has it, or
+  give each thread's LibreOffice its own bus.
+- [x] **`read_window` crashed LibreOffice Calc.** S · `GetAll` on an
+  element includes `Locale`, which aborts Calc on its defunct cell and input
+  line objects. The reader skips defunct elements and never asks for
+  `Locale`. A sheet's visible cells are listed, and an app that doesn't
+  answer stops the read with a message that says whether it's still
+  running (`features/AGENT_CONTROL.md`, "Accessibility").
+- [x] **`launch_app` returned no windows when its first one closed.** S ·
+  The wait ended at the first window: a splash or recovery dialog gone by
+  then gave `[]`. It now waits for the windows to settle.
+- [x] **Tab recordings on NixOS.** M · `preview_recording_start` needed T3's
+  downloaded headless shell, which NixOS can't run. The encoder now runs in a
+  hidden page of Plutonium's browser (`features/AGENT_CONTROL.md`).
+- [ ] **T3's headless shell on NixOS.** S · Without a Plutonium helper (T3
+  Code alone), headless tabs and recordings still launch T3's download, which
+  NixOS refuses; the agent now gets NixOS's message. Point Playwright at a
+  Chromium that runs here (the way Plutonium finds its own) if that case
+  matters.
+- [ ] **Idle agent tabs a shell shows.** S · T3's idle sweep (`closeIdleAgentTabs`)
+  and the "tab the user is looking at" fallback (`latestThreadTab`) count only
+  streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
+  `visible` now uses. The sweep may close an agent's tab the user is watching.
+- [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
+  `preview_drag` drags along a path of points; snapshot images are in click
+  coordinates on desktop tabs without flashing on screen; the panel's and the
+  floating preview's cursor follow a resized tab; `preview_resize` answers
+  with the new size
+  (`features/AGENT_CONTROL.md`, "In T3 Code").
+- [ ] **Agent input while the display is off.** M · When logind pauses
+  the session (VT switch), Ash stops presenting, so tabs stop drawing.
+  Mouse moves then never reach the page, because it takes them with its
+  next frame. The tools now fail within 5 s and don't wedge the tab
+  (`features/AGENT_CONTROL.md`). Making the input go through would need
+  Ash to keep producing frames (or acking presentation) while paused.
+  Seen in run `20261024-145112-excalidraw-spiral-sized` (`EXO-STALL`).
+- [x] **Incognito agent tabs on the desktop.** `profileId: "incognito"`
+  was ignored for desktop-rendered tabs (shared storage). Now a throwaway
+  off-the-record profile per tab (Chromium patch 0045).
+- [ ] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
+  reports `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
+  cursor off by the zoom. Not seen yet.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
+- [x] **Popups of windows no panel shows covered the shell.** An agent's
+  menus and tooltips showed over the shell (and other threads) while no
+  page showed the window. Now they show only at the element showing the
+  window (`WINDOW_SIZING.md`, "Popups").
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
   session's keymap (xkb) instead of assuming US keycodes. Characters the
   layout lacks need the temporary keymap that password auto-type needs too

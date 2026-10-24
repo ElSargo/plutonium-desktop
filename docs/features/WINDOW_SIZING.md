@@ -63,6 +63,24 @@ One element drives the window: its size is the window's, and it gets the request
 
 Only the visible shell's elements count. When the driver changes, the window takes the new driver's size. Each element reports its on-screen rect, so the browser can tell which element a press on the window landed in.
 
+## Popups
+
+An app's menus, context menus and tooltips (`xdg_popup`s, and X11 override-redirect menus, which xwayland-satellite turns into `xdg_popup`s) are Ash windows of their own, drawn above the page: the page only draws the window itself. So they show only where a page shows the window (patch 0045):
+- **Shown:** an element in the visible shell is on screen with the window (the driver, else any such element). The parked window is kept where that element's content box is, so popups open next to the element. Its popups move with it, and are scaled about the window's origin when CSS transforms scale the element (T3 Code's panel shows a held window scaled).
+- **Shown nowhere** (another thread, the panel closed, another shell, the element off screen): its popups stay open but are invisible, take no input from the user and hold no pointer grab. They never cover the shell or another thread. Agents' keys still reach them through the window, as before. Showing the window again shows them again, at the element.
+
+Each element reports its content box and its transform's scale (`SetRectInWidget`); the browser tells Exo where the window is shown (`EmbeddedWindows::SetShown()`).
+
+Checked on Xvfb (slot 9, plain shell, zenity's entry context menu opened by `press_window` shift+F10, 2026-10-24):
+- Opened while the window's thread is shown: under the entry, as usual.
+- Opened while another thread is shown: nothing on screen. The user's clicks where the menu is go to the page. Switching back shows it under the entry.
+- Switching threads with it open: it goes with the thread and comes back with it.
+- The element under `transform: translate(300px, 100px) scale(0.6)`: the menu moves and shrinks with the window.
+- A user's right-click menu: a click outside the element dismisses it. A click inside the element counts as a click on the app's window, since the window fills the element.
+- Unit test `ShellSurfaceTest.EmbedParkedPopupsHiddenUnlessShown` (`exo_unittests`, which doesn't build on this setup: `wayland/clients/client_base.cc` against the GBM headers).
+
+Before this, a parked window's popups were drawn wherever the window was last parked, over the shell, even when no page showed the window: a GTK context menu over another thread, and LibreOffice Calc's Insert menu and a tooltip over T3 Code while the panel didn't show Calc (`agent-tests/runs/20261024-142622-calc-normal-cdf.md`, problem 2).
+
 ## Verified
 
 | | Result |

@@ -23,6 +23,8 @@ export interface DesktopTab {
   readonly tags: readonly string[];
   readonly openerId: number;
   readonly openedBy: string;
+  /** In a throwaway off-the-record profile of its own (browsers with EXO-INCOGNITO). */
+  readonly incognito?: boolean;
   readonly dialogType?: string;
   readonly dialogMessage?: string;
   readonly dialogDefaultPrompt?: string;
@@ -118,6 +120,8 @@ export class Desktop {
   private readonly frameListeners = new Map<number, Set<(frame: ScreencastFrame | null) => void>>();
   /** Tabs or windows came, changed or went. */
   readonly changeListeners = new Set<() => void>();
+  /** A window came (`previous` undefined) or changed. */
+  readonly windowListeners = new Set<(window: DesktopWindow, previous: DesktopWindow | undefined) => void>();
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -171,7 +175,9 @@ export class Desktop {
       case "Plutonium.windowAdded":
       case "Plutonium.windowChanged": {
         const window = value.window as DesktopWindow;
+        const previous = this.windowMap.get(window.id);
         this.windowMap.set(window.id, window);
+        for (const listener of this.windowListeners) listener(window, previous);
         break;
       }
       case "Plutonium.windowRemoved":
@@ -250,9 +256,24 @@ export class Desktop {
     return this.windowMap.get(id);
   }
 
-  /** Opens a tab; `tags` starts with its thread. */
-  async createTab(url: string, tags: readonly string[]): Promise<DesktopTab> {
-    const { tab } = (await this.cdp.send("Plutonium.createTab", { url, tags })) as { tab: DesktopTab };
+  /**
+   * Opens a tab; `tags` starts with its thread. With `incognito`, in a
+   * throwaway profile of its own; a browser that can't do that fails it.
+   */
+  async createTab(
+    url: string,
+    tags: readonly string[],
+    options: { readonly incognito?: boolean } = {},
+  ): Promise<DesktopTab> {
+    const { tab } = (await this.cdp.send("Plutonium.createTab", {
+      url,
+      tags,
+      ...(options.incognito ? { incognito: true } : {}),
+    })) as { tab: DesktopTab };
+    if (options.incognito && tab.incognito !== true) {
+      await this.tabCommand(tab.id, "close").catch(() => {});
+      throw new Error("This browser can't open incognito tabs.");
+    }
     this.tabMap.set(tab.id, tab);
     return tab;
   }

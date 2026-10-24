@@ -463,16 +463,39 @@ export function rememberLaunch(child: ChildProcess, threadId: string, show: bool
  * thread tag (for apps that clear their environment).
  */
 function originForPid(pid: number): { threadId: string; show: boolean } | undefined {
-  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 1) return undefined;
+  return traceOrigin(pid).origin;
+}
+
+/** originForPid, and how it was found (or why not), for the logs. */
+function traceOrigin(pid: number): { origin?: { threadId: string; show: boolean }; how: string } {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 1) {
+    return { how: "the client's pid is unknown" };
+  }
   let current: number | undefined = pid;
+  let unreadable = 0;
   for (let depth = 0; current !== undefined && depth < MAX_PARENT_DEPTH; depth++) {
     const origin = readOrigin(current);
-    if (origin?.threadId) return { threadId: origin.threadId, show: origin.show };
+    if (!origin) unreadable++;
+    if (origin?.threadId) {
+      return { origin: { threadId: origin.threadId, show: origin.show }, how: `from pid ${current}'s environment` };
+    }
     const started = launched.get(current);
-    if (started) return { ...started };
+    if (started) return { origin: { ...started }, how: `pid ${current} is one the helper started` };
     current = readParentPid(current);
   }
-  return undefined;
+  if (unreadable > 0 && !existsSync(`/proc/${pid}`)) return { how: `pid ${pid} is gone` };
+  return {
+    how:
+      unreadable > 0
+        ? `no thread tag in pid ${pid} or its parents (${unreadable} environment(s) unreadable)`
+        : `no thread tag in pid ${pid} or its parents`,
+  };
+}
+
+/** The thread that started `pid`, and how that was found or why none was, for the logs. */
+export function explainPid(pid: number): { threadId: string | undefined; how: string } {
+  const { origin, how } = traceOrigin(pid);
+  return { threadId: origin?.threadId, how };
 }
 
 /** The thread that started `pid`. */
