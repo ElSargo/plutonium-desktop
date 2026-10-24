@@ -194,6 +194,25 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and the "tab the user is looking at" fallback (`latestThreadTab`) count only
   streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
   `visible` now uses. The sweep may close an agent's tab the user is watching.
+- [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
+  `preview_drag` drags along a path of points; snapshot images are in click
+  coordinates on desktop tabs without flashing on screen; the panel's and the
+  floating preview's cursor follow a resized tab; `preview_resize` answers
+  with the new size
+  (`features/AGENT_CONTROL.md`, "In T3 Code").
+- [ ] **Agent input while the display is off.** M · When logind pauses
+  the session (VT switch), Ash stops presenting, so tabs stop drawing.
+  Mouse moves then never reach the page, because it takes them with its
+  next frame. The tools now fail within 5 s and don't wedge the tab
+  (`features/AGENT_CONTROL.md`). Making the input go through would need
+  Ash to keep producing frames (or acking presentation) while paused.
+  Seen in run `20261024-145112-excalidraw-spiral-sized` (`EXO-STALL`).
+- [x] **Incognito agent tabs on the desktop.** `profileId: "incognito"`
+  was ignored for desktop-rendered tabs (shared storage). Now a throwaway
+  off-the-record profile per tab (Chromium patch 0045).
+- [ ] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
+  reports `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
+  cursor off by the zoom. Not seen yet.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [x] **Popups of windows no panel shows covered the shell.** An agent's

@@ -1,0 +1,599 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sat, 24 Oct 2026 12:24:09 +1300
+Subject: [PATCH 20/23] Preview tools: drag along a path; snapshot images in
+ click coordinates; cursor follows a scaled tab
+
+- preview_drag takes a path of viewport points (with button and modifiers) as
+  real mouse input, besides element onto element, so agents can draw on a
+  canvas. The panel's cursor follows the path.
+- Snapshots read the viewport and pixel ratio from the page instead of the
+  headless render scale, so the image is one pixel per CSS pixel (the
+  coordinates the click tools take) for desktop tabs too, and report the
+  viewport's CSS size.
+- Plutonium tabs publish where the page sits in the panel and its scale, so
+  the agent's cursor lands on the page after preview_resize.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/mcp/McpHttpServer.ts          |   2 +
+ .../src/mcp/toolkits/preview/tools.test.ts    |  15 ++
+ apps/server/src/mcp/toolkits/preview/tools.ts |   8 +-
+ apps/server/src/preview/ServerBrowser.ts      |   6 +-
+ .../src/preview/ServerBrowserPage.test.ts     |  87 +++++++++++-
+ apps/server/src/preview/ServerBrowserPage.ts  | 129 ++++++++++++++++--
+ .../src/plutonium/PlutoniumBrowserHost.tsx    |  25 ++++
+ packages/contracts/src/previewAutomation.ts   |  78 +++++++++--
+ 8 files changed, 321 insertions(+), 29 deletions(-)
+
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index 8454d44b39..52f4fca62d 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -499,6 +499,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
+                   readonly data: string;
+                   readonly width: number;
+                   readonly height: number;
++                  readonly viewport?: { readonly width: number; readonly height: number };
+                 };
+               };
+               const { screenshot, ...page } = snapshot;
+@@ -526,6 +527,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
+                   mimeType: screenshot.mimeType,
+                   width: screenshot.width,
+                   height: screenshot.height,
++                  ...(screenshot.viewport ? { viewport: screenshot.viewport } : {}),
+                 },
+                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
+               };
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.test.ts b/apps/server/src/mcp/toolkits/preview/tools.test.ts
+index 4212c711c3..5c3f195243 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.test.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.test.ts
+@@ -1,4 +1,6 @@
+ import { expect, it } from "@effect/vitest";
++import { PreviewAutomationDragInput } from "@t3tools/contracts";
++import { Exit, Schema } from "effect";
+ import { Tool } from "effect/ai";
+ 
+ import { PreviewToolkit } from "./tools.ts";
+@@ -78,3 +80,16 @@ it("exports exact object result schemas for preview actions", () => {
+     });
+   }
+ });
++
++it("takes a drag as two elements or a path of points, not both", () => {
++  const decode = Schema.decodeUnknownExit(PreviewAutomationDragInput);
++  const point = { x: 10, y: 20 };
++  expect(Exit.isSuccess(decode({ source: "#card", target: "#lane" }))).toBe(true);
++  expect(Exit.isSuccess(decode({ path: [point, point], modifiers: ["Shift"] }))).toBe(true);
++  expect(Exit.isSuccess(decode({ path: [point] }))).toBe(false);
++  expect(Exit.isSuccess(decode({ source: "#card" }))).toBe(false);
++  expect(Exit.isSuccess(decode({ source: "#card", target: "#lane", path: [point, point] }))).toBe(
++    false,
++  );
++  expect(Exit.isSuccess(decode({}))).toBe(false);
++});
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
+index 6e34a33002..314ceb5764 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.ts
+@@ -143,7 +143,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
+ export const PreviewSnapshotTool = safeBrowserTool(
+   Tool.make("preview_snapshot", {
+     description:
+-      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
++      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. The image shows the viewport one pixel per CSS pixel, so a point read off it is the x/y that preview_click, preview_hover and preview_drag take; screenshot.viewport gives the viewport's CSS size, and an image narrower than it (viewports over 1280 wide) is scaled down by that ratio. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
+     parameters: Schema.Struct({
+       ...PreviewAutomationTabTargetInput.fields,
+       includeImage: Schema.optional(
+@@ -168,7 +168,7 @@ export const PreviewSnapshotTool = safeBrowserTool(
+ const PreviewClickTool = browserTool(
+   Tool.make("preview_click", {
+     description:
+-      "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together. Set button=right for a context menu or clickCount=2 for a double-click; server browser tabs only.",
++      "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y, supplied together, are CSS pixels from the viewport's top-left, the same as a snapshot image's pixels. Set button=right for a context menu or clickCount=2 for a double-click; server browser tabs only.",
+     parameters: PreviewAutomationClickInput,
+     success: PreviewActionResult,
+     failure: PreviewToolFailure,
+@@ -190,7 +190,7 @@ const PreviewTypeTool = browserTool(
+ const PreviewHoverTool = safeBrowserTool(
+   Tool.make("preview_hover", {
+     description:
+-      "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips. Server browser tabs only.",
++      "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips. Target a locator, or x and y in CSS pixels from the viewport's top-left. Server browser tabs only.",
+     parameters: PreviewAutomationHoverInput,
+     success: PreviewActionResult,
+     failure: PreviewToolFailure,
+@@ -215,7 +215,7 @@ const PreviewSelectTool = browserTool(
+ const PreviewDragTool = browserTool(
+   Tool.make("preview_drag", {
+     description:
+-      "Drag one element onto another in the tab selected by tabId, or this agent session's current tab when omitted. Server browser tabs only.",
++      "Drag with the mouse in the tab selected by tabId, or this agent session's current tab when omitted. Either drag one element onto another (source and target locators), or press the button and move along a path of points, to draw on a canvas, sketch a shape or curve, drag out a selection box, or move something to an exact spot. A path is a list of {x,y} in CSS pixels from the viewport's top-left, the same as preview_click x/y and a snapshot image's pixels: two points for a straight drag, more for a curve. The button goes down at the first point and up at the last; button and modifiers (for example Shift) are held for the whole drag. These are real mouse events, as from a person. Server browser tabs only.",
+     parameters: PreviewAutomationDragInput,
+     success: PreviewActionResult,
+     failure: PreviewToolFailure,
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index abce259be4..44523d2f94 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -84,6 +84,7 @@ import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.
+ import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
+ 
+ const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
++// Headless tabs draw each CSS pixel with this many device pixels.
+ const RENDER_SCALE = 2;
+ // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
+ const SCREENCAST_ACK_PACE_MS = 100;
+@@ -1692,6 +1693,7 @@ const make = Effect.gen(function* () {
+           .catch(constVoid);
+       };
+       show("move");
++      if (phase === "track") return;
+       await sleepUntil(Date.now() + AGENT_CURSOR_MOVE_MS);
+       if (phase !== "click") return;
+       show("click");
+@@ -1998,9 +2000,7 @@ const make = Effect.gen(function* () {
+         return { tabId: tab.tabId, colorScheme };
+       }
+       case "snapshot": {
+-        return withScreencastsPaused(tab, () =>
+-          ServerBrowserPage.snapshot({ ...tab, renderScale: RENDER_SCALE }),
+-        );
++        return withScreencastsPaused(tab, () => ServerBrowserPage.snapshot(tab));
+       }
+       case "click": {
+         const clickInput = input as PreviewAutomationClickInput;
+diff --git a/apps/server/src/preview/ServerBrowserPage.test.ts b/apps/server/src/preview/ServerBrowserPage.test.ts
+index 9a4775bb47..1047eb5030 100644
+--- a/apps/server/src/preview/ServerBrowserPage.test.ts
++++ b/apps/server/src/preview/ServerBrowserPage.test.ts
+@@ -35,7 +35,6 @@ describe("server browser element refs", () => {
+     ServerBrowserPage.snapshot({
+       page,
+       cdp,
+-      renderScale: 1,
+       consoleEntries: [],
+       networkEntries: [],
+       actionTimeline: [],
+@@ -247,6 +246,92 @@ describe("server browser element refs", () => {
+     expect(await page.evaluate("window.seen")).toEqual(["click", "hover", "drop"]);
+   });
+ 
++  it("draws a stroke along a path with the button and modifiers held", async () => {
++    await page.setViewportSize({ width: 400, height: 300 });
++    await page.setContent(`
++      <div id="pad" style="position:absolute;inset:0"></div>
++      <script>
++        window.strokes = [];
++        let stroke = null;
++        pad.onpointerdown = (e) => (stroke = { shift: e.shiftKey, trusted: e.isTrusted, points: [[e.clientX, e.clientY]] });
++        pad.onpointermove = (e) => stroke?.points.push([e.clientX, e.clientY]);
++        pad.onpointerup = (e) => { stroke.points.push([e.clientX, e.clientY]); strokes.push(stroke); stroke = null; };
++      </script>`);
++    const shown: Array<string> = [];
++    const pointer: ServerBrowserPage.PointerReporter = async ({ x, y }, phase) => {
++      shown.push(`${phase}@${x},${y}`);
++    };
++    await ServerBrowserPage.drag(
++      page,
++      {
++        path: [
++          { x: 20, y: 20 },
++          { x: 100, y: 20 },
++          { x: 100, y: 100 },
++        ],
++        modifiers: ["Shift"],
++      },
++      pointer,
++    );
++    const [stroke] = (await page.evaluate("window.strokes")) as Array<{
++      shift: boolean;
++      trusted: boolean;
++      points: Array<[number, number]>;
++    }>;
++    expect(stroke).toMatchObject({ shift: true, trusted: true });
++    expect(stroke!.points[0]).toEqual([20, 20]);
++    expect(stroke!.points.at(-1)).toEqual([100, 100]);
++    expect(stroke!.points).toContainEqual([100, 20]);
++    // Moves come in short steps, so a canvas sees a continuous line.
++    expect(stroke!.points.length).toBeGreaterThan(15);
++    expect(shown).toEqual(["move@20,20", "track@100,20", "track@100,100"]);
++    // Nothing stays held afterwards.
++    await page.mouse.move(150, 150);
++    expect(await page.evaluate("window.strokes.length")).toBe(1);
++    expect(await page.evaluate("new MouseEvent('x').shiftKey")).toBe(false);
++  });
++
++  it("returns a snapshot image one pixel per CSS pixel at any device scale", async () => {
++    for (const deviceScaleFactor of [1, 1.78, 2]) {
++      const scaled = await browser.newContext({
++        viewport: { width: 640, height: 400 },
++        deviceScaleFactor,
++      });
++      try {
++        const scaledPage = await scaled.newPage();
++        const scaledCdp = await scaled.newCDPSession(scaledPage);
++        await scaledPage.setContent("<p>hello</p>");
++        const { screenshot } = await ServerBrowserPage.snapshot({
++          page: scaledPage,
++          cdp: scaledCdp,
++          consoleEntries: [],
++          networkEntries: [],
++          actionTimeline: [],
++        });
++        expect(screenshot).toMatchObject({
++          width: 640,
++          height: 400,
++          viewport: { width: 640, height: 400 },
++        });
++        const png = Buffer.from(screenshot.data, "base64");
++        expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([640, 400]);
++      } finally {
++        await scaled.close();
++      }
++    }
++  });
++
++  it("shrinks a wide viewport's snapshot image to 1280 and says so", async () => {
++    await page.setViewportSize({ width: 1600, height: 1000 });
++    await page.setContent("<p>wide</p>");
++    const { screenshot } = await takeSnapshot();
++    expect(screenshot).toMatchObject({
++      width: 1280,
++      height: 800,
++      viewport: { width: 1600, height: 1000 },
++    });
++  });
++
+   it("presents a headless page as Chrome, with client hints that agree", async () => {
+     await presentAsChrome(cdp, { platform: "linux", arch: "x64" });
+     // userAgentData exists only in secure contexts; https comes from a route.
+diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
+index 3df4901f46..ba608daaea 100644
+--- a/apps/server/src/preview/ServerBrowserPage.ts
++++ b/apps/server/src/preview/ServerBrowserPage.ts
+@@ -119,9 +119,10 @@ const targetLocator = (
+ };
+ 
+ /** Shows the agent's pointer to viewers before an action lands at that point. */
++/** "track" follows a pointer already on its way, with no glide. */
+ export type PointerReporter = (
+   point: { readonly x: number; readonly y: number },
+-  phase: "move" | "click",
++  phase: "move" | "click" | "track",
+ ) => Promise<void>;
+ const noPointer: PointerReporter = async () => {};
+ 
+@@ -151,19 +152,20 @@ const SNAPSHOT_SCRIPT = `(() => {
+ })()`;
+ 
+ // Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
++// `scale` multiplies device pixels: 1 captures the viewport as the screen shows it.
+ export const captureViewport = async (
+   page: Page,
+   cdp: CDPSession,
+   options: { readonly format: "png" | "jpeg"; readonly quality?: number; readonly scale: number },
+ ) => {
+   let clip;
+-  if (options.scale < 1) {
+-    const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
++  if (options.scale !== 1) {
+     const { cssVisualViewport } = await cdp.send("Page.getLayoutMetrics");
+     clip = {
+       x: cssVisualViewport.pageX,
+       y: cssVisualViewport.pageY,
+-      ...viewport,
++      width: cssVisualViewport.clientWidth,
++      height: cssVisualViewport.clientHeight,
+       scale: options.scale,
+     };
+   }
+@@ -175,16 +177,79 @@ export const captureViewport = async (
+   return data;
+ };
+ 
++/** Width and height from a PNG's header, or null when it isn't one. */
++const pngSize = (base64: string) => {
++  const header = Buffer.from(base64.slice(0, 32), "base64");
++  if (header.length < 24 || header.toString("ascii", 12, 16) !== "IHDR") return null;
++  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
++};
++
++/**
++ * The page's viewport in CSS pixels, the space click coordinates are in, and
++ * the device pixels each one is drawn with. Read from the page, since a tab
++ * the desktop renders draws at the screen's scale, not the server's.
++ */
++const viewportMetrics = async (page: Page, cdp: CDPSession) => {
++  const [{ cssVisualViewport }, devicePixelRatio] = await Promise.all([
++    cdp.send("Page.getLayoutMetrics"),
++    page.evaluate("devicePixelRatio") as Promise<number>,
++  ]);
++  return {
++    width: Math.round(cssVisualViewport.clientWidth),
++    height: Math.round(cssVisualViewport.clientHeight),
++    devicePixelRatio: devicePixelRatio > 0 ? devicePixelRatio : 1,
++  };
++};
++
++/**
++ * Image pixels per CSS pixel at capture scale 1, learned per page. Chromium
++ * multiplies a capture's scale by the device pixel ratio on screen, but not
++ * always under device emulation, so the first capture checks.
++ */
++const capturePixelRatio = new WeakMap<
++  Page,
++  { readonly devicePixelRatio: number; readonly ratio: number }
++>();
++
++/** A PNG of the viewport `width` pixels wide. */
++const captureAtWidth = async (
++  page: Page,
++  cdp: CDPSession,
++  viewport: { readonly width: number; readonly devicePixelRatio: number },
++  width: number,
++) => {
++  const capture = (ratio: number) =>
++    captureViewport(page, cdp, { format: "png", scale: width / viewport.width / ratio });
++  const { devicePixelRatio } = viewport;
++  const learned = capturePixelRatio.get(page);
++  const ratio = learned?.devicePixelRatio === devicePixelRatio ? learned.ratio : devicePixelRatio;
++  const data = await capture(ratio);
++  const captured = pngSize(data)?.width;
++  if (captured === undefined || Math.abs(captured - width) <= 1) {
++    capturePixelRatio.set(page, { devicePixelRatio, ratio });
++    return data;
++  }
++  // Captured pixels are rounded, so snap to whichever of the two it is.
++  const measured = (ratio * captured) / width;
++  const actual =
++    Math.abs(measured - 1) < Math.abs(measured - devicePixelRatio) ? 1 : devicePixelRatio;
++  capturePixelRatio.set(page, { devicePixelRatio, ratio: actual });
++  return capture(actual);
++};
++
+ export const snapshot = async (input: {
+   readonly page: Page;
+   readonly cdp: CDPSession;
+-  readonly renderScale: number;
+   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
+   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
+   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
+ }): Promise<PreviewAutomationSnapshot> => {
+-  const viewport = input.page.viewportSize() ?? { width: 1280, height: 800 };
+-  const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
++  // One image pixel per CSS pixel, so points read off the image are click
++  // coordinates; a viewport wider than the cap is shrunk to it.
++  const viewport = await viewportMetrics(input.page, input.cdp);
++  const cssScale = Math.min(1, MAX_SCREENSHOT_WIDTH / viewport.width);
++  const imageWidth = Math.round(viewport.width * cssScale);
++  const imageHeight = Math.round(viewport.height * cssScale);
+   const state = refsFor(input.page);
+   invalidateRefs(input.page);
+   const generation = state.generation;
+@@ -196,7 +261,7 @@ export const snapshot = async (input: {
+       >
+     >,
+     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
+-    captureViewport(input.page, input.cdp, { format: "png", scale }),
++    captureAtWidth(input.page, input.cdp, viewport, imageWidth),
+   ]);
+   if (state.generation !== generation) {
+     throw new ServerBrowserOperationError(
+@@ -220,8 +285,8 @@ export const snapshot = async (input: {
+     screenshot: {
+       mimeType: "image/png",
+       data,
+-      width: Math.round(viewport.width * input.renderScale * scale),
+-      height: Math.round(viewport.height * input.renderScale * scale),
++      ...(pngSize(data) ?? { width: imageWidth, height: imageHeight }),
++      viewport: { width: viewport.width, height: viewport.height },
+     },
+   };
+ };
+@@ -371,11 +436,18 @@ export const select = async (
+   return { selected: await locator.selectOption(values, { timeout }) };
+ };
+ 
++/** The longest single mouse move of a path drag, so pages see a continuous stroke. */
++const DRAG_STEP_PX = 8;
++
+ export const drag = async (
+   page: Page,
+   input: PreviewAutomationDragInput,
+   pointer: PointerReporter = noPointer,
+ ) => {
++  if (input.path) {
++    await dragPath(page, input.path, input, pointer);
++    return;
++  }
+   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+   const source = targetLocator(page, { locator: input.source })!;
+   const target = targetLocator(page, { locator: input.target })!;
+@@ -392,6 +464,43 @@ export const drag = async (
+   if (failure) throw failure.error;
+ };
+ 
++/** Real mouse input along viewport points: down at the first, up at the last. */
++const dragPath = async (
++  page: Page,
++  path: ReadonlyArray<{ readonly x: number; readonly y: number }>,
++  input: Pick<PreviewAutomationDragInput, "button" | "modifiers">,
++  pointer: PointerReporter,
++) => {
++  const button = input.button ?? "left";
++  const modifiers = input.modifiers ?? [];
++  const [first, ...rest] = path;
++  await pointer(first!, "move");
++  await page.mouse.move(first!.x, first!.y);
++  const held: string[] = [];
++  let down = false;
++  try {
++    for (const key of modifiers) {
++      await page.keyboard.down(key);
++      held.push(key);
++    }
++    await page.mouse.down({ button });
++    down = true;
++    let from = first!;
++    for (const to of rest) {
++      const steps = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / DRAG_STEP_PX));
++      await page.mouse.move(to.x, to.y, { steps });
++      void pointer(to, "track");
++      from = to;
++    }
++    await page.mouse.up({ button });
++    down = false;
++  } finally {
++    // A failed drag must not leave the button or a modifier held in the tab.
++    if (down) await page.mouse.up({ button }).catch(constVoid);
++    for (const key of held.toReversed()) await page.keyboard.up(key).catch(constVoid);
++  }
++};
++
+ /** Sets files on one file input; false when no locator or selector names one. */
+ export const setInputFiles = async (page: Page, input: PreviewAutomationUploadInput) => {
+   const locator = targetLocator(page, input);
+diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+index 44f382eb40..2967bf117e 100644
+--- a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
++++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+@@ -255,10 +255,35 @@ function PlutoniumBrowserTab(props: {
+         },
+       })}
+       {tab.dialogType ? <PageDialog runtimeTabId={runtimeTabId} tab={tab} /> : null}
++      {active ? <PresentContent runtimeTabId={runtimeTabId} layout={layout} /> : null}
+     </div>
+   );
+ }
+ 
++/**
++ * Where the page sits in the panel and how far it is scaled down, so the
++ * agent's cursor lands on the page at any viewport size.
++ */
++function PresentContent(props: {
++  readonly runtimeTabId: string;
++  readonly layout: ReturnType<typeof resolveBrowserViewportLayout>;
++}) {
++  const { runtimeTabId, layout } = props;
++  const { viewportX, viewportY, viewportWidth, viewportHeight, viewportScale } = layout;
++  useEffect(() => {
++    useBrowserSurfaceStore.getState().presentContent(runtimeTabId, {
++      x: viewportX,
++      y: viewportY,
++      width: viewportWidth,
++      height: viewportHeight,
++      scale: viewportScale,
++      scrollLeft: 0,
++      scrollTop: 0,
++    });
++  }, [runtimeTabId, viewportX, viewportY, viewportWidth, viewportHeight, viewportScale]);
++  return null;
++}
++
+ /** The page's alert/confirm/prompt, drawn over it (the browser shows none). */
+ function PageDialog({ runtimeTabId, tab }: { runtimeTabId: string; tab: BrokerTab }) {
+   const [text, setText] = useState(tab.dialogDefaultPrompt);
+diff --git a/packages/contracts/src/previewAutomation.ts b/packages/contracts/src/previewAutomation.ts
+index 504d28148b..2d89ae1f47 100644
+--- a/packages/contracts/src/previewAutomation.ts
++++ b/packages/contracts/src/previewAutomation.ts
+@@ -481,20 +481,70 @@ export const PreviewAutomationSelectResult = Schema.Struct({
+ });
+ export type PreviewAutomationSelectResult = typeof PreviewAutomationSelectResult.Type;
+ 
+-/** A required locator field. Its JSON schema keeps only the description on its last check. */
+-const DescribedLocator = (description: string) =>
+-  Schema.String.check(Schema.isTrimmed())
+-    .check(Schema.isNonEmpty({ description }))
+-    .annotateKey({ description });
++export const PREVIEW_DRAG_MAX_POINTS = 500;
++
++const DragPoint = Schema.Struct({
++  x: Schema.Finite.annotate({
++    description: "X in CSS pixels from the left edge of the tab's viewport.",
++  }),
++  y: Schema.Finite.annotate({
++    description: "Y in CSS pixels from the top edge of the tab's viewport.",
++  }),
++});
+ 
+ export const PreviewAutomationDragInput = Schema.Struct({
+   ...PreviewAutomationTabTargetFields,
+-  source: DescribedLocator(
+-    "Locator of the element to drag, for example aria-ref=<ref> from the latest snapshot.",
++  source: Schema.optional(Locator).annotate({
++    description:
++      "Locator of the element to drag, for example aria-ref=<ref> from the latest snapshot. Use with target.",
++  }),
++  target: Schema.optional(Locator).annotate({
++    description:
++      "Locator of the element to drop onto, for example aria-ref=<ref>. Use with source.",
++  }),
++  path: Schema.optional(
++    Schema.Array(DragPoint)
++      .check(Schema.isMinLength(2), Schema.isMaxLength(PREVIEW_DRAG_MAX_POINTS))
++      .annotate({
++        description:
++          "Points to drag through, in place of source and target: the button goes down at the first point, the pointer moves through each point in turn, and the button comes up at the last. Two points draw a straight stroke or drag a box; more points draw a curve or freehand line. Coordinates are CSS pixels from the viewport's top-left, the same as preview_click x/y and a snapshot image's pixels.",
++      }),
++  ),
++  button: Schema.optional(
++    Schema.Literals(["left", "right", "middle"]).annotate({
++      description: "Mouse button held during a path drag. Defaults to left.",
++    }),
++  ),
++  modifiers: Schema.optional(
++    Schema.Array(Schema.Literals(["Alt", "Control", "Meta", "Shift"])).annotate({
++      description:
++        "Modifier keys held for the whole path drag, for example Shift to constrain a shape.",
++    }),
+   ),
+-  target: DescribedLocator("Locator of the element to drop onto, for example aria-ref=<ref>."),
+   timeoutMs: OptionalTimeoutMs,
+-}).annotate({ description: "Drags one element and drops it onto another." });
++})
++  .check(
++    Schema.makeFilter(
++      (input: {
++        readonly source?: string | undefined;
++        readonly target?: string | undefined;
++        readonly path?: ReadonlyArray<unknown> | undefined;
++      }) => {
++        const elements = input.source !== undefined || input.target !== undefined;
++        if (elements && input.path !== undefined)
++          return "Provide either path or source and target.";
++        if (input.path !== undefined) return true;
++        return (
++          (input.source !== undefined && input.target !== undefined) ||
++          "Provide path, or both source and target."
++        );
++      },
++    ),
++  )
++  .annotate({
++    description:
++      "Drags one element onto another, or drags the mouse along a path of viewport points.",
++  });
+ export type PreviewAutomationDragInput = typeof PreviewAutomationDragInput.Type;
+ 
+ export const PreviewAutomationUploadInput = Schema.Struct({
+@@ -736,8 +786,14 @@ export const PreviewAutomationSnapshot = Schema.Struct({
+   screenshot: Schema.Struct({
+     mimeType: Schema.Literal("image/png"),
+     data: Schema.String,
+-    width: Schema.Int,
+-    height: Schema.Int,
++    width: Schema.Int.annotate({ description: "The image's width in pixels." }),
++    height: Schema.Int.annotate({ description: "The image's height in pixels." }),
++    viewport: Schema.optional(
++      Schema.Struct({ width: Schema.Int, height: Schema.Int }).annotate({
++        description:
++          "The tab's viewport in CSS pixels, the space click, hover and drag x/y are in. The image shows it one image pixel per CSS pixel unless it is wider than 1280, when the image is scaled down by width / viewport.width.",
++      }),
++    ),
+   }),
+ });
+ export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
