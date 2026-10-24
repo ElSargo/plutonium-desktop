@@ -71,6 +71,8 @@ interface Connection {
   readonly response: ServerResponse;
   readonly heartbeat: ReturnType<typeof setInterval>;
   visible: boolean;
+  /** EXO-DISPLAYS: the browser's id for the display the page is on ("" if unknown). */
+  readonly display: string;
   /** When it was last visible (or connected), for picking one. */
   lastVisible: number;
 }
@@ -106,12 +108,17 @@ export class ShellRelay {
   }
 
   /** The connected shells. */
-  shells(): { origin: string; shellId: string; visible: boolean }[] {
-    return [...this.connections.values()].map(({ origin, shellId, visible }) => ({ origin, shellId, visible }));
+  shells(): { origin: string; shellId: string; visible: boolean; display: string }[] {
+    return [...this.connections.values()].map(({ origin, shellId, visible, display }) => ({
+      origin,
+      shellId,
+      visible,
+      display,
+    }));
   }
 
   /** Makes `response` (an EventSource request from a shell page) `key`'s request stream. */
-  attach(response: ServerResponse, key: string, origin: string, shellId: string, visible: boolean): void {
+  attach(response: ServerResponse, key: string, origin: string, shellId: string, visible: boolean, display = ""): void {
     // A reconnect replaces the page's stream; the page itself is still there.
     this.detach(key, true);
     response.writeHead(200, {
@@ -126,6 +133,7 @@ export class ShellRelay {
       response,
       heartbeat: setInterval(() => response.write(": ping\n\n"), HEARTBEAT_MS),
       visible,
+      display,
       lastVisible: Date.now(),
     };
     this.connections.set(key, connection);

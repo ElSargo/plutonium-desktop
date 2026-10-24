@@ -16,6 +16,13 @@
   to the browser (setGroups), so other shells and the browser's overlay can
   label them. "Elsewhere" lists windows and tabs no thread here has, such as
   another shell's, and adds one to the current thread on a click.
+
+  Several displays: the browser runs a plain page on each. They share the
+  threads; each display has its own current thread and open tabs (stored by
+  the page's ?display=). A window shown on another display leaves a
+  placeholder here, with a button to bring it back. Apps and tabs can be
+  dragged to another shell, on any display, and dropped here from one; "To
+  display N" sends the shown one to that display's shell.
 -->
 <style>
   :root {
@@ -95,6 +102,9 @@
   /* A replaced element: it takes the window's size unless given one. */
   #stage native-window { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
   #stage .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; }
+  #stage .taken { position: absolute; inset: 0; display: none; place-content: center; gap: 12px; color: var(--muted); text-align: center; background: var(--panel); }
+  #stage.taken .taken { display: grid; }
+  #stage.drop { outline: 3px dashed var(--accent); outline-offset: -3px; }
   #status { color: var(--muted); font-size: 11px; white-space: nowrap; }
   dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); max-width: 90vw; }
   dialog img { display: block; max-width: 80vw; max-height: 75vh; }
@@ -143,6 +153,8 @@
 const params = new URLSearchParams(location.search);
 const helper = params.get("helper") ?? "http://127.0.0.1:3780";
 const $ = (id) => document.getElementById(id);
+// Several displays: what each display's page shows is its own (the threads are shared).
+const perDisplay = (key) => (params.get("display") ? `${key}.${params.get("display")}` : key);
 
 // Threads and per-thread tabs live in this page's storage.
 function load(key, fallback) {
@@ -153,10 +165,10 @@ function save(key, value) {
 }
 const state = {
   threads: load("plain-shell.threads", []),
-  current: load("plain-shell.current", null),
+  current: load(perDisplay("plain-shell.current"), null),
   // threadId → { open: [windowId], active }. active is a window id, or
   // "tab:<id>" for a browser tab (a thread's browser tabs are always listed).
-  tabs: load("plain-shell.tabs", {}),
+  tabs: load(perDisplay("plain-shell.tabs"), {}),
 };
 // Threads from before tags were namespaced (plain-<id>) are dropped.
 state.threads = state.threads.filter((t) => t.id.startsWith("plain:thread/"));
@@ -180,9 +192,16 @@ function describeThreads() {
 const threadIds = () => state.threads.map((t) => t.id);
 function persist() {
   save("plain-shell.threads", state.threads);
-  save("plain-shell.current", state.current);
-  save("plain-shell.tabs", state.tabs);
+  save(perDisplay("plain-shell.current"), state.current);
+  save(perDisplay("plain-shell.tabs"), state.tabs);
 }
+// Another display's page added or renamed a thread.
+addEventListener("storage", (event) => {
+  if (event.key !== "plain-shell.threads") return;
+  state.threads = load("plain-shell.threads", state.threads).filter((t) => t.id.startsWith("plain:thread/"));
+  if (!state.threads.some((t) => t.id === state.current)) state.current = state.threads[0]?.id ?? null;
+  render();
+});
 function tabsOf(threadId) {
   return (state.tabs[threadId] ??= { open: [], active: null });
 }
@@ -311,6 +330,7 @@ function render() {
     button.append(small);
     button.onclick = () => { openTab(thread.id, w.id); render(); };
     button.dataset.window = w.id;
+    draggable(button, { windowId: w.id });
     return button;
   };
   const heading = (text) => Object.assign(document.createElement("span"), { className: "label", textContent: text });
@@ -354,6 +374,7 @@ function render() {
     button.className = `tab${id === tabs.active ? " current" : ""}`;
     button.textContent = label(live.get(id));
     button.onclick = () => { tabs.active = id; persist(); render(); };
+    draggable(button, { windowId: id });
     return button;
   });
   const actions = document.createElement("div");
@@ -378,6 +399,7 @@ function render() {
             render();
           })]
         : []),
+      ...toDisplayActions((index) => shell.showOnDisplay(active.id, index)),
       action("Close app", () => shell.close(active.id), "danger"),
     );
   }
@@ -388,6 +410,7 @@ function render() {
     button.textContent = tab.title || tab.url || "New tab";
     button.title = tab.url;
     button.onclick = () => { tabs.active = key; persist(); render(); };
+    draggable(button, { tabId: tab.id });
     return button;
   });
   const activeTab = webId(tabs.active) !== null ? shell.tabs.get(webId(tabs.active)) : undefined;
@@ -399,6 +422,7 @@ function render() {
       ...(shell.tagsAvailable && activeTab.tag !== thread.id && activeTab.tags.includes(thread.id)
         ? [action("Remove from thread", () => shell.tagTab(activeTab.id, [], [thread.id]).catch((e) => setStatus(e.message)))]
         : []),
+      ...toDisplayActions((index) => shell.showTabOnDisplay(activeTab.id, index)),
       action("Close tab", () => shell.tabCommand(activeTab.id, "close"), "danger"),
     );
   }
@@ -446,11 +470,61 @@ function renderDialog(tab) {
   $("dialog-cancel").onclick = () => shell.answerTabDialog(tab.id, false);
 }
 
+// Several displays: "To display N" for every other display.
+function toDisplayActions(send) {
+  if (!shell || shell.displays.length < 2) return [];
+  return shell.displays.filter((d) => !d.current).map((d) =>
+    Object.assign(document.createElement("button"), {
+      textContent: `To display ${d.index}`,
+      title: d.label,
+      onclick: async () => { if (!(await send(d.index))) setStatus(`display ${d.index}'s shell didn't take it`); },
+    }));
+}
+
+// Apps and tabs can be dragged to another shell (on any display).
+function draggable(button, item) {
+  button.draggable = true;
+  button.addEventListener("dragstart", (event) => shell.startItemDrag(event, item));
+}
+
+// A window or tab dropped here (from another shell, or display) joins the thread.
+{
+  const stage = $("stage");
+  stage.addEventListener("dragover", (event) => {
+    if (!shell?.itemFromDrop(event)) return;
+    event.preventDefault();
+    stage.classList.add("drop");
+  });
+  stage.addEventListener("dragleave", () => stage.classList.remove("drop"));
+  stage.addEventListener("drop", async (event) => {
+    stage.classList.remove("drop");
+    const item = shell?.itemFromDrop(event);
+    if (!item) return;
+    event.preventDefault();
+    const threadId = state.current;
+    if (item.windowId && shell.windows.has(item.windowId)) {
+      const window = shell.windows.get(item.windowId);
+      if (shell.tagsAvailable && !window.tags.includes(threadId)) {
+        await shell.tagWindow(item.windowId, [threadId]).catch((e) => setStatus(e.message));
+      }
+      openTab(threadId, item.windowId);
+    } else if (item.tabId && shell.tabs.has(item.tabId)) {
+      if (!shell.tabs.get(item.tabId).tags.includes(threadId)) {
+        await shell.tagTab(item.tabId, [threadId]).catch((e) => setStatus(e.message));
+      }
+      tabsOf(threadId).active = webKey(item.tabId);
+      persist();
+    }
+    render();
+  });
+}
+
 // One <embed> for the active browser tab.
 function renderWebStage(tab) {
   if (shown?.tabId === tab.id) return;
   const element = shell.tabElement(tab.id);
   shown = { tabId: tab.id, element };
+  $("stage").classList.remove("taken");
   $("stage").replaceChildren(element);
 }
 
@@ -460,6 +534,7 @@ async function renderStage(active) {
   const stage = $("stage");
   if (shown && shown.tabId === undefined && shown.windowId === active?.id) return;
   stage.replaceChildren();
+  stage.classList.remove("taken");
   shown = null;
   if (!active) {
     const empty = document.createElement("div");
@@ -473,7 +548,22 @@ async function renderStage(active) {
   const element = document.createElement("native-window");
   element.dataset.window = active.id;
   shown = { windowId: active.id, element };
-  stage.append(element);
+  // Another page (another display's shell) shows it now: a placeholder.
+  const taken = document.createElement("div");
+  taken.className = "taken";
+  const back = Object.assign(document.createElement("button"), { textContent: "Bring it back" });
+  back.onclick = () => {
+    // Attaching again is a new claim.
+    const grant = element.getAttribute("grant");
+    element.removeAttribute("grant");
+    element.setAttribute("grant", grant);
+  };
+  taken.append(Object.assign(document.createElement("div"), { textContent: "Shown on another display." }), back);
+  const update = () => stage.classList.toggle("taken", element.windowState === "taken");
+  element.addEventListener("windowtaken", update);
+  element.addEventListener("windowchange", update);
+  stage.classList.remove("taken");
+  stage.append(element, taken);
   try {
     const grant = await shell.grantFor(active.id);
     if (shown?.element !== element) return;

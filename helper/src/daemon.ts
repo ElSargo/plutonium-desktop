@@ -240,6 +240,11 @@ function waitMsOf(value: unknown): number {
   return typeof value === "number" && value > 0 ? Math.min(value, 60_000) : 0;
 }
 
+/** EXO-DISPLAYS: a request's display (1-based), or undefined. */
+function displayOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Seconds since `start` (ms), for the logs. */
@@ -714,9 +719,20 @@ export class Daemon {
   }
 
   /** Asks the frontend to show the window to the user (it pops it out if the frontend can't). */
-  async focus(threadId: string, windowId: number): Promise<{ how: string }> {
+  async focus(threadId: string, windowId: number, display?: number): Promise<{ how: string }> {
     await this.ownedWindow(threadId, windowId);
-    return this.ask<{ how: string }>(threadId, "focus", { windowId, threadId });
+    return this.ask<{ how: string }>(threadId, "focus", { windowId, threadId, ...(display ? { display } : {}) });
+  }
+
+  /** EXO-DISPLAYS: the displays, with the shell each shows (a shell page knows them). */
+  async displays(): Promise<unknown[]> {
+    try {
+      return await this.relay.json<unknown[]>("displays");
+    } catch (error) {
+      // An older shell library, or browser.
+      if (error instanceof RelayError && error.status === 409) return [];
+      throw error;
+    }
   }
 
   /** Asks the app to close the window; waits up to `waitMs` for it to go. */
@@ -957,9 +973,9 @@ export class Daemon {
     return threadTab(await this.ownedTab(threadId, tabId));
   }
 
-  async focusTab(threadId: string, tabId: number): Promise<{ how: string }> {
+  async focusTab(threadId: string, tabId: number, display?: number): Promise<{ how: string }> {
     await this.ownedTab(threadId, tabId);
-    return this.ask<{ how: string }>(threadId, "focus_tab", { tabId });
+    return this.ask<{ how: string }>(threadId, "focus_tab", { tabId, ...(display ? { display } : {}) });
   }
 
   async snapshotTab(threadId: string, tabId: number): Promise<Buffer> {
@@ -1400,6 +1416,7 @@ export class Daemon {
           origin,
           url.searchParams.get("shell") ?? "",
           url.searchParams.get("visible") !== "0",
+          url.searchParams.get("display") ?? "",
         );
         return;
       }
@@ -1470,6 +1487,9 @@ export class Daemon {
         direct: (await this.direct()) !== null,
         gpu: await this.gpu(),
       });
+    }
+    if (method === "GET" && path === "/v1/displays") {
+      return sendJson(response, 200, await this.displays());
     }
     if (method === "GET" && path === "/v1/window-threads") {
       return sendJson(response, 200, threadsForPids(pidsParameter(url)));
@@ -1687,7 +1707,9 @@ export class Daemon {
           if ((TAB_COMMANDS as readonly string[]).includes(what)) {
             return sendJson(response, 200, await this.tabCommand(threadId, tabId, what, waitMsOf(body.waitMs)));
           }
-          if (what === "focus") return sendJson(response, 200, await this.focusTab(threadId, tabId));
+          if (what === "focus") {
+            return sendJson(response, 200, await this.focusTab(threadId, tabId, displayOf(body.display)));
+          }
           if (what === "dialog") {
             return sendJson(
               response,
@@ -1736,7 +1758,8 @@ export class Daemon {
           return;
         }
         if (method === "POST" && action[3] === "focus") {
-          return sendJson(response, 200, await this.focus(threadId, windowId));
+          const body = await readJson(request);
+          return sendJson(response, 200, await this.focus(threadId, windowId, displayOf(body.display)));
         }
         if (method === "POST" && action[3] === "close") {
           return sendJson(response, 200, await this.close(threadId, windowId));
