@@ -36,17 +36,47 @@ The compositor tells every app not to draw a title bar or borders (EXO-DECOR): a
 
 LibreOffice drew its own title bar and close buttons before; it draws none now.
 
+## Finding apps
+
+`launch_app` runs its `argv` with no shell: `argv[0]` is looked up on the helper's PATH. Installed apps often aren't on PATH under their names: a Flatpak is reachable as `flatpak run …` or its app id (`org.libreoffice.LibreOffice`), and a Nix build may not be on PATH at all. So `find_apps {filter?}` lists the apps the user's launcher shows (`helper/src/apps.ts`, the desktop entries in `$XDG_DATA_HOME` and `$XDG_DATA_DIRS`, Flatpak exports included), through `GET /v1/apps/find`. Each has its name, generic name, desktop id, an `argv` ready for `launch_app` (the entry's Exec with its `%f`/`%U` field codes and Flatpak's empty `@@u … @@` dropped; a `Terminal=true` app wrapped in a terminal), its `cwd` if it asks for one, its `source` (`flatpak`, `nix profile`, `system` or `user`) and its desktop file, so two installs of one app can be told apart.
+
+The filter is a case-insensitive regular expression (or plain text, if it isn't one) matched against the name, generic name, keywords, desktop id and Exec: `spreadsheet` finds Calc, `office` LibreOffice. With a filter, `onPath` lists the matching executables on PATH too, separately (they're mostly command-line programs), at most 20, with `moreOnPath` counting the rest.
+
+`launch_app` waits up to `wait_seconds` for the app's new windows to appear and then stay the same for a second, and returns the ones open then. A window that closes meanwhile (a splash screen, LibreOffice's document recovery) doesn't end the wait; the helper logs it. An empty list means no window was open when the wait ran out.
+
+When an agent's `launch_app` can't find `argv[0]`, the error says it isn't on PATH, points to `find_apps`, and lists up to three apps `find_apps` gives for its name, with their argv.
+
 ## Sizes agents hold
 
 `launch_app` takes a `width` and `height`. The helper holds an agent's windows at that size, or, without one, at the size the app picks (followed while no page shows the window, since apps settle their size after mapping). That includes windows that come after `launch_app` stops waiting (a slow first start, a main window after a splash), for 60 s more. `resize_window` holds the new size, also while a page shows the window. A window the user starts (`focus: true` without a size) isn't held.
 
 The helper tells the shells (`agent_windows` notice; `shell.agentWindows` and `"agentwindowschange"` in the shell library): the held size, and `busy` while an agent gave the window input in the last 4 s. T3 Code shows a held window at its size, scaled down to fit the panel without stretching, behind a lock that says the agent is using it and offers **Take control**. That releases the hold (`shell.releaseWindow()`, `POST /v1/shell/windows/<id>/release`): the panel sizes the window again, and `resize_window` refuses while the panel shows it. An agent working in a window the user controls shows as "Agent working" in its tab's header. `list_windows` gives `agentSize` and `userControl`.
 
+## Which windows are a thread's (2026-10-24)
+
+A window is a thread's when its tags include the thread's tag. The browser tags a new window with `PLUTONIUM_THREAD_ID` from its client's `/proc/<pid>/environ`, walking up its parents (patch 0014). Ash runs in a podman user namespace, so it can't read the environment of processes in other user namespaces: every host app, and every sandboxed one (a Flatpak's bwrap makes its own). For those it logs `EXO-TAGS can't read window #N's client environment` and adds the window untagged. A shell then asks the helper (`/v1/window-threads`) and names the window's origin (`setWindowOriginTag`).
+
+The helper runs on the host, so it can read the sandboxed app's environment, and it knows which processes it started (`rememberLaunch`). The agent tools no longer depend on a shell naming the origin. A window with no tags belongs to the thread that started its client (`threadForPid`, cached per window), in direct (DevTools) mode as well as through a shell. Before, that fallback ran only when a shell sent no tag list at all. The browser always sends one, so a Flatpak's untagged window never reached its thread when no shell had named it.
+
+The helper's log answers "why didn't my window show up":
+
+- each launch: `launched pid N in thread T: [argv]`, or `could not launch [argv] in thread T: …`;
+- each new window: its app id, pid and tags, and the thread it went to and how (`from pid N's environment`, `pid N is one the helper started`), or why it got none (`the client's pid is unknown`, `pid N is gone`, `no thread tag in pid N or its parents (k environment(s) unreadable)`); later tag changes as `tags now […]`;
+- the end of `launch_app`'s wait: the windows that closed during it, the windows it returns, or `no window in thread T from pid N after S s`, with whether the process exited and every other window that came in the meantime (with pid and tags).
+
+A launch that exits 0 at once with no window has usually handed its arguments to an instance already running, and the new window belongs to that instance's session and thread. The Flatpak LibreOffice does this over D-Bus: whoever owns `org.libreoffice.LibreOfficeIpc0` on the session bus gets every later start, in any Plutonium session, whatever `-env:UserInstallation` says. If that instance doesn't answer (2026-10-24: it was restarting after a crash), the new soffice.bin waits on D-Bus without connecting to Wayland, and no window comes. A private session bus (`env DBUS_SESSION_BUS_ADDRESS=… org.libreoffice.LibreOffice …`) does give a separate instance.
+
 ## Accessibility
 
 `read_window` reads a window as an accessibility tree over AT-SPI, for apps that have one (GTK, Qt, LibreOffice; not terminals): role, name, states, text, value, its center in snapshot pixels and a ref (`a12`). `act_window` acts on a ref: its default action, `focus`, `set_text`, `set_value`, `select`, `scroll_into_view`, or any action the app lists; with no action of its own, `click` clicks the element's center.
 
 The helper talks D-Bus itself (`helper/src/dbus.ts`: the session bus for the accessibility bus's address, then that bus). It finds the window's frame among the applications whose bus connection belongs to the window's pid, matched by title and size (`helper/src/a11y.ts`). Hidden elements are left out unless `all` is set; subtrees that manage their descendants are read only when small (Writer's paragraphs are). Writer's whole window reads in about 160 ms.
+
+Each element's state is read first, and a defunct one is asked nothing more. Name, description and child count are read one by one, never with `GetAll` on `Accessible`: that includes `Locale`, and LibreOffice Calc aborts (`IllegalAccessibleComponentStateException` out of `ScAccessibleContextBase::getLocale`) when asked for it on its cells' or input line's defunct objects. That was the crash on 2026-10-24.
+
+A table with more than 400 children (a sheet: 1048576 × 16384 cells) is read through its `Table` interface: the cells at its visible corners give the visible rows and columns, and of those cells (at most 1000) the outline lists the ones with text and the focused one, after a line with the table's size and the visible range. Calc's whole window, cells with values included, reads in about 300 ms.
+
+Each call has 4 s. The first one the app doesn't answer stops the read (calls not yet made aren't sent), and so does 20 s in all. The result says which call got no answer, after how many elements, and whether the app is still on the accessibility bus (busy or hung) or gone (it quit or crashed). With nothing read, `read_window` fails with that.
 
 ## Tabs
 
@@ -61,7 +91,7 @@ All tools act on the calling thread's windows and tabs only.
 
 | Windows | Tabs |
 |---|---|
-| `list_windows`, `launch_app`, `snapshot_window`, `focus_window`, `close_window` | `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab` |
+| `list_windows`, `find_apps {filter?}`, `launch_app`, `snapshot_window`, `focus_window`, `close_window` | `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `focus_tab`, `close_tab` |
 | `click_window {x, y, button?, count?}`, `hover_window`, `drag_window {from, to}`, `scroll_window {x, y, dy?, dx?}` | `read_tab`: title, URL and the page as an accessibility tree with `[ref=eN]` |
 | `type_window {text}`, `press_window {keys}` (`"ctrl+s"`, `["ctrl+a", "Backspace"]`) | `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab`, `select_tab`, `scroll_tab`, `evaluate_tab`, `wait_for_tab` (by `ref` or `selector`) |
 | `resize_window {width, height}`: the size it's held at | |
@@ -91,6 +121,7 @@ All tools act on the calling thread's windows and tabs only.
 | foot without a size: maps at 8×29, then settles | ✅ held at 696×488 |
 | T3 panel: the held window scaled into a 539 px panel, the lock, "working" while typing, **Take control** | ✅ the app took the panel's size (539×916), `userControl`; `resize_window` refused after |
 | `read_window` on Writer; `act_window` `set_text` on the paragraph, `click` on Italic; an unknown ref and action | ✅ 157 ms; text replaced; Italic checked; clear errors |
+| `read_window` on the Flatpak Calc with a CSV open (X11 test session, private bus), 6 times with and without `all` | ✅ 220–330 ms, the cells' values listed, Calc alive; the reader from before aborted it on the first read |
 
 ## Limits
 

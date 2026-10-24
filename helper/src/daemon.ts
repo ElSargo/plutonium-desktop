@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect, type Socket } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { A11yError, Accessibility } from "./a11y.ts";
@@ -48,6 +48,7 @@ import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from ".
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import {
+  explainPid,
   rememberLaunch,
   SHOW_VARIABLE,
   showsForPids,
@@ -95,6 +96,9 @@ const INPUT_SETTLE_MS = 200;
 // How long after launch_app's wait an agent's app's new windows are still held
 // at its size (a slow first start; the main window after a splash).
 const LATE_WINDOWS_MS = 60_000;
+// A launch's wait ends once the app's windows have stayed the same this long
+// (a splash or a recovery dialog closing doesn't end it).
+const LAUNCH_SETTLE_MS = 1_000;
 // How long a window an agent drove stays at full frame rate (setWindowAwake).
 const AWAKE_MS = 60_000;
 
@@ -236,6 +240,9 @@ function waitMsOf(value: unknown): number {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Seconds since `start` (ms), for the logs. */
+const seconds = (start: number) => `${((Date.now() - start) / 1000).toFixed(1)} s`;
+
 // type_window: key events per batch, and the pause between batches.
 const TYPE_BATCH = 64;
 const TYPE_BATCH_GAP_MS = 25;
@@ -338,6 +345,12 @@ export class Daemon {
   private reportedOrigins = new Set<string>();
   /** gpu.ts's answer for the Exo instance behind the socket's inode. */
   private gpuProbe: { inode: number; report: Promise<GpuReport> } | null = null;
+  /**
+   * The thread each untagged window's client was started by, by window id.
+   * The browser can't read the environment of every client (a sandbox's own
+   * user namespace, Flatpak's), the helper can, and knows what it started.
+   */
+  private readonly pidThreads = new Map<number, { pid: number; threadId: string | undefined }>();
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -378,11 +391,13 @@ export class Daemon {
         const windows = desktop.windows();
         const existing = new Set(windows.map((window) => window.id));
         this.agentWindows.prune(existing);
+        for (const id of this.pidThreads.keys()) if (!existing.has(id)) this.pidThreads.delete(id);
         for (const window of windows) {
           if (!window.embedded) this.agentWindows.follow(window.id, window.width, window.height);
         }
         this.a11y.prune(existing);
       });
+      desktop.windowListeners.add((window, previous) => this.logWindow(window, previous));
     }
     // Links a thread's apps open become tabs in the thread (opener.ts).
     try {
@@ -461,8 +476,37 @@ export class Daemon {
   async threadWindows(threadId: string): Promise<NativeWindowEntry[]> {
     const windows = await this.allWindows();
     return windows
-      .filter((entry) => (entry.tags ? entry.tags.includes(threadId) : threadForPid(entry.pid) === threadId))
+      .filter((entry) => (entry.tags?.length ? entry.tags.includes(threadId) : this.pidThread(entry) === threadId))
       .sort((a, b) => a.id - b.id);
+  }
+
+  /** An untagged window's thread: the one that started its client, if any. */
+  private pidThread(entry: { readonly id: number; readonly pid: number }): string | undefined {
+    const known = this.pidThreads.get(entry.id);
+    if (known?.pid === entry.pid) return known.threadId;
+    const threadId = threadForPid(entry.pid);
+    this.pidThreads.set(entry.id, { pid: entry.pid, threadId });
+    return threadId;
+  }
+
+  /** Logs a new window's client and thread, and later changes to its tags. */
+  private logWindow(window: DesktopWindow, previous: DesktopWindow | undefined): void {
+    const tags = `[${window.tags.join(", ")}]`;
+    const what = `window #${window.id} ${JSON.stringify(window.appId)} pid ${window.pid}`;
+    if (previous) {
+      if (previous.tags.join("\0") !== window.tags.join("\0")) console.log(`plutoniumd: ${what}: tags now ${tags}`);
+      return;
+    }
+    if (window.tags.length > 0) {
+      console.log(`plutoniumd: ${what}: tags ${tags}, thread ${window.tags[0]}`);
+      return;
+    }
+    const { threadId, how } = explainPid(window.pid);
+    this.pidThreads.set(window.id, { pid: window.pid, threadId });
+    console.log(
+      `plutoniumd: ${what}: no tags from the browser; ` +
+        (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
+    );
   }
 
   private isShellOrigin(origin: string): boolean {
@@ -496,8 +540,9 @@ export class Daemon {
   }
 
   /**
-   * Starts `argv` as one of the thread's processes. With `waitMs`, waits that
-   * long for the thread's first new window(s). With `show`, the shell brings
+   * Starts `argv` as one of the thread's processes. With `waitMs`, waits up to
+   * that long for the thread's new windows to appear and stop changing, and
+   * returns those open then. With `show`, the shell brings
    * its windows to the front (PLUTONIUM_SHOW). With `agent`, an agent started
    * it to work in: its windows are held at `agent.size`, or at the size the
    * app picks (shells show them scaled at that size until the user takes
@@ -515,6 +560,8 @@ export class Daemon {
       this.relay.connected || (await this.direct())
       ? new Set((await this.threadWindows(threadId)).map((entry) => entry.id))
       : undefined;
+    const allBefore = before ? new Set((await this.allWindows()).map((entry) => entry.id)) : undefined;
+    const started = Date.now();
     void this.gpu();
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd: cwd || process.env.HOME,
@@ -524,30 +571,81 @@ export class Daemon {
     });
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);
-      child.once("error", (error) => reject(new HttpError(400, `Could not start ${argv[0]}: ${error.message}`)));
+      child.once("error", (error) => reject(new HttpError(400, this.launchError(argv[0]!, cwd, error, agent !== undefined))));
+    }).catch((error: Error) => {
+      console.log(`plutoniumd: could not launch ${JSON.stringify(argv)} in thread ${threadId}: ${error.message}`);
+      throw error;
     });
     child.unref();
     rememberLaunch(child, threadId, show);
     const pid = child.pid ?? 0;
+    console.log(`plutoniumd: launched pid ${pid} in thread ${threadId}: ${JSON.stringify(argv)}`);
     const holds = agent !== undefined && (agent.size !== undefined || !show);
     // Windows that come after the wait (a slow first start, the main window
     // after a splash) are held too.
     if (before && holds) void this.holdLate(threadId, before, agent.size, Date.now() + Math.max(waitMs, 0) + LATE_WINDOWS_MS);
     if (!before || waitMs <= 0) return { pid, windows: [] };
     const deadline = Date.now() + waitMs;
+    // The new windows and since when they've been these; windows that came and went.
+    let current = "";
+    let since = 0;
+    const gone = new Map<number, string>();
+    let fresh: NativeWindowEntry[] = [];
     while (Date.now() < deadline) {
       await sleep(200);
-      const fresh = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
-      if (fresh.length > 0) {
-        // Apps often map a second window (a dialog, a splash) right after.
-        await sleep(300);
-        let settled = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
-        if (holds) settled = await this.holdNew(settled, agent.size);
-        return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
-      }
-      if (child.exitCode !== null && child.exitCode !== 0) break;
+      const now = (await this.threadWindows(threadId)).filter((entry) => !before.has(entry.id));
+      for (const entry of fresh) if (!now.some((other) => other.id === entry.id)) gone.set(entry.id, entry.appId);
+      fresh = now;
+      const ids = fresh.map((entry) => entry.id).join(",");
+      if (ids !== current) [current, since] = [ids, Date.now()];
+      // Some windows, the same for a while: the app has settled.
+      if (fresh.length > 0 && Date.now() - since >= LAUNCH_SETTLE_MS) break;
+      if (fresh.length === 0 && child.exitCode !== null && child.exitCode !== 0) break;
     }
+    if (gone.size > 0) {
+      console.log(
+        `plutoniumd: pid ${pid}'s windows that closed while it started: ` +
+          [...gone].map(([id, appId]) => `#${id} ${JSON.stringify(appId)}`).join(", "),
+      );
+    }
+    if (fresh.length > 0) {
+      const settled = holds ? await this.holdNew(fresh, agent.size) : fresh;
+      console.log(
+        `plutoniumd: pid ${pid}'s windows after ${seconds(started)}: ` +
+          settled.map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)}`).join(", "),
+      );
+      return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
+    }
+    // What came instead, if anything: windows the thread didn't get.
+    const others = (await this.allWindows().catch(() => [])).filter((entry) => !allBefore?.has(entry.id));
+    console.log(
+      `plutoniumd: no window in thread ${threadId} from pid ${pid} after ${seconds(started)}` +
+        (child.exitCode !== null ? ` (it exited with ${child.exitCode})` : "") +
+        (others.length > 0
+          ? `; other new windows: ${others
+              .map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)} pid ${entry.pid} tags [${(entry.tags ?? []).join(", ")}]`)
+              .join("; ")}`
+          : "; no other new windows"),
+    );
     return { pid, windows: [] };
+  }
+
+  /** Why `program` didn't start; for an agent, a program not found points to find_apps and what it would find. */
+  private launchError(program: string, cwd: string | undefined, error: NodeJS.ErrnoException, agent: boolean): string {
+    if (error.code !== "ENOENT" || !agent) return `Could not start ${program}: ${error.message}`;
+    // spawn says ENOENT for a missing working directory too.
+    if (cwd && !existsSync(cwd)) return `Could not start ${program}: the working directory ${cwd} doesn't exist.`;
+    const where = program.includes("/") ? "doesn't exist" : "isn't on PATH";
+    let found: readonly { name: string; argv: readonly string[] }[] = [];
+    try {
+      found = this.apps.find(basename(program)).apps.slice(0, 3);
+    } catch {
+      // Only a hint.
+    }
+    return (
+      `${program} ${where}; find_apps lists installed apps and how to launch them.` +
+      found.map((app) => `\n${app.name}: ${JSON.stringify(app.argv)}`).join("")
+    );
   }
 
   /**
@@ -1368,6 +1466,9 @@ export class Daemon {
     }
     if (method === "GET" && path === "/v1/apps") {
       return sendJson(response, 200, this.apps.list());
+    }
+    if (method === "GET" && path === "/v1/apps/find") {
+      return sendJson(response, 200, this.apps.find(url.searchParams.get("filter") || undefined));
     }
     // EXO-TAB-FEATURES: the host's files, for the file picker.
     if (path === "/v1/files" || path.startsWith("/v1/files/")) {

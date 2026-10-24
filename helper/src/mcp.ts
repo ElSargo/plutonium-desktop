@@ -56,13 +56,34 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "find_apps",
+    description:
+      "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them. " +
+      "Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where " +
+      "it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can " +
+      "be told apart. With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          description:
+            "A case-insensitive regular expression matched against each app's name, generic name, keywords, " +
+            'desktop id and command, e.g. "spreadsheet" or "office" (default: all apps).',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "launch_app",
     description:
       "Start a GUI app as part of this thread and wait for its window. The app runs detached from your shell, " +
       "on the Plutonium desktop, and its windows belong to this thread. Its windows wait in the thread (the user is told, " +
       "and can open them) unless focus is true. Its windows keep the size you give (width and height) or the one the app " +
       "picks: the user sees them scaled to fit, and that you're working in them, until they take control. " +
-      "Returns the new windows (empty if none appeared in time).",
+      "Returns the new windows open once they've stopped changing (a splash screen or a dialog that closes doesn't end " +
+      "the wait; empty if none was open when the wait ran out).",
     inputSchema: {
       type: "object",
       properties: {
@@ -70,10 +91,15 @@ const TOOLS = [
           type: "array",
           items: { type: "string" },
           minItems: 1,
-          description: 'Program and arguments, e.g. ["foot", "-T", "logs"]. No shell is involved.',
+          description:
+            "Program and arguments: use find_apps to get an app's argv. argv[0] is looked up on PATH, and installed " +
+            "apps' programs often aren't there under their app names (Flatpaks, for one). No shell is involved.",
         },
         cwd: { type: "string", description: "Working directory (default: your home directory)." },
-        wait_seconds: { type: "number", description: "How long to wait for a window (default 10, 0 to not wait)." },
+        wait_seconds: {
+          type: "number",
+          description: "How long to wait at most for the app's windows to appear and settle (default 10, 0 to not wait).",
+        },
         width: { type: "integer", minimum: 1, description: "Window width in DIPs (with height; default: the app's own)." },
         height: { type: "integer", minimum: 1, description: "Window height in DIPs (with width)." },
         focus: {
@@ -205,7 +231,9 @@ const TOOLS = [
       "Read one of this thread's windows as an accessibility tree, when the app has one (GTK, Qt, LibreOffice and most " +
       "desktop apps; not terminals or games): each element's role, name, states, text, its center in snapshot_window's " +
       "pixels (@x,y) and a ref for act_window. Better than a snapshot for reading text and finding controls. Hidden " +
-      "elements are left out unless all is true; ref reads one element and what's in it.",
+      "elements are left out unless all is true; ref reads one element and what's in it. A big table (a spreadsheet's " +
+      "sheet) gives its size and its visible cells that have text or focus: scroll the window to read others. When the " +
+      "app doesn't answer, it says so and whether the app is still running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -619,6 +647,7 @@ type Content = { type: "text"; text: string } | { type: "image"; data: string; m
  */
 export const WINDOW_TOOLS = new Set([
   "list_windows",
+  "find_apps",
   "launch_app",
   "snapshot_window",
   "click_window",
@@ -885,6 +914,10 @@ export async function callTool(
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/close`));
     case "list_windows":
       return text(await helperJson(socket, "GET", `/v1/threads/${thread}/windows`));
+    case "find_apps": {
+      const filter = typeof args.filter === "string" && args.filter ? args.filter : undefined;
+      return text(await helperJson(socket, "GET", `/v1/apps/find${filter ? `?filter=${encodeURIComponent(filter)}` : ""}`));
+    }
     case "launch_app": {
       const argv = args.argv;
       if (!Array.isArray(argv) || argv.length === 0 || !argv.every((arg) => typeof arg === "string")) {
@@ -950,7 +983,7 @@ async function handle(message: JsonRpcMessage): Promise<unknown> {
         capabilities: { tools: {} },
         serverInfo: SERVER_INFO,
         instructions:
-          "Native app windows and browser tabs of this chat thread on the Plutonium desktop. Use launch_app to open GUI apps, " +
+          "Native app windows and browser tabs of this chat thread on the Plutonium desktop. Use find_apps to find installed apps and launch_app to open them, " +
           "snapshot_window to see them, click_window, type_window, press_window, scroll_window and drag_window to use " +
           "them (points are snapshot_window's pixels), read_window and act_window to read and use them through the app's " +
           "accessibility tree, focus_window to show one to the user and close_window to close it. " +

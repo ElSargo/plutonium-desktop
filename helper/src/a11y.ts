@@ -40,6 +40,13 @@ const MAX_CHILDREN = 400;
 const MAX_TEXT = 300;
 // Calls in flight at once, so a big tree doesn't flood the app.
 const CONCURRENCY = 32;
+// A big table (a spreadsheet's millions of cells): only its visible cells are
+// read, at most this many.
+const MAX_CELLS = 1000;
+// How long one call may take before the app counts as not answering; a read
+// stops at the first call that doesn't answer, and after its whole budget.
+const CALL_TIMEOUT_MS = 4_000;
+const READ_BUDGET_MS = 20_000;
 
 /** An object on the accessibility bus. */
 interface Ref {
@@ -58,6 +65,15 @@ export interface A11yWindow {
 }
 
 export class A11yError extends Error {}
+
+/** A call the app didn't answer in time. */
+class NoAnswer extends Error {
+  readonly bus: string;
+  constructor(bus: string, what: string) {
+    super(what);
+    this.bus = bus;
+  }
+}
 
 function hasState(states: readonly number[], bit: number): boolean {
   return ((states[bit >> 5] ?? 0) & (1 << (bit & 31))) !== 0;
@@ -85,6 +101,8 @@ interface Node {
   readonly states: readonly number[];
   readonly interfaces: readonly string[];
   readonly childCount: number;
+  /** Gone from the app (a closed popup, a cell's old object): nothing else is asked of it. */
+  readonly defunct?: boolean;
   readonly extents?: readonly [number, number, number, number];
   readonly text?: string;
   readonly value?: { current: number; min: number; max: number };
@@ -92,6 +110,8 @@ interface Node {
 }
 
 class Limiter {
+  /** Once set, calls not yet started fail with it at once. */
+  stopped: Error | null = null;
   private running = 0;
   private readonly queue: (() => void)[] = [];
   private readonly max: number;
@@ -101,6 +121,11 @@ class Limiter {
   async run<T>(task: () => Promise<T>): Promise<T> {
     if (this.running >= this.max) await new Promise<void>((resolve) => this.queue.push(resolve));
     this.running++;
+    if (this.stopped) {
+      this.running--;
+      this.queue.shift()?.();
+      throw this.stopped;
+    }
     try {
       return await task();
     } finally {
@@ -111,10 +136,17 @@ class Limiter {
 }
 
 export class Accessibility {
+  private readonly callTimeoutMs: number;
+  private readonly readBudgetMs: number;
   private connecting: Promise<DBusConnection> | null = null;
   private readonly roleNames = new Map<number, string>();
   /** Per window: ref name ↔ object, stable across reads. */
   private readonly refs = new Map<number, { byName: Map<string, Ref>; byKey: Map<string, string>; next: number }>();
+
+  constructor(options: { callTimeoutMs?: number; readBudgetMs?: number } = {}) {
+    this.callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS;
+    this.readBudgetMs = options.readBudgetMs ?? READ_BUDGET_MS;
+  }
 
   /** The accessibility bus (found through the session bus), connected once. */
   private async bus(): Promise<DBusConnection> {
@@ -145,7 +177,50 @@ export class Accessibility {
 
   private async call(ref: Ref, iface: string, member: string, signature = "", body: unknown[] = []): Promise<unknown[]> {
     const bus = await this.bus();
-    return bus.call({ destination: ref.bus, path: ref.path, interface: iface, member, signature, body });
+    try {
+      return await bus.call({
+        destination: ref.bus,
+        path: ref.path,
+        interface: iface,
+        member,
+        signature,
+        body,
+        timeoutMs: this.callTimeoutMs,
+      });
+    } catch (error) {
+      if (!(error instanceof DBusError) && bus.isOpen && /timed out/.test((error as Error).message)) {
+        const what = iface !== PROPERTIES ? `${iface}.${member}` : member === "Get" ? `${body[0]}.${body[1]}` : `${member} ${body[0]}`;
+        throw new NoAnswer(ref.bus, what);
+      }
+      throw error;
+    }
+  }
+
+  /** Whether the app at `bus` is still on the accessibility bus (it's gone when it quit or crashed). */
+  private async present(bus: string): Promise<boolean> {
+    try {
+      await (await this.bus()).call({
+        destination: "org.freedesktop.DBus",
+        path: "/org/freedesktop/DBus",
+        interface: "org.freedesktop.DBus",
+        member: "GetConnectionUnixProcessID",
+        signature: "s",
+        body: [bus],
+        timeoutMs: this.callTimeoutMs,
+      });
+      return true;
+    } catch (error) {
+      return !(error instanceof DBusError);
+    }
+  }
+
+  /** What to tell the agent when the app didn't answer `error`'s call. */
+  private async noAnswer(error: NoAnswer, read: number): Promise<string> {
+    const seconds = Math.round(this.callTimeoutMs / 100) / 10;
+    const what = `The app didn't answer (${error.message}: no reply in ${seconds} s)${read ? ` after ${read} elements` : ""}`;
+    return (await this.present(error.bus))
+      ? `${what}. It's still running but busy or hung: wait and read again, or use snapshot_window.`
+      : `${what}, and it's gone: it quit or crashed. list_windows shows what's left.`;
   }
 
   private async property(ref: Ref, iface: string, name: string): Promise<unknown> {
@@ -186,6 +261,8 @@ export class Accessibility {
       }
     };
     const pids = await Promise.all(apps.map(pidOf));
+    // An app that didn't answer, said when its window isn't found otherwise.
+    let silent: NoAnswer | undefined;
     const own = apps.filter((_, index) => pids[index] === window.pid);
     // The app's own first; another process's (a wrapper's child, an X11 app
     // through Xwayland) by title.
@@ -195,7 +272,8 @@ export class Accessibility {
         let children: Ref[];
         try {
           children = await this.children(app);
-        } catch {
+        } catch (error) {
+          if (error instanceof NoAnswer && candidates === own) silent ??= error;
           continue;
         }
         for (const ref of children) {
@@ -205,8 +283,9 @@ export class Accessibility {
               this.call(ref, ACCESSIBLE, "GetState") as Promise<[number[]]>,
             ]);
             frames.push({ ref, name, states });
-          } catch {
+          } catch (error) {
             // Gone meanwhile.
+            if (error instanceof NoAnswer && candidates === own) silent ??= error;
           }
         }
       }
@@ -231,6 +310,7 @@ export class Accessibility {
         return (active ?? pool[0]!).ref;
       }
     }
+    if (silent) throw silent;
     if (own.length === 0) {
       throw new A11yError(
         "This app isn't on the accessibility bus: it has no accessibility support, or it's off (Qt apps need " +
@@ -243,18 +323,33 @@ export class Accessibility {
 
   private async node(ref: Ref, limiter: Limiter): Promise<Node> {
     const run = <T>(task: () => Promise<T>) => limiter.run(task);
-    const [props, [role], [states], [interfaces]] = await Promise.all([
-      run(() => this.call(ref, PROPERTIES, "GetAll", "s", [ACCESSIBLE])) as Promise<[Map<string, unknown>]>,
-      run(() => this.call(ref, ACCESSIBLE, "GetRole")) as Promise<[number]>,
-      run(() => this.call(ref, ACCESSIBLE, "GetState")) as Promise<[number[]]>,
-      run(() => this.call(ref, ACCESSIBLE, "GetInterfaces")) as Promise<[string[]]>,
-    ]).then(([[all], ...rest]) => [all, ...rest] as [Map<string, unknown>, [number], [number[]], [string[]]]);
+    // The state first: a defunct object is asked nothing else. And no
+    // GetAll(Accessible): it includes Locale, which aborts LibreOffice Calc on
+    // its cells' and input line's objects.
+    const [states] = (await run(() => this.call(ref, ACCESSIBLE, "GetState"))) as [number[]];
+    if (hasState(states, STATE.defunct)) {
+      return { ref, role: "", name: "", description: "", states, interfaces: [], childCount: 0, defunct: true };
+    }
+    // A property the app doesn't have is left out.
+    const property = (name: string) =>
+      run(() => this.property(ref, ACCESSIBLE, name)).catch((error) => {
+        if (error instanceof DBusError) return undefined;
+        throw error;
+      });
+    const [[role], [interfaces], name, description, childCount] = (await Promise.all([
+      run(() => this.call(ref, ACCESSIBLE, "GetRole")),
+      run(() => this.call(ref, ACCESSIBLE, "GetInterfaces")),
+      property("Name"),
+      property("Description"),
+      property("ChildCount"),
+    ])) as [[number], [string[]], unknown, unknown, unknown];
     const has = (name: string) => interfaces.includes(`org.a11y.atspi.${name}`);
     const roleName = await run(() => this.roleName(ref, role));
     const optional = async <T>(task: () => Promise<T>): Promise<T | undefined> => {
       try {
         return await run(task);
-      } catch {
+      } catch (error) {
+        if (error instanceof NoAnswer) throw error;
         return undefined;
       }
     };
@@ -291,11 +386,11 @@ export class Accessibility {
     return {
       ref,
       role: roleName,
-      name: String(props.get("Name") ?? ""),
-      description: String(props.get("Description") ?? ""),
+      name: String(name ?? ""),
+      description: String(description ?? ""),
       states,
       interfaces,
-      childCount: Number(props.get("ChildCount") ?? 0),
+      childCount: Number(childCount ?? 0),
       ...(extents ? { extents } : {}),
       ...(text !== undefined ? { text } : {}),
       ...(value ? { value } : {}),
@@ -336,12 +431,30 @@ export class Accessibility {
    * elements are left out unless `all`.
    */
   async read(window: A11yWindow, options: { ref?: string; all?: boolean } = {}): Promise<string> {
-    const root = options.ref ? this.resolve(window.id, options.ref) : await this.frameOf(window);
+    let root: Ref;
+    try {
+      root = options.ref ? this.resolve(window.id, options.ref) : await this.frameOf(window);
+    } catch (error) {
+      if (error instanceof NoAnswer) throw new A11yError(await this.noAnswer(error, 0));
+      throw error;
+    }
     const limiter = new Limiter(CONCURRENCY);
     const scale = window.deviceScaleFactor || 1;
+    const deadline = Date.now() + this.readBudgetMs;
     let count = 0;
     let truncated = false;
+    let stalled: NoAnswer | null = null;
+    let outOfTime = false;
     const lines: string[] = [];
+    // Stops the whole read: the calls not yet made fail at once.
+    const stop = (error: unknown) => {
+      if (error instanceof NoAnswer) stalled ??= error;
+      limiter.stopped ??= error as Error;
+    };
+    const timer = setTimeout(() => {
+      outOfTime = true;
+      stop(new Error("out of time"));
+    }, Math.max(0, deadline - Date.now()));
 
     const describe = (node: Node): string => {
       const parts = [`- ${node.role}`];
@@ -377,8 +490,87 @@ export class Accessibility {
       return line;
     };
 
+    // A big table's visible cells: the ones with text, and the focused one.
+    // Null when its visible part can't be found.
+    const cells = async (table: Node, indent: string): Promise<string[] | null> => {
+      if (!table.extents || !table.interfaces.includes("org.a11y.atspi.Component")) return null;
+      const [x, y, w, h] = table.extents;
+      const left = Math.max(x, 0);
+      const top = Math.max(y, 0);
+      const right = Math.min(x + w, window.width) - 1;
+      const bottom = Math.min(y + h, window.height) - 1;
+      if (right <= left || bottom <= top) return null;
+      const TABLE = "org.a11y.atspi.Table";
+      const run = <T>(task: () => Promise<T>) => limiter.run(task);
+      const cellAt = async (px: number, py: number): Promise<[number, number] | null> => {
+        const [[bus, path]] = (await run(() =>
+          this.call(table.ref, "org.a11y.atspi.Component", "GetAccessibleAtPoint", "iiu", [px, py, COORD_WINDOW]),
+        )) as [[string, string]];
+        if (!bus || path === "/org/a11y/atspi/null") return null;
+        const [index] = (await run(() => this.call({ bus, path }, ACCESSIBLE, "GetIndexInParent"))) as [number];
+        if (index < 0) return null;
+        const [[row], [column]] = (await Promise.all([
+          run(() => this.call(table.ref, TABLE, "GetRowAtIndex", "i", [index])),
+          run(() => this.call(table.ref, TABLE, "GetColumnAtIndex", "i", [index])),
+        ])) as [[number], [number]];
+        return row >= 0 && column >= 0 ? [row, column] : null;
+      };
+      let first: [number, number] | null;
+      let last: [number, number] | null;
+      let size: [number, number];
+      try {
+        [first, last, size] = await Promise.all([
+          cellAt(left + 1, top + 1),
+          cellAt(right - 1, bottom - 1),
+          Promise.all([this.property(table.ref, TABLE, "NRows"), this.property(table.ref, TABLE, "NColumns")]).then(
+            ([rows, columns]) => [Number(rows), Number(columns)] as [number, number],
+          ),
+        ]);
+      } catch (error) {
+        if (error instanceof NoAnswer) throw error;
+        return null;
+      }
+      if (!first || !last) return null;
+      const columns = Math.min(last[1] - first[1] + 1, MAX_CELLS);
+      const visibleRows = last[0] - first[0] + 1;
+      const rows = Math.min(visibleRows, Math.max(1, Math.floor(MAX_CELLS / columns)));
+      const positions: [number, number][] = [];
+      for (let row = first[0]; row < first[0] + rows; row++) {
+        for (let column = first[1]; column < first[1] + columns; column++) positions.push([row, column]);
+      }
+      const read = await Promise.all(
+        positions.map(async ([row, column]) => {
+          const [[bus, path]] = (await run(() => this.call(table.ref, TABLE, "GetAccessibleAt", "ii", [row, column]))) as [
+            [string, string],
+          ];
+          if (!bus || path === "/org/a11y/atspi/null") return null;
+          try {
+            return await this.node({ bus, path }, limiter);
+          } catch (error) {
+            if (error instanceof DBusError) return null;
+            throw error;
+          }
+        }),
+      );
+      const shown = read.filter(
+        (cell): cell is Node =>
+          cell !== null && !cell.defunct && (!!cell.text?.trim() || hasState(cell.states, STATE.focused)),
+      );
+      const name = (cell: Node | null | undefined, [row, column]: [number, number]) =>
+        cell?.name ? cell.name : `row ${row + 1}, column ${column + 1}`;
+      const corner = name(read.at(-1), positions.at(-1)!);
+      const cut = rows < visibleRows || columns < last[1] - first[1] + 1;
+      return [
+        `${indent}  - (${size[0]} rows × ${size[1]} columns; read the ${cut ? `first ${positions.length} ` : ""}visible cells, ` +
+          `${name(read[0], positions[0]!)} to ${corner}: ${shown.length ? "the empty ones left out" : "all empty"}. ` +
+          "Scroll the window to read others.)",
+        ...shown.map((cell) => `${indent}  ${describe(cell)}`),
+      ];
+    };
+
     // Each subtree's lines, in order; read with siblings in parallel.
     const walk = async (ref: Ref, depth: number): Promise<string[]> => {
+      if (limiter.stopped) return [];
       if (count >= MAX_NODES || depth > MAX_DEPTH) {
         truncated = true;
         return [];
@@ -389,8 +581,10 @@ export class Accessibility {
         node = await this.node(ref, limiter);
       } catch (error) {
         if (error instanceof DBusError) return [];
-        throw error;
+        stop(error);
+        return [];
       }
+      if (node.defunct) return [];
       if (depth > 0 && !options.all && !hasState(node.states, STATE.showing)) return [];
       if (NOISE.has(node.role)) return [];
       const skip =
@@ -400,25 +594,63 @@ export class Accessibility {
       if (node.childCount === 0) return own;
       // A spreadsheet's cells, a long list's rows.
       if (node.childCount > MAX_CHILDREN) {
-        return [...own, `${indent}  - (${node.childCount} children, not read)`];
+        let visible: string[] | null = null;
+        if (node.interfaces.includes("org.a11y.atspi.Table")) {
+          try {
+            visible = await cells(node, indent);
+          } catch (error) {
+            stop(error);
+            return own;
+          }
+        }
+        return [...own, ...(visible ?? [`${indent}  - (${node.childCount} children, not read)`])];
       }
       let children: Ref[];
       try {
         children = await limiter.run(() => this.children(ref));
-      } catch {
+      } catch (error) {
+        if (!(error instanceof DBusError)) stop(error);
         return own;
       }
       const nested = await Promise.all(children.map((child) => walk(child, skip ? depth : depth + 1)));
       return [...own, ...nested.flat()];
     };
 
-    lines.push(...(await walk(root, 0)));
-    if (truncated) lines.push(`(stopped after ${MAX_NODES} elements: read_window with a ref reads one part)`);
+    try {
+      lines.push(...(await walk(root, 0)));
+    } finally {
+      clearTimeout(timer);
+    }
+    if (stalled) {
+      const message = await this.noAnswer(stalled, count);
+      if (lines.length === 0) throw new A11yError(message);
+      lines.push(`(${message} What's above is what was read.)`);
+    } else if (outOfTime) {
+      lines.push(`(stopped after ${Math.round(this.readBudgetMs / 1000)} s and ${count} elements: read_window with a ref reads one part)`);
+    } else if (limiter.stopped) {
+      throw limiter.stopped;
+    } else if (truncated) {
+      lines.push(`(stopped after ${MAX_NODES} elements: read_window with a ref reads one part)`);
+    }
     return lines.join("\n");
   }
 
   /** Acts on element `ref` of `window`. Returns a point to click when the element has no action of its own. */
   async act(
+    window: A11yWindow,
+    ref: string,
+    action: string,
+    args: { text?: string; value?: number },
+  ): Promise<{ done: string } | { click: [number, number] }> {
+    try {
+      return await this.actOn(window, ref, action, args);
+    } catch (error) {
+      if (error instanceof NoAnswer) throw new A11yError(await this.noAnswer(error, 0));
+      throw error;
+    }
+  }
+
+  private async actOn(
     window: A11yWindow,
     ref: string,
     action: string,
@@ -483,7 +715,7 @@ export class Accessibility {
             return ok(done, "select it");
           }
         }
-        return this.act(window, ref, "click", args);
+        return this.actOn(window, ref, "click", args);
       }
       case "scroll_into_view": {
         if (!has("Component")) throw new A11yError("The element can't be scrolled to.");

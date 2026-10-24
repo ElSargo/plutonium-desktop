@@ -118,6 +118,8 @@ export class Desktop {
   private readonly frameListeners = new Map<number, Set<(frame: ScreencastFrame | null) => void>>();
   /** Tabs or windows came, changed or went. */
   readonly changeListeners = new Set<() => void>();
+  /** A window came (`previous` undefined) or changed. */
+  readonly windowListeners = new Set<(window: DesktopWindow, previous: DesktopWindow | undefined) => void>();
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -171,7 +173,9 @@ export class Desktop {
       case "Plutonium.windowAdded":
       case "Plutonium.windowChanged": {
         const window = value.window as DesktopWindow;
+        const previous = this.windowMap.get(window.id);
         this.windowMap.set(window.id, window);
+        for (const listener of this.windowListeners) listener(window, previous);
         break;
       }
       case "Plutonium.windowRemoved":

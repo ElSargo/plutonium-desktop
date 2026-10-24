@@ -145,6 +145,43 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   desktop has no Apps panel content. The helper has window screencasts
   (`Plutonium.startWindowScreencast`) and input; T3 would stream them
   (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Agents had to guess program names for `launch_app`.** `find_apps`
+  lists the launcher's apps with an argv for `launch_app`, where each is
+  installed from, and matching programs on PATH; a program not on PATH
+  points to it (`features/AGENT_CONTROL.md`, "Finding apps").
+- [ ] **`find_apps` shows one install per desktop id.** S · Two desktop
+  files with the same id (a user override, or the same app in a Nix
+  profile and the system) show as the first, as in the launcher. Apps
+  installed with no desktop file (a Nix build off PATH) don't show at all.
+- [x] **A Flatpak's window never reaches its thread.** S · Ash can't read a
+  sandboxed client's environment (another user namespace), so the window
+  comes untagged, and the helper's pid fallback ran only when there was no
+  tag list at all. The helper now gives an untagged window to the thread
+  that started its client, and logs launches and each new window's
+  attribution (`features/AGENT_CONTROL.md`, "Which windows are a thread's").
+  The live run's window was never seen in a log, so whether it was mapped
+  isn't known: the next run's helper log says.
+- [ ] **The browser can't name an untagged window's origin itself.** S · The
+  tag the helper finds by pid is used by the helper only. The shells' panels
+  rely on a shell calling `setWindowOriginTag`. A DevTools command
+  (`Plutonium.setWindowOriginTag`) would let the helper name it once for all.
+- [ ] **One LibreOffice for every thread.** M · A second start of the
+  Flatpak LibreOffice hands its arguments to whichever instance owns
+  `org.libreoffice.LibreOfficeIpc0` on the session bus, in any session, and
+  exits 0. The window opens in that instance's session and thread. If the
+  owner doesn't answer, the new one waits on D-Bus with no window (seen
+  2026-10-24 between test slots). `-env:UserInstallation` doesn't separate
+  them; a private session bus does. `launch_app` could say who has it, or
+  give each thread's LibreOffice its own bus.
+- [x] **`read_window` crashed LibreOffice Calc.** S · `GetAll` on an
+  element includes `Locale`, which aborts Calc on its defunct cell and input
+  line objects. The reader skips defunct elements and never asks for
+  `Locale`. A sheet's visible cells are listed, and an app that doesn't
+  answer stops the read with a message that says whether it's still
+  running (`features/AGENT_CONTROL.md`, "Accessibility").
+- [x] **`launch_app` returned no windows when its first one closed.** S ·
+  The wait ended at the first window: a splash or recovery dialog gone by
+  then gave `[]`. It now waits for the windows to settle.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
