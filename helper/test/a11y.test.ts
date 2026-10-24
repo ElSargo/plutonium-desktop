@@ -50,6 +50,12 @@ describe("Accessibility", () => {
     // Another process's window, for the by-title fallback.
     bus.addApp(5000, [{ role: "frame", name: "Through Xwayland", states: SHOWN, children: [elements.check] }]);
     bus.addApp(6000, []);
+    // A Flatpak app: on the bus through its sandbox's proxy (pid 8100), its
+    // windows from pid 8200; one of them untitled.
+    bus.addApp(8100, [
+      { role: "frame", name: "Recovery", states: SHOWN, extents: [0, 0, 600, 400] },
+      { role: "dialog", name: "", states: [...SHOWN, STATE.active], extents: [0, 0, 520, 160], children: [elements.zoom] },
+    ]);
     process.env.DBUS_SESSION_BUS_ADDRESS = bus.address;
   });
   after(async () => {
@@ -103,13 +109,81 @@ describe("Accessibility", () => {
     assert.equal(part.split("\n").length, 1);
   });
 
+  test("select: through the list's Selection, else its table's row, else a pointer click", async () => {
+    const tabs: FakeNode = {
+      role: "page tab list",
+      states: SHOWN,
+      selection: {},
+      children: [
+        { role: "page tab", name: "One", states: SHOWN, extents: [0, 0, 50, 20] },
+        { role: "page tab", name: "Two", states: SHOWN, extents: [50, 0, 50, 20] },
+      ],
+    };
+    // A GTK 3 list of two columns: it refuses SelectChild; its cells' first action expands.
+    const cell = (name: string, y: number): FakeNode => ({
+      role: "table cell",
+      name,
+      states: SHOWN,
+      extents: [20, y, 80, 20],
+      actions: ["Expand or contract", "Edit"],
+    });
+    const list: FakeNode = {
+      role: "table",
+      states: SHOWN,
+      selection: { refuses: true },
+      columns: 2,
+      children: [cell("", 0), cell("Column", 0), cell("", 20), cell("Line", 20)],
+    };
+    const loose: FakeNode = { role: "list", states: SHOWN, selection: { refuses: true }, children: [cell("Loose", 40)] };
+    bus.addApp(8300, [{ role: "frame", name: "Chart Type", states: SHOWN, extents: [0, 0, 300, 200], children: [tabs, list, loose] }]);
+    const chart = { ...window, id: 9, pid: 8300, title: "Chart Type", width: 300, height: 200, deviceScaleFactor: 1 };
+    const a11y = new Accessibility();
+    const outline = await a11y.read(chart);
+    const refOf = (name: string) => outline.match(new RegExp(`"${name}" \\[ref=(a\\d+)\\]`))![1]!;
+
+    assert.deepEqual(await a11y.act(chart, refOf("Two"), "select", {}), { done: "select it" });
+    assert.deepEqual(tabs.log, ["SelectChild 1"]);
+
+    assert.deepEqual(await a11y.act(chart, refOf("Line"), "select", {}), { done: "select its row" });
+    assert.deepEqual(list.log, ["SelectChild 3", "AddRowSelection 1"]);
+
+    // No row to select: a pointer click at its center, never "Expand or contract".
+    const result = await a11y.act(chart, refOf("Loose"), "select", {});
+    assert.deepEqual(result, { click: [60, 50], why: "the app didn't select it through accessibility" });
+    assert.equal(loose.children![0]!.log, undefined);
+  });
+
+  test("a ref whose element the app replaced: says it's gone", async () => {
+    const status: FakeNode = { role: "status bar", name: "Status", states: SHOWN, extents: [0, 280, 400, 20] };
+    bus.addApp(8400, [{ role: "frame", name: "Sheet", states: SHOWN, extents: [0, 0, 400, 300], children: [status] }]);
+    const sheet = { ...window, id: 10, pid: 8400, title: "Sheet" };
+    const a11y = new Accessibility();
+    const ref = (await a11y.read(sheet)).match(/"Status" \[ref=(a\d+)\]/)![1]!;
+    status.states = [STATE.defunct];
+    await assert.rejects(a11y.read(sheet, { ref }), new RegExp(`${ref} is gone: .*read_window the window again`));
+    await assert.rejects(a11y.act(sheet, ref, "click", {}), new RegExp(`${ref} is gone`));
+  });
+
+  test("a frame with its window's shadow: found by size, points without the shadow", async () => {
+    // A 200×100 window whose frame is 20 bigger each way: a 10 px shadow around it.
+    const ok: FakeNode = { role: "push button", name: "OK", states: SHOWN, extents: [110, 70, 40, 20], actions: ["click"] };
+    bus.addApp(8500, [
+      { role: "frame", name: "Main", states: [...SHOWN, STATE.active], extents: [0, 0, 800, 600] },
+      { role: "alert", name: "", states: SHOWN, extents: [0, 0, 220, 120], children: [ok] },
+    ]);
+    const box = { ...window, id: 11, pid: 8500, title: "", width: 200, height: 100, deviceScaleFactor: 2 };
+    const outline = await new Accessibility().read(box);
+    assert.match(outline, /^- alert \[ref=a1\] @200,100/);
+    assert.match(outline, /- push button "OK" \[ref=a\d+\] @240,140/);
+  });
+
   test("unknown refs and windows say what to do", async () => {
     const a11y = new Accessibility();
     await assert.rejects(a11y.act(window, "a99", "click", {}), (error: unknown) => {
       return error instanceof A11yError && /read_window gives the refs/.test(error.message);
     });
     // The app is there but has no windows.
-    await assert.rejects(a11y.read({ ...window, pid: 6000, title: "Nope" }), /none of its windows is this one/);
+    await assert.rejects(a11y.read({ ...window, pid: 6000, title: "Nope" }), /this window isn't among its windows there/);
     // Not on the bus at all.
     await assert.rejects(a11y.read({ ...window, pid: 1, title: "Gone" }), /isn't on the accessibility bus/);
   });
@@ -123,6 +197,18 @@ describe("Accessibility", () => {
     const a11y = new Accessibility();
     const outline = await a11y.read({ ...window, pid: 9999, title: "Through Xwayland" });
     assert.match(outline, /^- frame "Through Xwayland"/);
+  });
+
+  test("finds a sandboxed app's untitled window through its sandbox's proxy", async () => {
+    const sandboxOf = (pid: number) => (pid === 8100 || pid === 8200 ? "instance-1" : undefined);
+    const outline = await new Accessibility({ sandboxOf }).read({ ...window, pid: 8200, title: "", width: 520, height: 160 });
+    assert.match(outline, /^- dialog \[ref=a1\]/);
+    assert.match(outline, /slider "Zoom"/);
+    // Without the sandbox, nothing to match an untitled window by.
+    await assert.rejects(
+      new Accessibility({ sandboxOf: () => undefined }).read({ ...window, pid: 8200, title: "", width: 520, height: 160 }),
+      /isn't on the accessibility bus/,
+    );
   });
 
   test("forgets the refs of windows that are gone", async () => {

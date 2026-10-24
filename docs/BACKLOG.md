@@ -179,6 +179,16 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `Locale`. A sheet's visible cells are listed, and an app that doesn't
   answer stops the read with a message that says whether it's still
   running (`features/AGENT_CONTROL.md`, "Accessibility").
+- [x] **`read_window`/`act_window` follow-ups from the Calc runs.** S ·
+  A Flatpak's untitled windows are found (its a11y connection is its
+  sandbox proxy's), with points that leave out a GTK frame's shadow;
+  `select` on a cell of a GTK 3 list of several columns selects its row,
+  else clicks it; a stale ref says it's gone; Calc lost the second of two
+  Tabs, so typing pauses after Tab and Enter (`features/AGENT_CONTROL.md`).
+- [ ] **Action results could name new windows.** S · LibreOffice's
+  "discard?" box opened after an Escape and the agent never looked at it
+  (calc-normal-cdf, 2026-10-24). `press_window`, `click_window` and
+  `act_window` could say "new window #3 (untitled, 524×160)".
 - [x] **`launch_app` returned no windows when its first one closed.** S ·
   The wait ended at the first window: a splash or recovery dialog gone by
   then gave `[]`. It now waits for the windows to settle.

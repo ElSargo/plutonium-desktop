@@ -40,7 +40,7 @@ import {
   type NativeWindowEntry,
 } from "./relay.ts";
 import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
-import { comboKeys, textKeys } from "./keys.ts";
+import { comboKeys, commitRuns, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
@@ -246,6 +246,9 @@ const seconds = (start: number) => `${((Date.now() - start) / 1000).toFixed(1)} 
 // type_window: key events per batch, and the pause between batches.
 const TYPE_BATCH = 64;
 const TYPE_BATCH_GAP_MS = 25;
+// After a Tab or Enter with keys after it: LibreOffice Calc loses a key that
+// comes while it commits a cell.
+const COMMIT_GAP_MS = 80;
 
 // The uid owning the local end of a loopback TCP connection, from the kernel's
 // socket table (the peer is on this host: we only listen on 127.0.0.1).
@@ -1117,9 +1120,15 @@ export class Daemon {
         // of a poem typed back to back). Each batch is a focus blip
         // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
         // what fills a field.
-        for (let i = 0; i < events.length; i += TYPE_BATCH) {
-          if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
-          await keys(events.slice(i, i + TYPE_BATCH));
+        // And a pause after each Tab or Enter, while the app commits.
+        let first = true;
+        for (const run of commitRuns(events)) {
+          if (!first) await sleep(COMMIT_GAP_MS);
+          first = false;
+          for (let i = 0; i < run.length; i += TYPE_BATCH) {
+            if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
+            await keys(run.slice(i, i + TYPE_BATCH));
+          }
         }
         break;
       }
@@ -1134,7 +1143,12 @@ export class Daemon {
         } catch (error) {
           throw new HttpError(400, (error as Error).message);
         }
-        await keys(events);
+        let first = true;
+        for (const run of commitRuns(events)) {
+          if (!first) await sleep(COMMIT_GAP_MS);
+          first = false;
+          await keys(run);
+        }
         break;
       }
       case "resize": {
@@ -1213,7 +1227,7 @@ export class Daemon {
       // No action of its own: a click at its center.
       const [x, y] = result.click;
       await this.windowInput(threadId, windowId, { action: "click", x, y });
-      return { done: `clicked at ${x},${y}` };
+      return { done: `clicked at ${x},${y}${result.why ? ` (${result.why})` : ""}` };
     }
     return result;
   }
