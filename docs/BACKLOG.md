@@ -216,11 +216,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `preview_open {open:false}`, an action, then `preview_status`.
 - [ ] **`preview_press` and `preview_drag` say nothing back.** S · They return
   only the tool icon, so agents check each with a snapshot or a storage read.
-- [ ] **Calc test runs start in crash recovery.** S · `run.sh` kills the
-  tester's LibreOffice with unsaved documents, so the next run opens them
-  recovered. The recovery list is in the user's own Flatpak profile, which
-  also holds their backups; clearing it needs the user's say. A recovered
-  window has come back at 1×28 px twice; why isn't known.
+- [x] **Calc test runs start in crash recovery.** S · `run.sh` kills the
+  tester's LibreOffice with unsaved documents, and the recovery list is in the
+  user's own Flatpak profile. `run.sh` now drops the entries a run added
+  (`tools/agent-tests/lo-recovery.py`). A recovered window has come back at
+  1×28 px twice; why isn't known.
 - [ ] **Tab recordings have no duration.** S · The WebM the encoder writes
   has no length in its header (ffprobe shows none), so players can't seek
   well. Remuxing it after the stop (`ffmpeg -c copy`) would fix it (run

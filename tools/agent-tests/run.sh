@@ -119,6 +119,10 @@ stop_capture() {
 }
 trap stop_capture EXIT
 
+# LibreOffice's recovery list is the user's too: note what's in it now, so
+# what the tester leaves can be dropped afterwards (lo-recovery.py).
+python3 -I "$HERE/lo-recovery.py" list > "$out/lo-recovery-before.txt" 2>/dev/null || true
+
 launch=$(node -e 'const [t,i,m,p]=process.argv.slice(1); console.log(JSON.stringify({scratch:true,title:t,runtimeMode:"full-access",modelSelection:{instanceId:i,model:m},message:p}))' \
     "agent test: $name" "$instance" "$model" "$prompt")
 thread=$(mcp t3_thread_launch "$launch" | field threadId)
@@ -169,6 +173,8 @@ if (( ${#leftover[@]} )); then
   kill -9 "${leftover[@]}" 2>/dev/null || true
   echo "stopped ${#leftover[@]} processes the tester left (leftover.txt)"
 fi
+# The documents it had open would come back as crash recovery in the next run.
+python3 -I "$HERE/lo-recovery.py" drop-new "$out/lo-recovery-before.txt" || true
 echo "finished: $status after $((ended - started)) s"
 
 # The thread as T3 shows it, page by page, and its state.
