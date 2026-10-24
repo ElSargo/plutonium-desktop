@@ -13,6 +13,7 @@
 //                    {type: "pointer", threadId, tabId, phase, x, y}
 //                    {type: "open", threadId, tabId, tag}   (Plutonium's own)
 //                    {type: "close", threadId, tabId}       (Plutonium's own)
+//                    {type: "scratch", threadId, tabId}     (Plutonium's own)
 // (threadId and tabId are the server's names for the tab.)
 //
 // "open": the server has a tab no shell page shows (none is open, or none
@@ -22,11 +23,17 @@
 // page that shows the tab later adopts it, as it would another page's.
 // "close": the server's tab closed; the helper closes the tab if it opened it
 // (a shell page closes its own).
+// "scratch": the server wants a page for its own work (a recording's encoder,
+// which T3 Code would otherwise run in a headless browser of its own). The
+// helper opens a hidden page, in no window and no shell, and attaches it as
+// the page SCRATCH_PAGE; "close" or the server's disconnect closes it.
 //
 // Each tab's CDP connection only reaches that tab's page: the relay below
 // presents it as a browser with one page, the way T3 Code's desktop app does
 // (apps/desktop/src/preview/CdpRelay.ts), on a flat session of the real
-// browser's DevTools (cdp.ts).
+// browser's DevTools (cdp.ts). Of the browser's own commands it adds only
+// Plutonium.getTabs, answered with that tab alone: the server reads whether a
+// shell shows it (`embedded`) for preview_status's `visible`.
 import type { Socket } from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
@@ -51,6 +58,8 @@ interface RelayTarget {
   readonly url: () => string;
   readonly title: () => string;
   readonly version: () => Promise<Record<string, unknown>>;
+  /** The browser's Plutonium.Tab for the page (whether a shell shows it: `embedded`). */
+  readonly tab: () => Promise<unknown>;
 }
 
 interface RelayConnection {
@@ -77,6 +86,8 @@ const BROWSER_CONTEXT_ID = "plutonium-tab";
 const ANNOUNCE = Symbol("announce");
 /** The page name of tabs the helper opened for the server ("open"). */
 export const HELPER_PAGE = "plutoniumd";
+/** The page name of the server's hidden pages ("scratch"). */
+export const SCRATCH_PAGE = "plutoniumd-scratch";
 /** The page's root session id, as the server sees it. */
 const PAGE_SESSION_ID = "plutonium-tab-page";
 
@@ -118,6 +129,9 @@ function createRelay(target: RelayTarget, write: (message: string) => void): Rel
     switch (command.method) {
       case "Browser.getVersion":
         return target.version();
+      // Plutonium's own: only this tab, so the server can tell whether it is on screen.
+      case "Plutonium.getTabs":
+        return { tabs: [await target.tab()] };
       case "Target.getTargetInfo":
         return {
           targetInfo: { targetId: "browser", type: "browser", title: "", url: "", attached: true, canAccessOpener: false },
@@ -361,6 +375,12 @@ export class ServerTabs {
         targetId: tab.info.targetId,
         url: () => tab.info.url(),
         title: () => tab.info.title(),
+        tab: async () => {
+          const { tabs } = (await this.cdp.send("Plutonium.getTabs")) as { tabs: { targetId: string }[] };
+          const found = tabs.find((candidate) => candidate.targetId === tab.info.targetId);
+          if (!found) throw new Error("The browser has no such tab.");
+          return found;
+        },
         version: () => {
           this.version ??= this.cdp.send("Browser.getVersion").then((value) => value as Record<string, unknown>);
           this.version.catch(() => {
@@ -436,10 +456,43 @@ export class ServerTabs {
     const end = () => {
       if (this.server !== socket) return;
       this.server = null;
-      for (const tab of this.tabs.values()) this.release(tab);
+      for (const tab of [...this.tabs.values()]) {
+        if (tab.info.page === SCRATCH_PAGE) this.closeScratch(tab);
+        else this.release(tab);
+      }
     };
     socket.once("close", end);
     socket.once("error", end);
+  }
+
+  /**
+   * A hidden page (Target.createTarget's `hidden`): no tab strip, window or
+   * shell shows it. It paints nothing on its own, so the server turns on focus
+   * emulation for it, which makes it visible to its scripts.
+   */
+  private async openScratch(key: ServerTabKey): Promise<void> {
+    const server = this.server;
+    try {
+      const { targetId } = (await this.cdp.send("Target.createTarget", {
+        url: "about:blank",
+        hidden: true,
+        background: true,
+      })) as { targetId: string };
+      // The server went away meanwhile, or asked twice.
+      if (this.server !== server || !server || this.tabs.has(keyOf(key))) {
+        void this.cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+        return;
+      }
+      this.attach(key, { targetId, browserTabId: -1, page: SCRATCH_PAGE, url: () => "about:blank", title: () => "" }, () => false);
+    } catch (cause) {
+      // The server times out and reports it.
+      console.error("serverTabs: no scratch page:", cause instanceof Error ? cause.message : cause);
+    }
+  }
+
+  private closeScratch(tab: AttachedTab): void {
+    this.detach(tab.key);
+    void this.cdp.send("Target.closeTarget", { targetId: tab.info.targetId }).catch(() => {});
   }
 
   private command(line: string): void {
@@ -466,9 +519,17 @@ export class ServerTabs {
       if (!tab && typeof command.tag === "string" && command.tag) this.onOpen(key, command.tag);
       return;
     }
+    if (command.type === "scratch") {
+      if (!tab) void this.openScratch(key);
+      return;
+    }
     if (!tab) return;
     switch (command.type) {
       case "close":
+        if (tab.info.page === SCRATCH_PAGE) {
+          this.closeScratch(tab);
+          return;
+        }
         if (tab.info.page !== HELPER_PAGE) return;
         this.detach(tab.key);
         this.onClose(tab.key, tab.info.browserTabId);

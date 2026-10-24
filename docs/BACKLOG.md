@@ -145,6 +145,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   desktop has no Apps panel content. The helper has window screencasts
   (`Plutonium.startWindowScreencast`) and input; T3 would stream them
   (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Tab recordings on NixOS.** M · `preview_recording_start` needed T3's
+  downloaded headless shell, which NixOS can't run. The encoder now runs in a
+  hidden page of Plutonium's browser (`features/AGENT_CONTROL.md`).
+- [ ] **T3's headless shell on NixOS.** S · Without a Plutonium helper (T3
+  Code alone), headless tabs and recordings still launch T3's download, which
+  NixOS refuses; the agent now gets NixOS's message. Point Playwright at a
+  Chromium that runs here (the way Plutonium finds its own) if that case
+  matters.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
