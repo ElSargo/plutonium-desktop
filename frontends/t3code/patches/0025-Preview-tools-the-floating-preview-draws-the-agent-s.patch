@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 14:49:31 +1300
-Subject: [PATCH 21/23] Preview tools: the floating preview draws the agent's
+Subject: [PATCH 25/27] Preview tools: the floating preview draws the agent's
  cursor; resize answers with the new size; snapshots don't flash on screen
 
 - The floating preview draws the agent's cursor over a Plutonium tab, on the
@@ -25,7 +25,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 apps/server/src/preview/pngScale.ts
 
 diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
-index 314ceb5764..f40459f312 100644
+index 6318cae26a..c8873a9f69 100644
 --- a/apps/server/src/mcp/toolkits/preview/tools.ts
 +++ b/apps/server/src/mcp/toolkits/preview/tools.ts
 @@ -113,7 +113,7 @@ const PreviewNavigateTool = safeBrowserTool(
@@ -38,7 +38,7 @@ index 314ceb5764..f40459f312 100644
      success: Schema.Struct({ ...PreviewAutomationResizeResult.fields, ...presentationFields }),
      failure: PreviewToolFailure,
 diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
-index 44523d2f94..acff87cd5f 100644
+index 9e1f065b13..35f6af740a 100644
 --- a/apps/server/src/preview/ServerBrowser.ts
 +++ b/apps/server/src/preview/ServerBrowser.ts
 @@ -86,6 +86,8 @@ import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
@@ -50,7 +50,7 @@ index 44523d2f94..acff87cd5f 100644
  // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
  const SCREENCAST_ACK_PACE_MS = 100;
  const SCREENCAST_SETTLE_MS = 200;
-@@ -674,6 +676,30 @@ const make = Effect.gen(function* () {
+@@ -680,6 +682,30 @@ const make = Effect.gen(function* () {
      broadcastViewport(tab);
    };
  
@@ -81,7 +81,7 @@ index 44523d2f94..acff87cd5f 100644
    /** Applies a tab's published appearance and, for headless tabs, zoom. */
    const applyRendering = async (tab: ServerTab, snapshot: PreviewSessionSnapshot) => {
      const colorScheme = snapshot.colorScheme ?? "system";
-@@ -1988,7 +2014,9 @@ const make = Effect.gen(function* () {
+@@ -2059,7 +2085,9 @@ const make = Effect.gen(function* () {
          return {
            tabId: tab.tabId,
            setting,
@@ -93,7 +93,7 @@ index 44523d2f94..acff87cd5f 100644
        }
        case "setColorScheme": {
 diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
-index ba608daaea..7b82020915 100644
+index 00c739b3cc..07397f4812 100644
 --- a/apps/server/src/preview/ServerBrowserPage.ts
 +++ b/apps/server/src/preview/ServerBrowserPage.ts
 @@ -21,6 +21,7 @@ import { constVoid } from "effect/Function";

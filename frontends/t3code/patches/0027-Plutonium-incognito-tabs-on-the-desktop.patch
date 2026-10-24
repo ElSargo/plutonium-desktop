@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 17:13:15 +1300
-Subject: [PATCH 23/23] Plutonium: incognito tabs on the desktop
+Subject: [PATCH 27/27] Plutonium: incognito tabs on the desktop
 
 A desktop-rendered tab opened with profileId incognito asks for throwaway
 storage of its own: the server's open command to the helper says incognito,
@@ -23,7 +23,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  9 files changed, 71 insertions(+), 19 deletions(-)
 
 diff --git a/apps/server/src/preview/DesktopBrowserChannel.ts b/apps/server/src/preview/DesktopBrowserChannel.ts
-index c11577e711..6573d85db1 100644
+index d379e043ff..34f16058b6 100644
 --- a/apps/server/src/preview/DesktopBrowserChannel.ts
 +++ b/apps/server/src/preview/DesktopBrowserChannel.ts
 @@ -72,9 +72,13 @@ export class DesktopBrowserChannel extends Context.Service<
@@ -41,8 +41,8 @@ index c11577e711..6573d85db1 100644
 +    ) => Effect.Effect<void>;
      /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
      readonly close: (key: DesktopTabKey) => Effect.Effect<void>;
-     /** Draws the agent's cursor over a tab the desktop renders. */
-@@ -335,10 +339,15 @@ const make = Effect.gen(function* () {
+     /**
+@@ -379,10 +383,15 @@ const make = Effect.gen(function* () {
      ),
      isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
      endpoint,
@@ -58,13 +58,13 @@ index c11577e711..6573d85db1 100644
 +            ...(options?.incognito ? { incognito: true } : {}),
 +          }),
      close: (key) => (helperSocket === undefined ? Effect.void : command({ type: "close", ...key })),
+     scratchEndpoint,
      pointer: (key, pointer) => command({ type: "pointer", ...key, ...pointer }),
-   });
 diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
-index a85ad8e8fa..c83ee731cf 100644
+index 4050f6da14..4001dd66be 100644
 --- a/apps/server/src/preview/ServerBrowser.ts
 +++ b/apps/server/src/preview/ServerBrowser.ts
-@@ -757,7 +757,7 @@ const make = Effect.gen(function* () {
+@@ -763,7 +763,7 @@ const make = Effect.gen(function* () {
        ? Effect.runPromise(
            // Plutonium: the helper opens the tab if no shell page shows it.
            desktopChannel
@@ -73,7 +73,7 @@ index a85ad8e8fa..c83ee731cf 100644
              .pipe(Effect.andThen(desktopChannel.awaitAttached(key, DESKTOP_ATTACH_TIMEOUT))),
          )
        : Promise.resolve(false);
-@@ -794,6 +794,7 @@ const make = Effect.gen(function* () {
+@@ -811,6 +811,7 @@ const make = Effect.gen(function* () {
          ? await connectDesktop(snapshot)
          : null;
      // An agent tab without a profile (no client reported one) keeps throwaway storage.
@@ -263,7 +263,7 @@ index 2d26ded039..f3b7fac162 100644
      registerWebview: ignored,
      navigate: (tabId, url) => p.navigate(tabId, url),
 diff --git a/packages/contracts/src/desktopBrowser.ts b/packages/contracts/src/desktopBrowser.ts
-index 04f79e2127..2eae56262c 100644
+index 3362ebc572..371755c048 100644
 --- a/packages/contracts/src/desktopBrowser.ts
 +++ b/packages/contracts/src/desktopBrowser.ts
 @@ -47,7 +47,13 @@ export const DesktopBrowserCommand = Schema.Union([
@@ -280,7 +280,7 @@ index 04f79e2127..2eae56262c 100644
 +  }),
    /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
    Schema.Struct({ type: Schema.Literal("close"), ...TabKey }),
- ]);
+   /**
 diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
 index 71a2baa255..57cef7746f 100644
 --- a/packages/contracts/src/ipc.ts

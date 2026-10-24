@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 12:24:09 +1300
-Subject: [PATCH 20/23] Preview tools: drag along a path; snapshot images in
+Subject: [PATCH 24/27] Preview tools: drag along a path; snapshot images in
  click coordinates; cursor follows a scaled tab
 
 - preview_drag takes a path of viewport points (with button and modifiers) as
@@ -75,7 +75,7 @@ index 4212c711c3..5c3f195243 100644
 +  expect(Exit.isSuccess(decode({}))).toBe(false);
 +});
 diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
-index 6e34a33002..314ceb5764 100644
+index 341f9adca6..6318cae26a 100644
 --- a/apps/server/src/mcp/toolkits/preview/tools.ts
 +++ b/apps/server/src/mcp/toolkits/preview/tools.ts
 @@ -143,7 +143,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
@@ -115,7 +115,7 @@ index 6e34a33002..314ceb5764 100644
      success: PreviewActionResult,
      failure: PreviewToolFailure,
 diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
-index abce259be4..44523d2f94 100644
+index 9abda88bdf..9e1f065b13 100644
 --- a/apps/server/src/preview/ServerBrowser.ts
 +++ b/apps/server/src/preview/ServerBrowser.ts
 @@ -84,6 +84,7 @@ import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.
@@ -126,7 +126,7 @@ index abce259be4..44523d2f94 100644
  const RENDER_SCALE = 2;
  // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
  const SCREENCAST_ACK_PACE_MS = 100;
-@@ -1692,6 +1693,7 @@ const make = Effect.gen(function* () {
+@@ -1761,6 +1762,7 @@ const make = Effect.gen(function* () {
            .catch(constVoid);
        };
        show("move");
@@ -134,7 +134,7 @@ index abce259be4..44523d2f94 100644
        await sleepUntil(Date.now() + AGENT_CURSOR_MOVE_MS);
        if (phase !== "click") return;
        show("click");
-@@ -1998,9 +2000,7 @@ const make = Effect.gen(function* () {
+@@ -2069,9 +2071,7 @@ const make = Effect.gen(function* () {
          return { tabId: tab.tabId, colorScheme };
        }
        case "snapshot": {
@@ -251,7 +251,7 @@ index 9a4775bb47..1047eb5030 100644
      await presentAsChrome(cdp, { platform: "linux", arch: "x64" });
      // userAgentData exists only in secure contexts; https comes from a route.
 diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
-index 3df4901f46..ba608daaea 100644
+index 94fdcf80eb..00c739b3cc 100644
 --- a/apps/server/src/preview/ServerBrowserPage.ts
 +++ b/apps/server/src/preview/ServerBrowserPage.ts
 @@ -119,9 +119,10 @@ const targetLocator = (

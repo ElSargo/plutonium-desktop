@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 17:05:07 +1300
-Subject: [PATCH 22/23] Preview tools: a stuck action no longer wedges its tab
+Subject: [PATCH 26/27] Preview tools: a stuck action no longer wedges its tab
 
 - Agent actions on a tab hold its queue only until their timeout (plus
   500 ms). One still running then is abandoned: its caller fails, the queue
@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  7 files changed, 325 insertions(+), 33 deletions(-)
 
 diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
-index f40459f312..380583fd2b 100644
+index c8873a9f69..39605f91bc 100644
 --- a/apps/server/src/mcp/toolkits/preview/tools.ts
 +++ b/apps/server/src/mcp/toolkits/preview/tools.ts
 @@ -64,7 +64,7 @@ const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
@@ -37,7 +37,7 @@ index f40459f312..380583fd2b 100644
    success: PreviewAutomationStatus,
    failure: PreviewToolFailure,
 diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
-index acff87cd5f..a85ad8e8fa 100644
+index 35f6af740a..4050f6da14 100644
 --- a/apps/server/src/preview/ServerBrowser.ts
 +++ b/apps/server/src/preview/ServerBrowser.ts
 @@ -81,9 +81,16 @@ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
@@ -58,7 +58,7 @@ index acff87cd5f..a85ad8e8fa 100644
  // Headless tabs draw each CSS pixel with this many device pixels.
  const RENDER_SCALE = 2;
  // How long preview_resize waits for a desktop tab to take its new size.
-@@ -1455,6 +1462,7 @@ const make = Effect.gen(function* () {
+@@ -1490,6 +1497,7 @@ const make = Effect.gen(function* () {
          generation: tab.control.generation,
        },
        dialog: dialogStatus(tab),
@@ -66,7 +66,7 @@ index acff87cd5f..a85ad8e8fa 100644
        fileChooser: tab.fileChooser
          ? { multiple: tab.fileChooser.chooser.isMultiple(), accept: tab.fileChooser.accept }
          : null,
-@@ -1798,7 +1806,48 @@ const make = Effect.gen(function* () {
+@@ -1867,7 +1875,48 @@ const make = Effect.gen(function* () {
      }
    };
  
@@ -115,7 +115,7 @@ index acff87cd5f..a85ad8e8fa 100644
      const input = request.input;
      switch (request.operation) {
        case "status":
-@@ -1975,19 +2024,23 @@ const make = Effect.gen(function* () {
+@@ -2046,19 +2095,23 @@ const make = Effect.gen(function* () {
          return executeTabOperation(tab, request);
        });
      }
@@ -200,7 +200,7 @@ index 1047eb5030..4d82aa6dfd 100644
 +  });
  });
 diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
-index 7b82020915..c6daa22144 100644
+index 07397f4812..80c1aa37b4 100644
 --- a/apps/server/src/preview/ServerBrowserPage.ts
 +++ b/apps/server/src/preview/ServerBrowserPage.ts
 @@ -283,7 +283,7 @@ export const click = async (
