@@ -22,9 +22,9 @@ EXO-CAPTURE (docs/features/CAPTURE.md):
  .../webrtc/display_media_access_handler.cc    |  40 +-
  chrome/browser/plutonium_capture.cc           | 195 +++++
  chrome/browser/plutonium_capture.h            |  26 +
- chrome/browser/plutonium_pipewire.cc          | 778 ++++++++++++++++++
+ chrome/browser/plutonium_pipewire.cc          | 783 ++++++++++++++++++
  chrome/browser/plutonium_pipewire.h           |  63 ++
- 7 files changed, 1221 insertions(+), 5 deletions(-)
+ 7 files changed, 1226 insertions(+), 5 deletions(-)
  create mode 100644 chrome/browser/plutonium_pipewire.cc
  create mode 100644 chrome/browser/plutonium_pipewire.h
 
@@ -565,13 +565,18 @@ index 6108a7cbec..3c29c08dcd 100644
        content::RenderFrameHost* frame);
 diff --git a/chrome/browser/plutonium_pipewire.cc b/chrome/browser/plutonium_pipewire.cc
 new file mode 100644
-index 0000000000..59a4411acc
+index 0000000000..a91de52399
 --- /dev/null
 +++ b/chrome/browser/plutonium_pipewire.cc
-@@ -0,0 +1,778 @@
+@@ -0,0 +1,783 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// PLUTONIUM: PipeWire's C buffers (spa_data, spa_meta_*) and frame rows.
++#pragma allow_unsafe_buffers
++#endif
 +
 +#include "chrome/browser/plutonium_pipewire.h"
 +
