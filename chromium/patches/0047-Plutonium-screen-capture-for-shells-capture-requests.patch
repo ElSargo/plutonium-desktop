@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 22:20:36 +1300
-Subject: [PATCH 47/47] Plutonium: screen capture for shells, capture requests
+Subject: [PATCH 47/48] Plutonium: screen capture for shells, capture requests
  to the focused shell
 
 EXO-CAPTURE (docs/features/CAPTURE.md): PlutoniumCapture, the capture
@@ -390,7 +390,7 @@ index 02e25b87e9..7d7492007c 100644
  }
 diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
 new file mode 100644
-index 0000000000..61cf8e37be
+index 0000000000..f17a90a938
 --- /dev/null
 +++ b/chrome/browser/plutonium_capture.cc
 @@ -0,0 +1,1168 @@
@@ -948,7 +948,7 @@ index 0000000000..61cf8e37be
 +  value.Set("label", LabelOf(capture.source));
 +  value.Set("consumer", capture.consumer.Clone());
 +  value.Set("cursor", capture.cursor);
-+  value.Set("startTime", capture.start_time.InMillisecondsFSinceUnixEpoch());
++  value.Set("startTime", capture.start_time.InMillisecondsFSinceUnixEpochIgnoringNull());
 +  value.Set("acknowledged", IsAcknowledged(capture));
 +  if (!capture.size.IsEmpty()) {
 +    value.Set("size", base::DictValue()
@@ -2955,7 +2955,7 @@ index f25caa659b..d928455379 100644
    "html_no_embed_element.h",
    "html_no_script_element.cc",
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
-index 919749b906..b8c2092786 100644
+index 919749b906..8811ff4498 100644
 --- a/third_party/blink/renderer/core/html/native_window_broker.cc
 +++ b/third_party/blink/renderer/core/html/native_window_broker.cc
 @@ -25,6 +25,7 @@
@@ -3131,7 +3131,7 @@ index 919749b906..b8c2092786 100644
 +            self->pending_.erase(resolver);
 +            if (!png) {
 +              resolver->RejectWithDOMException(
-+                  error.Contains("switched off")
++                  error.contains("switched off")
 +                      ? DOMExceptionCode::kNotAllowedError
 +                      : DOMExceptionCode::kNotFoundError,
 +                  error.empty() ? String("The copy failed.") : error);
