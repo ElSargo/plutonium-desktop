@@ -130,7 +130,7 @@ All tools act on the calling thread's windows and tabs only.
 ## Limits
 
 - **US keyboard.** `type_window` types as a US layout would. The app maps keycodes through the session's keymap, so other layouts get other characters.
-- **Popups.** Menus and other `xdg_popup`s are separate surfaces. They aren't in the window's snapshot, and an agent's click lands on the window under them. Keyboard navigation works.
+- **Popups.** Menus and other `xdg_popup`s are separate surfaces. They aren't in the window's snapshot, and an agent's click lands on the window under them. Keyboard navigation works. A popup an agent opens shows on screen only while a panel shows its window, at the panel; otherwise it stays open but invisible (`WINDOW_SIZING.md`, "Popups").
 - **Typing speed.** Exo drops a client that can't keep up (`libwayland: error in client communication`): LibreOffice Writer died 3 times out of 3 when a 400-character `type_window` went in as back-to-back batches of 64 key events, and lived through the same text twice over with the batches 25 ms apart.
 - **Same app, two windows.** When the user's focus is in another window of the app the agent types into, the agent's window still borrows the seat's focus for each batch (the focus blip from before patch 0027).
 - **Input on a held window.** The panel shows a held window scaled, and blocks the user's input to it until they take control: input under a CSS transform isn't checked yet.

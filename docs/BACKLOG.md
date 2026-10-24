@@ -196,6 +196,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `visible` now uses. The sweep may close an agent's tab the user is watching.
 - [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
   snapshots and agent clicks don't reach them.
+- [x] **Popups of windows no panel shows covered the shell.** An agent's
+  menus and tooltips showed over the shell (and other threads) while no
+  page showed the window. Now they show only at the element showing the
+  window (`WINDOW_SIZING.md`, "Popups").
 - [ ] **Agent typing beyond a US layout.** S · Map text through the
   session's keymap (xkb) instead of assuming US keycodes. Characters the
   layout lacks need the temporary keymap that password auto-type needs too
