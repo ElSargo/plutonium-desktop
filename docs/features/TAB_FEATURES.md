@@ -363,6 +363,13 @@ The doc's earlier plan had the helper move each file into place after it complet
 
 **The Print portal** (`org.freedesktop.impl.portal.Print`, part of "Our own portal backend for the rest") uses the same dialog for native apps. `PreparePrint` shows the dialog without a preview and returns the settings, and `Print` hands the helper the document, which it sends to CUPS. So tabs and apps get one print dialog, as they get one file picker.
 
+**Built** (2026-10-26; `helper/src/printPortal.ts`, `printportal.py`, the library's `PrintDialog`):
+- **Its own process.** `Print` passes the document as a Unix fd, and Node can't receive fds. So `printportal.py` (plain Python, a small D-Bus client that negotiates fds) serves `org.freedesktop.impl.portal.Print` as `org.freedesktop.impl.portal.desktop.plutonium.print` (`helper/portal/plutonium-print.portal`; `plutonium-portals.conf` picks `plutonium-print` for Print). The helper starts it with the portal backend. Each call goes to the helper as a JSON line on its stdout, with Print's document copied to a file of its own under `$XDG_RUNTIME_DIR/plutonium/`, which the helper reads and removes. The answer comes back on stdin.
+- **PreparePrint** asks the focused shell (`print_prepare` over the shell relay: `{handle, detail: {title, printer, copies, landscape, paper}, source: {appId, pid, windowId, name, parent}, thread}`, the starting values from the app's settings and page setup). The library's dialog has no preview, Scale, Margins, Headers or Background graphics, since the app lays out its own pages. It opens over the app's window (found as the file picker finds it) and takes the keyboard from the app. Its answer, `{printer, path, copies, duplex, color, paper, landscape, pageRanges}` (printer "" for Save as PDF), or null, becomes GTK's settings (`printer` "Print to File" with `output-uri` for a PDF; `n-copies`, `duplex`, `use-color`, `orientation`, `paper-format`, `print-pages` and zero-based `page-ranges`), a page setup (the paper in mm, quarter-inch margins), and a token. The `print` option covers apps too: false refuses them; a function gets the request with `source` and answers through `request.answer()`.
+- **Print** takes the token's choice (or asks, without one): `lp` to the printer with two-sided and colour, but not the copies, since GTK puts them in the document; or the PDF written to the chosen path (`~/` works; an existing file gets " (1)").
+- **Cancelling.** The app's `Request.Close` closes the dialog (`print_cancel`).
+- **Verified** on X11 (slot 5, xdg-desktop-portal 1.20.4 on `tools/portal-bus.sh`'s bus), with gtk4-print-editor (`GDK_DEBUG=portals`): Print showed the dialog without a preview, named the app, and started from the app's own paper the second time; Save as PDF on A4 wrote a one-page A4 PDF with the text; landscape with two copies wrote two landscape A4 pages; Cancel cancelled, and the app carried on. A tab's print dialog is unchanged (preview, all fields). Not verified: a real printer (no CUPS client on this host), Qt apps, Flatpak apps.
+
 **Fallback.**
 - Chrome's print preview, as a dialog over the shell's window. The tab gets a `web_modal::WebContentsModalDialogManager` whose delegate gives the shell's widget as the host (`HasWebContentsModalDialogHost()` in `print_preview_dialog_controller.cc`).
 - If the preview can't offer real printers (above), it still saves PDFs.
@@ -409,7 +416,7 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `cancel_print`: answers it `"cancel"`.
 - T3 Code gives its agents only the native-window tools (`WINDOW_TOOLS`), so its agents don't get these yet.
 
-**Not built.** The Print portal (`BACKLOG.md`). Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
+**Not built.** Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
 
 **Verified** on Xvfb (slot 26, the plain shell, a local test page), 2026-10-23/24, with stand-ins for `lpstat` and `lp` (this machine has no CUPS):
 
@@ -458,7 +465,7 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 4. **Downloads.** M. Files already land; this adds the UI, threads, open and show.
 5. **Find in page.** S–M.
 6. **Printing.** M–L.
-7. **The FileChooser and Print portals** on the same picker and dialog, with "Our own portal backend for the rest". FileChooser is built (2026-10-26); Print is not.
+7. **The FileChooser and Print portals** on the same picker and dialog, with "Our own portal backend for the rest". Both are built (2026-10-26).
 8. **Form autofill.** Only if it's wanted (below).
 
 ## Not covered here

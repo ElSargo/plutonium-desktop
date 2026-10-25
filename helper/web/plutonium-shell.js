@@ -864,24 +864,31 @@ export class PlutoniumShell extends EventTarget {
   // fileChooser one, with `source` ({appId, pid, windowId, name}) instead of a tab. It
   // resolves to the answer, {paths, filter?, choices?}, or null.
   _appFileChooser(args, option) {
+    return this._appDialog(args, "fileChooser", option, (request) => (new FileChooser(this, request).open(), true));
+  }
+
+  // A native app's dialog (the helper's portals): a request as a tab's of `kind`, with
+  // `source` ({appId, pid, windowId, name}) instead of a tab, drawn by `option` (a
+  // function) or `draw`. It resolves to the answer, or null ("cancel" too).
+  _appDialog(args, kind, option, draw) {
     return new Promise((resolve) => {
       const controller = new AbortController();
-      this._appFileChoosers ??= new Map();
-      this._appFileChoosers.set(args.handle, controller);
+      this._appRequests ??= new Map();
+      this._appRequests.set(args.handle, controller);
       const giveBack = this._takeKeyboard();
       let done = false;
       const end = (answer) => {
         if (done) return false;
         done = true;
-        this._appFileChoosers.delete(args.handle);
+        this._appRequests.delete(args.handle);
         giveBack();
-        resolve(answer ?? null);
+        resolve(answer === "cancel" ? null : (answer ?? null));
         return true;
       };
       controller.signal.addEventListener("abort", () => end(null));
       const request = {
         requestId: args.handle,
-        kind: "fileChooser",
+        kind,
         detail: args.detail ?? {},
         source: args.source ?? {},
         thread: args.thread ?? null,
@@ -890,10 +897,9 @@ export class PlutoniumShell extends EventTarget {
       };
       let taken = false;
       try {
-        if (typeof option === "function") taken = !!option(request);
-        else taken = (new FileChooser(this, request).open(), true);
+        taken = typeof option === "function" ? !!option(request) : draw(request);
       } catch (error) {
-        console.error("plutonium: drawing an app's file picker", error);
+        console.error(`plutonium: drawing an app's ${kind} request`, error);
       }
       if (!taken) end(null);
     });
@@ -1533,7 +1539,7 @@ export class PlutoniumShell extends EventTarget {
           this._applyShortcuts();
           return;
         }
-        if (op === "file_chooser_cancel") this._appFileChoosers?.get(args.handle)?.abort();
+        if (op === "file_chooser_cancel" || op === "print_cancel") this._appRequests?.get(args.handle)?.abort();
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
           this.dispatchEvent(new Event("agentwindowschange"));
@@ -1639,6 +1645,13 @@ export class PlutoniumShell extends EventTarget {
         const option = this.options.fileChooser;
         if (option === false) throw new Error("this shell doesn't pick files");
         return this._appFileChooser(args, option);
+      }
+      case "print_prepare": {
+        // A native app prints (the Print portal): the same dialog as tabs', without a
+        // preview (the "print" option: false leaves the app without one).
+        const option = this.options.print;
+        if (option === false) throw new Error("this shell doesn't print");
+        return this._appDialog(args, "print", option, (request) => (new PrintDialog(this, request), true));
       }
       case "pick_color": {
         // An app asks for a color from the screen (the "colorPicker" option:
@@ -2009,6 +2022,8 @@ const PRINT_STYLE = `@layer plutonium {
     display: grid; grid-template-columns: minmax(0, 1fr) 260px; width: min(900px, calc(100vw - 16px));
     height: min(640px, calc(100vh - 16px)); overflow: hidden;
   }
+  .plutonium-dialog.plutonium-print.app { grid-template-columns: minmax(0, 1fr); width: min(340px, calc(100vw - 16px)); height: auto; }
+  .plutonium-print.app .preview { display: none; }
   .plutonium-print .preview { background: color-mix(in srgb, currentColor 12%, transparent); position: relative; }
   .plutonium-print .preview iframe { border: 0; width: 100%; height: 100%; display: block; }
   .plutonium-print .preview .note { position: absolute; inset: 0; display: grid; place-items: center; opacity: .7; }
@@ -2044,10 +2059,12 @@ class PrintDialog {
     this.url = "";
     this.rendering = null;
     this.opener = document.activeElement;
+    /** An app's (the Print portal): no preview; the answer is the settings, which the app prints with. */
+    this.app = request.tabId === undefined;
     this._build();
     request.signal.addEventListener("abort", () => this.close());
     this._loadPrinters();
-    this._render();
+    if (!this.app) this._render();
   }
 
   _build() {
@@ -2087,6 +2104,16 @@ class PrintDialog {
     this.status = element.querySelector(".status");
     this.form.paper.value = us ? "letter" : "a4";
     this.form.path.value = `~/Downloads/${fileNameOf(this.title)}`;
+    if (this.app) {
+      // The app lays out its pages: only what it asks of the printer, and its paper.
+      element.classList.add("app");
+      for (const name of ["scale", "margins", "headerFooter", "background"]) this.form[name].closest("label").hidden = true;
+      element.querySelector(".pages").textContent = this.request.source?.name ?? "";
+      const detail = this.request.detail ?? {};
+      if (detail.copies) this.form.copies.value = String(detail.copies);
+      if (detail.landscape !== undefined) this.form.layout.value = detail.landscape ? "landscape" : "portrait";
+      if (detail.paper && PAPER_SIZES[detail.paper]) this.form.paper.value = detail.paper;
+    }
     this.form.addEventListener("input", (event) => this._changed(event.target));
     this.form.addEventListener("change", (event) => this._changed(event.target));
     this.form.addEventListener("submit", (event) => {
@@ -2112,7 +2139,9 @@ class PrintDialog {
 
   // Over the tab's element if this page shows it, else in the middle.
   _place() {
-    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect();
+    const box = (
+      this.shell.shownTabElement(this.request.tabId) ?? this.shell.shownWindowElement(this.request.source?.windowId)
+    )?.getBoundingClientRect();
     const width = this.element.offsetWidth;
     const height = this.element.offsetHeight;
     const centreX = box && box.width ? box.left + box.width / 2 : innerWidth / 2;
@@ -2134,7 +2163,8 @@ class PrintDialog {
         if (printer.state === "disabled") option.disabled = true;
         select.append(option);
       }
-      const preferred = printers.find((printer) => printer.isDefault && printer.state !== "disabled");
+      const asked = this.app && printers.find((printer) => printer.name === this.request.detail?.printer);
+      const preferred = asked || printers.find((printer) => printer.isDefault && printer.state !== "disabled");
       if (preferred) select.value = preferred.name;
       if (!available && error) console.info(`plutonium: no printers (${error})`);
       this._showDestination();
@@ -2149,7 +2179,7 @@ class PrintDialog {
     if (target === this.form.pages) {
       this.form.querySelector('[data-for="custom"]').hidden = this.form.pages.value !== "custom";
     }
-    if (["copies", "duplex", "color", "path"].includes(target.name)) return;
+    if (["copies", "duplex", "color", "path"].includes(target.name) || this.app) return;
     clearTimeout(this._timer);
     this._timer = setTimeout(() => this._render(), 300);
   }
@@ -2229,6 +2259,7 @@ class PrintDialog {
     const printer = this.form.destination.value;
     this._error("");
     this.status.textContent = printer ? "Printing…" : "Saving…";
+    if (this.app) return this._answerApp(printer);
     try {
       const pdf = await this._pdfNow();
       let message;
@@ -2256,6 +2287,31 @@ class PrintDialog {
       this.busy = false;
       this.form.go.disabled = false;
     }
+  }
+
+  // An app's dialog answers the settings; the app then sends the document, which the
+  // helper prints or saves.
+  async _answerApp(printer) {
+    const form = this.form;
+    const ranges = form.pages.value === "custom" ? form.ranges.value.trim() : "";
+    if (ranges && !/^\s*\d+(\s*-\s*\d+)?(\s*,\s*\d+(\s*-\s*\d+)?)*\s*$/.test(ranges)) {
+      this._error("Check the page ranges.");
+      this.busy = false;
+      form.go.disabled = false;
+      return;
+    }
+    const copies = Math.floor(Number(form.copies.value));
+    await this.request.answer({
+      printer,
+      path: printer ? undefined : form.path.value.trim(),
+      copies: copies >= 1 ? copies : 1,
+      duplex: form.duplex.value,
+      color: form.color.value === "1",
+      paper: form.paper.value,
+      landscape: form.layout.value === "landscape",
+      pageRanges: ranges,
+    });
+    this.close();
   }
 
   cancel() {
