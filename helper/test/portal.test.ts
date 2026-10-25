@@ -388,4 +388,26 @@ describe("global shortcuts on a bus", { skip: dbusDaemon ? false : "no dbus-daem
     answer = { color: null };
     assert.equal((await pick())[0], 1);
   });
+
+  test("FileChooser: the shell's picker; paths back as URIs; a refusal cancels", async () => {
+    const open = (token: string, options: Map<string, unknown>) =>
+      client.call({
+        destination: PORTAL_NAME,
+        path: "/org/freedesktop/portal/desktop",
+        interface: "org.freedesktop.impl.portal.FileChooser",
+        member: "OpenFile",
+        signature: "osssa{sv}",
+        body: [handle(token), "com.discordapp.Discord", "x11:1a", "Pick", options],
+      }) as Promise<[number, Map<string, unknown>]>;
+    answer = { paths: ["/tmp/one.txt", "/tmp/two.txt"] };
+    const [code, results] = await open("h", new Map<string, unknown>([["multiple", ["b", true]]]));
+    assert.equal(code, 0);
+    assert.deepEqual(results.get("uris"), ["file:///tmp/one.txt", "file:///tmp/two.txt"]);
+    const request = asked.at(-1) as { op: string; detail: { mode: string; title: string }; source: { pid: number; parent: string } };
+    assert.equal(request.op, "file_chooser");
+    assert.deepEqual([request.detail.mode, request.detail.title, request.source.parent], ["open-multiple", "Pick", "x11:1a"]);
+    assert.equal(request.source.pid, process.pid);
+    answer = null;
+    assert.equal((await open("i", new Map()))[0], 1);
+  });
 });

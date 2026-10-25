@@ -1976,6 +1976,7 @@ export class Daemon {
           return reply.kind === "json" ? reply.value : null;
         },
         notifyShells: (op, args) => this.relay.notifyAll(op, args),
+        windows: () => this.relay.windows(),
       });
       portal.start().then(
         () => (this.portal = portal),
