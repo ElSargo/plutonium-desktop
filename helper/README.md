@@ -9,6 +9,7 @@ What it does:
 - **Links from apps open as tabs in the thread.** `xdg-open`, `$BROWSER` and the user's default browser lead to `plutonium.ts open` (`src/opener.ts`, `docs/features/OPENING_LINKS.md`).
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
 - **The backup terminal.** A page (`/v1/terminal/`) with tabs of login shells on this machine, for Ash's switcher to open when no shell works (`src/terminal.ts`, `src/ptybridge.py`, `web/terminal/`, xterm.js in `web/vendor/xterm/`). Each session is `$SHELL` on a pty, made by Python's `pty` module, in the thread `plutonium:terminal`. Needs `python3`.
+- **The desktop portal's screen capture.** `org.freedesktop.impl.portal.ScreenCast` and `Screenshot` for apps (OBS, Firefox, Discord), through the browser's capture API: the focused shell (else Ash) asks the user, Ash publishes a PipeWire node (`src/portal.ts`, `portal/`, `docs/features/CAPTURE.md`). On `$PLUTONIUM_PORTAL_BUS`, else the session bus; `PLUTONIUM_PORTAL=0` turns it off.
 - **Server-driven tabs.** A frontend's server can drive the tabs the shell shows for it over the DevTools protocol, as T3 Code drives its desktop app's tabs with Playwright (`src/serverTabs.ts`, `docs/features/TABS.md`). The helper connects to the browser's own DevTools (`--cdp-port`) and gives the server one relay per tab, which reaches that tab's page and nothing else.
 
 ## Running
@@ -72,6 +73,7 @@ Shared (socket and shell):
 | `POST /v1/apps/launch {thread, id, waitMs?, show?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot); shown unless `show: false` |
 | `GET /v1/printers?title=` | the host's printers through CUPS (`lpstat`): `{available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}` (`~/Downloads/<title>.pdf`) |
 | `POST /v1/print?printer&copies&duplex&color&title` (a PDF body) | prints it with `lp`: `{job}`; `duplex` none, long-edge or short-edge, `color` 1 or 0 |
+| `POST /v1/screenshots` (a PNG body) | writes it to `~/Pictures/Screenshots/Screenshot from <date> <time>.png` (`$PLUTONIUM_SCREENSHOTS_DIR`): `{path}` |
 | `POST /v1/print/save?path&title&overwrite` (a PDF body) | writes it (absolute or `~/` path, default `defaultPdfPath`) without overwriting unless `overwrite=1`: `{path}` |
 
 The backup terminal. Its page and scripts (`GET /v1/terminal/`, `terminal.js`, `terminal.css`, `xterm.js`, `xterm.css`, `addon-fit.js`) are public and can't be framed. Its sessions are for the socket, or for this user's same-origin requests on the port: `Sec-Fetch-Site: same-origin`, which other pages can't send.
@@ -157,6 +159,13 @@ await shell.snapshotTab(id);
 const shownId = await shell.showServerTab(tab.id, { threadId, tabId });  // the server's names
 await shell.releaseServerTab({ threadId, tabId });
 shell.addEventListener("agentpointer", (event) => drawCursor(event.detail));  // {threadId, tabId, phase, x, y}
+
+// Captures (shell.captureAvailable; docs/features/CAPTURE.md):
+const png = await shell.screenshot({ type: "window", id });       // also { type: "output", id }, { type: "tab", id }, region
+const stream = await shell.capture({ type: "window", id }, { size: { width: 1920, height: 1080 } });  // a MediaStream
+await shell.takeScreenshot({ targets: [{ source, rect }] });     // the Print UI; saves to ~/Pictures/Screenshots
+shell.captures(); shell.stopCapture(captureId);                  // every consumer's: "capturestart", "capturestop" events
+// connect({ capturePicker, captureIndicator }): apps' and tabs' requests, and what's captured (library's by default).
 
 // Tags and groups (shell.tagsAvailable):
 shell.setGroups([{ tag: "plain:thread/abc", label: "Fix the build" }]);  // this shell's

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 09:03:58 +1300
-Subject: [PATCH 36/46] Plutonium: page zoom for tabs
+Subject: [PATCH 36/49] Plutonium: page zoom for tabs
 
 EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Zoom"): the registry's
 tabs get Chrome's ZoomController (plutonium_zoom.{h,cc}), with Chrome's

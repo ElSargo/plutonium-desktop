@@ -45,10 +45,30 @@ ensure_helper_deps() {
   fi
 }
 
+# EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend is the
+# helper (docs/features/CAPTURE.md, "The portal backend"). DRM sessions
+# install its files, inert unless xdg-desktop-portal runs with
+# XDG_CURRENT_DESKTOP=Plutonium, which PORTAL_SESSION=1 sets for the user's
+# whole session (D-Bus activation and systemd) and restarts it with: a
+# desktop of its own. X11 test sessions use tools/portal-bus.sh instead.
+setup_portal() {
+  [[ $MODE == drm ]] || return 0
+  local data=${XDG_DATA_HOME:-$HOME/.local/share} config=${XDG_CONFIG_HOME:-$HOME/.config}
+  install -Dm644 "$ROOT/helper/portal/plutonium.portal" "$data/xdg-desktop-portal/portals/plutonium.portal"
+  install -Dm644 "$ROOT/helper/portal/plutonium-portals.conf" "$config/xdg-desktop-portal/plutonium-portals.conf"
+  [[ ${PORTAL_SESSION:-} == 1 ]] || return 0
+  export XDG_CURRENT_DESKTOP=Plutonium
+  dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=Plutonium 2>/dev/null ||
+    log "WARNING: couldn't pass XDG_CURRENT_DESKTOP to D-Bus activation: apps' screen capture may not reach the helper"
+  systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
+  log "portal: xdg-desktop-portal uses the helper for screen capture (XDG_CURRENT_DESKTOP=Plutonium)"
+}
+
 start_helper() {
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
   mkdir -p "$RUN_DIR/plutonium"
   ensure_helper_deps
+  setup_portal
   [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && sleep 1
   # Apps the helper launches inherit its environment: leave out an agent
   # session's own variables when this runs from one (Claude Code).

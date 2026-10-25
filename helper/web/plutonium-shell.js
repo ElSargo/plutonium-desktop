@@ -230,6 +230,15 @@ export class PlutoniumShell extends EventTarget {
     this._pageId = crypto.randomUUID();
     /** @type {Map<string, { threadId: string, tabId: string, browserTabId: number, targetId: string }>} */
     this._serverTabs = new Map();
+    /** Whether this Chromium has the capture API (screenshots, streams, capture requests). */
+    this.captureAvailable = this.available && typeof this.broker.captureCommand === "function";
+    /** @type {Map<number, Capture>} the running captures, every consumer's, by id */
+    this.captureList = new Map();
+    /** @type {{ recording: boolean, screenshots: boolean }} the global switches */
+    this.captureSettings = { recording: true, screenshots: true };
+    /** @type {Map<number, AbortController>} capture requests this page took, by id */
+    this._captureRequests = new Map();
+    this._captureIndicator = null;
     this.ready = this.available ? this._start() : Promise.resolve();
   }
 
@@ -331,6 +340,8 @@ export class PlutoniumShell extends EventTarget {
     if (typeof this.broker.closeContextMenu === "function") {
       this.broker.addEventListener("contextmenurequest", (event) => this._onContextMenuRequest(event));
     }
+    // Captures (docs/features/CAPTURE.md).
+    if (this.captureAvailable) this._startCaptures();
     this._serveBridge();
     const windows = await this.broker.getWindows();
     for (const entry of windows) this._setWindow(entry);
@@ -1023,6 +1034,239 @@ export class PlutoniumShell extends EventTarget {
    */
   setShellShortcuts(shortcuts) {
     this.broker?.setShellShortcuts?.(shortcuts);
+  }
+
+  // Captures (docs/features/CAPTURE.md). Every capture, whoever started it,
+  // arrives as "capturestart", "capturechange" and "capturestop" ({ capture });
+  // the switches as "capturesettingschange". While this is the focused shell,
+  // a consumer that needs the user to choose (an app through the portal, a
+  // tab's getDisplayMedia) asks here: the "capturePicker" option decides who
+  // draws the picker, and the "captureIndicator" option who shows what's
+  // captured (see CapturePicker and CaptureIndicator).
+  _startCaptures() {
+    const update = (event, type) => {
+      const capture = event.detail;
+      if (!capture) return;
+      const previous = this.captureList.get(capture.id);
+      if (type === "capturestop") this.captureList.delete(capture.id);
+      else this.captureList.set(capture.id, capture);
+      this.dispatchEvent(new CustomEvent(type, { detail: { capture, previous } }));
+      this._showCaptures();
+    };
+    for (const type of ["capturestart", "capturechange", "capturestop"]) {
+      this.broker.addEventListener(type, (event) => update(event, type));
+    }
+    this.broker.addEventListener("capturesettingschange", (event) => {
+      if (!event.detail) return;
+      this.captureSettings = event.detail;
+      this.dispatchEvent(new CustomEvent("capturesettingschange", { detail: { settings: event.detail } }));
+    });
+    this.broker.addEventListener("capturerequest", (event) => this._onCaptureRequest(event));
+    this.broker.addEventListener("capturerequestend", (event) => {
+      const controller = this._captureRequests.get(event.id);
+      this._captureRequests.delete(event.id);
+      controller?.abort();
+    });
+  }
+
+  // A consumer asks for a capture: take it (preventDefault()) unless the
+  // frontend leaves it to Ash's picker.
+  _onCaptureRequest(event) {
+    const option = this.options.capturePicker;
+    if (option === false || !event.detail) return;
+    const controller = new AbortController();
+    /** @type {CaptureRequest} */
+    const request = {
+      ...event.detail,
+      signal: controller.signal,
+      answer: (answer) => this.answerCapture(event.id, answer),
+    };
+    let taken = false;
+    try {
+      if (typeof option === "function") taken = !!option(request);
+      else taken = !!new CapturePicker(this, request).open();
+    } catch (error) {
+      console.error("plutonium: drawing the capture picker", error);
+    }
+    if (!taken) return;
+    event.preventDefault();
+    this._captureRequests.set(event.id, controller);
+  }
+
+  // The indicator: the library's, the frontend's, or none (then Ash shows
+  // its own once the captures go unacknowledged).
+  _showCaptures() {
+    const option = this.options.captureIndicator;
+    const captures = this.captures();
+    let shown = false;
+    if (option === false) shown = false;
+    else if (typeof option === "function") shown = !!option(captures);
+    else {
+      this._captureIndicator ??= new CaptureIndicator(this);
+      this._captureIndicator.render(captures);
+      shown = true;
+    }
+    if (!shown) return;
+    for (const capture of captures) {
+      if (!capture.acknowledged) this.acknowledgeCapture(capture.id).catch(() => {});
+    }
+  }
+
+  /** @returns {Capture[]} the running captures, oldest first */
+  captures() {
+    return [...this.captureList.values()].sort((a, b) => a.startTime - b.startTime);
+  }
+
+  async _captureCommand(command, args = {}) {
+    if (!this.captureAvailable) throw new Error("this Chromium has no capture API");
+    return JSON.parse(await this.broker.captureCommand(command, JSON.stringify(args)));
+  }
+
+  /**
+   * What can be captured: { outputs: [{ id, name, width, height, scaleFactor, primary }],
+   * windows: [{ id, title, appId, width, height, tags }], tabs: [{ id, title, url, tags }] }.
+   */
+  captureSources() {
+    return this._captureCommand("sources");
+  }
+
+  /**
+   * The output this page is on, as a source ({ type: "output", id }). EXO-MULTIMON: with a
+   * shell per display, this page's display.
+   */
+  async outputSource() {
+    const { outputs } = await this.captureSources();
+    const output = outputs.find((entry) => entry.primary) ?? outputs[0];
+    if (!output) throw new Error("no output to capture");
+    return { type: "output", id: output.id };
+  }
+
+  /**
+   * A PNG of `source` ({ type: "output" | "window" | "tab", id }), cropped to `region`
+   * ({ x, y, width, height } in the source's pixels). Rejects while screenshots are switched
+   * off.
+   * @returns {Promise<Blob>}
+   */
+  screenshot(source, { region } = {}) {
+    if (!this.captureAvailable) return Promise.reject(new Error("this Chromium has no capture API"));
+    return this.broker.screenshot(JSON.stringify(region ? { ...source, region } : source));
+  }
+
+  /** Saves a PNG into ~/Pictures/Screenshots (through the helper). Resolves to its path. */
+  async saveScreenshot(blob) {
+    const response = await fetch(`${HELPER}/v1/screenshots`, { method: "POST", headers: { "Content-Type": "image/png" }, body: blob });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `the helper refused the screenshot (${response.status})`);
+    return body.path;
+  }
+
+  /**
+   * A live MediaStream of `source`, with no picker (a shell may capture anything): for
+   * MediaRecorder, live thumbnails in a <video>, or a region screenshot's preview. `region`
+   * crops it ({ x, y, width, height }, the source's pixels); `size` ({ width, height }, DIPs)
+   * holds a window at that size while the stream runs, letterboxed if the app picks another;
+   * `frameRate` caps it. Every shell sees it as a capture; stopping its track ends it.
+   * Rejects while recording is switched off.
+   * @returns {Promise<MediaStream & { captureId: number }>}
+   */
+  async capture(source, { region = source.region, size, cursor, frameRate } = {}) {
+    const { region: _, ...whole } = source;
+    const { streamId, captureId } = await this._captureCommand("stream", { source: whole, size, cursor });
+    /** @type {Record<string, any>} */
+    const mandatory = { chromeMediaSource: "desktop", chromeMediaSourceId: streamId };
+    if (size && source.type === "window") {
+      const scale = this.windows.get(source.id)?.deviceScaleFactor ?? 1;
+      const width = Math.round(size.width * scale);
+      const height = Math.round(size.height * scale);
+      Object.assign(mandatory, { minWidth: width, maxWidth: width, minHeight: height, maxHeight: height });
+    } else {
+      // The source's own size (the default caps it at 640x480).
+      Object.assign(mandatory, { maxWidth: 8192, maxHeight: 8192 });
+    }
+    if (frameRate) mandatory.maxFrameRate = frameRate;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { mandatory } });
+    const result = region ? new MediaStream([cropTrack(stream.getVideoTracks()[0], region)]) : stream;
+    return Object.assign(result, { captureId });
+  }
+
+  /** Stops capture `id`, whoever started it. */
+  stopCapture(id) {
+    return this._captureCommand("stop", { id });
+  }
+
+  /** Holds capture `id`'s window at `size` ({ width, height }, DIPs), or lets it go (null). */
+  setCaptureSize(id, size) {
+    return this._captureCommand("setSize", { id, ...(size ?? {}) });
+  }
+
+  /** Says this page shows that capture `id` runs (else Ash shows its own indicator). */
+  acknowledgeCapture(id) {
+    return this._captureCommand("acknowledge", { id });
+  }
+
+  /**
+   * Answers capture request `requestId`, which this page took: { sources: [source, ...],
+   * size?, cursor?, persist? }, or null to refuse. Resolves to false if it is over, or the
+   * answer doesn't fit the request.
+   */
+  async answerCapture(requestId, answer) {
+    const ok = await this._captureCommand("answer", { requestId, answer: answer ?? null }).catch(() => false);
+    if (ok) this._captureRequests.delete(requestId);
+    return ok;
+  }
+
+  /** Turns the global switches on or off: { recording?, screenshots? }. */
+  async setCaptureSettings(settings) {
+    this.captureSettings = await this._captureCommand("setSettings", settings);
+    return this.captureSettings;
+  }
+
+  /**
+   * The screenshot UI (Print): freezes this page's output, then lets the user drag out a
+   * region, click one of `targets` (CSS-pixel rects on this page, such as the windows it
+   * shows: [{ source, rect }]), or press Enter or Space for the whole output. Escape
+   * cancels. Resolves to { blob, source } (null if cancelled); `save` (default true) also
+   * writes it to ~/Pictures/Screenshots, as `path`.
+   */
+  async takeScreenshot({ targets = [], save = true } = {}) {
+    // One at a time: Print again while choosing does nothing.
+    if (this._choosingArea) return null;
+    this._choosingArea = true;
+    // The keys (Escape, Enter) are the selector's while it's open: an app
+    // window that has the keyboard gives it up, and gets it back after.
+    const blurred = [];
+    for (const element of document.querySelectorAll("native-window")) {
+      const id = Number(element.getAttribute("window"));
+      if (element.windowFocused || this.windows.get(id)?.focused) {
+        element.blurWindow();
+        blurred.push(element);
+      }
+    }
+    try {
+      return await this._takeScreenshot(targets, save);
+    } finally {
+      this._choosingArea = false;
+      for (const element of blurred) if (element.isConnected) element.focusWindow();
+    }
+  }
+
+  async _takeScreenshot(targets, save) {
+    const output = await this.outputSource();
+    const frozen = await this.screenshot(output);
+    const choice = await new AreaSelector(frozen, targets).choose();
+    if (!choice) return null;
+    let blob;
+    let source;
+    if (choice.target) {
+      source = choice.target.source;
+      blob = await this.screenshot(source);
+    } else {
+      source = choice.region ? { ...output, region: choice.region } : output;
+      blob = choice.region ? await cropPng(frozen, choice.region) : frozen;
+    }
+    const path = save ? await this.saveScreenshot(blob) : undefined;
+    this.dispatchEvent(new CustomEvent("screenshot", { detail: { blob, source, path } }));
+    return { blob, source, path };
   }
 
   // The agent bridge: the helper sends requests over an EventSource and gets
@@ -3153,3 +3397,403 @@ registerTabRequestKind("permission", {
     return true;
   },
 });
+
+// Captures (docs/features/CAPTURE.md).
+//
+// A source is { type: "output" | "window" | "tab", id, region? } (an output's
+// id is a string: display ids don't fit in a JSON number; region { x, y,
+// width, height } in the source's pixels).
+/**
+ * @typedef {{ type: "output" | "window" | "tab", id: number | string,
+ *   region?: { x: number, y: number, width: number, height: number } }} CaptureSource
+ * @typedef {{ id: number, kind: "stream" | "pipewire" | "display", source: CaptureSource,
+ *   label: string, consumer: { kind: "shell" | "app" | "tab" | "agent", name: string,
+ *   appId?: string, pid?: number, thread?: string, tabId?: number, shellId?: string },
+ *   size?: { width: number, height: number }, cursor: string, nodeId?: number,
+ *   startTime: number, acknowledged: boolean }} Capture
+ *   kind: a shell's MediaStream, an app's through the portal (PipeWire), or a tab's
+ *   getDisplayMedia. size: a window held at a capture size. acknowledged: the focused shell
+ *   shows it (else Ash's own indicator does).
+ * @typedef {{ requestId: number, kind: "screencast" | "screenshot", consumer: Capture["consumer"],
+ *   types: string[], multiple: boolean, cursorModes?: string[], signal: AbortSignal,
+ *   answer: (answer: { sources: CaptureSource[], size?: object, cursor?: string,
+ *   persist?: boolean } | null) => Promise<boolean> }} CaptureRequest
+ *   A consumer asks the user to choose what to capture. answer(null) refuses; signal aborts if
+ *   the consumer went away first.
+ *
+ * connect() options:
+ *   capturePicker: false leaves requests to Ash's picker; a function (request: CaptureRequest)
+ *   => boolean draws its own (return true, then answer); left out, the library's picker.
+ *   captureIndicator: false shows nothing (Ash shows its own indicator); a function
+ *   (captures: Capture[]) => boolean shows its own (return true and the library
+ *   acknowledges them); left out, the library's indicator at the top right.
+ * Their look comes from the dialog properties (DIALOG_STYLE) and CAPTURE_STYLE's classes.
+ */
+
+const CAPTURE_STYLE = `@layer plutonium {
+  .plutonium-capture-picker { width: min(560px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 32px);
+    display: flex; flex-direction: column; gap: 8px; }
+  .plutonium-capture-picker[open], .plutonium-capture-picker:popover-open { display: flex; }
+  .plutonium-capture-picker .title { font-weight: 600; }
+  .plutonium-capture-picker .hint { opacity: .75; font-size: .9em; }
+  .plutonium-capture-picker .sources { overflow-y: auto; display: grid; gap: 10px; }
+  .plutonium-capture-picker h3 { margin: 4px 0 0; font-size: .85em; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
+  .plutonium-capture-picker .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .plutonium-capture-picker .source { all: unset; display: grid; gap: 4px; padding: 6px; border-radius: 6px; cursor: default;
+    border: 2px solid transparent; }
+  .plutonium-capture-picker .source:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+  .plutonium-capture-picker .source[aria-pressed="true"] { border-color: var(--plutonium-dialog-accent, AccentColor); }
+  .plutonium-capture-picker .source img, .plutonium-capture-picker .source .blank { width: 100%; aspect-ratio: 16 / 10;
+    object-fit: contain; background: color-mix(in srgb, currentColor 10%, transparent); border-radius: 4px; }
+  .plutonium-capture-picker .source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9em; }
+  .plutonium-capture-picker .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .plutonium-capture-indicator { top: 8px; right: 8px; padding: 6px 8px; display: grid; gap: 4px; }
+  .plutonium-capture-indicator .row { display: flex; align-items: center; gap: 8px; }
+  .plutonium-capture-indicator .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plutonium-capture-dot, #e5484d); }
+  .plutonium-capture-indicator button { font: inherit; }
+  .plutonium-area-selector { position: fixed; inset: 0; z-index: 2147483647; cursor: crosshair; user-select: none;
+    width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+    background: transparent no-repeat 0 0 / 100% 100%; outline: none; overflow: hidden; }
+  .plutonium-area-selector .shade { position: absolute; inset: 0; background: #0006; pointer-events: none; }
+  .plutonium-area-selector .target { position: absolute; outline: 2px solid var(--plutonium-dialog-accent, AccentColor);
+    background: color-mix(in srgb, var(--plutonium-dialog-accent, AccentColor) 15%, transparent); pointer-events: none; }
+  .plutonium-area-selector .region { position: absolute; box-shadow: 0 0 0 100vmax #0006;
+    outline: 1px solid #fff; pointer-events: none; }
+  .plutonium-area-selector .help { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: 6px 12px; border-radius: 6px; background: #000c; color: #fff; font: 13px system-ui, sans-serif; pointer-events: none; }
+}`;
+
+let captureStyle = null;
+
+function ensureCaptureStyle() {
+  if (captureStyle) return;
+  ensureDialogStyle();
+  captureStyle = document.createElement("style");
+  captureStyle.textContent = CAPTURE_STYLE;
+  document.head.append(captureStyle);
+}
+
+/** `track` cropped to `region` (its pixels), as a new track; stopping it stops `track`. */
+function cropTrack(track, region) {
+  const processor = new MediaStreamTrackProcessor({ track });
+  const generator = new MediaStreamTrackGenerator({ kind: "video" });
+  // Even, for the chroma planes.
+  const even = (value) => Math.max(0, Math.floor(value / 2) * 2);
+  processor.readable
+    .pipeThrough(
+      new TransformStream({
+        transform(frame, controller) {
+          const x = Math.min(even(region.x), frame.codedWidth - 2);
+          const y = Math.min(even(region.y), frame.codedHeight - 2);
+          const width = Math.max(2, Math.min(even(region.width), even(frame.codedWidth - x)));
+          const height = Math.max(2, Math.min(even(region.height), even(frame.codedHeight - y)));
+          try {
+            controller.enqueue(new VideoFrame(frame, { visibleRect: { x, y, width, height } }));
+          } finally {
+            frame.close();
+          }
+        },
+      }),
+    )
+    .pipeTo(generator.writable)
+    .catch(() => {});
+  const stop = generator.stop.bind(generator);
+  generator.stop = () => {
+    stop();
+    track.stop();
+  };
+  track.addEventListener("ended", () => stop());
+  return generator;
+}
+
+/** `png` cropped to `region` (its pixels), as a PNG. */
+async function cropPng(png, region) {
+  const bitmap = await createImageBitmap(png, region.x, region.y, region.width, region.height);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return canvas.convertToBlob({ type: "image/png" });
+}
+
+// The library's picker: a dialog in the middle of the page with every
+// source the consumer asked for, by type, with thumbnails. Share answers,
+// Cancel and Escape refuse.
+class CapturePicker {
+  constructor(shell, request) {
+    ensureCaptureStyle();
+    this.shell = shell;
+    this.request = request;
+    this.selected = [];
+    this.urls = [];
+    this.element = null;
+    this.onKey = (event) => {
+      if (event.key === "Escape") this.finish(null);
+      if (event.key === "Enter" && this.selected.length) this.finish(this.answer());
+    };
+  }
+
+  open() {
+    const { request } = this;
+    const element = document.createElement("div");
+    element.className = "plutonium-dialog plutonium-capture-picker";
+    element.popover = "manual";
+    element.setAttribute("role", "dialog");
+    element.style.left = "50%";
+    element.style.top = "50%";
+    element.style.transform = "translate(-50%, -50%)";
+    const who = request.consumer?.name || "An app";
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = request.kind === "screenshot" ? `${who} wants a screenshot` : `${who} wants to share your screen`;
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = request.multiple ? "Choose what to share (one or more)." : "Choose what to share.";
+    this.list = document.createElement("div");
+    this.list.className = "sources";
+    const buttons = document.createElement("div");
+    buttons.className = "buttons";
+    const cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    cancel.onclick = () => this.finish(null);
+    this.share = document.createElement("button");
+    this.share.className = "default";
+    this.share.textContent = request.kind === "screenshot" ? "Take" : "Share";
+    this.share.disabled = true;
+    this.share.onclick = () => this.finish(this.answer());
+    buttons.append(cancel, this.share);
+    element.append(title, hint, this.list, buttons);
+    document.body.append(element);
+    element.showPopover();
+    element.addEventListener("keydown", this.onKey);
+    this.element = element;
+    request.signal.addEventListener("abort", () => this.close());
+    this.fill().catch((error) => console.error("plutonium: listing capture sources", error));
+    // The page is the shell: bring it to the front for the user to answer.
+    this.shell.showShell();
+    this.share.focus();
+    return true;
+  }
+
+  async fill() {
+    const sources = await this.shell.captureSources();
+    const types = this.request.types?.length ? this.request.types : ["output", "window", "tab"];
+    const sections = [
+      ["output", "Screens", sources.outputs, (entry) => entry.name],
+      ["window", "Windows", sources.windows, (entry) => entry.title || entry.appId],
+      ["tab", "Tabs", sources.tabs, (entry) => entry.title || entry.url],
+    ];
+    for (const [type, heading, entries, label] of sections) {
+      if (!types.includes(type) || !entries?.length) continue;
+      const header = document.createElement("h3");
+      header.textContent = heading;
+      const grid = document.createElement("div");
+      grid.className = "grid";
+      for (const entry of entries) grid.append(this.item({ type, id: entry.id }, label(entry) || "(untitled)"));
+      this.list.append(header, grid);
+    }
+    if (!this.list.childElementCount) this.list.textContent = "There's nothing to share.";
+  }
+
+  item(source, label) {
+    const button = document.createElement("button");
+    button.className = "source";
+    button.setAttribute("aria-pressed", "false");
+    const blank = document.createElement("div");
+    blank.className = "blank";
+    const text = document.createElement("span");
+    text.textContent = label;
+    text.title = label;
+    button.append(blank, text);
+    button.onclick = () => this.toggle(source, button);
+    button.ondblclick = () => {
+      if (!this.request.multiple) this.finish(this.answer());
+    };
+    // A thumbnail, if screenshots are on.
+    this.shell
+      .screenshot(source)
+      .then((png) => {
+        if (!this.element) return;
+        const image = document.createElement("img");
+        const url = URL.createObjectURL(png);
+        this.urls.push(url);
+        image.src = url;
+        image.alt = "";
+        blank.replaceWith(image);
+      })
+      .catch(() => {});
+    return button;
+  }
+
+  toggle(source, button) {
+    const key = (entry) => `${entry.source.type}:${entry.source.id}`;
+    const index = this.selected.findIndex((entry) => key(entry) === key({ source }));
+    if (!this.request.multiple) {
+      for (const entry of this.selected) entry.button.setAttribute("aria-pressed", "false");
+      this.selected = [];
+    }
+    if (index >= 0 && this.request.multiple) this.selected.splice(index, 1);
+    else this.selected.push({ source, button });
+    for (const entry of this.selected) entry.button.setAttribute("aria-pressed", "true");
+    if (index >= 0 && this.request.multiple) button.setAttribute("aria-pressed", "false");
+    this.share.disabled = this.selected.length === 0;
+  }
+
+  answer() {
+    return { sources: this.selected.map((entry) => entry.source) };
+  }
+
+  async finish(answer) {
+    const ok = await this.request.answer(answer);
+    if (!ok && answer) return;
+    this.close();
+  }
+
+  close() {
+    if (!this.element) return;
+    this.element.remove();
+    this.element = null;
+    for (const url of this.urls) URL.revokeObjectURL(url);
+  }
+}
+
+// The library's indicator: a strip at the top right of the page, a line per
+// capture with a Stop button, while anything is captured.
+class CaptureIndicator {
+  constructor(shell) {
+    ensureCaptureStyle();
+    this.shell = shell;
+    this.element = null;
+  }
+
+  render(captures) {
+    if (!captures.length) {
+      this.element?.remove();
+      this.element = null;
+      return;
+    }
+    if (!this.element) {
+      this.element = document.createElement("div");
+      this.element.className = "plutonium-dialog plutonium-capture-indicator";
+      this.element.popover = "manual";
+      this.element.setAttribute("role", "status");
+      document.body.append(this.element);
+      this.element.showPopover();
+    }
+    this.element.replaceChildren(
+      ...captures.map((capture) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        const text = document.createElement("span");
+        const who = capture.consumer?.name || "An app";
+        text.textContent = `${who} is capturing ${capture.label}`;
+        const stop = document.createElement("button");
+        stop.textContent = "Stop";
+        stop.onclick = () => this.shell.stopCapture(capture.id).catch(() => {});
+        row.append(dot, text, stop);
+        return row;
+      }),
+    );
+  }
+}
+
+// The screenshot UI: the frozen output under a shade; dragging selects a
+// region, a click picks the target under the pointer, Enter or Space the
+// whole output, Escape cancels.
+class AreaSelector {
+  constructor(png, targets) {
+    ensureCaptureStyle();
+    this.png = png;
+    this.targets = targets;
+  }
+
+  choose() {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(this.png);
+      const element = document.createElement("div");
+      element.className = "plutonium-area-selector";
+      element.tabIndex = -1;
+      element.style.backgroundImage = `url("${url}")`;
+      const shade = document.createElement("div");
+      shade.className = "shade";
+      const highlight = document.createElement("div");
+      highlight.className = "target";
+      highlight.hidden = true;
+      const region = document.createElement("div");
+      region.className = "region";
+      region.hidden = true;
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = "Drag to select · click a window · Enter for the whole screen · Esc to cancel";
+      element.append(shade, highlight, region, help);
+      // Above everything the page has, popovers included.
+      element.popover = "manual";
+      document.body.append(element);
+      element.showPopover();
+      element.focus();
+
+      const scale = window.devicePixelRatio || 1;
+      let start = null;
+      const done = (choice) => {
+        element.remove();
+        URL.revokeObjectURL(url);
+        resolve(choice);
+      };
+      const targetAt = (x, y) =>
+        [...this.targets].reverse().find(({ rect }) => x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom);
+      const place = (box, rect) => {
+        Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+        box.hidden = false;
+      };
+      element.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        element.setPointerCapture(event.pointerId);
+        start = { x: event.clientX, y: event.clientY };
+      });
+      element.addEventListener("pointermove", (event) => {
+        if (!start) {
+          const target = targetAt(event.clientX, event.clientY);
+          shade.hidden = false;
+          if (target) place(highlight, target.rect);
+          else highlight.hidden = true;
+          return;
+        }
+        const left = Math.min(start.x, event.clientX);
+        const top = Math.min(start.y, event.clientY);
+        highlight.hidden = true;
+        shade.hidden = true;
+        place(region, { left, top, width: Math.abs(event.clientX - start.x), height: Math.abs(event.clientY - start.y) });
+      });
+      element.addEventListener("pointerup", (event) => {
+        if (!start) return;
+        const width = Math.abs(event.clientX - start.x);
+        const height = Math.abs(event.clientY - start.y);
+        if (width < 4 && height < 4) {
+          // A click: the target under it, else nothing.
+          const target = targetAt(event.clientX, event.clientY);
+          start = null;
+          region.hidden = true;
+          shade.hidden = false;
+          if (target) done({ target });
+          return;
+        }
+        const left = Math.min(start.x, event.clientX);
+        const top = Math.min(start.y, event.clientY);
+        done({
+          region: {
+            x: Math.round(left * scale),
+            y: Math.round(top * scale),
+            width: Math.max(1, Math.round(width * scale)),
+            height: Math.max(1, Math.round(height * scale)),
+          },
+        });
+      });
+      element.addEventListener("keydown", (event) => {
+        event.preventDefault();
+        if (event.key === "Escape") done(null);
+        if (event.key === "Enter" || event.key === " ") done({});
+      });
+    });
+  }
+}

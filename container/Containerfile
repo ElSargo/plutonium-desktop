@@ -23,11 +23,13 @@ RUN curl -fsSL "https://chromium.googlesource.com/chromium/src/+/${CHROMIUM_BASE
 # - Xvfb, xdotool, ImageMagick, x11-utils: private X11 sessions and their tests.
 # - python3-websockets: tools/cdp.py (DevTools).
 # - ccache: CCACHE=1 builds.
+# - libpipewire: Ash's PipeWire video nodes (screen capture), loaded at run time.
 RUN apt-get install -y --no-install-recommends \
       libinput-dev libevdev-dev libmtdev-dev libwacom-dev libudev-dev libgudev-1.0-dev \
       mesa-vulkan-drivers mesa-va-drivers va-driver-all libgl1-mesa-dri \
       xvfb xauth xdotool x11-utils x11-xserver-utils imagemagick \
       python3-websockets ccache strace procps psmisc less \
+      libpipewire-0.3-0t64 libpipewire-0.3-modules libspa-0.2-modules \
  && rm -rf /var/lib/apt/lists/*
 
 CMD ["sleep", "infinity"]

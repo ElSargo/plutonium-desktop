@@ -1,0 +1,3438 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sat, 24 Oct 2026 22:20:36 +1300
+Subject: [PATCH 47/49] Plutonium: screen capture for shells, capture requests
+ to the focused shell
+
+EXO-CAPTURE (docs/features/CAPTURE.md): PlutoniumCapture, the capture
+primitive. Sources are outputs (from the display list), windows (also
+parked) and tabs, each with an optional region.
+
+- navigator.windowBroker.screenshot(source) -> PNG, and
+  captureCommand(): "sources", "list", "settings", "setSettings",
+  "stream" (a desktop stream id for the shell's getUserMedia(): a
+  MediaStream of any source, no picker), "stop", "acknowledge",
+  "setSize", "answer".
+- Capture requests (the portal's, over the DevTools Plutonium domain's
+  captureCommand "request") go to the focused shell as a cancelable
+  "capturerequest"; if it doesn't take it or goes away, Ash's own picker
+  asks. Every shell gets "capturestart", "capturechange" and
+  "capturestop" for every capture, and any shell can stop one. If the
+  focused shell doesn't acknowledge a capture within 2 s, Ash shows its own
+  indicator, with Stop buttons.
+- Two global switches in local state refuse recording and screenshots.
+- A capture can hold a window at a size (EmbeddedWindows::
+  SetCaptureSize()), whatever its elements ask for; a captured window
+  keeps drawing at full rate while parked.
+- A shell's stream starts and stops with its MediaStreamUI, without
+  Chrome's screen capture notification.
+---
+ chrome/browser/BUILD.gn                       |    6 +
+ chrome/browser/devtools/cros_protocol.pdl     |   31 +
+ .../devtools/inspector_protocol_config.json   |    2 +-
+ .../devtools/protocol/plutonium_handler.cc    |   88 ++
+ .../devtools/protocol/plutonium_handler.h     |   17 +-
+ .../webrtc/desktop_capture_access_handler.cc  |   32 +-
+ chrome/browser/plutonium_capture.cc           | 1168 +++++++++++++++++
+ chrome/browser/plutonium_capture.h            |  300 +++++
+ chrome/browser/plutonium_shell.cc             |  178 ++-
+ chrome/browser/plutonium_shell.h              |   14 +
+ chrome/browser/prefs/browser_prefs.cc         |    2 +
+ .../browser/ui/ash/main_extra_parts/BUILD.gn  |    2 +
+ .../chrome_browser_main_extra_parts_ash.cc    |    3 +
+ .../chrome_browser_main_extra_parts_ash.h     |    3 +
+ .../main_extra_parts/plutonium_capture_ui.cc  |  437 ++++++
+ .../main_extra_parts/plutonium_capture_ui.h   |   52 +
+ components/exo/embedded_windows.cc            |   41 +-
+ components/exo/embedded_windows.h             |   13 +
+ .../mojom/native_window/window_broker.mojom   |   47 +
+ .../renderer/bindings/generated_in_core.gni   |    2 +
+ .../blink/renderer/bindings/idl_in_core.gni   |    1 +
+ .../core/events/event_type_names.json5        |    7 +
+ .../blink/renderer/core/html/build.gni        |    2 +
+ .../core/html/native_window_broker.cc         |  176 ++-
+ .../renderer/core/html/native_window_broker.h |   37 +-
+ .../core/html/native_window_broker.idl        |   24 +
+ .../renderer/core/html/shell_capture_event.cc |   40 +
+ .../renderer/core/html/shell_capture_event.h  |   39 +
+ .../core/html/shell_capture_event.idl         |   24 +
+ 29 files changed, 2777 insertions(+), 11 deletions(-)
+ create mode 100644 chrome/browser/plutonium_capture.cc
+ create mode 100644 chrome/browser/plutonium_capture.h
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.cc
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h
+ create mode 100644 third_party/blink/renderer/core/html/shell_capture_event.cc
+ create mode 100644 third_party/blink/renderer/core/html/shell_capture_event.h
+ create mode 100644 third_party/blink/renderer/core/html/shell_capture_event.idl
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 26dfb1e6b2..69f1a63411 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -778,6 +778,7 @@ if (is_chromeos) {
+       "exo_parts.h",
+       "exo_window_broker.h",
+       "plutonium_agent.h",
++      "plutonium_capture.h",
+       "plutonium_context_menu.h",
+       "plutonium_find.h",
+       "plutonium_downloads.h",
+@@ -796,6 +797,7 @@ if (is_chromeos) {
+       "exo_parts.cc",
+       "exo_window_broker.cc",
+       "plutonium_agent.cc",
++      "plutonium_capture.cc",
+       "plutonium_context_menu.cc",
+       "plutonium_find.cc",
+       "plutonium_downloads.cc",
+@@ -853,6 +855,10 @@ if (is_chromeos) {
+       "//ui/compositor",
+       "//ui/events",
+       "//ui/events/blink",
++
++      # EXO-CAPTURE: plutonium_capture.cc.
++      "//ui/display",
++      "//ui/snapshot",
+     ]
+   }
+ 
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index 9abc60318c..03aaff5eec 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -292,6 +292,37 @@ experimental domain Plutonium
+     parameters
+       integer id
+ 
++  # EXO-CAPTURE (docs/features/CAPTURE.md): runs capture command |command|
++  # with |argsJson| (a JSON object), as a shell's captureCommand() does:
++  # "sources", "list", "settings", "stop", "setSize", and for the helper's
++  # portal backend "request" (asks the focused shell, else Ash's picker; the
++  # answer, or null if the user refused) and "cancelRequest" {handle}.
++  command captureCommand
++    parameters
++      string command
++      optional string argsJson
++    returns
++      # Its result, as JSON.
++      string resultJson
++
++  # EXO-CAPTURE: a PNG of a source ({type: "output" | "window" | "tab", id,
++  # region?}), refused while screenshots are switched off.
++  command screenshot
++    parameters
++      string sourceJson
++    returns
++      binary data
++      integer width
++      integer height
++
++  # EXO-CAPTURE: a capture started, changed or stopped (|json| is the
++  # capture), or the capture settings changed (|json| is them).
++  event captureEvent
++    parameters
++      # "start", "change", "stop" or "settings".
++      string type
++      string json
++
+   event tabAdded
+     parameters
+       Tab tab
+diff --git a/chrome/browser/devtools/inspector_protocol_config.json b/chrome/browser/devtools/inspector_protocol_config.json
+index faae493904..885d1c9fba 100644
+--- a/chrome/browser/devtools/inspector_protocol_config.json
++++ b/chrome/browser/devtools/inspector_protocol_config.json
+@@ -39,7 +39,7 @@
+             },
+             {
+                 "domain": "Plutonium",
+-                "async": [ "captureTab", "captureWindow", "tabCommand", "downloadCommand" ]
++                "async": [ "captureTab", "captureWindow", "tabCommand", "downloadCommand", "captureCommand", "screenshot" ]
+             },
+             {
+                 "domain": "Extensions",
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+index 7a2da2cdc2..2f78f3afee 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.cc
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -7,6 +7,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/plutonium_agent.h"
+@@ -197,6 +198,12 @@ Response PlutoniumHandler::Enable() {
+     OnDownloadAdded(download);
+   }
+   downloads_observation_.Observe(downloads);
++  // EXO-CAPTURE: the settings, then the captures there are.
++  OnCaptureSettingsChanged(PlutoniumCapture::Get()->GetSettings());
++  for (const base::DictValue& capture : PlutoniumCapture::Get()->GetCaptures()) {
++    OnCaptureStarted(capture.FindInt("id").value_or(0), capture);
++  }
++  capture_observation_.Observe(PlutoniumCapture::Get());
+   return Response::Success();
+ }
+ 
+@@ -205,6 +212,7 @@ Response PlutoniumHandler::Disable() {
+   broker_observation_.Reset();
+   tabs_observation_.Reset();
+   downloads_observation_.Reset();
++  capture_observation_.Reset();
+   screencasts_.clear();
+   awake_tabs_.clear();
+   awake_windows_.clear();
+@@ -704,3 +712,83 @@ void PlutoniumHandler::OnDownloadChanged(const base::DictValue& download) {
+ void PlutoniumHandler::OnDownloadRemoved(int32_t id) {
+   frontend_->DownloadRemoved(id);
+ }
++
++void PlutoniumHandler::CaptureCommand(
++    const std::string& command,
++    std::optional<std::string> args_json,
++    std::unique_ptr<CaptureCommandCallback> callback) {
++  PlutoniumCapture::Get()->RunCommand(
++      command, args_json.value_or(std::string()), /*frame=*/nullptr,
++      /*taker=*/0,
++      base::BindOnce(
++          [](std::unique_ptr<CaptureCommandCallback> callback, bool ok,
++             const std::string& result) {
++            if (!ok) {
++              callback->sendFailure(Response::InvalidParams(result));
++              return;
++            }
++            callback->sendSuccess(result);
++          },
++          std::move(callback)));
++}
++
++void PlutoniumHandler::Screenshot(const std::string& source_json,
++                                  std::unique_ptr<ScreenshotCallback> callback) {
++  std::optional<base::Value> parsed = base::JSONReader::Read(
++      source_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
++  std::optional<PlutoniumCapture::Source> source =
++      parsed ? PlutoniumCapture::Source::FromValue(*parsed) : std::nullopt;
++  if (!source) {
++    callback->sendFailure(Response::InvalidParams("Which source?"));
++    return;
++  }
++  PlutoniumCapture::Get()->Screenshot(
++      *source,
++      base::BindOnce(
++          [](std::unique_ptr<ScreenshotCallback> callback,
++             const SkBitmap& bitmap, const std::string& error) {
++            if (bitmap.drawsNothing()) {
++              callback->sendFailure(Response::ServerError(error));
++              return;
++            }
++            std::optional<std::vector<uint8_t>> data =
++                Encode(bitmap, /*jpeg=*/false, 0);
++            if (!data) {
++              callback->sendFailure(
++                  Response::ServerError("Couldn't encode the image"));
++              return;
++            }
++            callback->sendSuccess(
++                protocol::Binary::fromVector(std::move(*data)), bitmap.width(),
++                bitmap.height());
++          },
++          std::move(callback)));
++}
++
++void PlutoniumHandler::OnCaptureStarted(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("start", json);
++}
++
++void PlutoniumHandler::OnCaptureChanged(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("change", json);
++}
++
++void PlutoniumHandler::OnCaptureStopped(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("stop", json);
++}
++
++void PlutoniumHandler::OnCaptureSettingsChanged(
++    const base::DictValue& settings) {
++  std::string json;
++  base::JSONWriter::Write(settings, &json);
++  frontend_->CaptureEvent("settings", json);
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+index 78e98e96f1..18c7d8fcfb 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.h
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -15,6 +15,7 @@
+ #include "base/scoped_observation.h"
+ #include "chrome/browser/devtools/protocol/plutonium.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_capture.h"
+ #include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ 
+@@ -31,7 +32,8 @@ class WindowScreencast;
+ class PlutoniumHandler : public protocol::Plutonium::Backend,
+                          public ExoWindowBroker::Observer,
+                          public PlutoniumTabs::Observer,
+-                         public PlutoniumDownloads::Observer {
++                         public PlutoniumDownloads::Observer,
++                         public PlutoniumCapture::Observer {
+  public:
+   explicit PlutoniumHandler(protocol::UberDispatcher* dispatcher);
+   PlutoniumHandler(const PlutoniumHandler&) = delete;
+@@ -105,6 +107,11 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       std::optional<int> max_height) override;
+   protocol::Response StopWindowScreencast(int id) override;
+   protocol::Response WindowScreencastFrameAck(int id, int session_id) override;
++  void CaptureCommand(const std::string& command,
++                      std::optional<std::string> args_json,
++                      std::unique_ptr<CaptureCommandCallback> callback) override;
++  void Screenshot(const std::string& source_json,
++                  std::unique_ptr<ScreenshotCallback> callback) override;
+ 
+   // ExoWindowBroker::Observer:
+   void OnWindowAdded(const ExoWindowBroker::WindowInfo& window) override;
+@@ -121,6 +128,12 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+   void OnDownloadChanged(const base::DictValue& download) override;
+   void OnDownloadRemoved(int32_t id) override;
+ 
++  // PlutoniumCapture::Observer:
++  void OnCaptureStarted(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureChanged(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureStopped(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureSettingsChanged(const base::DictValue& settings) override;
++
+  private:
+   struct Screencast {
+     Screencast();
+@@ -147,6 +160,8 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       tabs_observation_{this};
+   base::ScopedObservation<PlutoniumDownloads, PlutoniumDownloads::Observer>
+       downloads_observation_{this};
++  base::ScopedObservation<PlutoniumCapture, PlutoniumCapture::Observer>
++      capture_observation_{this};
+   std::map<int32_t, Screencast> screencasts_;
+   // Tabs kept awake (SetTabAwake): their capture handles.
+   std::map<int32_t, base::ScopedClosureRunner> awake_tabs_;
+diff --git a/chrome/browser/media/webrtc/desktop_capture_access_handler.cc b/chrome/browser/media/webrtc/desktop_capture_access_handler.cc
+index 02e25b87e9..7d7492007c 100644
+--- a/chrome/browser/media/webrtc/desktop_capture_access_handler.cc
++++ b/chrome/browser/media/webrtc/desktop_capture_access_handler.cc
+@@ -25,6 +25,9 @@
+ #include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
+ #include "chrome/browser/media/webrtc/native_desktop_media_list.h"
+ #include "chrome/browser/media/webrtc/tab_desktop_media_list.h"
++#if BUILDFLAG(IS_CHROMEOS)
++#include "chrome/browser/plutonium_capture.h"
++#endif
+ #include "chrome/browser/ui/screen_capture_notification_ui.h"
+ #include "chrome/browser/ui/simple_message_box.h"
+ #include "chrome/browser/ui/ui_features.h"
+@@ -806,6 +809,16 @@ void DesktopCaptureAccessHandler::AcceptRequest(
+   CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M161);
+   CHECK(web_contents, base::NotFatalUntil::M161);
+ 
++#if BUILDFLAG(IS_CHROMEOS)
++  // PLUTONIUM (EXO-CAPTURE): a stream a shell asked for (PlutoniumCapture's
++  // "stream"): the shells show it rather than Chrome's notification, and it
++  // is one of the captures every shell sees, running as long as the stream.
++  const int32_t plutonium_capture_id =
++      PlutoniumCapture::Get()->TakeStream(pending_request->request);
++#else
++  const int32_t plutonium_capture_id = 0;
++#endif
++
+   // TODO(crbug.com/40216442): Generalize to multiple streams.
+   // Create the callback before `pending_request` is moved to ensure that we
+   // have access to the `pending_request`'s variables' values.
+@@ -816,7 +829,7 @@ void DesktopCaptureAccessHandler::AcceptRequest(
+       pending_request->request.disable_local_echo,
+       /*suppress_local_audio_playback=*/false,
+       /*restrict_own_audio=*/false,
+-      pending_request->should_display_notification,
++      pending_request->should_display_notification && !plutonium_capture_id,
+       pending_request->application_title,
+       pending_request->request.captured_surface_control_active);
+ 
+@@ -827,6 +840,23 @@ void DesktopCaptureAccessHandler::AcceptRequest(
+       &DesktopCaptureAccessHandler::OnDesktopCaptureDevicesObtained,
+       base::Unretained(this), web_contents->GetWeakPtr(),
+       std::move(pending_request), media_id);
++#if BUILDFLAG(IS_CHROMEOS)
++  if (plutonium_capture_id) {
++    on_desktop_capture_devices_obtained_callback = base::BindOnce(
++        [](int32_t id,
++           base::OnceCallback<void(blink::mojom::StreamDevices,
++                                   std::unique_ptr<content::MediaStreamUI>)>
++               callback,
++           blink::mojom::StreamDevices devices,
++           std::unique_ptr<content::MediaStreamUI> ui) {
++          std::move(callback).Run(
++              std::move(devices),
++              PlutoniumCapture::Get()->WrapStreamUI(id, std::move(ui)));
++        },
++        plutonium_capture_id,
++        std::move(on_desktop_capture_devices_obtained_callback));
++  }
++#endif
+   std::move(get_devices_for_desktop_capture_callback)
+       .Run(std::move(on_desktop_capture_devices_obtained_callback));
+ }
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+new file mode 100644
+index 0000000000..f17a90a938
+--- /dev/null
++++ b/chrome/browser/plutonium_capture.cc
+@@ -0,0 +1,1168 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_capture.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "ash/shell.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/notreached.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "components/exo/embedded_windows.h"
++#include "components/prefs/pref_registry_simple.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/desktop_streams_registry.h"
++#include "content/public/browser/media_stream_request.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_media_capture_id.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/aura/window.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/image/image.h"
++#include "ui/snapshot/snapshot.h"
++#include "url/origin.h"
++
++namespace {
++
++// A shell has this long to call getUserMedia() with a stream id.
++constexpr base::TimeDelta kStreamIdLifetime = base::Seconds(10);
++
++constexpr char kRecordingOff[] =
++    "Recording is switched off (Plutonium's capture settings)";
++constexpr char kScreenshotsOff[] =
++    "Screenshots are switched off (Plutonium's capture settings)";
++constexpr char kNoSource[] = "No such source";
++
++std::optional<int64_t> IdOf(const base::Value* value) {
++  if (!value) {
++    return std::nullopt;
++  }
++  if (value->is_int()) {
++    return value->GetInt();
++  }
++  if (value->is_double()) {
++    return static_cast<int64_t>(value->GetDouble());
++  }
++  int64_t id = 0;
++  if (value->is_string() && base::StringToInt64(value->GetString(), &id)) {
++    return id;
++  }
++  return std::nullopt;
++}
++
++const char* TypeName(PlutoniumCapture::Source::Type type) {
++  switch (type) {
++    case PlutoniumCapture::Source::Type::kOutput:
++      return "output";
++    case PlutoniumCapture::Source::Type::kWindow:
++      return "window";
++    case PlutoniumCapture::Source::Type::kTab:
++      return "tab";
++  }
++  NOTREACHED();
++}
++
++std::optional<display::Display> FindDisplay(int64_t id) {
++  for (const display::Display& display :
++       display::Screen::Get()->GetAllDisplays()) {
++    if (display.id() == id) {
++      return display;
++    }
++  }
++  return std::nullopt;
++}
++
++std::string DisplayName(const display::Display& display, size_t index) {
++  if (!display.label().empty()) {
++    return display.label();
++  }
++  return "Display " + base::NumberToString(index + 1);
++}
++
++// |bitmap| cropped to |region| (its pixels; empty: all of it). Empty if
++// |region| is outside it.
++SkBitmap Crop(const SkBitmap& bitmap, const gfx::Rect& region) {
++  if (region.IsEmpty() || bitmap.drawsNothing()) {
++    return bitmap;
++  }
++  gfx::Rect crop = region;
++  crop.Intersect(gfx::Rect(bitmap.width(), bitmap.height()));
++  SkBitmap cropped;
++  if (crop.IsEmpty() ||
++      !bitmap.extractSubset(&cropped, SkIRect::MakeXYWH(crop.x(), crop.y(),
++                                                         crop.width(),
++                                                         crop.height()))) {
++    return SkBitmap();
++  }
++  return cropped;
++}
++
++std::string ToJson(const base::Value& value) {
++  std::string json;
++  base::JSONWriter::Write(value, &json);
++  return json;
++}
++
++}  // namespace
++
++PlutoniumCapture::Source::Source() = default;
++PlutoniumCapture::Source::Source(const Source&) = default;
++PlutoniumCapture::Source& PlutoniumCapture::Source::operator=(const Source&) =
++    default;
++PlutoniumCapture::Source::~Source() = default;
++bool PlutoniumCapture::Source::operator==(const Source&) const = default;
++
++// static
++std::optional<PlutoniumCapture::Source> PlutoniumCapture::Source::FromValue(
++    const base::Value& value) {
++  if (!value.is_dict()) {
++    return std::nullopt;
++  }
++  const base::DictValue& dict = value.GetDict();
++  const std::string* type = dict.FindString("type");
++  std::optional<int64_t> id = IdOf(dict.Find("id"));
++  if (!type || !id) {
++    return std::nullopt;
++  }
++  Source source;
++  if (*type == "output") {
++    source.type = Type::kOutput;
++  } else if (*type == "window") {
++    source.type = Type::kWindow;
++  } else if (*type == "tab") {
++    source.type = Type::kTab;
++  } else {
++    return std::nullopt;
++  }
++  source.id = *id;
++  if (const base::DictValue* region = dict.FindDict("region")) {
++    std::optional<int> x = region->FindInt("x");
++    std::optional<int> y = region->FindInt("y");
++    std::optional<int> width = region->FindInt("width");
++    std::optional<int> height = region->FindInt("height");
++    if (!x || !y || !width || !height || *width <= 0 || *height <= 0) {
++      return std::nullopt;
++    }
++    source.region = gfx::Rect(*x, *y, *width, *height);
++  }
++  return source;
++}
++
++base::DictValue PlutoniumCapture::Source::ToValue() const {
++  base::DictValue value;
++  value.Set("type", TypeName(type));
++  // Display ids don't fit in a JSON number.
++  if (type == Type::kOutput) {
++    value.Set("id", base::NumberToString(id));
++  } else {
++    value.Set("id", static_cast<int>(id));
++  }
++  if (!region.IsEmpty()) {
++    value.Set("region", base::DictValue()
++                            .Set("x", region.x())
++                            .Set("y", region.y())
++                            .Set("width", region.width())
++                            .Set("height", region.height()));
++  }
++  return value;
++}
++
++// A shell's stream's UI: Chrome's own (the capture indicator's), told that
++// the stream runs and stops, so the capture does too.
++class PlutoniumCapture::StreamUI : public content::MediaStreamUI {
++ public:
++  StreamUI(int32_t id, std::unique_ptr<content::MediaStreamUI> ui)
++      : id_(id), ui_(std::move(ui)) {}
++  StreamUI(const StreamUI&) = delete;
++  StreamUI& operator=(const StreamUI&) = delete;
++  ~StreamUI() override { PlutoniumCapture::Get()->Remove(id_); }
++
++  // content::MediaStreamUI:
++  gfx::NativeViewId OnStarted(
++      base::RepeatingClosure stop,
++      SourceCallback source,
++      const std::string& label,
++      std::vector<content::DesktopMediaID> screen_capture_ids,
++      StateChangeCallback state_change) override {
++    PlutoniumCapture::Get()->OnStreamStarted(id_, stop);
++    if (!ui_) {
++      return 0;
++    }
++    return ui_->OnStarted(std::move(stop), std::move(source), label,
++                          std::move(screen_capture_ids),
++                          std::move(state_change));
++  }
++  void OnDeviceStoppedForSourceChange(
++      const std::string& label,
++      const content::DesktopMediaID& old_media_id,
++      const content::DesktopMediaID& new_media_id,
++      bool captured_surface_control_active) override {
++    if (ui_) {
++      ui_->OnDeviceStoppedForSourceChange(label, old_media_id, new_media_id,
++                                          captured_surface_control_active);
++    }
++  }
++  void OnDeviceStopped(const std::string& label,
++                       const content::DesktopMediaID& media_id) override {
++    if (ui_) {
++      ui_->OnDeviceStopped(label, media_id);
++    }
++    PlutoniumCapture::Get()->Remove(id_);
++  }
++  void OnRegionCaptureRectChanged(
++      const std::optional<gfx::Rect>& region_capture_rect) override {
++    if (ui_) {
++      ui_->OnRegionCaptureRectChanged(region_capture_rect);
++    }
++  }
++  void SetFocus(const content::DesktopMediaID& media_id,
++                bool focus,
++                bool is_from_microtask,
++                bool is_from_timer) override {
++    if (ui_) {
++      ui_->SetFocus(media_id, focus, is_from_microtask, is_from_timer);
++    }
++  }
++
++ private:
++  const int32_t id_;
++  std::unique_ptr<content::MediaStreamUI> ui_;
++};
++
++PlutoniumCapture::Capture::Capture() = default;
++PlutoniumCapture::Capture::~Capture() = default;
++PlutoniumCapture::PendingRequest::PendingRequest() = default;
++PlutoniumCapture::PendingRequest::~PendingRequest() = default;
++
++PlutoniumCapture::PlutoniumCapture() {
++  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++    shells_observation_.Observe(shells);
++  }
++}
++
++PlutoniumCapture::~PlutoniumCapture() = default;
++
++// static
++PlutoniumCapture* PlutoniumCapture::Get() {
++  static base::NoDestructor<PlutoniumCapture> instance;
++  return instance.get();
++}
++
++// static
++void PlutoniumCapture::RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
++  registry->RegisterDictionaryPref(kSettingsPref);
++}
++
++// static
++content::WebContents* PlutoniumCapture::FocusedShell() {
++  // One shell is visible at a time; it's the one the user has in front.
++  return PlutoniumTabs::Get()->shell();
++}
++
++void PlutoniumCapture::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void PlutoniumCapture::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void PlutoniumCapture::SetUi(Ui* ui) {
++  ui_ = ui;
++  if (PlutoniumShells* shells = PlutoniumShells::Get();
++      shells && !shells_observation_.IsObserving()) {
++    shells_observation_.Observe(shells);
++  }
++}
++
++bool PlutoniumCapture::recording_allowed() const {
++  return GetSettings().FindBool("recording").value_or(true);
++}
++
++bool PlutoniumCapture::screenshots_allowed() const {
++  return GetSettings().FindBool("screenshots").value_or(true);
++}
++
++base::DictValue PlutoniumCapture::GetSettings() const {
++  bool recording = true;
++  bool screenshots = true;
++  if (PrefService* local_state = g_browser_process->local_state()) {
++    const base::DictValue& settings = local_state->GetDict(kSettingsPref);
++    recording = settings.FindBool("recording").value_or(true);
++    screenshots = settings.FindBool("screenshots").value_or(true);
++  }
++  return base::DictValue()
++      .Set("recording", recording)
++      .Set("screenshots", screenshots);
++}
++
++base::expected<base::Value, std::string> PlutoniumCapture::SetSettings(
++    const base::DictValue& args) {
++  PrefService* local_state = g_browser_process->local_state();
++  if (!local_state) {
++    return base::unexpected("No settings");
++  }
++  base::DictValue settings = GetSettings();
++  for (const char* key : {"recording", "screenshots"}) {
++    if (std::optional<bool> value = args.FindBool(key)) {
++      settings.Set(key, *value);
++    }
++  }
++  local_state->SetDict(kSettingsPref, settings.Clone());
++  VLOG(1) << "EXO-CAPTURE settings " << settings.DebugString();
++  NotifySettings();
++  // Switching recording off ends what records now.
++  if (!recording_allowed()) {
++    std::vector<int32_t> ids;
++    for (const auto& [id, capture] : captures_) {
++      ids.push_back(id);
++    }
++    for (int32_t id : ids) {
++      Stop(id);
++    }
++  }
++  return base::Value(std::move(settings));
++}
++
++void PlutoniumCapture::NotifySettings() {
++  const base::DictValue settings = GetSettings();
++  for (Observer& observer : observers_) {
++    observer.OnCaptureSettingsChanged(settings);
++  }
++}
++
++base::DictValue PlutoniumCapture::GetSources() const {
++  base::ListValue outputs;
++  const std::vector<display::Display>& displays =
++      display::Screen::Get()->GetAllDisplays();
++  const int64_t primary = display::Screen::Get()->GetPrimaryDisplay().id();
++  for (size_t i = 0; i < displays.size(); ++i) {
++    const display::Display& display = displays[i];
++    outputs.Append(
++        base::DictValue()
++            .Set("id", base::NumberToString(display.id()))
++            .Set("name", DisplayName(display, i))
++            .Set("width", display.GetSizeInPixel().width())
++            .Set("height", display.GetSizeInPixel().height())
++            .Set("scaleFactor", display.device_scale_factor())
++            .Set("primary", display.id() == primary));
++  }
++  base::ListValue windows;
++  if (ExoWindowBroker* broker = ExoWindowBroker::Get()) {
++    for (const ExoWindowBroker::WindowInfo& window : broker->GetWindows()) {
++      base::ListValue tags;
++      for (const std::string& tag : window.tags) {
++        tags.Append(tag);
++      }
++      windows.Append(base::DictValue()
++                         .Set("id", window.id)
++                         .Set("title", base::UTF16ToUTF8(window.title))
++                         .Set("appId", window.app_id)
++                         .Set("width", window.size.width())
++                         .Set("height", window.size.height())
++                         .Set("tags", std::move(tags)));
++    }
++  }
++  base::ListValue tabs;
++  for (const PlutoniumTabs::TabInfo& tab : PlutoniumTabs::Get()->GetTabs()) {
++    base::ListValue tags;
++    for (const std::string& tag : tab.tags) {
++      tags.Append(tag);
++    }
++    tabs.Append(base::DictValue()
++                    .Set("id", tab.id)
++                    .Set("title", base::UTF16ToUTF8(tab.title))
++                    .Set("url", tab.url.spec())
++                    .Set("tags", std::move(tags)));
++  }
++  return base::DictValue()
++      .Set("outputs", std::move(outputs))
++      .Set("windows", std::move(windows))
++      .Set("tabs", std::move(tabs));
++}
++
++std::string PlutoniumCapture::LabelOf(const Source& source) const {
++  switch (source.type) {
++    case Source::Type::kOutput: {
++      const std::vector<display::Display>& displays =
++          display::Screen::Get()->GetAllDisplays();
++      for (size_t i = 0; i < displays.size(); ++i) {
++        if (displays[i].id() == source.id) {
++          return DisplayName(displays[i], i);
++        }
++      }
++      return "Display";
++    }
++    case Source::Type::kWindow: {
++      ExoWindowBroker* broker = ExoWindowBroker::Get();
++      std::optional<ExoWindowBroker::WindowInfo> window =
++          broker ? broker->GetWindow(static_cast<int32_t>(source.id))
++                 : std::nullopt;
++      if (!window) {
++        return "Window";
++      }
++      return window->title.empty() ? window->app_id
++                                   : base::UTF16ToUTF8(window->title);
++    }
++    case Source::Type::kTab: {
++      std::optional<PlutoniumTabs::TabInfo> tab =
++          PlutoniumTabs::Get()->GetTab(static_cast<int32_t>(source.id));
++      if (!tab) {
++        return "Tab";
++      }
++      return tab->title.empty() ? tab->url.spec()
++                                : base::UTF16ToUTF8(tab->title);
++    }
++  }
++  NOTREACHED();
++}
++
++content::DesktopMediaID PlutoniumCapture::ToMediaId(
++    const Source& source) const {
++  switch (source.type) {
++    case Source::Type::kOutput: {
++      aura::Window* root = ash::Shell::HasInstance()
++                               ? ash::Shell::GetRootWindowForDisplayId(
++                                     source.id)
++                               : nullptr;
++      if (!root) {
++        return content::DesktopMediaID();
++      }
++      return content::DesktopMediaID::RegisterNativeWindow(
++          content::DesktopMediaID::TYPE_SCREEN, root);
++    }
++    case Source::Type::kWindow: {
++      aura::Window* window = exo::EmbeddedWindows::Get()->GetCaptureWindow(
++          static_cast<int32_t>(source.id));
++      if (!window) {
++        return content::DesktopMediaID();
++      }
++      return content::DesktopMediaID::RegisterNativeWindow(
++          content::DesktopMediaID::TYPE_WINDOW, window);
++    }
++    case Source::Type::kTab: {
++      content::WebContents* contents =
++          PlutoniumTabs::Get()->GetContents(static_cast<int32_t>(source.id));
++      content::RenderFrameHost* frame =
++          contents ? contents->GetPrimaryMainFrame() : nullptr;
++      if (!frame) {
++        return content::DesktopMediaID();
++      }
++      return content::DesktopMediaID(
++          content::DesktopMediaID::TYPE_WEB_CONTENTS,
++          content::DesktopMediaID::kNullId,
++          content::WebContentsMediaCaptureId(
++              frame->GetProcess()->GetDeprecatedID(), frame->GetRoutingID()));
++    }
++  }
++  NOTREACHED();
++}
++
++void PlutoniumCapture::Screenshot(const Source& source,
++                                  ScreenshotCallback callback) {
++  if (!screenshots_allowed()) {
++    std::move(callback).Run(SkBitmap(), kScreenshotsOff);
++    return;
++  }
++  if (source.type == Source::Type::kOutput) {
++    std::optional<display::Display> display = FindDisplay(source.id);
++    aura::Window* root = display && ash::Shell::HasInstance()
++                             ? ash::Shell::GetRootWindowForDisplayId(source.id)
++                             : nullptr;
++    if (!root) {
++      std::move(callback).Run(SkBitmap(), kNoSource);
++      return;
++    }
++    // The region is in pixels; the copy is asked for in DIPs, and comes in
++    // pixels, cropped.
++    gfx::Rect area(root->bounds().size());
++    if (!source.region.IsEmpty()) {
++      area = gfx::ToEnclosingRect(gfx::ScaleRect(
++          gfx::RectF(source.region), 1.f / display->device_scale_factor()));
++      area.Intersect(gfx::Rect(root->bounds().size()));
++    }
++    ui::GrabWindowSnapshot(
++        root, area,
++        base::BindOnce(
++            [](ScreenshotCallback callback, gfx::Image image) {
++              SkBitmap bitmap =
++                  image.IsEmpty() ? SkBitmap() : image.AsBitmap();
++              std::move(callback).Run(
++                  bitmap, bitmap.drawsNothing() ? "The copy failed" : "");
++            },
++            std::move(callback)));
++    return;
++  }
++  auto crop = base::BindOnce(
++      [](const gfx::Rect& region, ScreenshotCallback callback,
++         const SkBitmap& bitmap) {
++        SkBitmap cropped = Crop(bitmap, region);
++        std::move(callback).Run(
++            cropped, cropped.drawsNothing() ? "The copy failed" : "");
++      },
++      source.region, std::move(callback));
++  const int32_t id = static_cast<int32_t>(source.id);
++  if (source.type == Source::Type::kWindow) {
++    ExoWindowBroker* broker = ExoWindowBroker::Get();
++    if (!broker || !broker->GetWindow(id)) {
++      std::move(crop).Run(SkBitmap());
++      return;
++    }
++    exo::EmbeddedWindows::Get()->Snapshot(id, std::move(crop));
++    return;
++  }
++  if (!PlutoniumTabs::Get()->GetTab(id)) {
++    std::move(crop).Run(SkBitmap());
++    return;
++  }
++  PlutoniumTabs::Get()->Snapshot(id, std::move(crop));
++}
++
++std::vector<base::DictValue> PlutoniumCapture::GetCaptures() const {
++  std::vector<base::DictValue> result;
++  for (const auto& [id, capture] : captures_) {
++    if (capture->started) {
++      result.push_back(ToValue(*capture));
++    }
++  }
++  return result;
++}
++
++base::DictValue PlutoniumCapture::ToValue(const Capture& capture) const {
++  base::DictValue value;
++  value.Set("id", capture.id);
++  value.Set("kind", capture.kind);
++  value.Set("source", capture.source.ToValue());
++  value.Set("label", LabelOf(capture.source));
++  value.Set("consumer", capture.consumer.Clone());
++  value.Set("cursor", capture.cursor);
++  value.Set("startTime", capture.start_time.InMillisecondsFSinceUnixEpochIgnoringNull());
++  value.Set("acknowledged", IsAcknowledged(capture));
++  if (!capture.size.IsEmpty()) {
++    value.Set("size", base::DictValue()
++                          .Set("width", capture.size.width())
++                          .Set("height", capture.size.height()));
++  }
++  if (capture.node_id) {
++    value.Set("nodeId", static_cast<int>(capture.node_id));
++  }
++  return value;
++}
++
++bool PlutoniumCapture::IsAcknowledged(const Capture& capture) const {
++  content::WebContents* shell = FocusedShell();
++  return shell && capture.acknowledged_by.contains(
++                      shell->GetPrimaryMainFrame()->GetGlobalId());
++}
++
++void PlutoniumCapture::Notify(const Capture& capture,
++                              bool started,
++                              bool stopped) {
++  const base::DictValue value = ToValue(capture);
++  for (Observer& observer : observers_) {
++    if (started) {
++      observer.OnCaptureStarted(capture.id, value);
++    } else if (stopped) {
++      observer.OnCaptureStopped(capture.id, value);
++    } else {
++      observer.OnCaptureChanged(capture.id, value);
++    }
++  }
++}
++
++void PlutoniumCapture::RunCommand(const std::string& command,
++                                  const std::string& args_json,
++                                  content::RenderFrameHost* frame,
++                                  int32_t taker,
++                                  CommandCallback callback) {
++  base::DictValue args;
++  if (!args_json.empty()) {
++    std::optional<base::Value> parsed = base::JSONReader::Read(
++        args_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
++    if (!parsed || !parsed->is_dict()) {
++      std::move(callback).Run(false, "The arguments must be a JSON object");
++      return;
++    }
++    args = std::move(parsed->GetDict());
++  }
++  // The helper's (the portal's): a capture request, answered later.
++  if (command == "request") {
++    if (frame) {
++      std::move(callback).Run(false, "Only for the helper");
++      return;
++    }
++    const std::string* kind = args.FindString("kind");
++    const bool screenshot = kind && *kind == "screenshot";
++    if (screenshot ? !screenshots_allowed() : !recording_allowed()) {
++      std::move(callback).Run(false,
++                              screenshot ? kScreenshotsOff : kRecordingOff);
++      return;
++    }
++    if (!kind) {
++      args.Set("kind", "screencast");
++    }
++    Request(std::move(args),
++            base::BindOnce(
++                [](CommandCallback callback, std::optional<base::Value> answer) {
++                  std::move(callback).Run(
++                      true, answer ? ToJson(*answer) : std::string("null"));
++                },
++                std::move(callback)));
++    return;
++  }
++  base::expected<base::Value, std::string> result =
++      RunShellCommand(command, args, frame, taker);
++  if (!result.has_value()) {
++    std::move(callback).Run(false, result.error());
++    return;
++  }
++  std::move(callback).Run(true, ToJson(result.value()));
++}
++
++base::expected<base::Value, std::string> PlutoniumCapture::RunShellCommand(
++    const std::string& command,
++    const base::DictValue& args,
++    content::RenderFrameHost* frame,
++    int32_t taker) {
++  if (command == "sources") {
++    return base::Value(GetSources());
++  }
++  if (command == "settings") {
++    return base::Value(GetSettings());
++  }
++  if (command == "list") {
++    base::ListValue list;
++    for (base::DictValue& capture : GetCaptures()) {
++      list.Append(std::move(capture));
++    }
++    return base::Value(std::move(list));
++  }
++  if (command == "stop") {
++    std::optional<int> id = args.FindInt("id");
++    if (!id || !Stop(*id)) {
++      return base::unexpected("No such capture");
++    }
++    return base::Value();
++  }
++  if (command == "setSize") {
++    std::optional<int> id = args.FindInt("id");
++    if (!id) {
++      return base::unexpected("Which capture?");
++    }
++    return SetSize(*id, args);
++  }
++  if (command == "cancelRequest") {
++    const std::string* handle = args.FindString("handle");
++    if (frame || !handle) {
++      return base::unexpected("Which request?");
++    }
++    std::vector<int32_t> ids;
++    for (const auto& [id, request] : requests_) {
++      const std::string* request_handle = request->detail.FindString("handle");
++      if (request_handle && *request_handle == *handle) {
++        ids.push_back(id);
++      }
++    }
++    for (int32_t id : ids) {
++      Finish(id, std::nullopt);
++    }
++    return base::Value(!ids.empty());
++  }
++  // The rest are a shell document's.
++  if (!frame) {
++    return base::unexpected("Only for shells");
++  }
++  if (command == "setSettings") {
++    return SetSettings(args);
++  }
++  if (command == "stream") {
++    base::expected<base::DictValue, std::string> stream =
++        RegisterStream(args, frame);
++    if (!stream.has_value()) {
++      return base::unexpected(stream.error());
++    }
++    return base::Value(std::move(stream.value()));
++  }
++  if (command == "acknowledge") {
++    std::optional<int> id = args.FindInt("id");
++    if (!id || !Find(*id)) {
++      return base::unexpected("No such capture");
++    }
++    Acknowledge(*id, frame);
++    return base::Value();
++  }
++  if (command == "answer") {
++    std::optional<int> request_id = args.FindInt("requestId");
++    const base::Value* answer = args.Find("answer");
++    if (!request_id) {
++      return base::unexpected("Which request?");
++    }
++    const base::Value null_answer;
++    return base::Value(
++        Answer(*request_id, taker, answer ? *answer : null_answer));
++  }
++  return base::unexpected("No such command: " + command);
++}
++
++base::expected<base::DictValue, std::string> PlutoniumCapture::RegisterStream(
++    const base::DictValue& args,
++    content::RenderFrameHost* frame) {
++  if (!recording_allowed()) {
++    return base::unexpected(kRecordingOff);
++  }
++  const base::Value* source_value = args.Find("source");
++  std::optional<Source> source =
++      source_value ? Source::FromValue(*source_value) : std::nullopt;
++  if (!source) {
++    return base::unexpected("Which source?");
++  }
++  const content::DesktopMediaID media_id = ToMediaId(*source);
++  if (media_id.is_null()) {
++    return base::unexpected(kNoSource);
++  }
++  auto capture = std::make_unique<Capture>();
++  capture->kind = "stream";
++  capture->source = *source;
++  base::DictValue consumer;
++  consumer.Set("kind", "shell");
++  std::string name = "Shell";
++  content::WebContents* contents =
++      content::WebContents::FromRenderFrameHost(frame);
++  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++    if (std::optional<PlutoniumShells::Shell> shell =
++            shells->GetShellFor(contents)) {
++      consumer.Set("shellId", shell->id);
++      name = shell->name;
++    }
++  }
++  consumer.Set("name", name);
++  capture->consumer = std::move(consumer);
++  if (const base::DictValue* size = args.FindDict("size")) {
++    capture->size = gfx::Size(size->FindInt("width").value_or(0),
++                              size->FindInt("height").value_or(0));
++    if (capture->size.IsEmpty() || source->type != Source::Type::kWindow) {
++      capture->size = gfx::Size();
++    }
++  }
++  if (const std::string* cursor = args.FindString("cursor")) {
++    capture->cursor = *cursor;
++  }
++  capture->stream_id =
++      content::DesktopStreamsRegistry::GetInstance()->RegisterStream(
++          frame->GetProcess()->GetDeprecatedID(), frame->GetRoutingID(),
++          frame->GetLastCommittedOrigin(), media_id,
++          content::kRegistryStreamTypeDesktop);
++  const std::string stream_id = capture->stream_id;
++  const int32_t id = Add(std::move(capture));
++  // Forgotten unless getUserMedia() uses it soon.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&PlutoniumCapture::DropUnusedStream,
++                     base::Unretained(this), id),
++      kStreamIdLifetime);
++  VLOG(1) << "EXO-CAPTURE stream #" << id << " of "
++          << ToJson(base::Value(source->ToValue())) << " for a shell";
++  return base::DictValue().Set("streamId", stream_id).Set("captureId", id);
++}
++
++void PlutoniumCapture::DropUnusedStream(int32_t id) {
++  auto it = captures_.find(id);
++  if (it != captures_.end() && !it->second->started) {
++    captures_.erase(it);
++  }
++}
++
++int32_t PlutoniumCapture::TakeStream(
++    const content::MediaStreamRequest& request) {
++  if (request.requested_video_device_ids.empty()) {
++    return 0;
++  }
++  const std::string& stream_id = request.requested_video_device_ids.front();
++  if (stream_id.empty()) {
++    return 0;
++  }
++  for (auto& [id, capture] : captures_) {
++    if (capture->stream_id == stream_id) {
++      capture->stream_id.clear();
++      return id;
++    }
++  }
++  return 0;
++}
++
++std::unique_ptr<content::MediaStreamUI> PlutoniumCapture::WrapStreamUI(
++    int32_t id,
++    std::unique_ptr<content::MediaStreamUI> ui) {
++  if (!Find(id)) {
++    return ui;
++  }
++  return std::make_unique<StreamUI>(id, std::move(ui));
++}
++
++PlutoniumCapture::Capture* PlutoniumCapture::Find(int32_t id) {
++  auto it = captures_.find(id);
++  return it == captures_.end() ? nullptr : it->second.get();
++}
++
++int32_t PlutoniumCapture::Add(std::unique_ptr<Capture> capture) {
++  const int32_t id = next_id_++;
++  capture->id = id;
++  captures_[id] = std::move(capture);
++  return id;
++}
++
++void PlutoniumCapture::OnStreamStarted(int32_t id,
++                                       base::RepeatingClosure stop) {
++  Capture* capture = Find(id);
++  if (!capture || capture->started) {
++    return;
++  }
++  capture->started = true;
++  capture->start_time = base::Time::Now();
++  capture->started_at = base::TimeTicks::Now();
++  capture->stop = std::move(stop);
++  if (capture->source.type == Source::Type::kWindow) {
++    capture->keep_drawing = exo::EmbeddedWindows::Get()->KeepDrawing(
++        static_cast<int32_t>(capture->source.id));
++    UpdateCaptureSize(capture->source.id);
++  }
++  VLOG(1) << "EXO-CAPTURE #" << id << " (" << capture->kind << ") started: "
++          << LabelOf(capture->source);
++  Notify(*capture, /*started=*/true, /*stopped=*/false);
++  UpdateIndicator();
++}
++
++void PlutoniumCapture::Remove(int32_t id) {
++  auto it = captures_.find(id);
++  if (it == captures_.end()) {
++    return;
++  }
++  std::unique_ptr<Capture> capture = std::move(it->second);
++  captures_.erase(it);
++  if (!capture->started) {
++    return;
++  }
++  VLOG(1) << "EXO-CAPTURE #" << id << " stopped";
++  if (capture->source.type == Source::Type::kWindow) {
++    UpdateCaptureSize(capture->source.id);
++  }
++  Notify(*capture, /*started=*/false, /*stopped=*/true);
++  UpdateIndicator();
++}
++
++bool PlutoniumCapture::Stop(int32_t id) {
++  Capture* capture = Find(id);
++  if (!capture) {
++    return false;
++  }
++  base::RepeatingClosure stop = capture->stop;
++  if (stop) {
++    stop.Run();
++  }
++  // Whether or not the stream told us yet.
++  Remove(id);
++  return true;
++}
++
++base::expected<base::Value, std::string> PlutoniumCapture::SetSize(
++    int32_t id,
++    const base::DictValue& args) {
++  Capture* capture = Find(id);
++  if (!capture) {
++    return base::unexpected("No such capture");
++  }
++  if (capture->source.type != Source::Type::kWindow) {
++    return base::unexpected("Only a window can be held at a size");
++  }
++  gfx::Size size(args.FindInt("width").value_or(0),
++                 args.FindInt("height").value_or(0));
++  capture->size = size.IsEmpty() ? gfx::Size() : size;
++  UpdateCaptureSize(capture->source.id);
++  if (capture->started) {
++    Notify(*capture, /*started=*/false, /*stopped=*/false);
++  }
++  return base::Value();
++}
++
++void PlutoniumCapture::UpdateCaptureSize(int64_t window_id) {
++  gfx::Size size;
++  // The newest capture's.
++  for (const auto& [id, capture] : captures_) {
++    if (capture->started && capture->source.type == Source::Type::kWindow &&
++        capture->source.id == window_id && !capture->size.IsEmpty()) {
++      size = capture->size;
++    }
++  }
++  exo::EmbeddedWindows::Get()->SetCaptureSize(static_cast<int32_t>(window_id),
++                                              size);
++}
++
++void PlutoniumCapture::Acknowledge(int32_t id,
++                                   content::RenderFrameHost* frame) {
++  Capture* capture = Find(id);
++  if (!capture ||
++      !capture->acknowledged_by.insert(frame->GetGlobalId()).second) {
++    return;
++  }
++  if (capture->started) {
++    Notify(*capture, /*started=*/false, /*stopped=*/false);
++  }
++  UpdateIndicator();
++}
++
++void PlutoniumCapture::UpdateIndicator() {
++  indicator_timer_.Stop();
++  std::vector<base::DictValue> unshown;
++  base::TimeDelta next = base::TimeDelta::Max();
++  const base::TimeTicks now = base::TimeTicks::Now();
++  for (const auto& [id, capture] : captures_) {
++    if (!capture->started || IsAcknowledged(*capture)) {
++      continue;
++    }
++    const base::TimeDelta age = now - capture->started_at;
++    if (age >= kAcknowledgeDelay) {
++      unshown.push_back(ToValue(*capture));
++    } else {
++      next = std::min(next, kAcknowledgeDelay - age);
++    }
++  }
++  if (ui_) {
++    ui_->ShowIndicator(unshown);
++  }
++  if (!next.is_max()) {
++    indicator_timer_.Start(FROM_HERE, next,
++                           base::BindOnce(&PlutoniumCapture::UpdateIndicator,
++                                          base::Unretained(this)));
++  }
++}
++
++void PlutoniumCapture::OnVisibleShellChanged(content::WebContents* previous,
++                                             content::WebContents* visible) {
++  // Acknowledged or not depends on which shell is in front.
++  for (const auto& [id, capture] : captures_) {
++    if (capture->started) {
++      Notify(*capture, /*started=*/false, /*stopped=*/false);
++    }
++  }
++  UpdateIndicator();
++}
++
++void PlutoniumCapture::OnShellsDestroying() {
++  shells_observation_.Reset();
++}
++
++int32_t PlutoniumCapture::Request(base::DictValue detail, AnswerCallback done) {
++  auto request = std::make_unique<PendingRequest>();
++  const int32_t id = next_request_id_++;
++  request->id = id;
++  detail.Set("requestId", id);
++  request->detail = std::move(detail);
++  request->done = std::move(done);
++  const std::string json = ToJson(base::Value(request->detail.Clone()));
++  requests_[id] = std::move(request);
++  VLOG(1) << "EXO-CAPTURE request #" << id << ": " << json;
++
++  content::WebContents* shell = FocusedShell();
++  const bool asked =
++      shell && plutonium_shell::SendCaptureRequest(
++                   shell, id, json,
++                   base::BindOnce(&PlutoniumCapture::OnTaken,
++                                  base::Unretained(this), id));
++  if (!asked) {
++    VLOG(1) << "EXO-CAPTURE request #" << id
++            << ": no shell listens, Ash's picker asks";
++    // Callbacks never run from inside Request().
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PlutoniumCapture::Pick, base::Unretained(this), id));
++  }
++  return id;
++}
++
++void PlutoniumCapture::OnTaken(int32_t request_id, int32_t taker) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end()) {
++    // Over already.
++    if (taker) {
++      plutonium_shell::EndCaptureRequest(taker, request_id);
++    }
++    return;
++  }
++  if (taker) {
++    it->second->taker = taker;
++    return;
++  }
++  VLOG(1) << "EXO-CAPTURE request #" << request_id
++          << ": the shell didn't take it, Ash's picker asks";
++  Pick(request_id);
++}
++
++void PlutoniumCapture::Pick(int32_t request_id) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end()) {
++    return;
++  }
++  PendingRequest& request = *it->second;
++  request.taker = 0;
++  if (!ui_) {
++    Finish(request_id, std::nullopt);
++    return;
++  }
++  request.picking = true;
++  ui_->Pick(request.detail,
++            base::BindOnce(&PlutoniumCapture::OnPicked, base::Unretained(this),
++                           request_id));
++}
++
++void PlutoniumCapture::OnPicked(int32_t request_id,
++                                std::optional<base::Value> answer) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end() || !it->second->picking) {
++    return;
++  }
++  it->second->picking = false;
++  if (!answer) {
++    Finish(request_id, std::nullopt);
++    return;
++  }
++  base::expected<base::Value, std::string> checked =
++      CheckAnswer(*it->second, *answer);
++  Finish(request_id, checked.has_value()
++                         ? std::make_optional(std::move(checked.value()))
++                         : std::nullopt);
++}
++
++base::expected<base::Value, std::string> PlutoniumCapture::CheckAnswer(
++    const PendingRequest& request,
++    const base::Value& answer) const {
++  if (!answer.is_dict()) {
++    return base::unexpected("The answer must be an object");
++  }
++  const base::ListValue* sources = answer.GetDict().FindList("sources");
++  if (!sources || sources->empty()) {
++    return base::unexpected("The answer names no source");
++  }
++  const base::ListValue* types = request.detail.FindList("types");
++  const bool multiple = request.detail.FindBool("multiple").value_or(false);
++  base::ListValue checked;
++  for (const base::Value& value : *sources) {
++    std::optional<Source> source = Source::FromValue(value);
++    if (!source || ToMediaId(*source).is_null()) {
++      return base::unexpected(kNoSource);
++    }
++    if (types && !types->empty() &&
++        !std::ranges::contains(*types, base::Value(TypeName(source->type)))) {
++      return base::unexpected("Not a type the consumer asked for");
++    }
++    checked.Append(source->ToValue());
++    if (!multiple) {
++      break;
++    }
++  }
++  base::DictValue result;
++  result.Set("sources", std::move(checked));
++  if (const base::DictValue* size = answer.GetDict().FindDict("size")) {
++    result.Set("size", size->Clone());
++  }
++  if (const std::string* cursor = answer.GetDict().FindString("cursor")) {
++    result.Set("cursor", *cursor);
++  }
++  if (std::optional<bool> persist = answer.GetDict().FindBool("persist")) {
++    result.Set("persist", *persist);
++  }
++  return base::Value(std::move(result));
++}
++
++bool PlutoniumCapture::Answer(int32_t request_id,
++                              int32_t taker,
++                              const base::Value& answer) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end() || !taker || it->second->taker != taker) {
++    return false;
++  }
++  // The answerer needs no "capturerequestend".
++  it->second->taker = 0;
++  // null, or {refused: true}: the user said no.
++  if (answer.is_none() ||
++      (answer.is_dict() &&
++       answer.GetDict().FindBool("refused").value_or(false))) {
++    Finish(request_id, std::nullopt);
++    return true;
++  }
++  base::expected<base::Value, std::string> checked =
++      CheckAnswer(*it->second, answer);
++  if (!checked.has_value()) {
++    VLOG(1) << "EXO-CAPTURE request #" << request_id
++            << ": answer refused: " << checked.error();
++    it->second->taker = taker;
++    return false;
++  }
++  Finish(request_id, std::move(checked.value()));
++  return true;
++}
++
++void PlutoniumCapture::Finish(int32_t request_id,
++                              std::optional<base::Value> answer) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end()) {
++    return;
++  }
++  std::unique_ptr<PendingRequest> request = std::move(it->second);
++  requests_.erase(it);
++  if (request->picking && ui_) {
++    ui_->CancelPick(request_id);
++  }
++  // A shell that took it and didn't answer it puts its UI away.
++  if (request->taker && !answer) {
++    plutonium_shell::EndCaptureRequest(request->taker, request_id);
++  }
++  VLOG(1) << "EXO-CAPTURE request #" << request_id << " "
++          << (answer ? "answered: " + ToJson(*answer) : "refused");
++  std::move(request->done).Run(std::move(answer));
++}
++
++void PlutoniumCapture::CancelRequest(int32_t request_id) {
++  auto it = requests_.find(request_id);
++  if (it == requests_.end()) {
++    return;
++  }
++  std::unique_ptr<PendingRequest> request = std::move(it->second);
++  requests_.erase(it);
++  if (request->picking && ui_) {
++    ui_->CancelPick(request_id);
++  }
++  if (request->taker) {
++    plutonium_shell::EndCaptureRequest(request->taker, request_id);
++  }
++}
++
++void PlutoniumCapture::OnShellGone(int32_t taker) {
++  std::vector<int32_t> ids;
++  for (const auto& [id, request] : requests_) {
++    if (request->taker == taker) {
++      request->taker = 0;
++      ids.push_back(id);
++    }
++  }
++  for (int32_t id : ids) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PlutoniumCapture::Pick, base::Unretained(this), id));
++  }
++}
+diff --git a/chrome/browser/plutonium_capture.h b/chrome/browser/plutonium_capture.h
+new file mode 100644
+index 0000000000..6108a7cbec
+--- /dev/null
++++ b/chrome/browser/plutonium_capture.h
+@@ -0,0 +1,300 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_CAPTURE_H_
++#define CHROME_BROWSER_PLUTONIUM_CAPTURE_H_
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/functional/callback_helpers.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "base/scoped_observation.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "base/types/expected.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "content/public/browser/desktop_media_id.h"
++#include "content/public/browser/global_routing_id.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
++
++class PrefRegistrySimple;
++class SkBitmap;
++
++namespace content {
++class MediaStreamUI;
++class RenderFrameHost;
++class WebContents;
++struct MediaStreamRequest;
++}  // namespace content
++
++// EXO-CAPTURE (docs/features/CAPTURE.md): screenshots, screen sharing and
++// recording. One capture primitive in Ash, for three kinds of consumer:
++// shell pages (navigator.windowBroker), native apps through the desktop
++// portal (the helper, over the DevTools Plutonium domain) and tabs
++// (getDisplayMedia).
++//
++// Sources: an output (a display, by id, from the display list), a window
++// (exo::EmbeddedWindows' id; also while it's parked), a tab (PlutoniumTabs'
++// id), each with an optional region (in the source's pixels). A source is a
++// JSON object {type: "output" | "window" | "tab", id, region?: {x, y, width,
++// height}}.
++//
++// Requests: a consumer that needs the user to choose (the portal, a tab's
++// getDisplayMedia) asks the focused shell (FocusedShell()) with a cancelable
++// "capturerequest" event. If it doesn't take it, or goes away before
++// answering, Ash's own picker (Ui) asks. A request never hangs.
++//
++// Captures: every running capture goes to every shell ("capturestart",
++// "capturechange", "capturestop"), whatever started it, and any shell can
++// stop any of them. The focused shell is expected to show that something is
++// captured and to say so ("acknowledge"); if it hasn't within
++// kAcknowledgeDelay, Ash shows its own indicator (Ui::ShowIndicator()).
++//
++// Settings: two global switches, in local state (kSettingsPref), refuse
++// recording and screenshots to everyone: shells, the portal, tabs and
++// agents. Ash checks them here.
++class PlutoniumCapture : public PlutoniumShells::Observer {
++ public:
++  inline static constexpr char kSettingsPref[] = "plutonium.capture";
++  // How long the focused shell has to acknowledge a capture before Ash
++  // shows its own indicator.
++  static constexpr base::TimeDelta kAcknowledgeDelay = base::Seconds(2);
++
++  struct Source {
++    enum class Type { kOutput, kWindow, kTab };
++
++    Source();
++    Source(const Source&);
++    Source& operator=(const Source&);
++    ~Source();
++    bool operator==(const Source&) const;
++
++    // Null if |value| isn't a source.
++    static std::optional<Source> FromValue(const base::Value& value);
++    base::DictValue ToValue() const;
++
++    Type type = Type::kOutput;
++    // A display id, a window id or a tab id.
++    int64_t id = 0;
++    // In the source's pixels; empty: all of it.
++    gfx::Rect region;
++  };
++
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnCaptureStarted(int32_t id, const base::DictValue& capture) {}
++    virtual void OnCaptureChanged(int32_t id, const base::DictValue& capture) {}
++    virtual void OnCaptureStopped(int32_t id, const base::DictValue& capture) {}
++    virtual void OnCaptureSettingsChanged(const base::DictValue& settings) {}
++  };
++
++  // Ash's own UI, for when the focused shell doesn't do it
++  // (chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h).
++  class Ui {
++   public:
++    virtual ~Ui() = default;
++    // Asks the user to choose for |request| (a "capturerequest" detail).
++    // |done| gets an answer, as a shell's ({sources: [...]}), or null if the
++    // user refused. One at a time: a new Pick() refuses the one open.
++    virtual void Pick(const base::DictValue& request,
++                      base::OnceCallback<void(std::optional<base::Value>)>
++                          done) = 0;
++    // Request |request_id| is over: put its picker away (|done| isn't run).
++    virtual void CancelPick(int32_t request_id) = 0;
++    // The captures no shell shows (empty: none), each time they change.
++    // Each gets a way to stop it (Stop()).
++    virtual void ShowIndicator(const std::vector<base::DictValue>& captures) = 0;
++  };
++
++  using CommandCallback =
++      base::OnceCallback<void(bool ok, const std::string& result_json)>;
++  using ScreenshotCallback =
++      base::OnceCallback<void(const SkBitmap& bitmap, const std::string& error)>;
++
++  static PlutoniumCapture* Get();
++  static void RegisterLocalStatePrefs(PrefRegistrySimple* registry);
++
++  // The shell the user has in focus: it gets the capture requests, and it's
++  // the one whose acknowledgement counts. EXO-MULTIMON: with a shell per
++  // display, the one on the display that has focus. Null if none.
++  static content::WebContents* FocusedShell();
++
++  PlutoniumCapture(const PlutoniumCapture&) = delete;
++  PlutoniumCapture& operator=(const PlutoniumCapture&) = delete;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++  void SetUi(Ui* ui);
++
++  // The global switches.
++  bool recording_allowed() const;
++  bool screenshots_allowed() const;
++  base::DictValue GetSettings() const;
++
++  // The sources there are now: {outputs: [{id, name, width, height (pixels),
++  // scaleFactor, primary}], windows: [{id, title, appId, width, height,
++  // tags}], tabs: [{id, title, url, tags}]}.
++  base::DictValue GetSources() const;
++  // What |source| is called ("Built-in display", a window's title, ...).
++  std::string LabelOf(const Source& source) const;
++
++  // A copy of |source| now, in physical pixels (cropped to its region).
++  // Refused while screenshots are switched off.
++  void Screenshot(const Source& source, ScreenshotCallback callback);
++
++  // Every capture now, as JSON objects (window_broker.mojom's form).
++  std::vector<base::DictValue> GetCaptures() const;
++
++  // Runs capture command |command| (window_broker.mojom's RunCaptureCommand,
++  // the DevTools Plutonium domain's captureCommand) for a shell document
++  // (|frame|, its broker connection |taker|) or, with a null |frame|, for
++  // the helper. See docs/features/CAPTURE.md for the commands.
++  void RunCommand(const std::string& command,
++                  const std::string& args_json,
++                  content::RenderFrameHost* frame,
++                  int32_t taker,
++                  CommandCallback callback);
++
++  // Asks for a capture (the portal, a tab): the focused shell, else Ash's
++  // picker. |detail| is the request's detail without its requestId. |done|
++  // gets the answer ({sources, size?, cursor?}) or null (refused or
++  // cancelled). Returns the request's id.
++  using AnswerCallback = base::OnceCallback<void(std::optional<base::Value>)>;
++  int32_t Request(base::DictValue detail, AnswerCallback done);
++  // The consumer went away: the request ends without |done|.
++  void CancelRequest(int32_t request_id);
++  // Broker connection |taker| went away: the requests it took go to Ash's
++  // picker.
++  void OnShellGone(int32_t taker);
++
++  // Stops capture |id|. False if there is no such capture.
++  bool Stop(int32_t id);
++
++  // EXO-CAPTURE: hooks for chrome/browser/media/webrtc's access handlers.
++  //
++  // Whether |request| (a getUserMedia() for a desktop stream) is for a
++  // stream a shell asked for with "stream": then its capture id, else 0.
++  // The stream id is used up.
++  int32_t TakeStream(const content::MediaStreamRequest& request);
++  // Wraps capture |id|'s stream UI so that it starts and stops with the
++  // stream (and Stop() stops it).
++  std::unique_ptr<content::MediaStreamUI> WrapStreamUI(
++      int32_t id,
++      std::unique_ptr<content::MediaStreamUI> ui);
++
++  // What |source| is as a DesktopMediaID (registered for capture), or
++  // TYPE_NONE if it's gone.
++  content::DesktopMediaID ToMediaId(const Source& source) const;
++
++  // PlutoniumShells::Observer:
++  void OnVisibleShellChanged(content::WebContents* previous,
++                             content::WebContents* visible) override;
++  void OnShellsDestroying() override;
++
++ private:
++  friend class base::NoDestructor<PlutoniumCapture>;
++  class StreamUI;
++
++  struct Capture {
++    Capture();
++    ~Capture();
++    int32_t id = 0;
++    std::string kind;
++    Source source;
++    base::DictValue consumer;
++    gfx::Size size;
++    std::string cursor = "embedded";
++    bool started = false;
++    base::Time start_time;
++    base::TimeTicks started_at;
++    uint32_t node_id = 0;
++    // Stops it for real (the stream's own stop).
++    base::RepeatingClosure stop;
++    // A captured window keeps drawing at full rate, also parked.
++    base::ScopedClosureRunner keep_drawing;
++    // The shell documents that say they show it.
++    std::set<content::GlobalRenderFrameHostId> acknowledged_by;
++    // "stream": the id its getUserMedia() uses, until it does.
++    std::string stream_id;
++  };
++
++  struct PendingRequest {
++    PendingRequest();
++    ~PendingRequest();
++    int32_t id = 0;
++    base::DictValue detail;
++    AnswerCallback done;
++    // The broker connection that took it, or 0.
++    int32_t taker = 0;
++    // Ash's picker asks.
++    bool picking = false;
++  };
++
++  PlutoniumCapture();
++  ~PlutoniumCapture() override;
++
++  base::DictValue ToValue(const Capture& capture) const;
++  bool IsAcknowledged(const Capture& capture) const;
++  void Notify(const Capture& capture, bool started, bool stopped);
++
++  base::expected<base::Value, std::string> RunShellCommand(
++      const std::string& command,
++      const base::DictValue& args,
++      content::RenderFrameHost* frame,
++      int32_t taker);
++  base::expected<base::DictValue, std::string> RegisterStream(
++      const base::DictValue& args,
++      content::RenderFrameHost* frame);
++  base::expected<base::Value, std::string> SetSettings(
++      const base::DictValue& args);
++  base::expected<base::Value, std::string> SetSize(int32_t id,
++                                                   const base::DictValue& args);
++  void Acknowledge(int32_t id, content::RenderFrameHost* frame);
++
++  // Requests.
++  void OnTaken(int32_t request_id, int32_t taker);
++  void Pick(int32_t request_id);
++  void OnPicked(int32_t request_id, std::optional<base::Value> answer);
++  // A valid answer to request |request_id|, normalized, or why not.
++  base::expected<base::Value, std::string> CheckAnswer(
++      const PendingRequest& request,
++      const base::Value& answer) const;
++  bool Answer(int32_t request_id, int32_t taker, const base::Value& answer);
++  void Finish(int32_t request_id, std::optional<base::Value> answer);
++
++  // Captures.
++  Capture* Find(int32_t id);
++  int32_t Add(std::unique_ptr<Capture> capture);
++  void OnStreamStarted(int32_t id, base::RepeatingClosure stop);
++  void Remove(int32_t id);
++  // A window's capture size: the newest capture's that holds one.
++  void UpdateCaptureSize(int64_t window_id);
++  void UpdateIndicator();
++  void DropUnusedStream(int32_t id);
++
++  void NotifySettings();
++
++  int32_t next_id_ = 1;
++  int32_t next_request_id_ = 1;
++  std::map<int32_t, std::unique_ptr<Capture>> captures_;
++  std::map<int32_t, std::unique_ptr<PendingRequest>> requests_;
++  raw_ptr<Ui> ui_ = nullptr;
++  base::ObserverList<Observer> observers_;
++  base::OneShotTimer indicator_timer_;
++  base::ScopedObservation<PlutoniumShells, PlutoniumShells::Observer>
++      shells_observation_{this};
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_CAPTURE_H_
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index 43fea6ecf6..f43644835e 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -13,6 +13,7 @@
+ 
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
++#include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
+@@ -22,6 +23,7 @@
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/exo_embedder.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_capture.h"
+ #include "chrome/browser/plutonium_context_menu.h"
+ #include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_groups.h"
+@@ -203,6 +205,13 @@ void EncodePng(base::OnceCallback<void(std::optional<mojo_base::BigBuffer>)>
+           std::move(callback)));
+ }
+ 
++// EXO-CAPTURE: |value| as JSON.
++std::string ToJson(const base::DictValue& value) {
++  std::string json;
++  base::JSONWriter::Write(value, &json);
++  return json;
++}
++
+ // Force-enables the shell origin trial (which exposes navigator.windowBroker)
+ // for navigations that will commit a shell document. This only decides what
+ // script sees; the binder re-checks the committed document.
+@@ -236,7 +245,8 @@ class WindowBrokerImpl
+       public PlutoniumTabs::Observer,
+       public PlutoniumGroups::Observer,
+       public PlutoniumShells::Observer,
+-      public PlutoniumDownloads::Observer {
++      public PlutoniumDownloads::Observer,
++      public PlutoniumCapture::Observer {
+  public:
+   WindowBrokerImpl(content::RenderFrameHost& render_frame_host,
+                    mojo::PendingReceiver<blink::mojom::WindowBroker> receiver)
+@@ -257,6 +267,11 @@ class WindowBrokerImpl
+     if (asked_) {
+       PlutoniumTabRequests::Get()->OnShellGone(id_);
+     }
++    // EXO-CAPTURE: so do the capture requests it took.
++    capture_observer_.reset();
++    if (capture_asked_) {
++      PlutoniumCapture::Get()->OnShellGone(id_);
++    }
+     if (ExoWindowBroker* broker = ExoWindowBroker::Get()) {
+       broker->RemoveObserver(this);
+     }
+@@ -322,6 +337,32 @@ class WindowBrokerImpl
+     }
+   }
+ 
++  // EXO-CAPTURE: false if this document doesn't listen for capture
++  // requests.
++  bool SendCaptureRequest(int32_t request_id,
++                          const std::string& detail_json,
++                          base::OnceCallback<void(int32_t taker)>& callback) {
++    if (!capture_observer_.is_bound() || !StillShell()) {
++      return false;
++    }
++    capture_asked_ = true;
++    capture_observer_->OnCaptureRequest(
++        request_id, detail_json,
++        mojo::WrapCallbackWithDefaultInvokeIfNotRun(
++            base::BindOnce(
++                [](base::OnceCallback<void(int32_t)> callback, int32_t taker,
++                   bool taken) { std::move(callback).Run(taken ? taker : 0); },
++                std::move(callback), id_),
++            false));
++    return true;
++  }
++
++  void EndCaptureRequest(int32_t request_id) {
++    if (capture_observer_.is_bound()) {
++      capture_observer_->OnCaptureRequestEnded(request_id);
++    }
++  }
++
+   bool RequestShowTab(const PlutoniumTabs::TabInfo& tab) {
+     if (tab_observers_.empty() || !StillShell()) {
+       return false;
+@@ -683,6 +724,114 @@ class WindowBrokerImpl
+     }
+   }
+ 
++  // EXO-CAPTURE:
++  void AddCaptureObserver(
++      mojo::PendingAssociatedRemote<blink::mojom::CaptureObserver> observer,
++      AddCaptureObserverCallback callback) override {
++    if (!StillShell()) {
++      std::move(callback).Run({}, "{}");
++      return;
++    }
++    // A new observer replaces the old one; what the old one took goes to
++    // Ash's picker.
++    if (capture_observer_.is_bound()) {
++      capture_observer_.reset();
++      if (capture_asked_) {
++        PlutoniumCapture::Get()->OnShellGone(id_);
++      }
++    }
++    capture_observer_.Bind(std::move(observer));
++    capture_observer_.set_disconnect_handler(base::BindOnce(
++        [](WindowBrokerImpl* self) {
++          self->capture_observer_.reset();
++          self->capture_observation_.Reset();
++          if (self->capture_asked_) {
++            PlutoniumCapture::Get()->OnShellGone(self->id_);
++          }
++        },
++        base::Unretained(this)));
++    PlutoniumCapture* capture = PlutoniumCapture::Get();
++    if (!capture_observation_.IsObserving()) {
++      capture_observation_.Observe(capture);
++    }
++    std::vector<std::string> captures;
++    for (const base::DictValue& entry : capture->GetCaptures()) {
++      captures.push_back(ToJson(entry));
++    }
++    std::move(callback).Run(std::move(captures),
++                            ToJson(capture->GetSettings()));
++  }
++
++  void Screenshot(const std::string& source_json,
++                  ScreenshotCallback callback) override {
++    if (!StillShell()) {
++      std::move(callback).Run(std::nullopt, "Not the shell");
++      return;
++    }
++    std::optional<base::Value> parsed = base::JSONReader::Read(
++        source_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
++    std::optional<PlutoniumCapture::Source> source =
++        parsed ? PlutoniumCapture::Source::FromValue(*parsed) : std::nullopt;
++    if (!source) {
++      std::move(callback).Run(std::nullopt, "Which source?");
++      return;
++    }
++    PlutoniumCapture::Get()->Screenshot(
++        *source,
++        base::BindOnce(
++            [](ScreenshotCallback callback, const SkBitmap& bitmap,
++               const std::string& error) {
++              if (bitmap.drawsNothing()) {
++                std::move(callback).Run(std::nullopt, error);
++                return;
++              }
++              EncodePng(base::BindOnce(
++                            [](ScreenshotCallback callback,
++                               std::optional<mojo_base::BigBuffer> png) {
++                              const std::string error =
++                                  png ? "" : "Couldn't encode the image";
++                              std::move(callback).Run(std::move(png), error);
++                            },
++                            std::move(callback)),
++                        bitmap);
++            },
++            std::move(callback)));
++  }
++
++  void RunCaptureCommand(const std::string& command,
++                         const std::string& args_json,
++                         RunCaptureCommandCallback callback) override {
++    if (!StillShell()) {
++      std::move(callback).Run(false, "Not the shell");
++      return;
++    }
++    PlutoniumCapture::Get()->RunCommand(command, args_json,
++                                        &render_frame_host(), id_,
++                                        std::move(callback));
++  }
++
++  // PlutoniumCapture::Observer:
++  void OnCaptureStarted(int32_t id, const base::DictValue& capture) override {
++    if (capture_observer_.is_bound() && StillShell()) {
++      capture_observer_->OnCaptureStarted(id, ToJson(capture));
++    }
++  }
++  void OnCaptureChanged(int32_t id, const base::DictValue& capture) override {
++    if (capture_observer_.is_bound() && StillShell()) {
++      capture_observer_->OnCaptureChanged(id, ToJson(capture));
++    }
++  }
++  void OnCaptureStopped(int32_t id, const base::DictValue& capture) override {
++    if (capture_observer_.is_bound() && StillShell()) {
++      capture_observer_->OnCaptureStopped(id, ToJson(capture));
++    }
++  }
++  void OnCaptureSettingsChanged(const base::DictValue& settings) override {
++    if (capture_observer_.is_bound() && StillShell()) {
++      capture_observer_->OnCaptureSettingsChanged(ToJson(settings));
++    }
++  }
++
+   // PlutoniumDownloads::Observer:
+   void OnDownloadAdded(const base::DictValue& download) override {
+     if (!StillShell()) {
+@@ -846,6 +995,12 @@ class WindowBrokerImpl
+       download_observers_;
+   base::ScopedObservation<PlutoniumDownloads, PlutoniumDownloads::Observer>
+       downloads_observation_{this};
++  // EXO-CAPTURE: captures and capture requests.
++  mojo::AssociatedRemote<blink::mojom::CaptureObserver> capture_observer_;
++  // It was sent a capture request.
++  bool capture_asked_ = false;
++  base::ScopedObservation<PlutoniumCapture, PlutoniumCapture::Observer>
++      capture_observation_{this};
+ };
+ 
+ }  // namespace
+@@ -1025,6 +1180,27 @@ void EndTabRequest(int32_t taker, int32_t request_id) {
+   }
+ }
+ 
++bool SendCaptureRequest(content::WebContents* shell,
++                        int32_t request_id,
++                        const std::string& detail_json,
++                        base::OnceCallback<void(int32_t taker)> callback) {
++  for (WindowBrokerImpl* impl : WindowBrokerImpl::Instances()) {
++    if (impl->contents() == shell &&
++        impl->SendCaptureRequest(request_id, detail_json, callback)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++void EndCaptureRequest(int32_t taker, int32_t request_id) {
++  for (WindowBrokerImpl* impl : WindowBrokerImpl::Instances()) {
++    if (impl->id() == taker) {
++      impl->EndCaptureRequest(request_id);
++    }
++  }
++}
++
+ bool IsShellBrowser(BrowserWindowInterface* browser) {
+   return IsShellMode() && browser &&
+          browser->GetType() == BrowserWindowInterface::TYPE_APP;
+diff --git a/chrome/browser/plutonium_shell.h b/chrome/browser/plutonium_shell.h
+index faf1b4ceb1..f35c83c24c 100644
+--- a/chrome/browser/plutonium_shell.h
++++ b/chrome/browser/plutonium_shell.h
+@@ -5,7 +5,9 @@
+ #ifndef CHROME_BROWSER_PLUTONIUM_SHELL_H_
+ #define CHROME_BROWSER_PLUTONIUM_SHELL_H_
+ 
++#include <cstdint>
+ #include <optional>
++#include <string>
+ #include <vector>
+ 
+ #include "base/command_line.h"
+@@ -142,6 +144,18 @@ bool SendTabRequest(content::WebContents* shell,
+ // ("tabrequestend").
+ void EndTabRequest(int32_t taker, int32_t request_id);
+ 
++// EXO-CAPTURE: asks |shell|'s page about capture request |request_id|
++// (plutonium_capture.h), |detail_json| being the "capturerequest" event's
++// detail. False if it doesn't listen; otherwise |callback| gets the broker
++// connection that took it, or 0 if it didn't (or went away first).
++bool SendCaptureRequest(content::WebContents* shell,
++                        int32_t request_id,
++                        const std::string& detail_json,
++                        base::OnceCallback<void(int32_t taker)> callback);
++// Tells broker connection |taker| that capture request |request_id| is over
++// ("capturerequestend").
++void EndCaptureRequest(int32_t taker, int32_t request_id);
++
+ // Adds a throttle that exposes the shell API to navigations that will commit
+ // the shell (the renderer side only; IsShellDocument() is what's enforced).
+ void MaybeAddNavigationThrottle(content::NavigationThrottleRegistry& registry);
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index c34bdd90f6..ac0f740f4a 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -357,6 +357,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
++#include "chrome/browser/plutonium_capture.h"
+ #include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_permissions.h"
+ #include "chrome/browser/plutonium_shells.h"
+@@ -1817,6 +1818,7 @@ void RegisterLocalState(PrefRegistrySimple* registry) {
+ #if BUILDFLAG(IS_CHROMEOS)
+   PlutoniumGroups::RegisterLocalStatePrefs(registry);
+   PlutoniumShells::RegisterLocalStatePrefs(registry);
++  PlutoniumCapture::RegisterLocalStatePrefs(registry);
+   plutonium_permissions::RegisterLocalStatePrefs(registry);
+   arc::prefs::RegisterLocalStatePrefs(registry);
+   ChromeOSMetricsProvider::RegisterPrefs(registry);
+diff --git a/chrome/browser/ui/ash/main_extra_parts/BUILD.gn b/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
+index 1375b8659d..7bb27cd2c0 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
++++ b/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
+@@ -8,6 +8,8 @@ static_library("main_extra_parts") {
+   sources = [
+     "chrome_browser_main_extra_parts_ash.cc",
+     "chrome_browser_main_extra_parts_ash.h",
++    "plutonium_capture_ui.cc",
++    "plutonium_capture_ui.h",
+     "plutonium_helper_client.cc",
+     "plutonium_helper_client.h",
+     "plutonium_overlay.cc",
+diff --git a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+index bac4431a81..f3aa96ce95 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+@@ -66,6 +66,7 @@
+ #include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_file_chooser.h"
+ #include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_helper_client.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.h"
+ #include "chrome/browser/global_features.h"
+@@ -279,6 +280,7 @@ void ChromeBrowserMainExtraPartsAsh::PreProfileInit() {
+   // EXO-SHELLS: before the startup browser too (it adopts it).
+   if (plutonium_shell::IsShellMode()) {
+     plutonium_shells_ = std::make_unique<PlutoniumShellsImpl>();
++    plutonium_capture_ui_ = std::make_unique<PlutoniumCaptureUi>();
+     if (plutonium_helper::IsAvailable()) {
+       PlutoniumDownloads::Get()->SetOpener(
+           base::BindRepeating(&OpenDownloadWithHelper));
+@@ -628,6 +630,7 @@ void ChromeBrowserMainExtraPartsAsh::CheckIfSanitizeCompleted() {
+ }
+ 
+ void ChromeBrowserMainExtraPartsAsh::PostMainMessageLoopRun() {
++  plutonium_capture_ui_.reset();
+   plutonium_shells_.reset();
+   ash::bluetooth_config::Shutdown();
+ 
+diff --git a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.h b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.h
+index 4968ed14bc..28020196a3 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.h
++++ b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.h
+@@ -39,6 +39,7 @@ class GraduationManager;
+ 
+ }  // namespace ash
+ 
++class PlutoniumCaptureUi;
+ class PlutoniumShellsImpl;
+ 
+ namespace chrome {
+@@ -159,6 +160,8 @@ class ChromeBrowserMainExtraPartsAsh : public ChromeBrowserMainExtraParts {
+   std::unique_ptr<ash::ArcWindowWatcher> arc_window_watcher_;
+   // EXO-SHELLS: shell mode only.
+   std::unique_ptr<PlutoniumShellsImpl> plutonium_shells_;
++  // EXO-CAPTURE: Ash's capture picker and indicator; shell mode only.
++  std::unique_ptr<PlutoniumCaptureUi> plutonium_capture_ui_;
+   std::unique_ptr<ArcOpenUrlDelegateImpl> arc_open_url_delegate_impl_;
+   std::unique_ptr<ash::boca::BocaAppClientImpl> boca_client_;
+   std::unique_ptr<ImeControllerClientImpl> ime_controller_client_;
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.cc
+new file mode 100644
+index 0000000000..6ddcff5bf2
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.cc
+@@ -0,0 +1,437 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h"
++
++#include <algorithm>
++#include <string>
++#include <utility>
++
++#include "ash/public/cpp/shell_window_ids.h"
++#include "ash/shell.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/aura/window.h"
++#include "ui/base/accelerators/accelerator.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#include "ui/events/event.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/controls/button/label_button.h"
++#include "ui/views/controls/label.h"
++#include "ui/views/controls/scroll_view.h"
++#include "ui/views/layout/box_layout.h"
++#include "ui/views/view.h"
++#include "ui/views/widget/widget.h"
++#include "ui/wm/core/window_util.h"
++
++namespace {
++
++// The shells overlay's colors.
++constexpr SkColor kPanel = SkColorSetRGB(0x20, 0x21, 0x24);
++constexpr SkColor kSelected = SkColorSetRGB(0x3c, 0x40, 0x43);
++constexpr SkColor kButton = SkColorSetRGB(0x30, 0x31, 0x34);
++constexpr SkColor kTitle = SkColorSetRGB(0xe8, 0xea, 0xed);
++constexpr SkColor kDim = SkColorSetRGB(0x9a, 0xa0, 0xa6);
++constexpr SkColor kAccent = SkColorSetRGB(0x8a, 0xb4, 0xf8);
++constexpr SkColor kOnAccent = SkColorSetRGB(0x20, 0x21, 0x24);
++constexpr SkColor kRecording = SkColorSetRGB(0xf2, 0x8b, 0x82);
++
++constexpr int kPickerWidth = 520;
++constexpr int kListHeight = 420;
++
++// Runs |action| from a fresh task: a button must not go away inside its own
++// event handling.
++base::RepeatingClosure Deferred(base::RepeatingClosure action) {
++  return base::BindRepeating(
++      [](base::RepeatingClosure action) {
++        base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++                                                                    action);
++      },
++      std::move(action));
++}
++
++views::Label* AddLabel(views::View* parent,
++                       std::u16string_view text,
++                       SkColor color,
++                       int size_delta = 0,
++                       bool bold = false) {
++  auto* label = parent->AddChildView(std::make_unique<views::Label>(text));
++  label->SetHorizontalAlignment(gfx::ALIGN_LEFT);
++  label->SetAutoColorReadabilityEnabled(false);
++  label->SetEnabledColor(color);
++  gfx::FontList font = gfx::FontList().DeriveWithSizeDelta(size_delta);
++  if (bold) {
++    font = font.DeriveWithWeight(gfx::Font::Weight::BOLD);
++  }
++  label->SetFontList(font);
++  label->SetElideBehavior(gfx::ELIDE_TAIL);
++  return label;
++}
++
++views::LabelButton* AddButton(views::View* parent,
++                              std::u16string_view text,
++                              base::RepeatingClosure action,
++                              SkColor background,
++                              SkColor color) {
++  auto* button = parent->AddChildView(std::make_unique<views::LabelButton>(
++      base::BindRepeating(
++          [](base::RepeatingClosure action, const ui::Event&) {
++            action.Run();
++          },
++          Deferred(std::move(action))),
++      text));
++  button->SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(7, 14)));
++  button->SetEnabledTextColors(color);
++  button->SetTextColor(views::Button::STATE_DISABLED, kDim);
++  button->SetBackground(views::CreateRoundedRectBackground(background, 6));
++  return button;
++}
++
++views::View* AddBox(views::View* parent,
++                    views::BoxLayout::Orientation orientation,
++                    int spacing,
++                    const gfx::Insets& insets = gfx::Insets()) {
++  auto* box = parent->AddChildView(std::make_unique<views::View>());
++  auto* layout = box->SetLayoutManager(
++      std::make_unique<views::BoxLayout>(orientation, insets, spacing));
++  if (orientation == views::BoxLayout::Orientation::kHorizontal) {
++    layout->set_cross_axis_alignment(
++        views::BoxLayout::CrossAxisAlignment::kCenter);
++  }
++  return box;
++}
++
++// Gives the focused shell its focus back.
++void FocusShell() {
++  content::WebContents* shell = PlutoniumCapture::FocusedShell();
++  aura::Window* window = shell ? shell->GetTopLevelNativeWindow() : nullptr;
++  if (window && window->IsVisible()) {
++    wm::ActivateWindow(window);
++  }
++}
++
++// The picker's contents: who asks, then the sources it can have, by type,
++// then Cancel and Share.
++class PickerView : public views::View {
++  METADATA_HEADER(PickerView, views::View)
++
++ public:
++  using Done = base::RepeatingCallback<void(std::optional<base::Value>)>;
++
++  PickerView(const base::DictValue& request, Done done)
++      : done_(std::move(done)) {
++    multiple_ = request.FindBool("multiple").value_or(false);
++    const base::ListValue* types = request.FindList("types");
++    auto wants = [types](const char* type) {
++      return !types || types->empty() ||
++             std::ranges::contains(*types, base::Value(type));
++    };
++    SetLayoutManager(std::make_unique<views::BoxLayout>(
++        views::BoxLayout::Orientation::kVertical, gfx::Insets(20), 10));
++    SetBackground(views::CreateRoundedRectBackground(kPanel, 12));
++
++    const base::DictValue* consumer = request.FindDict("consumer");
++    const std::string* name =
++        consumer ? consumer->FindString("name") : nullptr;
++    const std::string* kind = request.FindString("kind");
++    const bool screenshot = kind && *kind == "screenshot";
++    const std::u16string who =
++        name && !name->empty() ? base::UTF8ToUTF16(*name) : u"An app";
++    AddLabel(this,
++             who + (screenshot ? u" wants a screenshot"
++                               : u" wants to share your screen"),
++             kTitle, 4, /*bold=*/true);
++    AddLabel(this,
++             multiple_ ? u"Choose what to share (one or more)."
++                       : u"Choose what to share.",
++             kDim);
++
++    auto* scroll = AddChildView(std::make_unique<views::ScrollView>());
++    scroll->SetBackgroundColor(kPanel);
++    scroll->ClipHeightTo(0, kListHeight);
++    auto* list = scroll->SetContents(std::make_unique<views::View>());
++    list->SetLayoutManager(std::make_unique<views::BoxLayout>(
++        views::BoxLayout::Orientation::kVertical, gfx::Insets(), 4));
++    const base::DictValue sources = PlutoniumCapture::Get()->GetSources();
++    if (wants("output")) {
++      AddSection(list, u"Screens", sources.FindList("outputs"), "output",
++                 "name");
++    }
++    if (wants("window")) {
++      AddSection(list, u"Windows", sources.FindList("windows"), "window",
++                 "title");
++    }
++    if (wants("tab")) {
++      AddSection(list, u"Tabs", sources.FindList("tabs"), "tab", "title");
++    }
++    if (items_.empty()) {
++      AddLabel(list, u"There's nothing to share.", kDim);
++    }
++
++    auto* buttons =
++        AddBox(this, views::BoxLayout::Orientation::kHorizontal, 8);
++    static_cast<views::BoxLayout*>(buttons->GetLayoutManager())
++        ->set_main_axis_alignment(views::BoxLayout::MainAxisAlignment::kEnd);
++    AddButton(buttons, u"Cancel",
++              base::BindRepeating(&PickerView::Cancel,
++                                  weak_factory_.GetWeakPtr()),
++              kButton, kTitle);
++    share_ = AddButton(buttons, screenshot ? u"Take" : u"Share",
++                       base::BindRepeating(&PickerView::Share,
++                                           weak_factory_.GetWeakPtr()),
++                       kAccent, kOnAccent);
++    share_->SetEnabled(false);
++
++    AddAccelerator(ui::Accelerator(ui::VKEY_ESCAPE, ui::EF_NONE));
++    AddAccelerator(ui::Accelerator(ui::VKEY_RETURN, ui::EF_NONE));
++  }
++
++  // views::View:
++  bool AcceleratorPressed(const ui::Accelerator& accelerator) override {
++    if (accelerator.key_code() == ui::VKEY_ESCAPE) {
++      Cancel();
++    } else if (share_->GetEnabled()) {
++      Share();
++    }
++    return true;
++  }
++
++ private:
++  struct Item {
++    base::DictValue source;
++    raw_ptr<views::LabelButton> button = nullptr;
++    bool selected = false;
++  };
++
++  void AddSection(views::View* parent,
++                  std::u16string_view heading,
++                  const base::ListValue* entries,
++                  const char* type,
++                  const char* label_key) {
++    if (!entries || entries->empty()) {
++      return;
++    }
++    AddLabel(parent, heading, kDim, -1, /*bold=*/true);
++    for (const base::Value& entry : *entries) {
++      if (!entry.is_dict()) {
++        continue;
++      }
++      const base::DictValue& dict = entry.GetDict();
++      const base::Value* id = dict.Find("id");
++      if (!id) {
++        continue;
++      }
++      const std::string* label = dict.FindString(label_key);
++      Item item;
++      item.source = base::DictValue().Set("type", type).Set("id", id->Clone());
++      item.button = AddButton(
++          parent,
++          label && !label->empty() ? base::UTF8ToUTF16(*label)
++                                   : std::u16string(u"(untitled)"),
++          base::BindRepeating(&PickerView::Toggle, weak_factory_.GetWeakPtr(),
++                              items_.size()),
++          kButton, kTitle);
++      item.button->SetHorizontalAlignment(gfx::ALIGN_LEFT);
++      items_.push_back(std::move(item));
++    }
++  }
++
++  void Toggle(size_t index) {
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (i == index) {
++        items_[i].selected = !multiple_ || !items_[i].selected;
++      } else if (!multiple_) {
++        items_[i].selected = false;
++      }
++      items_[i].button->SetBackground(views::CreateRoundedRectBackground(
++          items_[i].selected ? kSelected : kButton, 6));
++    }
++    share_->SetEnabled(std::ranges::any_of(
++        items_, [](const Item& item) { return item.selected; }));
++  }
++
++  void Share() {
++    base::ListValue chosen;
++    for (const Item& item : items_) {
++      if (item.selected) {
++        chosen.Append(item.source.Clone());
++      }
++    }
++    done_.Run(base::Value(base::DictValue().Set("sources", std::move(chosen))));
++  }
++
++  void Cancel() { done_.Run(std::nullopt); }
++
++  bool multiple_ = false;
++  std::vector<Item> items_;
++  raw_ptr<views::LabelButton> share_ = nullptr;
++  Done done_;
++  base::WeakPtrFactory<PickerView> weak_factory_{this};
++};
++
++BEGIN_METADATA(PickerView)
++END_METADATA
++
++// The indicator's contents: a line per capture, with a Stop button.
++std::unique_ptr<views::View> BuildIndicator(
++    const std::vector<base::DictValue>& captures) {
++  auto view = std::make_unique<views::View>();
++  view->SetLayoutManager(std::make_unique<views::BoxLayout>(
++      views::BoxLayout::Orientation::kVertical, gfx::Insets::VH(8, 12), 6));
++  view->SetBackground(views::CreateRoundedRectBackground(kPanel, 10));
++  for (const base::DictValue& capture : captures) {
++    auto* row = AddBox(view.get(), views::BoxLayout::Orientation::kHorizontal,
++                       10);
++    auto* dot = row->AddChildView(std::make_unique<views::View>());
++    dot->SetPreferredSize(gfx::Size(10, 10));
++    dot->SetBackground(views::CreateRoundedRectBackground(kRecording, 5));
++    const base::DictValue* consumer = capture.FindDict("consumer");
++    const std::string* name =
++        consumer ? consumer->FindString("name") : nullptr;
++    const std::string* label = capture.FindString("label");
++    AddLabel(row,
++             base::UTF8ToUTF16((name && !name->empty() ? *name : "An app") +
++                               " is capturing " +
++                               (label ? *label : std::string("the screen"))),
++             kTitle);
++    const int id = capture.FindInt("id").value_or(0);
++    AddButton(row, u"Stop", base::BindRepeating([](int id) {
++                PlutoniumCapture::Get()->Stop(id);
++              }, id),
++              kButton, kTitle);
++  }
++  return view;
++}
++
++}  // namespace
++
++PlutoniumCaptureUi::PlutoniumCaptureUi() {
++  PlutoniumCapture::Get()->SetUi(this);
++}
++
++PlutoniumCaptureUi::~PlutoniumCaptureUi() {
++  PlutoniumCapture::Get()->SetUi(nullptr);
++}
++
++void PlutoniumCaptureUi::Pick(
++    const base::DictValue& request,
++    base::OnceCallback<void(std::optional<base::Value>)> done) {
++  // One at a time: the one open is refused.
++  if (done_) {
++    std::move(done_).Run(std::nullopt);
++  }
++  ClosePicker();
++  aura::Window* root = ash::Shell::HasInstance()
++                           ? ash::Shell::GetRootWindowForNewWindows()
++                           : nullptr;
++  if (!root) {
++    std::move(done).Run(std::nullopt);
++    return;
++  }
++  picking_ = request.FindInt("requestId").value_or(0);
++  done_ = std::move(done);
++
++  auto view = std::make_unique<PickerView>(
++      request, base::BindRepeating(&PlutoniumCaptureUi::OnPicked,
++                                   weak_factory_.GetWeakPtr(), picking_));
++  const gfx::Rect work_area =
++      display::Screen::Get()->GetDisplayNearestWindow(root).work_area();
++  const int width = std::min(kPickerWidth, work_area.width() * 9 / 10);
++  const int height =
++      std::min(view->GetHeightForWidth(width), work_area.height() * 9 / 10);
++  views::Widget::InitParams params(
++      views::Widget::InitParams::CLIENT_OWNS_WIDGET,
++      views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
++  params.name = "PlutoniumCapturePicker";
++  params.parent =
++      ash::Shell::GetContainer(root, ash::kShellWindowId_OverlayContainer);
++  params.bounds = gfx::Rect(work_area.x() + (work_area.width() - width) / 2,
++                            work_area.y() + (work_area.height() - height) / 2,
++                            width, height);
++  params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
++  params.activatable = views::Widget::InitParams::Activatable::kYes;
++  params.shadow_type = views::Widget::InitParams::ShadowType::kNone;
++  picker_ = std::make_unique<views::Widget>(std::move(params));
++  picker_->SetContentsView(std::move(view));
++  picker_->Show();
++  picker_->Activate();
++  VLOG(1) << "EXO-CAPTURE Ash's picker asks (request #" << picking_ << ")";
++}
++
++void PlutoniumCaptureUi::CancelPick(int32_t request_id) {
++  if (picking_ != request_id) {
++    return;
++  }
++  done_.Reset();
++  ClosePicker();
++}
++
++void PlutoniumCaptureUi::OnPicked(int32_t request_id,
++                                  std::optional<base::Value> answer) {
++  if (picking_ != request_id || !done_) {
++    return;
++  }
++  ClosePicker();
++  std::move(done_).Run(std::move(answer));
++}
++
++void PlutoniumCaptureUi::ClosePicker() {
++  picking_ = 0;
++  if (!picker_) {
++    return;
++  }
++  // Not from inside one of the widget's own calls (a key or a click).
++  base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
++      FROM_HERE, std::move(picker_));
++  FocusShell();
++}
++
++void PlutoniumCaptureUi::ShowIndicator(
++    const std::vector<base::DictValue>& captures) {
++  if (captures.empty()) {
++    if (indicator_) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
++          FROM_HERE, std::move(indicator_));
++    }
++    return;
++  }
++  aura::Window* root = ash::Shell::HasInstance()
++                           ? ash::Shell::GetPrimaryRootWindow()
++                           : nullptr;
++  if (!root) {
++    return;
++  }
++  if (!indicator_) {
++    views::Widget::InitParams params(
++        views::Widget::InitParams::CLIENT_OWNS_WIDGET,
++        views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
++    params.name = "PlutoniumCaptureIndicator";
++    params.parent =
++        ash::Shell::GetContainer(root, ash::kShellWindowId_OverlayContainer);
++    params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
++    params.activatable = views::Widget::InitParams::Activatable::kNo;
++    params.shadow_type = views::Widget::InitParams::ShadowType::kNone;
++    indicator_ = std::make_unique<views::Widget>(std::move(params));
++  }
++  views::View* view = indicator_->SetContentsView(BuildIndicator(captures));
++  const gfx::Size size = view->GetPreferredSize();
++  const gfx::Rect work_area =
++      display::Screen::Get()->GetDisplayNearestWindow(root).work_area();
++  indicator_->SetBounds(gfx::Rect(work_area.right() - size.width() - 16,
++                                  work_area.y() + 16, size.width(),
++                                  size.height()));
++  indicator_->ShowInactive();
++}
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h
+new file mode 100644
+index 0000000000..76e7cc7f29
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h
+@@ -0,0 +1,52 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_CAPTURE_UI_H_
++#define CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_CAPTURE_UI_H_
++
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_capture.h"
++
++namespace views {
++class Widget;
++}
++
++// EXO-CAPTURE: Ash's own capture UI (PlutoniumCapture::Ui), for when the
++// focused shell doesn't do it (docs/features/CAPTURE.md):
++// - the picker, a dialog above the shells listing every output, window and
++//   tab the consumer can have; Share answers, Cancel or Escape refuses;
++// - the indicator, a strip in the top right corner of the primary display
++//   that lists the captures no shell shows, each with a Stop button. It
++//   takes no focus.
++class PlutoniumCaptureUi : public PlutoniumCapture::Ui {
++ public:
++  PlutoniumCaptureUi();
++  PlutoniumCaptureUi(const PlutoniumCaptureUi&) = delete;
++  PlutoniumCaptureUi& operator=(const PlutoniumCaptureUi&) = delete;
++  ~PlutoniumCaptureUi() override;
++
++  // PlutoniumCapture::Ui:
++  void Pick(const base::DictValue& request,
++            base::OnceCallback<void(std::optional<base::Value>)> done) override;
++  void CancelPick(int32_t request_id) override;
++  void ShowIndicator(const std::vector<base::DictValue>& captures) override;
++
++ private:
++  void OnPicked(int32_t request_id, std::optional<base::Value> answer);
++  void ClosePicker();
++
++  std::unique_ptr<views::Widget> picker_;
++  int32_t picking_ = 0;
++  base::OnceCallback<void(std::optional<base::Value>)> done_;
++  std::unique_ptr<views::Widget> indicator_;
++  base::WeakPtrFactory<PlutoniumCaptureUi> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_CAPTURE_UI_H_
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index fcada28ec3..37cbf5190e 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -201,8 +201,8 @@ void EmbeddedWindows::Detach(int32_t window_id) {
+       ClearFocusToModalParent(window_id);
+     }
+     // The next element to show the window chooses its size, or takes the
+-    // window's own.
+-    it->second.shell_surface->SetEmbedSize(gfx::Size());
++    // window's own (EXO-CAPTURE: unless a capture holds one).
++    it->second.shell_surface->SetEmbedSize(it->second.capture_size);
+     it->second.embed_size = gfx::Size();
+     if (window_id == presented_window_id_) {
+       // EXO-PRESENT: it stays where it is until the presentation ends.
+@@ -275,8 +275,8 @@ void EmbeddedWindows::EndPresentation() {
+   if (it->second.attach_count > 0) {
+     // Back to its elements, at the size they asked for.
+     shell_surface->SetEmbedParked(true);
+-    if (!it->second.embed_size.IsEmpty()) {
+-      shell_surface->SetEmbedSize(it->second.embed_size);
++    if (!SizeFor(it->second).IsEmpty()) {
++      shell_surface->SetEmbedSize(SizeFor(it->second));
+     }
+   } else if (HideWindows()) {
+     shell_surface->SetEmbedParked(true);
+@@ -318,10 +318,41 @@ void EmbeddedWindows::SetSize(int32_t window_id, const gfx::Size& size) {
+   it->second.embed_size = size;
+   // EXO-PRESENT: fullscreen until the presentation ends.
+   if (window_id != presented_window_id_) {
+-    it->second.shell_surface->SetEmbedSize(size);
++    it->second.shell_surface->SetEmbedSize(SizeFor(it->second));
+   }
+ }
+ 
++void EmbeddedWindows::SetCaptureSize(int32_t window_id,
++                                     const gfx::Size& size) {
++  auto it = windows_.find(window_id);
++  if (it == windows_.end() || it->second.capture_size == size) {
++    return;
++  }
++  it->second.capture_size = size;
++  VLOG(1) << "EXO-CAPTURE window #" << window_id << " held at "
++          << (size.IsEmpty() ? std::string("its element's size")
++                             : size.ToString());
++  if (window_id != presented_window_id_) {
++    it->second.shell_surface->SetEmbedSize(SizeFor(it->second));
++  }
++}
++
++gfx::Size EmbeddedWindows::GetCaptureSize(int32_t window_id) const {
++  auto it = windows_.find(window_id);
++  return it == windows_.end() ? gfx::Size() : it->second.capture_size;
++}
++
++aura::Window* EmbeddedWindows::GetCaptureWindow(int32_t window_id) const {
++  ShellSurfaceBase* shell_surface = FindShellSurface(window_id);
++  views::Widget* widget = shell_surface ? shell_surface->GetWidget() : nullptr;
++  return widget ? widget->GetNativeWindow() : nullptr;
++}
++
++// static
++gfx::Size EmbeddedWindows::SizeFor(const Entry& entry) {
++  return entry.capture_size.IsEmpty() ? entry.embed_size : entry.capture_size;
++}
++
+ void EmbeddedWindows::Close(int32_t window_id) {
+   if (ShellSurfaceBase* shell_surface = FindShellSurface(window_id)) {
+     shell_surface->OnCloseRequested(views::Widget::ClosedReason::kUnspecified);
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index bca9d001fa..af97506430 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -157,6 +157,14 @@ class EmbeddedWindows : public aura::WindowObserver {
+   int32_t presented_window_id() const { return presented_window_id_; }
+   // Asks the app to resize its window geometry to |size| (DIPs).
+   void SetSize(int32_t window_id, const gfx::Size& size);
++  // EXO-CAPTURE: a capture holds the window at |size| (DIPs), whatever size
++  // its elements ask for (SetSize()), until it's set empty again. They keep
++  // the window's place and show the frame scaled into their box.
++  void SetCaptureSize(int32_t window_id, const gfx::Size& size);
++  gfx::Size GetCaptureSize(int32_t window_id) const;
++  // EXO-CAPTURE: the aura window to capture for |window_id| (its widget's),
++  // or null.
++  aura::Window* GetCaptureWindow(int32_t window_id) const;
+   // EXO-FULLSCREEN: whether an element showing the window is fullscreen;
+   // the app is told it is fullscreen while one is.
+   void SetFullscreen(int32_t window_id, bool fullscreen);
+@@ -263,12 +271,17 @@ class EmbeddedWindows : public aura::WindowObserver {
+     bool show_on_detach = false;
+     // EXO-PRESENT: the size its elements last asked for.
+     gfx::Size embed_size;
++    // EXO-CAPTURE: the size a capture holds it at (SetCaptureSize()), or
++    // empty.
++    gfx::Size capture_size;
+     std::optional<Info> last_info;
+   };
+ 
+   EmbeddedWindows();
+   ~EmbeddedWindows() override;
+ 
++  // The size the app is asked for: a capture's, else its elements'.
++  static gfx::Size SizeFor(const Entry& entry);
+   int32_t FindWindowId(const ShellSurfaceBase* shell_surface) const;
+   ShellSurfaceBase* FindShellSurface(int32_t window_id) const;
+   // The drop target under |location| in |window| when that window shows
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 1bd486709b..929814c64d 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -240,6 +240,35 @@ interface BrowserDownloadObserver {
+   OnDownloadRemoved(int32 download_id);
+ };
+ 
++// EXO-CAPTURE (chrome/browser/plutonium_capture.h, docs/features/CAPTURE.md):
++// screen captures, for every shell. A capture is a JSON object: {id, kind
++// ("stream": a shell's MediaStream, "pipewire": an app's, through the portal,
++// "display": a tab's getDisplayMedia), source ({type: "output" | "window" |
++// "tab", id, region?}), label (what the source is called), consumer ({kind:
++// "shell" | "app" | "tab" | "agent", name, appId?, pid?, thread?, tabId?,
++// shellId?}), size? ({width, height}: a window held at a capture size),
++// cursor ("hidden", "embedded" or "metadata"), nodeId? (PipeWire), startTime
++// (ms since the epoch), acknowledged (the focused shell shows it)}.
++interface CaptureObserver {
++  // A consumer asks for a capture, and this is the focused shell: a
++  // cancelable "capturerequest" event, with |detail_json| as its detail:
++  // {requestId, kind ("screencast" or "screenshot"), consumer, types (of
++  // source), multiple, cursorModes}. |taken|: the page called
++  // preventDefault(), so it asks the user and answers with the "answer"
++  // command. Otherwise Ash's own picker asks.
++  OnCaptureRequest(int32 id, string detail_json) => (bool taken);
++  // Request |id|, which this page took, is over (the consumer went away).
++  // Surfaced as "capturerequestend".
++  OnCaptureRequestEnded(int32 id);
++  // "capturestart", "capturechange" and "capturestop", with the capture.
++  OnCaptureStarted(int32 id, string capture_json);
++  OnCaptureChanged(int32 id, string capture_json);
++  OnCaptureStopped(int32 id, string capture_json);
++  // The global switches changed: {recording, screenshots}.
++  // "capturesettingschange".
++  OnCaptureSettingsChanged(string settings_json);
++};
++
+ interface WindowBroker {
+   // The current windows.
+   GetWindows() => (array<NativeWindowEntry> windows);
+@@ -385,4 +414,22 @@ interface WindowBroker {
+   // (~/Downloads, the default), "thread" (~/Downloads/<thread label>/), an
+   // absolute path ("~/" for the home folder), or "" for the default.
+   SetDownloadFolder(string tag, string folder);
++
++  // EXO-CAPTURE: the captures now and the settings, then every later change
++  // and the capture requests for this page through |observer| (ordered with
++  // the reply, as AddObserver()). Replaces the previous one.
++  AddCaptureObserver(pending_associated_remote<CaptureObserver> observer)
++      => (array<string> captures_json, string settings_json);
++  // A PNG of |source_json| ({type, id, region?}; region {x, y, width,
++  // height} in the source's pixels), or null and why not (screenshots are
++  // switched off, there's no such source, or the copy failed).
++  Screenshot(string source_json)
++      => (mojo_base.mojom.BigBuffer? png, string error);
++  // Runs capture command |command| with |args_json| (a JSON object):
++  // "sources", "list", "settings", "setSettings", "stream" (a MediaStream's
++  // id for this page's getUserMedia()), "stop", "acknowledge", "setSize",
++  // "answer" (docs/features/CAPTURE.md). |result_json| is its result as
++  // JSON, or why it failed.
++  RunCaptureCommand(string command, string args_json)
++      => (bool ok, string result_json);
+ };
+diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
+index 28dbc3bb8d..fbb49d2d09 100644
+--- a/third_party/blink/renderer/bindings/generated_in_core.gni
++++ b/third_party/blink/renderer/bindings/generated_in_core.gni
+@@ -1112,6 +1112,8 @@ generated_interface_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_tab_request_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_download_event.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_browser_download_event.h",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_shell_capture_event.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_shell_capture_event.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_permissions_policy.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_fence.cc",
+diff --git a/third_party/blink/renderer/bindings/idl_in_core.gni b/third_party/blink/renderer/bindings/idl_in_core.gni
+index 99798b5c37..a5644c3b7b 100644
+--- a/third_party/blink/renderer/bindings/idl_in_core.gni
++++ b/third_party/blink/renderer/bindings/idl_in_core.gni
+@@ -500,6 +500,7 @@ static_idl_files_in_core = [
+   "//third_party/blink/renderer/core/html/shell_entry.idl",
+   "//third_party/blink/renderer/core/html/tab_request_event.idl",
+   "//third_party/blink/renderer/core/html/browser_download_event.idl",
++  "//third_party/blink/renderer/core/html/shell_capture_event.idl",
+   "//third_party/blink/renderer/core/html/html_object_element.idl",
+   "//third_party/blink/renderer/core/html/html_olist_element.idl",
+   "//third_party/blink/renderer/core/html/html_or_svg_or_mathml_element.idl",
+diff --git a/third_party/blink/renderer/core/events/event_type_names.json5 b/third_party/blink/renderer/core/events/event_type_names.json5
+index c1cd21b1a8..eb89030451 100644
+--- a/third_party/blink/renderer/core/events/event_type_names.json5
++++ b/third_party/blink/renderer/core/events/event_type_names.json5
+@@ -378,6 +378,13 @@
+     "downloadadded",
+     "downloadchanged",
+     "downloadremoved",
++    // EXO-CAPTURE: navigator.windowBroker.
++    "capturechange",
++    "capturerequest",
++    "capturerequestend",
++    "capturesettingschange",
++    "capturestart",
++    "capturestop",
+     // EXO-BROKER: navigator.windowBroker.
+     "grantrevoked",
+     "windowadded",
+diff --git a/third_party/blink/renderer/core/html/build.gni b/third_party/blink/renderer/core/html/build.gni
+index f25caa659b..d928455379 100644
+--- a/third_party/blink/renderer/core/html/build.gni
++++ b/third_party/blink/renderer/core/html/build.gni
+@@ -410,6 +410,8 @@ blink_core_sources_html = [
+   "tab_request_event.h",
+   "browser_download_event.cc",
+   "browser_download_event.h",
++  "shell_capture_event.cc",
++  "shell_capture_event.h",
+   "html_no_embed_element.cc",
+   "html_no_embed_element.h",
+   "html_no_script_element.cc",
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 919749b906..8811ff4498 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -25,6 +25,7 @@
+ #include "third_party/blink/renderer/core/html/context_menu_request_event.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "third_party/blink/renderer/core/html/native_window_event.h"
++#include "third_party/blink/renderer/core/html/shell_capture_event.h"
+ #include "third_party/blink/renderer/core/html/tab_request_event.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ 
+@@ -46,6 +47,15 @@ bool IsDownloadEvent(const AtomicString& event_type) {
+          event_type == event_type_names::kDownloadremoved;
+ }
+ 
++bool IsCaptureEvent(const AtomicString& event_type) {
++  return event_type == event_type_names::kCapturerequest ||
++         event_type == event_type_names::kCapturerequestend ||
++         event_type == event_type_names::kCapturestart ||
++         event_type == event_type_names::kCapturechange ||
++         event_type == event_type_names::kCapturestop ||
++         event_type == event_type_names::kCapturesettingschange;
++}
++
+ bool IsTabEvent(const AtomicString& event_type) {
+   return event_type == event_type_names::kTabadded ||
+          event_type == event_type_names::kTabchanged ||
+@@ -123,7 +133,8 @@ NativeWindowBroker::NativeWindowBroker(ExecutionContext* context)
+       shell_observer_receiver_(this, context),
+       context_menu_observer_receiver_(this, context),
+       tab_request_observer_receiver_(this, context),
+-      download_observer_receiver_(this, context) {}
++      download_observer_receiver_(this, context),
++      capture_observer_receiver_(this, context) {}
+ 
+ bool NativeWindowBroker::BindRemote() {
+   ExecutionContext* context = GetExecutionContext();
+@@ -176,6 +187,9 @@ void NativeWindowBroker::AddedEventListener(
+   if (IsDownloadEvent(event_type)) {
+     SubscribeDownloads();
+   }
++  if (IsCaptureEvent(event_type)) {
++    SubscribeCaptures();
++  }
+ }
+ 
+ void NativeWindowBroker::RemovedEventListener(
+@@ -225,6 +239,17 @@ void NativeWindowBroker::RemovedEventListener(
+                              event_type_names::kDownloadremoved})) {
+     download_observer_receiver_.reset();
+   }
++  // What it took goes to Ash's picker.
++  if (IsCaptureEvent(event_type) &&
++      !HasAnyEventListeners({event_type_names::kCapturerequest,
++                             event_type_names::kCapturerequestend,
++                             event_type_names::kCapturestart,
++                             event_type_names::kCapturechange,
++                             event_type_names::kCapturestop,
++                             event_type_names::kCapturesettingschange})) {
++    capture_observer_receiver_.reset();
++    taken_capture_requests_.clear();
++  }
+ }
+ 
+ void NativeWindowBroker::SubscribeContextMenus() {
+@@ -433,6 +458,152 @@ void NativeWindowBroker::setDownloadFolder(const String& tag,
+   remote_->SetDownloadFolder(tag, folder);
+ }
+ 
++void NativeWindowBroker::SubscribeCaptures() {
++  if (capture_observer_receiver_.is_bound() || !BindRemote()) {
++    return;
++  }
++  remote_->AddCaptureObserver(
++      capture_observer_receiver_.BindNewEndpointAndPassRemote(
++          GetExecutionContext()->GetTaskRunner(TaskType::kInternalDefault)),
++      BindOnce(&NativeWindowBroker::OnCaptureSnapshot,
++               WrapWeakPersistent(this), ++capture_subscription_));
++}
++
++void NativeWindowBroker::OnCaptureSnapshot(int subscription,
++                                           const Vector<String>& captures,
++                                           const String& settings) {
++  if (subscription != capture_subscription_ ||
++      !capture_observer_receiver_.is_bound() || !GetExecutionContext()) {
++    return;
++  }
++  OnCaptureSettingsChanged(settings);
++  for (const String& capture : captures) {
++    if (subscription != capture_subscription_ ||
++        !capture_observer_receiver_.is_bound()) {
++      return;
++    }
++    // The id is the capture's own; the browser reads it from the JSON too.
++    DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++        event_type_names::kCapturestart, 0, capture));
++  }
++}
++
++void NativeWindowBroker::OnCaptureRequest(int32_t id,
++                                          const String& detail_json,
++                                          OnCaptureRequestCallback callback) {
++  if (!GetExecutionContext()) {
++    std::move(callback).Run(false);
++    return;
++  }
++  auto* event = MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturerequest, id, detail_json);
++  DispatchEvent(*event);
++  const bool taken = event->defaultPrevented();
++  if (taken) {
++    taken_capture_requests_.insert(id);
++  }
++  std::move(callback).Run(taken);
++}
++
++void NativeWindowBroker::OnCaptureRequestEnded(int32_t id) {
++  if (!taken_capture_requests_.Contains(id)) {
++    return;
++  }
++  taken_capture_requests_.erase(id);
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturerequestend, id, String()));
++}
++
++void NativeWindowBroker::OnCaptureStarted(int32_t id,
++                                          const String& capture_json) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturestart, id, capture_json));
++}
++
++void NativeWindowBroker::OnCaptureChanged(int32_t id,
++                                          const String& capture_json) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturechange, id, capture_json));
++}
++
++void NativeWindowBroker::OnCaptureStopped(int32_t id,
++                                          const String& capture_json) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturestop, id, capture_json));
++}
++
++void NativeWindowBroker::OnCaptureSettingsChanged(const String& settings_json) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kCapturesettingschange, 0, settings_json));
++}
++
++ScriptPromise<Blob> NativeWindowBroker::screenshot(ScriptState* script_state,
++                                                   const String& source_json) {
++  auto* resolver =
++      MakeGarbageCollected<ScriptPromiseResolver<Blob>>(script_state);
++  auto promise = resolver->Promise();
++  if (!EnsureBound(resolver)) {
++    return promise;
++  }
++  remote_->Screenshot(
++      source_json,
++      BindOnce(
++          [](NativeWindowBroker* self, ScriptPromiseResolver<Blob>* resolver,
++             std::optional<mojo_base::BigBuffer> png, const String& error) {
++            self->pending_.erase(resolver);
++            if (!png) {
++              resolver->RejectWithDOMException(
++                  error.contains("switched off")
++                      ? DOMExceptionCode::kNotAllowedError
++                      : DOMExceptionCode::kNotFoundError,
++                  error.empty() ? String("The copy failed.") : error);
++              return;
++            }
++            resolver->Resolve(Blob::Create(base::span(*png), "image/png"));
++          },
++          WrapPersistent(this), WrapPersistent(resolver)));
++  return promise;
++}
++
++ScriptPromise<IDLString> NativeWindowBroker::captureCommand(
++    ScriptState* script_state,
++    const String& command,
++    const String& args_json) {
++  auto* resolver =
++      MakeGarbageCollected<ScriptPromiseResolver<IDLString>>(script_state);
++  auto promise = resolver->Promise();
++  if (!EnsureBound(resolver)) {
++    return promise;
++  }
++  remote_->RunCaptureCommand(
++      command, args_json,
++      BindOnce(
++          [](NativeWindowBroker* self, ScriptPromiseResolver<IDLString>* resolver,
++             bool ok, const String& result) {
++            self->pending_.erase(resolver);
++            if (!ok) {
++              resolver->RejectWithDOMException(
++                  DOMExceptionCode::kOperationError, result);
++              return;
++            }
++            resolver->Resolve(result);
++          },
++          WrapPersistent(this), WrapPersistent(resolver)));
++  return promise;
++}
++
+ void NativeWindowBroker::SubscribeShells() {
+   if (shell_observer_receiver_.is_bound() || !BindRemote()) {
+     return;
+@@ -609,6 +780,8 @@ void NativeWindowBroker::OnDisconnected() {
+   tab_request_observer_receiver_.reset();
+   taken_tab_requests_.clear();
+   download_observer_receiver_.reset();
++  capture_observer_receiver_.reset();
++  taken_capture_requests_.clear();
+   HeapHashSet<Member<ScriptPromiseResolverBase>> pending;
+   pending.swap(pending_);
+   for (ScriptPromiseResolverBase* resolver : pending) {
+@@ -1061,6 +1234,7 @@ void NativeWindowBroker::Trace(Visitor* visitor) const {
+   visitor->Trace(context_menu_observer_receiver_);
+   visitor->Trace(tab_request_observer_receiver_);
+   visitor->Trace(download_observer_receiver_);
++  visitor->Trace(capture_observer_receiver_);
+   visitor->Trace(pending_);
+   EventTarget::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index d440d52637..3faeac7393 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -21,6 +21,7 @@
+ #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
+ #include "third_party/blink/renderer/platform/supplementable.h"
+ #include "third_party/blink/renderer/platform/wtf/hash_map.h"
++#include "third_party/blink/renderer/platform/wtf/hash_set.h"
+ 
+ namespace blink {
+ 
+@@ -54,7 +55,8 @@ class CORE_EXPORT NativeWindowBroker final
+       public mojom::blink::ShellObserver,
+       public mojom::blink::ContextMenuObserver,
+       public mojom::blink::TabRequestObserver,
+-      public mojom::blink::BrowserDownloadObserver {
++      public mojom::blink::BrowserDownloadObserver,
++      public mojom::blink::CaptureObserver {
+   DEFINE_WRAPPERTYPEINFO();
+ 
+  public:
+@@ -124,6 +126,12 @@ class CORE_EXPORT NativeWindowBroker final
+                                               const String& command);
+   void setDownloadFolder(const String& tag, const String& folder);
+ 
++  // EXO-CAPTURE:
++  ScriptPromise<Blob> screenshot(ScriptState*, const String& source_json);
++  ScriptPromise<IDLString> captureCommand(ScriptState*,
++                                          const String& command,
++                                          const String& args_json);
++
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(contextmenurequest, kContextmenurequest)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(grantrevoked, kGrantrevoked)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(groupschanged, kGroupschanged)
+@@ -141,6 +149,13 @@ class CORE_EXPORT NativeWindowBroker final
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadadded, kDownloadadded)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadchanged, kDownloadchanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(downloadremoved, kDownloadremoved)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturerequest, kCapturerequest)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturerequestend, kCapturerequestend)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturestart, kCapturestart)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturechange, kCapturechange)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturestop, kCapturestop)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(capturesettingschange,
++                                  kCapturesettingschange)
+ 
+   // EventTarget:
+   const AtomicString& InterfaceName() const override {
+@@ -186,6 +201,16 @@ class CORE_EXPORT NativeWindowBroker final
+   void OnDownloadChanged(mojom::blink::BrowserDownloadPtr download) override;
+   void OnDownloadRemoved(int32_t download_id) override;
+ 
++  // mojom::blink::CaptureObserver:
++  void OnCaptureRequest(int32_t id,
++                        const String& detail_json,
++                        OnCaptureRequestCallback callback) override;
++  void OnCaptureRequestEnded(int32_t id) override;
++  void OnCaptureStarted(int32_t id, const String& capture_json) override;
++  void OnCaptureChanged(int32_t id, const String& capture_json) override;
++  void OnCaptureStopped(int32_t id, const String& capture_json) override;
++  void OnCaptureSettingsChanged(const String& settings_json) override;
++
+   void Trace(Visitor*) const override;
+ 
+  protected:
+@@ -213,6 +238,10 @@ class CORE_EXPORT NativeWindowBroker final
+   void SubscribeDownloads();
+   void OnDownloadSnapshot(int subscription,
+                           Vector<mojom::blink::BrowserDownloadPtr> downloads);
++  void SubscribeCaptures();
++  void OnCaptureSnapshot(int subscription,
++                         const Vector<String>& captures,
++                         const String& settings);
+   ScriptPromise<IDLUndefined> UpdateTags(ScriptState*,
+                                          bool tab,
+                                          int32_t id,
+@@ -243,6 +272,12 @@ class CORE_EXPORT NativeWindowBroker final
+   HeapMojoAssociatedReceiver<mojom::blink::BrowserDownloadObserver,
+                              NativeWindowBroker>
+       download_observer_receiver_;
++  // EXO-CAPTURE: captures and capture requests.
++  HeapMojoAssociatedReceiver<mojom::blink::CaptureObserver, NativeWindowBroker>
++      capture_observer_receiver_;
++  // The capture requests this document took and hasn't answered.
++  HashSet<int32_t> taken_capture_requests_;
++  int capture_subscription_ = 0;
+   bool disconnected_ = false;
+   // Counts subscriptions, so a snapshot that arrives after its subscription
+   // ended (the page stopped and started listening again) is dropped.
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index 4760b30580..40a09b5ca0 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -166,6 +166,30 @@
+     // absolute path ("~/" for the home folder), or "" for the default.
+     undefined setDownloadFolder(DOMString tag, DOMString folder);
+ 
++    // EXO-CAPTURE (docs/features/CAPTURE.md): screenshots and captures.
++    //
++    // A PNG of |sourceJson| ({type: "output" | "window" | "tab", id,
++    // region?}; region {x, y, width, height} in the source's pixels). Rejects
++    // (NotAllowedError) while screenshots are switched off, else
++    // (NotFoundError) if there's no such source or the copy failed.
++    [CallWith=ScriptState] Promise<Blob> screenshot(DOMString sourceJson);
++    // Runs capture command |command| ("sources", "list", "settings",
++    // "setSettings", "stream", "stop", "acknowledge", "setSize", "answer")
++    // with |argsJson| (a JSON object). Resolves with the result as JSON;
++    // rejects (OperationError) with why it failed.
++    [CallWith=ScriptState] Promise<DOMString> captureCommand(
++        DOMString command, optional DOMString argsJson = "");
++    // ShellCaptureEvents. Adding the first listener for any of these
++    // subscribes; the running captures then arrive as "capturestart"
++    // events, and the settings as "capturesettingschange". While this is
++    // the focused shell, capture requests arrive as "capturerequest".
++    attribute EventHandler oncapturerequest;
++    attribute EventHandler oncapturerequestend;
++    attribute EventHandler oncapturestart;
++    attribute EventHandler oncapturechange;
++    attribute EventHandler oncapturestop;
++    attribute EventHandler oncapturesettingschange;
++
+     // BrowserTabEvents. Adding the first listener for any of these
+     // subscribes; the current tabs then arrive as "tabadded" events.
+     attribute EventHandler ontabadded;
+diff --git a/third_party/blink/renderer/core/html/shell_capture_event.cc b/third_party/blink/renderer/core/html/shell_capture_event.cc
+new file mode 100644
+index 0000000000..22d04716e6
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/shell_capture_event.cc
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/html/shell_capture_event.h"
++
++#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
++#include "third_party/blink/renderer/core/event_interface_names.h"
++#include "third_party/blink/renderer/core/event_type_names.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++
++namespace blink {
++
++ShellCaptureEvent::ShellCaptureEvent(const AtomicString& type,
++                                     int32_t id,
++                                     const String& detail_json)
++    : Event(type,
++            Bubbles::kNo,
++            type == event_type_names::kCapturerequest ? Cancelable::kYes
++                                                      : Cancelable::kNo),
++      id_(id),
++      detail_json_(detail_json) {}
++
++ScriptValue ShellCaptureEvent::detail(ScriptState* script_state) const {
++  v8::Isolate* isolate = script_state->GetIsolate();
++  if (detail_json_.empty()) {
++    return ScriptValue(isolate, v8::Null(isolate));
++  }
++  v8::Local<v8::Value> value = FromJSONString(script_state, detail_json_);
++  if (value.IsEmpty()) {
++    return ScriptValue(isolate, v8::Null(isolate));
++  }
++  return ScriptValue(isolate, value);
++}
++
++const AtomicString& ShellCaptureEvent::InterfaceName() const {
++  return event_interface_names::kShellCaptureEvent;
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/html/shell_capture_event.h b/third_party/blink/renderer/core/html/shell_capture_event.h
+new file mode 100644
+index 0000000000..e794305d6c
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/shell_capture_event.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_SHELL_CAPTURE_EVENT_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_SHELL_CAPTURE_EVENT_H_
++
++#include "third_party/blink/renderer/bindings/core/v8/script_value.h"
++#include "third_party/blink/renderer/core/dom/events/event.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++
++namespace blink {
++
++class ScriptState;
++
++// EXO-CAPTURE: see shell_capture_event.idl.
++class ShellCaptureEvent final : public Event {
++  DEFINE_WRAPPERTYPEINFO();
++
++ public:
++  // "capturerequest" is cancelable. |detail_json| is empty for
++  // "capturerequestend".
++  ShellCaptureEvent(const AtomicString& type,
++                    int32_t id,
++                    const String& detail_json);
++
++  int32_t id() const { return id_; }
++  ScriptValue detail(ScriptState*) const;
++
++  const AtomicString& InterfaceName() const override;
++
++ private:
++  const int32_t id_;
++  const String detail_json_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_SHELL_CAPTURE_EVENT_H_
+diff --git a/third_party/blink/renderer/core/html/shell_capture_event.idl b/third_party/blink/renderer/core/html/shell_capture_event.idl
+new file mode 100644
+index 0000000000..2d1a55336f
+--- /dev/null
++++ b/third_party/blink/renderer/core/html/shell_capture_event.idl
+@@ -0,0 +1,24 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// EXO-CAPTURE: navigator.windowBroker's capture events
++// (docs/features/CAPTURE.md): "capturerequest" (cancelable: preventDefault()
++// takes the request, and the page answers it with the "answer" capture
++// command; else Ash's own picker asks), "capturerequestend" (one this page
++// took is over), "capturestart", "capturechange", "capturestop" and
++// "capturesettingschange".
++[
++    Exposed=Window,
++    RuntimeEnabled=PlutoniumShell,
++    SecureContext
++] interface ShellCaptureEvent : Event {
++    // The capture's id, or the request's (0 for "capturesettingschange").
++    readonly attribute long id;
++    // A fresh object on every read: the request's detail ({requestId, kind,
++    // consumer, types, multiple, cursorModes}), the capture ({id, kind,
++    // source, label, consumer, size?, cursor, nodeId?, startTime,
++    // acknowledged}), or the settings ({recording, screenshots}); null for
++    // "capturerequestend".
++    [CallWith=ScriptState] readonly attribute any detail;
++};

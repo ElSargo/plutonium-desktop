@@ -1,0 +1,1423 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sat, 24 Oct 2026 22:39:09 +1300
+Subject: [PATCH 48/49] Plutonium: PipeWire video nodes for captures,
+ getDisplayMedia asks the shell
+
+EXO-CAPTURE (docs/features/CAPTURE.md):
+- PlutoniumScreencast: Ash's own PipeWire producer (WebRTC's PipeWire code
+  is consumer-only and off for chromeos). A frame sink video capturer on an
+  output, a window (its subtree, also parked) or a tab; each frame copied
+  into a MemFd (or MemPtr) buffer, BGRx or BGRA, at a fixed size,
+  letterboxed. Cursor hidden, embedded (a capture overlay) or metadata
+  (SPA_META_Cursor). libpipewire is loaded at run time.
+- The capture command "start" (the helper's portal backend): a capture of
+  kind "pipewire", its node id once PipeWire has it.
+- In shell mode a page's getDisplayMedia() asks the focused shell
+  ("capturerequest"), else Ash's picker, instead of Chrome's picker; the
+  capture is one every shell sees, without Chrome's notification.
+---
+ chrome/browser/BUILD.gn                       |  35 +
+ .../desktop_media_picker_factory_impl.cc      |  89 ++
+ .../webrtc/display_media_access_handler.cc    |  40 +-
+ chrome/browser/plutonium_capture.cc           | 195 +++++
+ chrome/browser/plutonium_capture.h            |  26 +
+ chrome/browser/plutonium_pipewire.cc          | 783 ++++++++++++++++++
+ chrome/browser/plutonium_pipewire.h           |  63 ++
+ 7 files changed, 1226 insertions(+), 5 deletions(-)
+ create mode 100644 chrome/browser/plutonium_pipewire.cc
+ create mode 100644 chrome/browser/plutonium_pipewire.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 69f1a63411..3f5cfcd643 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -772,6 +772,40 @@ if (is_chromeos) {
+     deps = [ "//content/public/browser" ]
+   }
+ 
++  # EXO-CAPTURE: the PipeWire producer, on PipeWire's own headers (it loads
++  # libpipewire at run time). Its SPA macros aren't Chromium-warning clean.
++  source_set("plutonium_pipewire") {
++    sources = [
++      "plutonium_pipewire.cc",
++      "plutonium_pipewire.h",
++    ]
++    include_dirs = [
++      "//third_party/pipewire/include",
++      "//third_party/pipewire/src/src",
++      "//third_party/pipewire/src/spa/include",
++    ]
++    configs -= [ "//build/config/compiler:chromium_code" ]
++    configs += [ "//build/config/compiler:no_chromium_code" ]
++    cflags = [ "-Wno-gnu-case-range" ]
++    deps = [
++      "//base",
++      "//components/viz/common",
++      "//components/viz/host",
++      "//content/public/browser",
++      "//media",
++      "//media/capture/mojom:video_capture_buffer",
++      "//mojo/public/cpp/bindings",
++      "//skia",
++      "//ui/aura",
++      "//ui/base",
++      "//ui/base/cursor",
++      "//ui/base/cursor/mojom:cursor_type",
++      "//ui/compositor",
++      "//ui/events",
++      "//ui/gfx/geometry",
++    ]
++  }
++
+   source_set("exo_parts") {
+     public = [
+       "exo_embedder.h",
+@@ -857,6 +891,7 @@ if (is_chromeos) {
+       "//ui/events/blink",
+ 
+       # EXO-CAPTURE: plutonium_capture.cc.
++      ":plutonium_pipewire",
+       "//ui/display",
+       "//ui/snapshot",
+     ]
+diff --git a/chrome/browser/media/webrtc/desktop_media_picker_factory_impl.cc b/chrome/browser/media/webrtc/desktop_media_picker_factory_impl.cc
+index 52a81ecef2..b981721482 100644
+--- a/chrome/browser/media/webrtc/desktop_media_picker_factory_impl.cc
++++ b/chrome/browser/media/webrtc/desktop_media_picker_factory_impl.cc
+@@ -15,7 +15,13 @@
+ #include "content/public/browser/desktop_capture.h"
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/values.h"
+ #include "chrome/browser/media/webrtc/desktop_media_list_ash.h"
++#include "chrome/browser/plutonium_capture.h"
++#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+ #endif
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -63,6 +69,78 @@ std::unique_ptr<ThumbnailCapturer> MakeWindowCapturer(
+ }  // namespace
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
++#if BUILDFLAG(IS_CHROMEOS)
++namespace {
++
++// PLUTONIUM (EXO-CAPTURE): in shell mode a page's getDisplayMedia() asks the
++// focused shell (a "capturerequest", as an app's portal request does), else
++// Ash's own picker (docs/features/CAPTURE.md, "Tabs"). The stream stays in
++// Chromium: the answer is a DesktopMediaID of the same sources.
++class PlutoniumDesktopMediaPicker : public DesktopMediaPicker {
++ public:
++  PlutoniumDesktopMediaPicker() = default;
++  PlutoniumDesktopMediaPicker(const PlutoniumDesktopMediaPicker&) = delete;
++  PlutoniumDesktopMediaPicker& operator=(const PlutoniumDesktopMediaPicker&) =
++      delete;
++  ~PlutoniumDesktopMediaPicker() override {
++    if (request_id_) {
++      PlutoniumCapture::Get()->CancelRequest(request_id_);
++    }
++  }
++
++  // DesktopMediaPicker:
++  void Show(const Params& params,
++            std::vector<std::unique_ptr<DesktopMediaList>> source_lists,
++            DoneCallback done_callback) override {
++    PlutoniumCapture* capture = PlutoniumCapture::Get();
++    if (!capture->recording_allowed()) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE,
++          base::BindOnce(
++              std::move(done_callback),
++              DoneCallbackArgumentType(base::unexpected(
++                  blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED))));
++      return;
++    }
++    consumer_ = capture->ConsumerFor(params.web_contents, params.app_name);
++    base::ListValue types;
++    types.Append("output");
++    types.Append("window");
++    types.Append("tab");
++    request_id_ = capture->Request(
++        base::DictValue()
++            .Set("kind", "screencast")
++            .Set("consumer", consumer_.Clone())
++            .Set("types", std::move(types))
++            .Set("multiple", false),
++        base::BindOnce(&PlutoniumDesktopMediaPicker::OnAnswer,
++                       weak_factory_.GetWeakPtr(), std::move(done_callback)));
++  }
++
++ private:
++  void OnAnswer(DoneCallback done_callback, std::optional<base::Value> answer) {
++    request_id_ = 0;
++    const content::DesktopMediaID media_id =
++        answer ? PlutoniumCapture::Get()->PrepareDisplay(*answer,
++                                                         consumer_.Clone())
++               : content::DesktopMediaID();
++    if (media_id.is_null()) {
++      std::move(done_callback)
++          .Run(base::unexpected(
++              blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED));
++      return;
++    }
++    std::move(done_callback).Run(media_id);
++  }
++
++  int32_t request_id_ = 0;
++  base::DictValue consumer_;
++  base::WeakPtrFactory<PlutoniumDesktopMediaPicker> weak_factory_{this};
++};
++
++}  // namespace
++#endif  // BUILDFLAG(IS_CHROMEOS)
++
+ DesktopMediaPickerFactoryImpl::DesktopMediaPickerFactoryImpl() = default;
+ 
+ DesktopMediaPickerFactoryImpl::~DesktopMediaPickerFactoryImpl() = default;
+@@ -75,6 +153,11 @@ DesktopMediaPickerFactoryImpl* DesktopMediaPickerFactoryImpl::GetInstance() {
+ 
+ std::unique_ptr<DesktopMediaPicker> DesktopMediaPickerFactoryImpl::CreatePicker(
+     const content::MediaStreamRequest* request) {
++#if BUILDFLAG(IS_CHROMEOS)
++  if (PlutoniumCapture::PicksInShell()) {
++    return std::make_unique<PlutoniumDesktopMediaPicker>();
++  }
++#endif
+   // DesktopMediaPicker is implemented only for Windows, OSX, Aura Linux, and
+   // desktop Android builds.
+ #if defined(TOOLKIT_VIEWS)
+@@ -98,6 +181,12 @@ DesktopMediaPickerFactoryImpl::CreateMediaList(
+   // We do not use DesktopMediaList on Android.
+   return {};
+ #else
++#if BUILDFLAG(IS_CHROMEOS)
++  // PLUTONIUM (EXO-CAPTURE): the shell's picker lists the sources itself.
++  if (PlutoniumCapture::PicksInShell()) {
++    return {};
++  }
++#endif
+   // If we're supposed to include Tabs, but aren't including Windows (either
+   // directly or indirectly), then we need to add Chrome App Windows back in.
+   const bool add_chrome_app_windows =
+diff --git a/chrome/browser/media/webrtc/display_media_access_handler.cc b/chrome/browser/media/webrtc/display_media_access_handler.cc
+index addfa22ae6..632c6a4d81 100644
+--- a/chrome/browser/media/webrtc/display_media_access_handler.cc
++++ b/chrome/browser/media/webrtc/display_media_access_handler.cc
+@@ -21,6 +21,9 @@
+ #include "chrome/browser/media/webrtc/capture_policy_utils.h"
+ #include "chrome/browser/media/webrtc/desktop_capture_devices_util.h"
+ #include "chrome/browser/media/webrtc/desktop_media_picker_factory_impl.h"
++#if BUILDFLAG(IS_CHROMEOS)
++#include "chrome/browser/plutonium_capture.h"
++#endif
+ #include "chrome/browser/media/webrtc/native_desktop_media_list.h"
+ #include "chrome/browser/media/webrtc/tab_desktop_media_list.h"
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+@@ -685,18 +688,45 @@ void DisplayMediaAccessHandler::AcceptRequest(WebContents* web_contents,
+       (media_id.type == DesktopMediaID::TYPE_WEB_CONTENTS) &&
+       media_id.web_contents_id.disable_local_echo;
+ 
++  auto on_devices_obtained = base::BindOnce(
++      &DisplayMediaAccessHandler::
++          OnDesktopCaptureDevicesObtainedAfterAcceptRequest,
++      base::Unretained(this), web_contents->GetWeakPtr(),
++      pending_request.request, media_id);
++#if BUILDFLAG(IS_CHROMEOS)
++  // PLUTONIUM (EXO-CAPTURE): a source the shell's picker chose: the shells
++  // show the capture rather than Chrome's notification, and it is one of the
++  // captures every shell sees, running as long as the stream.
++  const int32_t plutonium_capture_id =
++      PlutoniumCapture::Get()->TakeDisplay(media_id);
++  if (plutonium_capture_id) {
++    on_devices_obtained = base::BindOnce(
++        [](int32_t id,
++           base::OnceCallback<void(blink::mojom::StreamDevices,
++                                   std::unique_ptr<content::MediaStreamUI>)>
++               callback,
++           blink::mojom::StreamDevices devices,
++           std::unique_ptr<content::MediaStreamUI> ui) {
++          std::move(callback).Run(
++              std::move(devices),
++              PlutoniumCapture::Get()->WrapStreamUI(id, std::move(ui)));
++        },
++        plutonium_capture_id, std::move(on_devices_obtained));
++  }
++#else
++  const int32_t plutonium_capture_id = 0;
++#endif
++
+   GetDevicesForDesktopCapture(
+       web_contents, media_id, pending_request.request.video_type,
+       pending_request.request.audio_type,
+       pending_request.request.security_origin, media_id.audio_share,
+       disable_local_echo, pending_request.request.suppress_local_audio_playback,
+-      pending_request.request.restrict_own_audio, display_notification_,
++      pending_request.request.restrict_own_audio,
++      display_notification_ && !plutonium_capture_id,
+       GetApplicationTitle(web_contents),
+       pending_request.request.captured_surface_control_active,
+-      base::BindOnce(&DisplayMediaAccessHandler::
+-                         OnDesktopCaptureDevicesObtainedAfterAcceptRequest,
+-                     base::Unretained(this), web_contents->GetWeakPtr(),
+-                     pending_request.request, media_id));
++      std::move(on_devices_obtained));
+ }
+ 
+ void DisplayMediaAccessHandler::
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+index f17a90a938..0067955179 100644
+--- a/chrome/browser/plutonium_capture.cc
++++ b/chrome/browser/plutonium_capture.cc
+@@ -15,9 +15,11 @@
+ #include "base/notreached.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/task/bind_post_task.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_pipewire.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ #include "components/exo/embedded_windows.h"
+@@ -27,13 +29,16 @@
+ #include "content/public/browser/media_stream_request.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
++#include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_media_capture_id.h"
+ #include "third_party/skia/include/core/SkBitmap.h"
+ #include "ui/aura/window.h"
+ #include "ui/display/display.h"
+ #include "ui/display/screen.h"
++#include "ui/compositor/layer.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/image/image.h"
+ #include "ui/snapshot/snapshot.h"
+ #include "url/origin.h"
+@@ -626,6 +631,19 @@ void PlutoniumCapture::RunCommand(const std::string& command,
+                 std::move(callback)));
+     return;
+   }
++  // The helper's (the portal's): a PipeWire node, ready later.
++  if (command == "start") {
++    if (frame) {
++      std::move(callback).Run(false, "Only for the helper");
++      return;
++    }
++    if (!recording_allowed()) {
++      std::move(callback).Run(false, kRecordingOff);
++      return;
++    }
++    StartScreencast(args, std::move(callback));
++    return;
++  }
+   base::expected<base::Value, std::string> result =
+       RunShellCommand(command, args, frame, taker);
+   if (!result.has_value()) {
+@@ -781,6 +799,183 @@ base::expected<base::DictValue, std::string> PlutoniumCapture::RegisterStream(
+   return base::DictValue().Set("streamId", stream_id).Set("captureId", id);
+ }
+ 
++void PlutoniumCapture::StartScreencast(const base::DictValue& args,
++                                       CommandCallback callback) {
++  const base::Value* source_value = args.Find("source");
++  std::optional<Source> source =
++      source_value ? Source::FromValue(*source_value) : std::nullopt;
++  if (!source) {
++    std::move(callback).Run(false, "Which source?");
++    return;
++  }
++  PlutoniumScreencast::Target target;
++  gfx::Size size;
++  gfx::Size held;
++  if (const base::DictValue* asked = args.FindDict("size");
++      asked && source->type == Source::Type::kWindow) {
++    held = gfx::Size(asked->FindInt("width").value_or(0),
++                     asked->FindInt("height").value_or(0));
++    if (held.IsEmpty()) {
++      held = gfx::Size();
++    }
++  }
++  switch (source->type) {
++    case Source::Type::kOutput: {
++      std::optional<display::Display> display = FindDisplay(source->id);
++      target.window = display && ash::Shell::HasInstance()
++                          ? ash::Shell::GetRootWindowForDisplayId(source->id)
++                          : nullptr;
++      if (display) {
++        size = display->GetSizeInPixel();
++      }
++      break;
++    }
++    case Source::Type::kWindow: {
++      target.window = exo::EmbeddedWindows::Get()->GetCaptureWindow(
++          static_cast<int32_t>(source->id));
++      if (target.window) {
++        const float scale = target.window->layer()->device_scale_factor();
++        size = gfx::ScaleToCeiledSize(
++            held.IsEmpty() ? target.window->bounds().size() : held, scale);
++      }
++      break;
++    }
++    case Source::Type::kTab: {
++      target.contents =
++          PlutoniumTabs::Get()->GetContents(static_cast<int32_t>(source->id));
++      content::RenderWidgetHostView* view =
++          target.contents ? target.contents->GetRenderWidgetHostView()
++                          : nullptr;
++      if (view) {
++        size = gfx::ScaleToCeiledSize(view->GetViewBounds().size(),
++                                      view->GetDeviceScaleFactor());
++      }
++      break;
++    }
++  }
++  if ((!target.window && !target.contents) || size.IsEmpty()) {
++    std::move(callback).Run(false, kNoSource);
++    return;
++  }
++  auto capture = std::make_unique<Capture>();
++  capture->kind = "pipewire";
++  capture->source = *source;
++  capture->size = held;
++  if (const base::DictValue* consumer = args.FindDict("consumer")) {
++    capture->consumer = consumer->Clone();
++  }
++  if (!capture->consumer.FindString("kind")) {
++    capture->consumer.Set("kind", "app");
++  }
++  if (!capture->consumer.FindString("name")) {
++    capture->consumer.Set("name", "An app");
++  }
++  const std::string* cursor = args.FindString("cursor");
++  capture->cursor = cursor ? *cursor : "hidden";
++  const std::string label = LabelOf(*source);
++  const std::string cursor_mode = capture->cursor;
++  const int32_t id = Add(std::move(capture));
++  // Its callbacks come from inside it: they must not destroy it there.
++  std::unique_ptr<PlutoniumScreencast> screencast = PlutoniumScreencast::Start(
++      target, size, cursor_mode, "Plutonium: " + label,
++      base::BindPostTaskToCurrentDefault(
++          base::BindOnce(&PlutoniumCapture::OnScreencastReady,
++                         base::Unretained(this), id, std::move(callback))),
++      base::BindPostTaskToCurrentDefault(base::BindOnce(
++          &PlutoniumCapture::Remove, base::Unretained(this), id)));
++  if (!screencast) {
++    // The ready callback says so.
++    captures_.erase(id);
++    return;
++  }
++  Find(id)->screencast = std::move(screencast);
++}
++
++void PlutoniumCapture::OnScreencastReady(int32_t id,
++                                         CommandCallback callback,
++                                         uint32_t node_id,
++                                         const gfx::Size& size) {
++  Capture* capture = Find(id);
++  if (!capture || !node_id) {
++    captures_.erase(id);
++    std::move(callback).Run(false, "No PipeWire node (is PipeWire running?)");
++    return;
++  }
++  capture->node_id = node_id;
++  OnStreamStarted(id, base::RepeatingClosure());
++  std::move(callback).Run(true, ToJson(base::Value(base::DictValue()
++                                                       .Set("captureId", id)
++                                                       .Set("nodeId", static_cast<int>(node_id))
++                                                       .Set("width", size.width())
++                                                       .Set("height", size.height()))));
++}
++
++// static
++bool PlutoniumCapture::PicksInShell() {
++  return plutonium_shell::IsShellMode();
++}
++
++base::DictValue PlutoniumCapture::ConsumerFor(
++    content::WebContents* contents,
++    const std::u16string& app_name) const {
++  base::DictValue consumer;
++  consumer.Set("kind", "tab");
++  consumer.Set("name", app_name.empty() ? std::string("A page")
++                                        : base::UTF16ToUTF8(app_name));
++  if (std::optional<PlutoniumTabs::TabInfo> tab =
++          PlutoniumTabs::Get()->GetTabFor(contents)) {
++    consumer.Set("tabId", tab->id);
++    if (!tab->tags.empty()) {
++      consumer.Set("thread", tab->tags.front());
++    }
++  } else if (contents &&
++             plutonium_shell::IsShellDocument(contents->GetPrimaryMainFrame())) {
++    consumer.Set("kind", "shell");
++  }
++  return consumer;
++}
++
++content::DesktopMediaID PlutoniumCapture::PrepareDisplay(
++    const base::Value& answer,
++    base::DictValue consumer) {
++  const base::ListValue* sources =
++      answer.is_dict() ? answer.GetDict().FindList("sources") : nullptr;
++  std::optional<Source> source = sources && !sources->empty()
++                                     ? Source::FromValue(sources->front())
++                                     : std::nullopt;
++  if (!source) {
++    return content::DesktopMediaID();
++  }
++  const content::DesktopMediaID media_id = ToMediaId(*source);
++  if (media_id.is_null()) {
++    return media_id;
++  }
++  auto capture = std::make_unique<Capture>();
++  capture->kind = "display";
++  capture->source = *source;
++  capture->consumer = std::move(consumer);
++  capture->stream_id = media_id.ToString();
++  const int32_t id = Add(std::move(capture));
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&PlutoniumCapture::DropUnusedStream,
++                     base::Unretained(this), id),
++      kStreamIdLifetime);
++  return media_id;
++}
++
++int32_t PlutoniumCapture::TakeDisplay(const content::DesktopMediaID& media_id) {
++  const std::string stream_id = media_id.ToString();
++  for (auto& [id, capture] : captures_) {
++    if (capture->kind == "display" && !capture->started &&
++        capture->stream_id == stream_id) {
++      capture->stream_id.clear();
++      return id;
++    }
++  }
++  return 0;
++}
++
+ void PlutoniumCapture::DropUnusedStream(int32_t id) {
+   auto it = captures_.find(id);
+   if (it != captures_.end() && !it->second->started) {
+diff --git a/chrome/browser/plutonium_capture.h b/chrome/browser/plutonium_capture.h
+index 6108a7cbec..3c29c08dcd 100644
+--- a/chrome/browser/plutonium_capture.h
++++ b/chrome/browser/plutonium_capture.h
+@@ -29,6 +29,7 @@
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/size.h"
+ 
++class PlutoniumScreencast;
+ class PrefRegistrySimple;
+ class SkBitmap;
+ 
+@@ -194,6 +195,23 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+       int32_t id,
+       std::unique_ptr<content::MediaStreamUI> ui);
+ 
++  // EXO-CAPTURE: getDisplayMedia() from a page (chrome/browser/media/webrtc's
++  // picker in shell mode).
++  //
++  // Whether pages' getDisplayMedia() asks the shells (shell mode).
++  static bool PicksInShell();
++  // Who asks, as a request's consumer.
++  base::DictValue ConsumerFor(content::WebContents* contents,
++                              const std::u16string& app_name) const;
++  // The answer to its request as the DesktopMediaID to capture (TYPE_NONE if
++  // it names nothing there is), noted as a capture of |consumer| that starts
++  // with the stream (TakeDisplay()).
++  content::DesktopMediaID PrepareDisplay(const base::Value& answer,
++                                         base::DictValue consumer);
++  // Whether the stream about to start for |media_id| is one PrepareDisplay()
++  // noted: then its capture id (for WrapStreamUI()), else 0.
++  int32_t TakeDisplay(const content::DesktopMediaID& media_id);
++
+   // What |source| is as a DesktopMediaID (registered for capture), or
+   // TYPE_NONE if it's gone.
+   content::DesktopMediaID ToMediaId(const Source& source) const;
+@@ -228,6 +246,8 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+     std::set<content::GlobalRenderFrameHostId> acknowledged_by;
+     // "stream": the id its getUserMedia() uses, until it does.
+     std::string stream_id;
++    // "pipewire": its PipeWire node.
++    std::unique_ptr<PlutoniumScreencast> screencast;
+   };
+ 
+   struct PendingRequest {
+@@ -254,6 +274,12 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+       const base::DictValue& args,
+       content::RenderFrameHost* frame,
+       int32_t taker);
++  // "start": a PipeWire node of a source, for the portal.
++  void StartScreencast(const base::DictValue& args, CommandCallback callback);
++  void OnScreencastReady(int32_t id,
++                         CommandCallback callback,
++                         uint32_t node_id,
++                         const gfx::Size& size);
+   base::expected<base::DictValue, std::string> RegisterStream(
+       const base::DictValue& args,
+       content::RenderFrameHost* frame);
+diff --git a/chrome/browser/plutonium_pipewire.cc b/chrome/browser/plutonium_pipewire.cc
+new file mode 100644
+index 0000000000..a91de52399
+--- /dev/null
++++ b/chrome/browser/plutonium_pipewire.cc
+@@ -0,0 +1,783 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// PLUTONIUM: PipeWire's C buffers (spa_data, spa_meta_*) and frame rows.
++#pragma allow_unsafe_buffers
++#endif
++
++#include "chrome/browser/plutonium_pipewire.h"
++
++#include <dlfcn.h>
++#include <pipewire/pipewire.h>
++#include <spa/buffer/meta.h>
++#include <spa/param/video/format-utils.h>
++#include <spa/pod/builder.h>
++#include <sys/mman.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <cstring>
++#include <optional>
++#include <type_traits>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/read_only_shared_memory_region.h"
++#include "base/memory/weak_ptr.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/synchronization/lock.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/thread_annotations.h"
++#include "base/time/time.h"
++#include "components/viz/common/surfaces/video_capture_target.h"
++#include "components/viz/host/client_frame_sink_video_capturer.h"
++#include "components/viz/host/host_frame_sink_manager.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "media/base/video_frame.h"
++#include "media/capture/mojom/video_capture_buffer.mojom.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/aura/client/cursor_shape_client.h"
++#include "ui/aura/env.h"
++#include "ui/aura/scoped_window_capture_request.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_observer.h"
++#include "ui/aura/window_occlusion_tracker.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/base/cursor/cursor.h"
++#include "ui/compositor/compositor.h"
++#include "ui/events/event.h"
++#include "ui/events/event_observer.h"
++#include "ui/gfx/geometry/rect_f.h"
++
++namespace {
++
++// libpipewire, loaded at run time (the container image may not have it).
++struct PipeWire {
++  decltype(&pw_init) init = nullptr;
++  decltype(&pw_thread_loop_new) thread_loop_new = nullptr;
++  decltype(&pw_thread_loop_get_loop) thread_loop_get_loop = nullptr;
++  decltype(&pw_thread_loop_start) thread_loop_start = nullptr;
++  decltype(&pw_thread_loop_stop) thread_loop_stop = nullptr;
++  decltype(&pw_thread_loop_destroy) thread_loop_destroy = nullptr;
++  decltype(&pw_thread_loop_lock) thread_loop_lock = nullptr;
++  decltype(&pw_thread_loop_unlock) thread_loop_unlock = nullptr;
++  decltype(&pw_context_new) context_new = nullptr;
++  decltype(&pw_context_destroy) context_destroy = nullptr;
++  decltype(&pw_context_connect) context_connect = nullptr;
++  decltype(&pw_core_disconnect) core_disconnect = nullptr;
++  decltype(&pw_properties_new) properties_new = nullptr;
++  decltype(&pw_stream_new) stream_new = nullptr;
++  decltype(&pw_stream_add_listener) stream_add_listener = nullptr;
++  decltype(&pw_stream_connect) stream_connect = nullptr;
++  decltype(&pw_stream_update_params) stream_update_params = nullptr;
++  decltype(&pw_stream_dequeue_buffer) stream_dequeue_buffer = nullptr;
++  decltype(&pw_stream_queue_buffer) stream_queue_buffer = nullptr;
++  decltype(&pw_stream_destroy) stream_destroy = nullptr;
++  decltype(&pw_stream_get_node_id) stream_get_node_id = nullptr;
++  decltype(&pw_stream_trigger_process) stream_trigger_process = nullptr;
++  decltype(&pw_stream_state_as_string) stream_state_as_string = nullptr;
++
++  // Null if there's no libpipewire.
++  static const PipeWire* Get() {
++    static const std::optional<PipeWire> instance = Load();
++    return instance ? &instance.value() : nullptr;
++  }
++
++ private:
++  static std::optional<PipeWire> Load() {
++    void* library = dlopen("libpipewire-0.3.so.0", RTLD_NOW | RTLD_LOCAL);
++    if (!library) {
++      LOG(WARNING) << "EXO-CAPTURE no libpipewire: " << dlerror();
++      return std::nullopt;
++    }
++    PipeWire lib;
++    bool ok = true;
++    auto load = [&](auto& function, const char* name) {
++      function = reinterpret_cast<std::remove_reference_t<decltype(function)>>(
++          dlsym(library, name));
++      ok &= !!function;
++    };
++    load(lib.init, "pw_init");
++    load(lib.thread_loop_new, "pw_thread_loop_new");
++    load(lib.thread_loop_get_loop, "pw_thread_loop_get_loop");
++    load(lib.thread_loop_start, "pw_thread_loop_start");
++    load(lib.thread_loop_stop, "pw_thread_loop_stop");
++    load(lib.thread_loop_destroy, "pw_thread_loop_destroy");
++    load(lib.thread_loop_lock, "pw_thread_loop_lock");
++    load(lib.thread_loop_unlock, "pw_thread_loop_unlock");
++    load(lib.context_new, "pw_context_new");
++    load(lib.context_destroy, "pw_context_destroy");
++    load(lib.context_connect, "pw_context_connect");
++    load(lib.core_disconnect, "pw_core_disconnect");
++    load(lib.properties_new, "pw_properties_new");
++    load(lib.stream_new, "pw_stream_new");
++    load(lib.stream_add_listener, "pw_stream_add_listener");
++    load(lib.stream_connect, "pw_stream_connect");
++    load(lib.stream_update_params, "pw_stream_update_params");
++    load(lib.stream_dequeue_buffer, "pw_stream_dequeue_buffer");
++    load(lib.stream_queue_buffer, "pw_stream_queue_buffer");
++    load(lib.stream_destroy, "pw_stream_destroy");
++    load(lib.stream_get_node_id, "pw_stream_get_node_id");
++    load(lib.stream_trigger_process, "pw_stream_trigger_process");
++    load(lib.stream_state_as_string, "pw_stream_state_as_string");
++    if (!ok) {
++      LOG(WARNING) << "EXO-CAPTURE libpipewire lacks a function we use";
++      return std::nullopt;
++    }
++    lib.init(nullptr, nullptr);
++    return lib;
++  }
++};
++
++// The cursor beside a frame (metadata mode), in the frame's pixels.
++struct CursorMeta {
++  bool visible = false;
++  gfx::Point position;
++  gfx::Point hotspot;
++  // Set when it changed since the last frame that carried it.
++  SkBitmap bitmap;
++};
++
++// The largest cursor image metadata carries.
++constexpr int kMaxCursorSize = 64;
++constexpr size_t kCursorMetaSize = sizeof(spa_meta_cursor) +
++                                   sizeof(spa_meta_bitmap) +
++                                   kMaxCursorSize * kMaxCursorSize * 4;
++
++// One PipeWire video source node. Its callbacks run on PipeWire's own
++// thread; Push() on the UI thread copies a frame in and starts a graph
++// cycle, whose process() fills the next buffer from it.
++class PipeWireStream {
++ public:
++  PipeWireStream(const PipeWire* pw,
++                 const gfx::Size& size,
++                 bool cursor_metadata,
++                 base::RepeatingCallback<void(uint32_t node_id)> on_ready,
++                 base::RepeatingClosure on_error)
++      : pw_(pw),
++        size_(size),
++        stride_(size.width() * 4),
++        cursor_metadata_(cursor_metadata),
++        runner_(base::SequencedTaskRunner::GetCurrentDefault()),
++        on_ready_(std::move(on_ready)),
++        on_error_(std::move(on_error)) {}
++
++  PipeWireStream(const PipeWireStream&) = delete;
++  PipeWireStream& operator=(const PipeWireStream&) = delete;
++
++  ~PipeWireStream() {
++    if (loop_) {
++      // Joins PipeWire's thread: no callback runs after this.
++      pw_->thread_loop_stop(loop_);
++    }
++    if (stream_) {
++      pw_->stream_destroy(stream_);
++    }
++    if (core_) {
++      pw_->core_disconnect(core_);
++    }
++    if (context_) {
++      pw_->context_destroy(context_);
++    }
++    if (loop_) {
++      pw_->thread_loop_destroy(loop_);
++    }
++  }
++
++  bool Connect(const std::string& name) {
++    loop_ = pw_->thread_loop_new("plutonium-screencast", nullptr);
++    if (!loop_) {
++      return false;
++    }
++    context_ = pw_->context_new(pw_->thread_loop_get_loop(loop_), nullptr, 0);
++    if (!context_ || pw_->thread_loop_start(loop_) < 0) {
++      return false;
++    }
++    pw_->thread_loop_lock(loop_);
++    core_ = pw_->context_connect(context_, nullptr, 0);
++    if (!core_) {
++      pw_->thread_loop_unlock(loop_);
++      LOG(WARNING) << "EXO-CAPTURE can't reach PipeWire";
++      return false;
++    }
++    stream_ = pw_->stream_new(
++        core_, name.c_str(),
++        pw_->properties_new(PW_KEY_MEDIA_CLASS, "Video/Source",
++                            PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_NODE_NAME,
++                            "plutonium-screencast", PW_KEY_NODE_DESCRIPTION,
++                            name.c_str(), nullptr));
++    if (!stream_) {
++      pw_->thread_loop_unlock(loop_);
++      return false;
++    }
++    events_.version = PW_VERSION_STREAM_EVENTS;
++    events_.state_changed = &PipeWireStream::OnStateChanged;
++    events_.param_changed = &PipeWireStream::OnParamChanged;
++    events_.add_buffer = &PipeWireStream::OnAddBuffer;
++    events_.remove_buffer = &PipeWireStream::OnRemoveBuffer;
++    events_.process = &PipeWireStream::OnProcess;
++    pw_->stream_add_listener(stream_, &listener_, &events_, this);
++
++    uint8_t buffer[1024];
++    spa_pod_builder builder = {};
++    builder.data = buffer;
++    builder.size = sizeof(buffer);
++    const spa_pod* params[2] = {
++        BuildFormat(&builder, SPA_VIDEO_FORMAT_BGRx),
++        BuildFormat(&builder, SPA_VIDEO_FORMAT_BGRA),
++    };
++    const int result = pw_->stream_connect(
++        stream_, PW_DIRECTION_OUTPUT, PW_ID_ANY,
++        static_cast<pw_stream_flags>(PW_STREAM_FLAG_DRIVER |
++                                     PW_STREAM_FLAG_ALLOC_BUFFERS),
++        params, 2);
++    pw_->thread_loop_unlock(loop_);
++    return result >= 0;
++  }
++
++  // A frame: |size_| pixels from |pixels|, BGRA rows |stride| bytes apart.
++  void Push(const uint8_t* pixels,
++            size_t stride,
++            const gfx::Size& size,
++            const CursorMeta& cursor) {
++    {
++      base::AutoLock lock(lock_);
++      staging_.resize(stride_ * size_.height());
++      const int rows = std::min(size.height(), size_.height());
++      const size_t row_bytes =
++          std::min<size_t>(size.width(), size_.width()) * 4;
++      for (int y = 0; y < rows; ++y) {
++        memcpy(staging_.data() + y * stride_, pixels + y * stride, row_bytes);
++      }
++      has_frame_ = true;
++      cursor_.visible = cursor.visible;
++      cursor_.position = cursor.position;
++      cursor_.hotspot = cursor.hotspot;
++      if (!cursor.bitmap.drawsNothing()) {
++        cursor_.bitmap = cursor.bitmap;
++      }
++    }
++    pw_->thread_loop_lock(loop_);
++    if (streaming_) {
++      pw_->stream_trigger_process(stream_);
++    }
++    pw_->thread_loop_unlock(loop_);
++  }
++
++ private:
++  const spa_pod* BuildFormat(spa_pod_builder* builder, spa_video_format format) {
++    spa_rectangle size = {static_cast<uint32_t>(size_.width()),
++                          static_cast<uint32_t>(size_.height())};
++    spa_fraction rate = {0, 1};
++    spa_fraction max_rate = {60, 1};
++    spa_fraction min_rate = {1, 1};
++    return static_cast<const spa_pod*>(spa_pod_builder_add_object(
++        builder, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
++        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
++        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
++        SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), SPA_FORMAT_VIDEO_size,
++        SPA_POD_Rectangle(&size), SPA_FORMAT_VIDEO_framerate,
++        SPA_POD_Fraction(&rate), SPA_FORMAT_VIDEO_maxFramerate,
++        SPA_POD_CHOICE_RANGE_Fraction(&max_rate, &min_rate, &max_rate)));
++  }
++
++  static void OnStateChanged(void* data,
++                             pw_stream_state old,
++                             pw_stream_state state,
++                             const char* error) {
++    auto* self = static_cast<PipeWireStream*>(data);
++    VLOG(1) << "EXO-CAPTURE PipeWire stream "
++            << self->pw_->stream_state_as_string(state)
++            << (error ? std::string(": ") + error : std::string());
++    self->streaming_ = state == PW_STREAM_STATE_STREAMING;
++    if (state == PW_STREAM_STATE_PAUSED && !self->ready_) {
++      self->ready_ = true;
++      self->runner_->PostTask(
++          FROM_HERE, base::BindOnce(self->on_ready_,
++                                    self->pw_->stream_get_node_id(
++                                        self->stream_)));
++    }
++    if (state == PW_STREAM_STATE_ERROR ||
++        (state == PW_STREAM_STATE_UNCONNECTED && self->ready_)) {
++      self->runner_->PostTask(FROM_HERE, self->on_error_);
++    }
++    // A consumer came: show it what there is now.
++    if (state == PW_STREAM_STATE_STREAMING) {
++      self->pw_->stream_trigger_process(self->stream_);
++    }
++  }
++
++  static void OnParamChanged(void* data, uint32_t id, const spa_pod* param) {
++    auto* self = static_cast<PipeWireStream*>(data);
++    if (!param || id != SPA_PARAM_Format) {
++      return;
++    }
++    spa_video_info_raw format = {};
++    if (spa_format_video_raw_parse(param, &format) < 0) {
++      return;
++    }
++    uint8_t buffer[1024];
++    spa_pod_builder builder = {};
++    builder.data = buffer;
++    builder.size = sizeof(buffer);
++    const int size = self->stride_ * self->size_.height();
++    const spa_pod* params[3];
++    uint32_t count = 0;
++    params[count++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
++        &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
++        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 16),
++        SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
++        SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(self->stride_),
++        SPA_PARAM_BUFFERS_dataType,
++        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) |
++                                 (1 << SPA_DATA_MemPtr))));
++    params[count++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
++        &builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
++        SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header), SPA_PARAM_META_size,
++        SPA_POD_Int(static_cast<int>(sizeof(spa_meta_header)))));
++    if (self->cursor_metadata_) {
++      params[count++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
++          &builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
++          SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
++          SPA_PARAM_META_size, SPA_POD_Int(static_cast<int>(kCursorMetaSize))));
++    }
++    self->pw_->stream_update_params(self->stream_, params, count);
++  }
++
++  static void OnAddBuffer(void* data, pw_buffer* buffer) {
++    auto* self = static_cast<PipeWireStream*>(data);
++    spa_data* plane = &buffer->buffer->datas[0];
++    const size_t size = self->stride_ * self->size_.height();
++    if (plane->type & (1 << SPA_DATA_MemFd)) {
++      const int fd = static_cast<int>(
++          syscall(__NR_memfd_create, "plutonium-screencast", MFD_CLOEXEC));
++      if (fd >= 0 && ftruncate(fd, size) == 0) {
++        void* memory =
++            mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++        if (memory != MAP_FAILED) {
++          plane->type = SPA_DATA_MemFd;
++          plane->flags = SPA_DATA_FLAG_READWRITE;
++          plane->fd = fd;
++          plane->mapoffset = 0;
++          plane->maxsize = size;
++          plane->data = memory;
++          return;
++        }
++      }
++      if (fd >= 0) {
++        close(fd);
++      }
++    }
++    plane->type = SPA_DATA_MemPtr;
++    plane->flags = SPA_DATA_FLAG_READWRITE;
++    plane->fd = -1;
++    plane->maxsize = size;
++    plane->data = calloc(1, size);
++  }
++
++  static void OnRemoveBuffer(void* data, pw_buffer* buffer) {
++    spa_data* plane = &buffer->buffer->datas[0];
++    if (plane->type == SPA_DATA_MemFd) {
++      munmap(plane->data, plane->maxsize);
++      close(static_cast<int>(plane->fd));
++    } else if (plane->type == SPA_DATA_MemPtr) {
++      free(plane->data);
++    }
++    plane->data = nullptr;
++  }
++
++  static void OnProcess(void* data) {
++    auto* self = static_cast<PipeWireStream*>(data);
++    pw_buffer* buffer = self->pw_->stream_dequeue_buffer(self->stream_);
++    if (!buffer) {
++      return;
++    }
++    spa_buffer* spa = buffer->buffer;
++    spa_data* plane = &spa->datas[0];
++    const size_t size = self->stride_ * self->size_.height();
++    {
++      base::AutoLock lock(self->lock_);
++      if (plane->data && self->has_frame_ && plane->maxsize >= size) {
++        memcpy(plane->data, self->staging_.data(), size);
++      }
++      plane->chunk->offset = 0;
++      plane->chunk->size = self->has_frame_ ? size : 0;
++      plane->chunk->stride = self->stride_;
++      plane->chunk->flags = 0;
++      if (auto* header = static_cast<spa_meta_header*>(spa_buffer_find_meta_data(
++              spa, SPA_META_Header, sizeof(spa_meta_header)))) {
++        header->flags = 0;
++        header->offset = 0;
++        header->pts = (base::TimeTicks::Now() - base::TimeTicks()).InNanoseconds();
++        header->dts_offset = 0;
++        header->seq = self->sequence_++;
++      }
++      if (auto* cursor = static_cast<spa_meta_cursor*>(spa_buffer_find_meta_data(
++              spa, SPA_META_Cursor, sizeof(spa_meta_cursor)))) {
++        self->FillCursor(cursor);
++      }
++    }
++    self->pw_->stream_queue_buffer(self->stream_, buffer);
++  }
++
++  void FillCursor(spa_meta_cursor* meta) EXCLUSIVE_LOCKS_REQUIRED(lock_) {
++    if (!cursor_.visible) {
++      meta->id = 0;
++      return;
++    }
++    meta->id = 1;
++    meta->flags = 0;
++    meta->position.x = cursor_.position.x();
++    meta->position.y = cursor_.position.y();
++    meta->hotspot.x = cursor_.hotspot.x();
++    meta->hotspot.y = cursor_.hotspot.y();
++    meta->bitmap_offset = 0;
++    const SkBitmap& image = cursor_.bitmap;
++    if (image.drawsNothing() || image.width() > kMaxCursorSize ||
++        image.height() > kMaxCursorSize) {
++      return;
++    }
++    meta->bitmap_offset = sizeof(spa_meta_cursor);
++    auto* bitmap = SPA_PTROFF(meta, meta->bitmap_offset, spa_meta_bitmap);
++    bitmap->format = SPA_VIDEO_FORMAT_BGRA;
++    bitmap->size.width = image.width();
++    bitmap->size.height = image.height();
++    bitmap->stride = image.width() * 4;
++    bitmap->offset = sizeof(spa_meta_bitmap);
++    auto* pixels = SPA_PTROFF(bitmap, bitmap->offset, uint8_t);
++    for (int y = 0; y < image.height(); ++y) {
++      memcpy(pixels + y * bitmap->stride, image.getAddr32(0, y),
++             bitmap->stride);
++    }
++    // Sent once; later frames have the position only.
++    cursor_.bitmap.reset();
++  }
++
++  const raw_ptr<const PipeWire> pw_;
++  const gfx::Size size_;
++  const int stride_;
++  const bool cursor_metadata_;
++  scoped_refptr<base::SequencedTaskRunner> runner_;
++  base::RepeatingCallback<void(uint32_t)> on_ready_;
++  base::RepeatingClosure on_error_;
++
++  raw_ptr<pw_thread_loop> loop_ = nullptr;
++  raw_ptr<pw_context> context_ = nullptr;
++  raw_ptr<pw_core> core_ = nullptr;
++  raw_ptr<pw_stream> stream_ = nullptr;
++  spa_hook listener_ = {};
++  pw_stream_events events_ = {};
++  // PipeWire's thread's.
++  bool ready_ = false;
++  bool streaming_ = false;
++  uint32_t sequence_ = 0;
++
++  base::Lock lock_;
++  std::vector<uint8_t> staging_ GUARDED_BY(lock_);
++  bool has_frame_ GUARDED_BY(lock_) = false;
++  CursorMeta cursor_ GUARDED_BY(lock_);
++};
++
++class ScreencastImpl : public PlutoniumScreencast,
++                       public viz::mojom::FrameSinkVideoConsumer,
++                       public aura::WindowObserver,
++                       public ui::EventObserver,
++                       public content::WebContentsObserver {
++ public:
++  ScreencastImpl(const Target& target,
++                 const gfx::Size& size,
++                 const std::string& cursor,
++                 base::OnceCallback<void(uint32_t, const gfx::Size&)> ready,
++                 base::OnceClosure ended)
++      : window_(target.window),
++        size_(size),
++        cursor_(cursor),
++        ready_(std::move(ready)),
++        ended_(std::move(ended)) {}
++
++  ~ScreencastImpl() override {
++    if (capturer_) {
++      capturer_->StopAndResetConsumer();
++    }
++    if (observing_events_) {
++      aura::Env::GetInstance()->RemoveEventObserver(this);
++    }
++    if (window_) {
++      window_->RemoveObserver(this);
++    }
++  }
++
++  bool Init(const Target& target, const std::string& name) {
++    const PipeWire* pw = PipeWire::Get();
++    if (!pw || size_.IsEmpty()) {
++      return false;
++    }
++    if (target.contents) {
++      content::RenderWidgetHostView* view =
++          target.contents->GetRenderWidgetHostView();
++      if (!view) {
++        return false;
++      }
++      Observe(target.contents);
++      capture_handle_ = target.contents->IncrementCapturerCount(
++          size_, /*stay_hidden=*/true, /*stay_awake=*/true,
++          /*is_activity=*/true);
++      capturer_ = view->CreateVideoCapturer();
++      // A tab's cursor isn't Ash's.
++      cursor_ = "hidden";
++    } else {
++      aura::Window* root = window_ ? window_->GetRootWindow() : nullptr;
++      if (!root || !root->GetFrameSinkId().is_valid()) {
++        return false;
++      }
++      window_->AddObserver(this);
++      viz::VideoCaptureTarget capture_target(root->GetFrameSinkId());
++      if (!window_->IsRootWindow()) {
++        // Drawn into a render pass of its own, also while it's parked
++        // (hidden, or at zero opacity).
++        capture_request_ = window_->MakeWindowCapturable();
++        capture_target =
++            viz::VideoCaptureTarget(root->GetFrameSinkId(),
++                                    capture_request_.GetCaptureId());
++        force_visible_.emplace(window_);
++      }
++      video_capture_lock_ = root->GetHost()->CreateVideoCaptureLock();
++      capturer_ = aura::Env::GetInstance()
++                      ->context_factory()
++                      ->GetHostFrameSinkManager()
++                      ->CreateVideoCapturer();
++      capturer_->ChangeTarget(capture_target);
++    }
++    stream_ = std::make_unique<PipeWireStream>(
++        pw, size_, cursor_ == "metadata",
++        base::BindRepeating(&ScreencastImpl::OnReady,
++                            weak_factory_.GetWeakPtr()),
++        base::BindRepeating(&ScreencastImpl::End,
++                            weak_factory_.GetWeakPtr()));
++    if (!stream_->Connect(name)) {
++      stream_.reset();
++      return false;
++    }
++    capturer_->SetFormat(media::PIXEL_FORMAT_ARGB);
++    capturer_->SetMinCapturePeriod(base::Seconds(1) / 60);
++    capturer_->SetResolutionConstraints(size_, size_,
++                                        /*use_fixed_aspect_ratio=*/true);
++    capturer_->SetAutoThrottlingEnabled(false);
++    if (cursor_ == "embedded") {
++      overlay_ = capturer_->CreateOverlay(/*stacking_index=*/0);
++    }
++    if (cursor_ != "hidden") {
++      aura::Env::GetInstance()->AddEventObserver(
++          this, aura::Env::GetInstance(),
++          {ui::EventType::kMouseMoved, ui::EventType::kMouseDragged,
++           ui::EventType::kMousePressed, ui::EventType::kMouseReleased,
++           ui::EventType::kMouseEntered, ui::EventType::kMouseExited});
++      observing_events_ = true;
++      UpdateCursor();
++    }
++    capturer_->Start(this, viz::mojom::BufferFormatPreference::kDefault);
++    return true;
++  }
++
++  // viz::mojom::FrameSinkVideoConsumer:
++  void OnFrameCaptured(
++      media::mojom::VideoBufferHandlePtr data,
++      media::mojom::VideoFrameInfoPtr info,
++      const gfx::Rect& content_rect,
++      mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
++          callbacks) override {
++    mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> done(
++        std::move(callbacks));
++    if (!stream_ || !data->is_read_only_shmem_region()) {
++      return;
++    }
++    base::ReadOnlySharedMemoryMapping mapping =
++        data->get_read_only_shmem_region().Map();
++    if (!mapping.IsValid() ||
++        mapping.size() < media::VideoFrame::AllocationSize(
++                             info->pixel_format, info->coded_size)) {
++      return;
++    }
++    const size_t row_bytes = media::VideoFrame::RowBytes(
++        media::VideoFrame::Plane::kARGB, info->pixel_format,
++        info->coded_size.width());
++    const gfx::Rect& visible = info->visible_rect;
++    const uint8_t* pixels =
++        mapping.data() + visible.y() * row_bytes + visible.x() * 4;
++    CursorMeta cursor;
++    if (cursor_ == "metadata" && cursor_bounds_) {
++      cursor.visible = true;
++      // Relative to the content, which the frame letterboxes.
++      cursor.position = gfx::Point(
++          content_rect.x() +
++              base::ClampRound(cursor_location_.x() * content_rect.width()),
++          content_rect.y() +
++              base::ClampRound(cursor_location_.y() * content_rect.height()));
++      cursor.hotspot = cursor_hotspot_;
++      if (cursor_changed_) {
++        cursor.bitmap = cursor_bitmap_;
++        cursor_changed_ = false;
++      }
++    }
++    stream_->Push(pixels, row_bytes, visible.size(), cursor);
++  }
++  void OnNewCaptureVersion(const media::CaptureVersion&) override {}
++  void OnFrameWithEmptyRegionCapture() override {}
++  void OnStopped() override { End(); }
++  void OnLog(const std::string&) override {}
++
++  // Couldn't start: |ready| gets 0.
++  void Fail() { End(); }
++
++  // aura::WindowObserver:
++  void OnWindowDestroying(aura::Window* window) override {
++    window_->RemoveObserver(this);
++    window_ = nullptr;
++    force_visible_.reset();
++    End();
++  }
++
++  // ui::EventObserver:
++  void OnEvent(const ui::Event& event) override { UpdateCursor(); }
++
++  // content::WebContentsObserver:
++  void WebContentsDestroyed() override { End(); }
++
++ private:
++  void OnReady(uint32_t node_id) {
++    VLOG(1) << "EXO-CAPTURE PipeWire node " << node_id << " at "
++            << size_.ToString();
++    if (ready_) {
++      std::move(ready_).Run(node_id, size_);
++    }
++  }
++
++  void End() {
++    if (ready_) {
++      std::move(ready_).Run(0, gfx::Size());
++      return;
++    }
++    if (ended_) {
++      std::move(ended_).Run();
++    }
++  }
++
++  // Where the pointer is (0..1 of the captured area) and what it looks
++  // like, for the overlay or the metadata.
++  void UpdateCursor() {
++    if (!window_) {
++      return;
++    }
++    aura::Window* root = window_->GetRootWindow();
++    if (!root || !root->GetHost()) {
++      return;
++    }
++    const gfx::Rect area = window_->GetBoundsInScreen();
++    const gfx::Point location =
++        aura::Env::GetInstance()->last_mouse_location();
++    gfx::NativeCursor native = root->GetHost()->last_cursor();
++    if (native == ui::mojom::CursorType::kNull) {
++      native = ui::mojom::CursorType::kPointer;
++    }
++    std::optional<ui::CursorData> data =
++        aura::client::GetCursorShapeClient().GetCursorData(native);
++    if (area.IsEmpty() || !area.Contains(location) || !data ||
++        data->bitmaps.empty() || native == ui::mojom::CursorType::kNone) {
++      cursor_bounds_ = false;
++      if (overlay_) {
++        overlay_->SetBounds(gfx::RectF());
++      }
++      return;
++    }
++    const SkBitmap& bitmap = data->bitmaps[0];
++    const float scale = data->scale_factor;
++    cursor_location_ =
++        gfx::PointF(static_cast<float>(location.x() - area.x()) / area.width(),
++                    static_cast<float>(location.y() - area.y()) / area.height());
++    cursor_bounds_ = true;
++    if (overlay_) {
++      const gfx::SizeF size(bitmap.width() / scale, bitmap.height() / scale);
++      const gfx::PointF hotspot(data->hotspot.x() / scale,
++                                data->hotspot.y() / scale);
++      const gfx::RectF bounds(
++          (location.x() - area.x() - hotspot.x()) / area.width(),
++          (location.y() - area.y() - hotspot.y()) / area.height(),
++          size.width() / area.width(), size.height() / area.height());
++      if (bitmap.getGenerationID() != cursor_generation_) {
++        cursor_generation_ = bitmap.getGenerationID();
++        overlay_->SetImageAndBounds(bitmap, bounds);
++      } else {
++        overlay_->SetBounds(bounds);
++      }
++      return;
++    }
++    // Metadata: at the frame's scale.
++    if (bitmap.getGenerationID() != cursor_generation_) {
++      cursor_generation_ = bitmap.getGenerationID();
++      cursor_bitmap_ = bitmap;
++      cursor_changed_ = true;
++    }
++    cursor_hotspot_ = data->hotspot;
++    // A move without a new frame: ask for one, to carry the position.
++    capturer_->RequestRefreshFrame();
++  }
++
++  raw_ptr<aura::Window> window_;
++  const gfx::Size size_;
++  std::string cursor_;
++  base::OnceCallback<void(uint32_t, const gfx::Size&)> ready_;
++  base::OnceClosure ended_;
++
++  std::unique_ptr<PipeWireStream> stream_;
++  std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
++  std::unique_ptr<viz::ClientFrameSinkVideoCapturer::Overlay> overlay_;
++  aura::ScopedWindowCaptureRequest capture_request_;
++  std::optional<aura::WindowOcclusionTracker::ScopedForceVisible>
++      force_visible_;
++  std::unique_ptr<aura::WindowTreeHost::VideoCaptureLock> video_capture_lock_;
++  base::ScopedClosureRunner capture_handle_;
++  bool observing_events_ = false;
++
++  bool cursor_bounds_ = false;
++  gfx::PointF cursor_location_;
++  gfx::Point cursor_hotspot_;
++  SkBitmap cursor_bitmap_;
++  bool cursor_changed_ = false;
++  uint32_t cursor_generation_ = 0;
++  base::WeakPtrFactory<ScreencastImpl> weak_factory_{this};
++};
++
++}  // namespace
++
++// static
++std::unique_ptr<PlutoniumScreencast> PlutoniumScreencast::Start(
++    const Target& target,
++    const gfx::Size& size,
++    const std::string& cursor,
++    const std::string& name,
++    base::OnceCallback<void(uint32_t node_id, const gfx::Size& size)> ready,
++    base::OnceClosure ended) {
++  auto screencast = std::make_unique<ScreencastImpl>(
++      target, size, cursor, std::move(ready), std::move(ended));
++  if (!screencast->Init(target, name)) {
++    screencast->Fail();
++    return nullptr;
++  }
++  return screencast;
++}
++
++// static
++bool PlutoniumScreencast::IsAvailable() {
++  return !!PipeWire::Get();
++}
+diff --git a/chrome/browser/plutonium_pipewire.h b/chrome/browser/plutonium_pipewire.h
+new file mode 100644
+index 0000000000..26c669e6e9
+--- /dev/null
++++ b/chrome/browser/plutonium_pipewire.h
+@@ -0,0 +1,63 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_PIPEWIRE_H_
++#define CHROME_BROWSER_PLUTONIUM_PIPEWIRE_H_
++
++#include <memory>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace aura {
++class Window;
++}
++
++namespace content {
++class WebContents;
++}
++
++// EXO-CAPTURE (docs/features/CAPTURE.md, "Where PipeWire lives"): a capture
++// published as a PipeWire video source, for apps that capture through the
++// desktop portal (OBS, Firefox, Discord). WebRTC's PipeWire code is
++// consumer-only (and off for target_os = "chromeos"), so this is our own
++// producer: a viz frame sink video capturer on the source, each frame copied
++// into a shared-memory buffer (MemFd, or MemPtr), BGRx or BGRA, at a fixed
++// size (the source's at the start, letterboxed after). libpipewire is loaded
++// at run time; without it, or without a PipeWire daemon, Start() fails.
++//
++// Cursor modes, as the portal's: "hidden"; "embedded" (drawn into the
++// frames); "metadata" (SPA_META_Cursor: its position and, when it changes,
++// its image, beside the frames).
++class PlutoniumScreencast {
++ public:
++  // What it captures: a root window (an output), a window (its subtree of
++  // the root's frame), or a tab's page.
++  struct Target {
++    raw_ptr<aura::Window> window = nullptr;
++    raw_ptr<content::WebContents> contents = nullptr;
++  };
++
++  // |ready| gets the node's id once PipeWire has it, with the frame size,
++  // or 0 if it failed (also when this returns null: it can't start). |ended|
++  // runs if the stream ends on its own (the source went away, PipeWire went
++  // away). Neither runs after the screencast is destroyed. Either may run
++  // from inside its calls: post them.
++  static std::unique_ptr<PlutoniumScreencast> Start(
++      const Target& target,
++      const gfx::Size& size,
++      const std::string& cursor,
++      const std::string& name,
++      base::OnceCallback<void(uint32_t node_id, const gfx::Size& size)> ready,
++      base::OnceClosure ended);
++
++  // Whether libpipewire could be loaded.
++  static bool IsAvailable();
++
++  virtual ~PlutoniumScreencast() = default;
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_PIPEWIRE_H_

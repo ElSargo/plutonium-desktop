@@ -505,28 +505,33 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 
 In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 
-- [ ] **Shell capture API and screenshots.** M · `shell.capture()` →
+- [x] **Shell capture API and screenshots.** M · `shell.capture()` →
   MediaStream and `shell.screenshot()` → PNG for outputs, windows, tabs and
   regions, on the snapshot and capturer code from patches 0005 and 0007.
   niri's Print key with a region/window selector, saving to
   `~/Pictures/Screenshots`. The global recording and screenshot switches, enforced in
-  Ash. Copying to the clipboard waits on the clipboard item.
-- [ ] **Capture requests to the focused shell; events to every shell.** M ·
+  Ash. Copying to the clipboard waits on the clipboard item. Done
+  (`features/CAPTURE.md`, "How it's built"); a shell's MediaStream of a
+  window only covers what fits on the screen (PipeWire captures don't).
+- [x] **Capture requests to the focused shell; events to every shell.** M ·
   `capturerequest`/`answerCapture`, `capturestart`/`capturestop`,
   `stopCapture`. Ash's fallback picker, and its own indicator when the
   focused shell doesn't acknowledge a capture.
-- [ ] **Resizing a window for capture.** M · A capture size that overrides the
+- [x] **Resizing a window for capture.** M · A capture size that overrides the
   element's in `configure`. The element shows the frame with `object-fit`, and
   the stream letterboxes when the app picks another size. Check that a parked
   window gets steady frame callbacks while it's captured.
-- [ ] **PipeWire output from Ash.** L · A producer of our own (WebRTC's
+- [x] **PipeWire output from Ash.** L · A producer of our own (WebRTC's
   `rtc_use_pipewire` is off for `target_os = "chromeos"`, and its code is
   consumer-only): dmabuf with modifiers, a shared-memory fallback, the three cursor
-  modes. libpipewire in the container image.
-- [ ] **Portal backend in the helper.** L · `impl.portal.ScreenCast` and
+  modes. libpipewire in the container image. Done with shared memory (dmabuf
+  below); a window's frames are its own copies, so it can be parked, off the
+  screen, or bigger than it.
+- [x] **Portal backend in the helper.** L · `impl.portal.ScreenCast` and
   `Screenshot`, `plutonium.portal`, `plutonium-portals.conf`,
   `XDG_CURRENT_DESKTOP=Plutonium`, restore tokens that name stable things.
-  Test with OBS and native Discord.
+  Test with OBS and native Discord. Done and checked with a real portal
+  client (`tools/portal-screencast.py`); OBS and Discord themselves not yet.
 - [x] **`ELECTRON_OZONE_PLATFORM_HINT=wayland` in the thread environment.** S ·
   The XWayland Discord can't share a screen: its rootless Xwayland holds
   only its own windows. With `XDG_SESSION_TYPE=wayland`, which Electron 38+
@@ -536,12 +541,21 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
 - [ ] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
   Discord's away status.
-- [ ] **getDisplayMedia from tabs through the shell picker.** M · Replace
+- [x] **getDisplayMedia from tabs through the shell picker.** M · Replace
   Ash's `DesktopMediaPicker` with `capturerequest`.
 - [ ] **Agent recording over MCP.** M · Records the agent's own thread's items to a file, with no
   dialogs. It goes to every shell as `capturestart` and honours the global switch.
 - [ ] **Discord screen-share audio.** S to test, M to fix · If Discord wants a
   per-app node, publish one from the shared window's pid (as venmic does).
+- [ ] **dmabuf for Ash's PipeWire nodes.** M · They're shared memory (MemFd)
+  now, a CPU copy per frame. dmabuf with modifiers needs buffers Ash
+  allocates and the capturer renders into, rather than viz's own pool.
+- [ ] **A shell's MediaStream of a window bigger than the screen.** S–M ·
+  Chromium's window capture is a subtree of the screen's frame, so it only
+  covers what fits; PipeWire captures use the window's own copies instead.
+  The same for shells: a MediaStreamTrackGenerator fed by those copies, or
+  a capturer on the window's own frame sink.
+- [ ] **The portal's `PickColor`.** S · Answers "other" now.
 - [ ] **`ext-image-copy-capture-v1` in Exo,** for grim, wf-recorder and obs-wlrobs.
   M · Later.
 

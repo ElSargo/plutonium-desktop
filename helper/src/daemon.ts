@@ -44,6 +44,8 @@ import { comboKeys, commitRuns, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
+import { Portal } from "./portal.ts";
+import { saveScreenshot } from "./screenshots.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -342,6 +344,8 @@ export class Daemon {
   readonly agentWindows = new AgentWindows();
   /** Windows as accessibility trees (read_window, act_window). */
   readonly a11y = new Accessibility();
+  /** EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend (portal.ts). */
+  private portal: Portal | null = null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -1521,6 +1525,15 @@ export class Daemon {
         defaultPdfPath: defaultPdfPath(url.searchParams.get("title") ?? ""),
       });
     }
+    // EXO-CAPTURE: a screenshot (a PNG body) into ~/Pictures/Screenshots.
+    if (method === "POST" && path === "/v1/screenshots") {
+      const png = await readBody(request);
+      try {
+        return sendJson(response, 200, saveScreenshot(png));
+      } catch (error) {
+        throw new HttpError(400, (error as Error).message);
+      }
+    }
     if (method === "POST" && (path === "/v1/print" || path === "/v1/print/save")) {
       const pdf = await readBody(request);
       if (!pdf.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw new HttpError(400, "Expected a PDF.");
@@ -1914,9 +1927,18 @@ export class Daemon {
     }, 2000);
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
+    // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
+    if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
+      const portal = new Portal({ desktop: this.desktop, apps: this.apps, threadForPid });
+      portal.start().then(
+        () => (this.portal = portal),
+        (error: unknown) => console.warn(`plutoniumd: no portal backend: ${(error as Error).message}`),
+      );
+    }
   }
 
   stop(): void {
+    this.portal?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();
     for (const server of this.servers) server.close();

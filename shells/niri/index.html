@@ -1013,6 +1013,35 @@ const actions = {
   },
   launcher() { openLauncher(); },
   hotkeys() { showHotkeys(); },
+  // niri's screenshot UI: a region or a window, saved to ~/Pictures/Screenshots.
+  async screenshot() {
+    if (!shell?.captureAvailable) return notice("no screenshots in this browser");
+    const targets = [];
+    for (const tile of tiles.values()) {
+      const rect = tile.el.getBoundingClientRect();
+      if (tile.el.hidden || rect.width < 1 || rect.right <= 0 || rect.left >= innerWidth) continue;
+      targets.push({ source: { type: tile.kind === "w" ? "window" : "tab", id: tile.id }, rect });
+    }
+    try {
+      const shot = await shell.takeScreenshot({ targets });
+      if (shot) notice(`Screenshot saved to ${shot.path}`);
+    } catch (e) { notice(`screenshot: ${e.message}`); }
+  },
+  async screenshotScreen() {
+    if (!shell?.captureAvailable) return notice("no screenshots in this browser");
+    try {
+      const path = await shell.saveScreenshot(await shell.screenshot(await shell.outputSource()));
+      notice(`Screenshot saved to ${path}`);
+    } catch (e) { notice(`screenshot: ${e.message}`); }
+  },
+  async screenshotWindow() {
+    const tile = tiles.get(focusedKey());
+    if (!tile || !shell?.captureAvailable) return;
+    try {
+      const path = await shell.saveScreenshot(await shell.screenshot({ type: tile.kind === "w" ? "window" : "tab", id: tile.id }));
+      notice(`Screenshot saved to ${path}`);
+    } catch (e) { notice(`screenshot: ${e.message}`); }
+  },
 };
 
 // ---------------------------------------------------------------- binds
@@ -1067,6 +1096,9 @@ bind("Super+Shift+Equal", "Increase Window Height", () => actions.setWindowHeigh
 bind("Super+KeyV", "Move Window Between Floating and Tiling", () => actions.toggleFloating(), { repeat: false, hotkey: true });
 bind("Super+Shift+KeyV", "Switch Focus Between Floating and Tiling", () => actions.switchFocusFloatingTiling(), { repeat: false, hotkey: true });
 bind("Super+KeyW", "Toggle Column Tabbed Display", () => actions.toggleTabbed(), { repeat: false, hotkey: true });
+bind("PrintScreen", "Take a Screenshot", () => actions.screenshot(), { repeat: false, hotkey: true });
+bind("Ctrl+PrintScreen", "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
+bind("Alt+PrintScreen", "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
 
 const byCombo = new Map(binds.flatMap((b) => b.keys.map((k) => [k, b])));
 const comboOf = (e) =>
