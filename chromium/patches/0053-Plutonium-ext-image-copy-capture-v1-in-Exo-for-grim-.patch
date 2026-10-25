@@ -24,8 +24,8 @@ handle.
  .../exo/wayland/ext_image_copy_capture.cc     | 491 ++++++++++++++++++
  .../exo/wayland/ext_image_copy_capture.h      |  56 ++
  components/exo/wayland/server.cc              |  13 +
- third_party/wayland-protocols/BUILD.gn        |   9 +
- 9 files changed, 681 insertions(+), 1 deletion(-)
+ third_party/wayland-protocols/BUILD.gn        |  12 +
+ 9 files changed, 684 insertions(+), 1 deletion(-)
  create mode 100644 components/exo/wayland/ext_image_copy_capture.cc
  create mode 100644 components/exo/wayland/ext_image_copy_capture.h
 
@@ -846,10 +846,10 @@ index 1aea55644c..334a90eeca 100644
  
  void Server::Finalize(StartCallback callback, bool success) {
 diff --git a/third_party/wayland-protocols/BUILD.gn b/third_party/wayland-protocols/BUILD.gn
-index 14d520e2be..5af29e26e1 100644
+index 14d520e2be..5b3fef2512 100644
 --- a/third_party/wayland-protocols/BUILD.gn
 +++ b/third_party/wayland-protocols/BUILD.gn
-@@ -55,6 +55,15 @@ wayland_protocol("gtk_shell_protocol") {
+@@ -55,6 +55,18 @@ wayland_protocol("gtk_shell_protocol") {
    sources = [ "gtk/gdk/wayland/protocol/gtk-shell.xml" ]
  }
  
@@ -859,6 +859,9 @@ index 14d520e2be..5af29e26e1 100644
 +  sources = [
 +    "src/staging/ext-image-capture-source/ext-image-capture-source-v1.xml",
 +    "src/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml",
++
++    # The capture source protocol's toplevel sources refer to its handles.
++    "src/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml",
 +  ]
 +}
 +
