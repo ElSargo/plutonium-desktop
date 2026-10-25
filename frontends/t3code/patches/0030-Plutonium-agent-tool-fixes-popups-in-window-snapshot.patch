@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 26 Oct 2026 08:55:52 +1300
+Date: Mon, 26 Oct 2026 12:23:55 +1300
 Subject: [PATCH 30/30] Plutonium: agent tool fixes: popups in window
  snapshots, results that say what happened, private tabs marked
 
@@ -17,11 +17,13 @@ Subject: [PATCH 30/30] Plutonium: agent tool fixes: popups in window
 - The floating preview follows the tab whose cursor the agent moves.
 - A private tab shows a mask in its panel tab and a Private badge in the
   floating preview.
+- find_apps names the launcher's install when there are several.
 ---
  .../src/mcp/toolkits/preview/handlers.ts      |  28 ++-
  .../src/mcp/toolkits/preview/tools.test.ts    |  12 +-
  apps/server/src/mcp/toolkits/preview/tools.ts |  16 +-
- apps/server/src/plutonium/windowTools.ts      |  31 ++-
+ apps/server/src/plutonium/windowTools.ts      |  33 ++-
+ apps/server/src/preview/ServerBrowser.test.ts |  26 +++
  apps/server/src/preview/ServerBrowser.ts      |  69 ++++--
  apps/server/src/preview/ServerBrowserPage.ts  |   3 +
  .../src/preview/recordingDuration.test.ts     | 100 +++++++++
@@ -29,7 +31,7 @@ Subject: [PATCH 30/30] Plutonium: agent tool fixes: popups in window
  apps/web/src/components/ChatView.tsx          |  26 +++
  apps/web/src/components/RightPanelTabs.tsx    |  15 +-
  .../preview/ThreadPreviewMiniPlayer.tsx       |  24 +-
- 11 files changed, 501 insertions(+), 32 deletions(-)
+ 12 files changed, 528 insertions(+), 33 deletions(-)
  create mode 100644 apps/server/src/preview/recordingDuration.test.ts
  create mode 100644 apps/server/src/preview/recordingDuration.ts
 
@@ -165,9 +167,18 @@ index 39605f91bc..fe97e245cc 100644
      dependencies,
    }).annotate(Tool.Title, "Press key in preview page"),
 diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
-index eed75a0efa..bd164cd93c 100644
+index eed75a0efa..698b598146 100644
 --- a/apps/server/src/plutonium/windowTools.ts
 +++ b/apps/server/src/plutonium/windowTools.ts
+@@ -89,7 +89,7 @@ const ListWindowsTool = Tool.make("list_windows", {
+ 
+ const FindAppsTool = Tool.make("find_apps", {
+   description:
+-    "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them with launch_app. Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can be told apart. With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
++    "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them with launch_app. Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can be told apart. Every install is listed: one the launcher doesn't show, since another file has its desktop id, names that file (launcherShows). With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
+   parameters: Schema.Struct({
+     filter: Schema.optional(
+       Schema.String.annotate({
 @@ -143,7 +143,7 @@ const LaunchAppTool = windowTool(
  
  export const SnapshotWindowTool = Tool.make("snapshot_window", {
@@ -196,7 +207,7 @@ index eed75a0efa..bd164cd93c 100644
  const ClickWindowTool = windowTool(
    "click_window",
 -  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. Take a new snapshot to see what happened.",
-+  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no further. Returns the windows the click opened (newWindows) or closed, and the window's open popups. Take a new snapshot to see what happened.",
++  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no further. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window's open popups. Take a new snapshot to see what happened.",
    {
      window_id: windowId,
      x: coordinate("x"),
@@ -205,7 +216,7 @@ index eed75a0efa..bd164cd93c 100644
  const PressWindowTool = windowTool(
    "press_window",
 -  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn.',
-+  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn. Returns the windows the keys opened (newWindows) or closed, and the window\'s open popups (menus).',
++  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window\'s open popups (menus).',
    {
      window_id: windowId,
      keys: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({
@@ -214,7 +225,7 @@ index eed75a0efa..bd164cd93c 100644
  const ActWindowTool = windowTool(
    "act_window",
 -  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Read again to see the result.',
-+  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Returns the windows it opened (newWindows) or closed, and the window\'s open popups (menus). Read again to see the result.',
++  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window\'s open popups (menus). Read again to see the result.',
    {
      window_id: windowId,
      ref: Schema.String.annotate({
@@ -248,6 +259,40 @@ index eed75a0efa..bd164cd93c 100644
              })
            : Effect.fail(failure(texts(content) || "The window gave no image."));
        }),
+diff --git a/apps/server/src/preview/ServerBrowser.test.ts b/apps/server/src/preview/ServerBrowser.test.ts
+index 9835828915..134c0bc64f 100644
+--- a/apps/server/src/preview/ServerBrowser.test.ts
++++ b/apps/server/src/preview/ServerBrowser.test.ts
+@@ -1651,3 +1651,29 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
+     }),
+   ).pipe(Effect.provide(layer)),
+ );
++
++it.live("a navigate isn't busy with itself, and an evaluate is in the action timeline", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const { broker, tabId } = yield* ready;
++      const navigated = yield* broker.invoke<PreviewAutomationStatus>({
++        scope,
++        tabId,
++        operation: "navigate",
++        input: { url: "http://localhost:5173/next" },
++      });
++      expect(navigated).not.toHaveProperty("busy");
++      yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
++      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
++        scope,
++        tabId,
++        operation: "snapshot",
++        input: {},
++      });
++      expect(snapshot.actionTimeline.map((event) => [event.action, event.status])).toEqual([
++        ["navigate", "succeeded"],
++        ["evaluate", "succeeded"],
++      ]);
++    }),
++  ).pipe(Effect.provide(layer)),
++);
 diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
 index 4001dd66be..cf20224467 100644
 --- a/apps/server/src/preview/ServerBrowser.ts

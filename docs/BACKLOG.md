@@ -152,10 +152,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   lists the launcher's apps with an argv for `launch_app`, where each is
   installed from, and matching programs on PATH; a program not on PATH
   points to it (`features/AGENT_CONTROL.md`, "Finding apps").
-- [ ] **`find_apps` shows one install per desktop id.** S · Two desktop
-  files with the same id (a user override, or the same app in a Nix
-  profile and the system) show as the first, as in the launcher. Apps
-  installed with no desktop file (a Nix build off PATH) don't show at all.
+- [x] **`find_apps` shows one install per desktop id.** S · Every install
+  is listed; one the launcher doesn't show names the one it does
+  (`launcherShows`). Apps with no desktop file still show only as programs
+  on PATH (`features/AGENT_CONTROL.md`, "Finding apps").
 - [x] **A Flatpak's window never reaches its thread.** S · Ash can't read a
   sandboxed client's environment (another user namespace), so the window
   comes untagged, and the helper's pid fallback ran only when there was no
@@ -188,10 +188,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `select` on a cell of a GTK 3 list of several columns selects its row,
   else clicks it; a stale ref says it's gone; Calc lost the second of two
   Tabs, so typing pauses after Tab and Enter (`features/AGENT_CONTROL.md`).
-- [ ] **Action results could name new windows.** S · LibreOffice's
-  "discard?" box opened after an Escape and the agent never looked at it
-  (calc-normal-cdf, 2026-10-24). `press_window`, `click_window` and
-  `act_window` could say "new window #3 (untitled, 524×160)".
+- [x] **Action results could name new windows.** S · Window actions return
+  the windows that opened or closed since the agent last heard
+  (`new window #9 ("Character", 982×615)`) and the window's open menus
+  (`features/AGENT_CONTROL.md`, "Popups").
 - [x] **`launch_app` returned no windows when its first one closed.** S ·
   The wait ended at the first window: a splash or recovery dialog gone by
   then gave `[]`. It now waits for the windows to settle.
@@ -203,38 +203,37 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   NixOS refuses; the agent now gets NixOS's message. Point Playwright at a
   Chromium that runs here (the way Plutonium finds its own) if that case
   matters.
-- [ ] **Idle agent tabs a shell shows.** S · T3's idle sweep (`closeIdleAgentTabs`)
-  and the "tab the user is looking at" fallback (`latestThreadTab`) count only
-  streamed viewers, not a Plutonium shell showing the tab (`embedded`), which
-  `visible` now uses. The sweep may close an agent's tab the user is watching.
-- [ ] **The floating preview doesn't follow the tab an agent drives.** S · It
-  switches only to a new tab or one the server asks to show (`ChatView.tsx`),
-  so an agent back on an older tab works out of sight (run
-  `20261024-194129-excalidraw-incognito`).
-- [ ] **Nothing marks a private tab as private.** S · An incognito tab looks
-  like any other in the panel and the floating preview.
-- [ ] **A hidden background embed may count as `visible`.** S · An agent acting
-  on a tab nobody looks at gets an embed at opacity 0; if Chromium reports it
-  `embedded`, `preview_status` says the user sees it. Check with
-  `preview_open {open:false}`, an action, then `preview_status`.
-- [ ] **`preview_press` and `preview_drag` say nothing back.** S · They return
-  only the tool icon, so agents check each with a snapshot or a storage read.
+- [x] **Idle agent tabs a shell shows.** S · The idle sweep and
+  `latestThreadTab` count a shell showing the tab (`embedded`).
+- [x] **The floating preview doesn't follow the tab an agent drives.** S ·
+  It switches to the tab whose cursor the agent moves.
+- [x] **Nothing marks a private tab as private.** S · A mask in its panel
+  tab, a "Private" badge in the floating preview.
+- [x] **A hidden background embed may count as `visible`.** S · Checked: an
+  agent's actions make none (`preview_open {open:false}`, actions, then
+  `preview_status`: `visible:false`). Only a recording the user starts in
+  the panel embeds a tab nobody looks at, and counts as `visible` while it
+  runs.
+- [ ] **A path drag on a hidden tab times out.** S · On a tab no page shows
+  (`preview_open {open:false}`), `preview_drag` with a path timed out after
+  15 s while `preview_press` and `preview_click` worked; the same drag on
+  the tab shown worked (X11 test session, 2026-10-26).
+- [x] **`preview_press` and `preview_drag` say nothing back.** S · They
+  return `done` ("Pressed Tab.").
 - [x] **Calc test runs start in crash recovery.** S · `run.sh` kills the
   tester's LibreOffice with unsaved documents, and the recovery list is in the
   user's own Flatpak profile. `run.sh` now drops the entries a run added
   (`tools/agent-tests/lo-recovery.py`). A recovered window has come back at
   1×28 px twice; why isn't known.
-- [ ] **Tab recordings have no duration.** S · The WebM the encoder writes
-  has no length in its header (ffprobe shows none), so players can't seek
-  well. Remuxing it after the stop (`ffmpeg -c copy`) would fix it (run
-  `20261024-201052-excalidraw-cloud`).
-- [ ] **`preview_evaluate` isn't in a snapshot's `actionTimeline`.** S ·
-  Clicks, presses and drags are; evaluates aren't.
-- [ ] **`preview_navigate` lists itself as busy.** S · Its reply is built
-  inside the action (`ServerBrowser.ts`, `tab.control.agent`), so `busy`
-  shows the navigate next to `loading:false`.
-- [ ] **A snapshot's `[active]` means focused; nothing says so.** S · A tester
-  took Hachure `[active]` for the chosen fill while Solid was chosen.
+- [x] **Tab recordings have no duration.** S · The server writes the length
+  into the header (WebM Duration; MP4 mvhd/tkhd/mdhd/mehd): ffprobe gave
+  17.02 s for a 17.3 s MP4 recording.
+- [x] **`preview_evaluate` isn't in a snapshot's `actionTimeline`.** S ·
+  It is now.
+- [x] **`preview_navigate` lists itself as busy.** S · Its status leaves
+  out the running navigate.
+- [x] **A snapshot's `[active]` means focused; nothing says so.** S · It
+  reads `[focused]`, and `preview_snapshot`'s description says so.
 - [ ] **Agent tool paths no run has reached yet.** S · Scenarios to write: a
   stuck action (a long drag while the session's display is paused); the side
   panel open on a resized tab (its cursor, the narrow viewport); in Calc, a
@@ -259,8 +258,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
   reports `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
   cursor off by the zoom. Not seen yet.
-- [ ] **Agents and popups.** M · Menus (`xdg_popup`) aren't in window
-  snapshots and agent clicks don't reach them.
+- [x] **Agents and popups.** M · Window snapshots draw the window's open
+  menus (and say where they are); agent clicks and hovers reach them, and a
+  press outside closes them (patch 0060; `features/AGENT_CONTROL.md`,
+  "Popups").
 - [x] **Popups of windows no panel shows covered the shell.** An agent's
   menus and tooltips showed over the shell (and other threads) while no
   page showed the window. Now they show only at the element showing the
