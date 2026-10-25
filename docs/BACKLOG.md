@@ -432,8 +432,8 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   dialogs: FileChooser, OpenURI (Flatpak link opening, see
   `features/OPENING_LINKS.md`), Settings (color scheme, accent),
   Notification, Inhibit, Print, Account, Access and Background.
-  FileChooser is built (below, "The FileChooser portal on the same
-  picker"); its dialog opens over the app's window, found by the request's
+  FileChooser and Print are built (below, "The FileChooser portal on the
+  same picker", "The Print portal on the same dialog"); FileChooser's dialog opens over the app's window, found by the request's
   pid (the parent window handle, an XID or an xdg-foreign handle, isn't
   mapped to Exo windows).
 - [ ] **Password manager adapter** (`features/PASSWORDS.md`). L · Phase 5
@@ -545,15 +545,11 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   on a real session (the frontend exports the URIs itself; not tried on the
   private test bus, which would start a second document portal on the
   user's `$XDG_RUNTIME_DIR/doc`).
-- [ ] **The Print portal on the same dialog.** M · Part of "Our own portal
-  backend for the rest": `PreparePrint` shows the library's print dialog
-  without a preview and returns the settings; `Print` hands the helper the
-  document (an fd), which it sends to CUPS (`TAB_FEATURES.md`, "The Print
-  portal"). In the way: `Print` passes the document as a Unix fd (`h`),
-  and the helper's D-Bus client (`dbus.ts`) can't receive fds, since Node
-  has no SCM_RIGHTS on its sockets. It needs a small native or Python
-  receiver (as `ptybridge.py` is for terminals), or the backend's `Print`
-  in another process. The dialog also has to work without a tab's preview.
+- [x] **The Print portal on the same dialog.** M · Built 2026-10-26
+  (`TAB_FEATURES.md`, "The Print portal"): `printportal.py` serves it,
+  since the document comes as an fd Node can't receive; the library's
+  print dialog without a preview, then CUPS or Save as PDF. Left: a real
+  printer, a Qt app and a Flatpak app, checked on a real session.
 - [ ] **Form autofill in tabs.** S–M to L · Not now (decided 2026-10-23).
   Later: identities and cards through the password adapter.
 

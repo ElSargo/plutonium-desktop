@@ -80,7 +80,7 @@ describe("PreparePrint, then Print", () => {
     const [printed] = await backend.call({ ...base, id: 2, method: "Print", document: path, options: { token } });
     assert.equal(printed, 0);
     assert.equal(existsSync(path), false);
-    assert.deepEqual(jobs.at(-1), { pdf: "%PDF-1.7 one", printer: "Office", copies: 2, duplex: "none", color: true, title: "Doc" });
+    assert.deepEqual(jobs.at(-1), { pdf: "%PDF-1.7 one", printer: "Office", duplex: "none", color: true, title: "Doc" });
     assert.equal(asked.length, 1);
   });
 

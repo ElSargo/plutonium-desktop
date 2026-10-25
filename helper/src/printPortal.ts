@@ -227,7 +227,7 @@ export class PrintBackend {
       if (choice.printer) {
         const { job } = await (this.options.printPdf ?? printPdf)(document, {
           printer: choice.printer,
-          copies: choice.copies,
+          // GTK lays out the copies in the document itself (two copies of one page: two pages).
           duplex: choice.duplex,
           color: choice.color,
           title: call.title,
