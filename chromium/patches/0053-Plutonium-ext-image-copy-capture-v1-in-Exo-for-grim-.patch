@@ -2,30 +2,35 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 25 Oct 2026 18:59:23 +1300
 Subject: [PATCH 53/53] Plutonium: ext-image-copy-capture-v1 in Exo, for grim
- and wf-recorder
+ and wl-screenrec
 
 EXO-CAPTURE: ext-image-copy-capture-v1 with ext-image-capture-source-v1's
 output sources. Each frame is a copy of the output's root layer written
-into the client's shared-memory buffer (XRGB8888 or ARGB8888), with full
-damage. A session starts once the embedder allows it
-(exo::wayland::ImageCaptureDelegate): PlutoniumCapture asks the user as for
-the portal ("capturerequest" to the focused shell, else Ash's picker),
-needs both switches on (it can be a screenshot or a recording), and
-publishes it as a capture of kind "wayland" that any shell can stop. No
-toplevel sources (Exo has no foreign toplevel list), no cursor: a cursor
-session's capture session stops at once. exo::Buffer gains a getter for its
-handle.
+into the client's buffer: shared memory (XRGB8888 or ARGB8888) or a linear
+dmabuf of those formats on the first render node (wl-screenrec takes
+nothing else), through a mapping, with full damage. A session starts once
+the embedder allows it (exo::wayland::ImageCaptureDelegate):
+PlutoniumCapture asks the user as for the portal ("capturerequest" to the
+focused shell, else Ash's picker), needs both switches on (it can be a
+screenshot or a recording), and publishes it as a capture of kind
+"wayland" that any shell can stop. A client that goes away while asked
+cancels the request (its picker closes). No toplevel sources (Exo has no
+foreign toplevel list), no cursor: a cursor session's capture session
+stops at once. exo::Buffer gains a getter for its handle. The capture
+source protocol's target generates ext-foreign-toplevel-list too, which
+its toplevel sources refer to. (wf-recorder only speaks
+wlr-screencopy.)
 ---
  chrome/browser/BUILD.gn                       |   1 +
- chrome/browser/plutonium_capture.cc           |  86 +++
- chrome/browser/plutonium_capture.h            |  18 +-
+ chrome/browser/plutonium_capture.cc           | 107 ++++
+ chrome/browser/plutonium_capture.h            |  22 +-
  components/exo/buffer.h                       |   5 +
  components/exo/wayland/BUILD.gn               |   3 +
- .../exo/wayland/ext_image_copy_capture.cc     | 491 ++++++++++++++++++
- .../exo/wayland/ext_image_copy_capture.h      |  56 ++
+ .../exo/wayland/ext_image_copy_capture.cc     | 577 ++++++++++++++++++
+ .../exo/wayland/ext_image_copy_capture.h      |  59 ++
  components/exo/wayland/server.cc              |  13 +
  third_party/wayland-protocols/BUILD.gn        |  12 +
- 9 files changed, 684 insertions(+), 1 deletion(-)
+ 9 files changed, 798 insertions(+), 1 deletion(-)
  create mode 100644 components/exo/wayland/ext_image_copy_capture.cc
  create mode 100644 components/exo/wayland/ext_image_copy_capture.h
 
@@ -42,7 +47,7 @@ index 161bc9b87d..899ebdab7f 100644
        "//ui/snapshot",
      ]
 diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
-index 0e1a2199bc..4a648273fd 100644
+index 0e1a2199bc..4a7acfe11b 100644
 --- a/chrome/browser/plutonium_capture.cc
 +++ b/chrome/browser/plutonium_capture.cc
 @@ -8,18 +8,23 @@
@@ -77,19 +82,21 @@ index 0e1a2199bc..4a648273fd 100644
  }
  
  PlutoniumCapture::~PlutoniumCapture() = default;
-@@ -1396,3 +1402,83 @@ void PlutoniumCapture::OnShellGone(int32_t taker) {
+@@ -1396,3 +1402,104 @@ void PlutoniumCapture::OnShellGone(int32_t taker) {
          base::BindOnce(&PlutoniumCapture::Pick, base::Unretained(this), id));
    }
  }
 +
-+void PlutoniumCapture::RequestOutputCapture(
++int32_t PlutoniumCapture::RequestOutputCapture(
 +    int32_t pid,
 +    int64_t display_id,
 +    base::OnceCallback<void(bool)> done) {
 +  if (!recording_allowed() || !screenshots_allowed()) {
 +    std::move(done).Run(false);
-+    return;
++    return 0;
 +  }
++  const int32_t token = next_wayland_token_++;
++  wayland_requests_[token] = 0;
 +  // Who asks: its process's name and thread, from /proc (off this thread).
 +  base::ThreadPool::PostTaskAndReplyWithResult(
 +      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
@@ -113,27 +120,46 @@ index 0e1a2199bc..4a648273fd 100644
 +          },
 +          pid),
 +      base::BindOnce(
-+          [](PlutoniumCapture* self, int64_t display_id,
++          [](PlutoniumCapture* self, int32_t token, int64_t display_id,
 +             base::OnceCallback<void(bool)> done, base::DictValue consumer) {
++            auto pending = self->wayland_requests_.find(token);
++            if (pending == self->wayland_requests_.end()) {
++              return;  // The client went away.
++            }
 +            // For OnCaptureStarted().
 +            self->wayland_consumers_[consumer.FindInt("pid").value_or(0)] =
 +                consumer.Clone();
 +            base::ListValue types;
 +            types.Append("output");
-+            self->Request(
++            pending->second = self->Request(
 +                base::DictValue()
 +                    .Set("kind", "screencast")
 +                    .Set("consumer", std::move(consumer))
 +                    .Set("types", std::move(types))
 +                    .Set("multiple", false),
 +                base::BindOnce(
-+                    [](base::OnceCallback<void(bool)> done,
++                    [](PlutoniumCapture* self, int32_t token,
++                       base::OnceCallback<void(bool)> done,
 +                       std::optional<base::Value> answer) {
++                      self->wayland_requests_.erase(token);
 +                      std::move(done).Run(answer.has_value());
 +                    },
-+                    std::move(done)));
++                    base::Unretained(self), token, std::move(done)));
 +          },
-+          base::Unretained(this), display_id, std::move(done)));
++          base::Unretained(this), token, display_id, std::move(done)));
++  return token;
++}
++
++void PlutoniumCapture::CancelOutputCapture(int32_t token) {
++  auto pending = wayland_requests_.find(token);
++  if (pending == wayland_requests_.end()) {
++    return;
++  }
++  const int32_t request_id = pending->second;
++  wayland_requests_.erase(pending);
++  if (request_id) {
++    CancelRequest(request_id);
++  }
 +}
 +
 +int32_t PlutoniumCapture::OnCaptureStarted(int32_t pid,
@@ -162,7 +188,7 @@ index 0e1a2199bc..4a648273fd 100644
 +  Remove(id);
 +}
 diff --git a/chrome/browser/plutonium_capture.h b/chrome/browser/plutonium_capture.h
-index 31b90c299e..6fed046b52 100644
+index 31b90c299e..c596176f53 100644
 --- a/chrome/browser/plutonium_capture.h
 +++ b/chrome/browser/plutonium_capture.h
 @@ -24,6 +24,7 @@
@@ -183,7 +209,7 @@ index 31b90c299e..6fed046b52 100644
   public:
    inline static constexpr char kSettingsPref[] = "plutonium.capture";
    // How long the focused shell has to acknowledge a capture before Ash
-@@ -220,6 +222,18 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+@@ -220,6 +222,19 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
    // TYPE_NONE if it's gone.
    content::DesktopMediaID ToMediaId(const Source& source) const;
  
@@ -191,9 +217,10 @@ index 31b90c299e..6fed046b52 100644
 +  // wf-recorder): it can be a screenshot or a recording, so both switches
 +  // must be on; the user is asked as for the portal; it's a capture of kind
 +  // "wayland" while it runs.
-+  void RequestOutputCapture(int32_t pid,
-+                            int64_t display_id,
-+                            base::OnceCallback<void(bool)> done) override;
++  int32_t RequestOutputCapture(int32_t pid,
++                               int64_t display_id,
++                               base::OnceCallback<void(bool)> done) override;
++  void CancelOutputCapture(int32_t token) override;
 +  int32_t OnCaptureStarted(int32_t pid,
 +                           int64_t display_id,
 +                           base::RepeatingClosure stop) override;
@@ -202,12 +229,15 @@ index 31b90c299e..6fed046b52 100644
    // PlutoniumShells::Observer:
    void OnVisibleShellChanged(content::WebContents* previous,
                               content::WebContents* visible) override;
-@@ -322,6 +336,8 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+@@ -322,6 +337,11 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
    int32_t next_request_id_ = 1;
    std::map<int32_t, std::unique_ptr<Capture>> captures_;
    std::map<int32_t, std::unique_ptr<PendingRequest>> requests_;
 +  // ext-image-copy-capture clients asked about, by pid: who they are.
 +  std::map<int32_t, base::DictValue> wayland_consumers_;
++  // Their requests by token: the Request() id (0 until it's made).
++  std::map<int32_t, int32_t> wayland_requests_;
++  int32_t next_wayland_token_ = 1;
    raw_ptr<Ui> ui_ = nullptr;
    base::ObserverList<Observer> observers_;
    base::OneShotTimer indicator_timer_;
@@ -250,10 +280,10 @@ index 54738dbec4..ea971d4789 100644
      "//ui/accessibility",
 diff --git a/components/exo/wayland/ext_image_copy_capture.cc b/components/exo/wayland/ext_image_copy_capture.cc
 new file mode 100644
-index 0000000000..199002d852
+index 0000000000..b53d810da8
 --- /dev/null
 +++ b/components/exo/wayland/ext_image_copy_capture.cc
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,577 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -267,11 +297,17 @@ index 0000000000..199002d852
 +
 +#include <ext-image-capture-source-v1-server-protocol.h>
 +#include <ext-image-copy-capture-v1-server-protocol.h>
++#include <drm_fourcc.h>
++#include <linux/dma-buf.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
 +#include <wayland-server-core.h>
 +#include <wayland-server-protocol-core.h>
 +
 +#include <algorithm>
 +#include <cstring>
++#include <initializer_list>
 +#include <memory>
 +#include <utility>
 +
@@ -280,6 +316,8 @@ index 0000000000..199002d852
 +#include "base/logging.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/posix/eintr_wrapper.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/time/time.h"
 +#include "components/exo/buffer.h"
@@ -371,6 +409,31 @@ index 0000000000..199002d852
 +};
 +
 +////////////////////////////////////////////////////////////////////////////////
++// The first render node's device number, for dmabufs (0: none).
++dev_t RenderNode() {
++  static const dev_t device = [] {
++    for (int minor = 128; minor < 192; ++minor) {
++      struct stat info;
++      if (stat(("/dev/dri/renderD" + base::NumberToString(minor)).c_str(),
++               &info) == 0 &&
++          S_ISCHR(info.st_mode)) {
++        return info.st_rdev;
++      }
++    }
++    return static_cast<dev_t>(0);
++  }();
++  return device;
++}
++
++// Starts or ends CPU access to a dmabuf.
++void SyncDmabuf(int fd, uint64_t flags) {
++  struct dma_buf_sync sync = {};
++  sync.flags = flags | DMA_BUF_SYNC_WRITE;
++  if (HANDLE_EINTR(ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync))) {
++    PLOG(ERROR) << "EXO-CAPTURE DMA_BUF_IOCTL_SYNC";
++  }
++}
++
 +// ext_image_copy_capture_session_v1:
 +
 +class CaptureSession {
@@ -381,6 +444,9 @@ index 0000000000..199002d852
 +  CaptureSession(const CaptureSession&) = delete;
 +  CaptureSession& operator=(const CaptureSession&) = delete;
 +  ~CaptureSession() {
++    if (request_token_ && g_delegate) {
++      g_delegate->CancelOutputCapture(request_token_);
++    }
 +    if (capture_id_ && g_delegate) {
 +      g_delegate->OnCaptureStopped(capture_id_);
 +    }
@@ -399,7 +465,7 @@ index 0000000000..199002d852
 +    wl_client_get_credentials(wl_resource_get_client(resource_), &pid, nullptr,
 +                              nullptr);
 +    pid_ = pid;
-+    g_delegate->RequestOutputCapture(
++    request_token_ = g_delegate->RequestOutputCapture(
 +        pid_, display_id_,
 +        base::BindOnce(&CaptureSession::OnAnswered,
 +                       weak_factory_.GetWeakPtr()));
@@ -426,6 +492,7 @@ index 0000000000..199002d852
 +
 + private:
 +  void OnAnswered(bool allowed) {
++    request_token_ = 0;
 +    if (stopped_) {
 +      return;
 +    }
@@ -453,6 +520,25 @@ index 0000000000..199002d852
 +                                                      WL_SHM_FORMAT_XRGB8888);
 +    ext_image_copy_capture_session_v1_send_shm_format(resource_,
 +                                                      WL_SHM_FORMAT_ARGB8888);
++    // Linear dmabufs too (wl-screenrec takes nothing else), written through
++    // a mapping as shared memory is.
++    if (dev_t device = RenderNode()) {
++      wl_array devices;
++      wl_array_init(&devices);
++      *static_cast<dev_t*>(wl_array_add(&devices, sizeof(dev_t))) = device;
++      ext_image_copy_capture_session_v1_send_dmabuf_device(resource_,
++                                                           &devices);
++      wl_array_release(&devices);
++      for (uint32_t format : {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888}) {
++        wl_array modifiers;
++        wl_array_init(&modifiers);
++        *static_cast<uint64_t*>(wl_array_add(&modifiers, sizeof(uint64_t))) =
++            DRM_FORMAT_MOD_LINEAR;
++        ext_image_copy_capture_session_v1_send_dmabuf_format(resource_, format,
++                                                             &modifiers);
++        wl_array_release(&modifiers);
++      }
++    }
 +    ext_image_copy_capture_session_v1_send_done(resource_);
 +    wl_client_flush(wl_resource_get_client(resource_));
 +  }
@@ -460,6 +546,8 @@ index 0000000000..199002d852
 +  const raw_ptr<wl_resource> resource_;
 +  const int64_t display_id_;
 +  int32_t pid_ = 0;
++  // While the embedder asks.
++  int32_t request_token_ = 0;
 +  int32_t capture_id_ = 0;
 +  gfx::Size size_;
 +  bool active_ = false;
@@ -526,29 +614,57 @@ index 0000000000..199002d852
 +  Buffer* buffer = buffer_ ? GetUserDataAs<Buffer>(buffer_) : nullptr;
 +  const gfx::GpuMemoryBufferHandle* handle =
 +      buffer ? &buffer->gpu_memory_buffer_handle() : nullptr;
-+  if (!handle || handle->type != gfx::SHARED_MEMORY_BUFFER ||
-+      !handle->region().IsValid() || buffer->GetSize() !=
-+                                         gfx::Size(bitmap.width(),
-+                                                   bitmap.height())) {
++  if (!handle ||
++      buffer->GetSize() != gfx::Size(bitmap.width(), bitmap.height())) {
 +    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
 +    return;
 +  }
-+  base::WritableSharedMemoryMapping mapping = handle->region().Map();
 +  const size_t row_bytes = static_cast<size_t>(bitmap.width()) * 4;
-+  const size_t needed =
-+      handle->offset + static_cast<size_t>(handle->stride) *
-+                           (bitmap.height() - 1) +
-+      row_bytes;
-+  if (!mapping.IsValid() || mapping.size() < needed ||
-+      handle->stride < row_bytes) {
++  // N32 is BGRA in memory: wl_shm's (A|X)RGB8888 little-endian, and DRM's.
++  auto copy = [&](uint8_t* pixels, size_t stride) {
++    for (int y = 0; y < bitmap.height(); ++y) {
++      memcpy(pixels + stride * y, bitmap.getAddr32(0, y), row_bytes);
++    }
++  };
++  if (handle->type == gfx::SHARED_MEMORY_BUFFER && handle->region().IsValid()) {
++    base::WritableSharedMemoryMapping mapping = handle->region().Map();
++    const size_t needed =
++        handle->offset + static_cast<size_t>(handle->stride) *
++                             (bitmap.height() - 1) +
++        row_bytes;
++    if (!mapping.IsValid() || mapping.size() < needed ||
++        handle->stride < row_bytes) {
++      Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
++      return;
++    }
++    copy(mapping.GetMemoryAsSpan<uint8_t>().data() + handle->offset,
++         handle->stride);
++  } else if (handle->type == gfx::NATIVE_PIXMAP &&
++             handle->native_pixmap_handle().planes.size() == 1 &&
++             handle->native_pixmap_handle().modifier ==
++                 DRM_FORMAT_MOD_LINEAR) {
++    const gfx::NativePixmapPlane& plane =
++        handle->native_pixmap_handle().planes[0];
++    const size_t length = plane.offset +
++                          static_cast<size_t>(plane.stride) *
++                              (bitmap.height() - 1) +
++                          row_bytes;
++    void* memory = plane.stride < row_bytes
++                       ? MAP_FAILED
++                       : mmap(nullptr, length, PROT_READ | PROT_WRITE,
++                              MAP_SHARED, plane.fd.get(), 0);
++    if (memory == MAP_FAILED) {
++      PLOG(ERROR) << "EXO-CAPTURE mapping a dmabuf";
++      Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
++      return;
++    }
++    SyncDmabuf(plane.fd.get(), DMA_BUF_SYNC_START);
++    copy(static_cast<uint8_t*>(memory) + plane.offset, plane.stride);
++    SyncDmabuf(plane.fd.get(), DMA_BUF_SYNC_END);
++    munmap(memory, length);
++  } else {
 +    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
 +    return;
-+  }
-+  // N32 is BGRA in memory: wl_shm's (A|X)RGB8888 little-endian.
-+  uint8_t* pixels = mapping.GetMemoryAsSpan<uint8_t>().data() + handle->offset;
-+  for (int y = 0; y < bitmap.height(); ++y) {
-+    memcpy(pixels + static_cast<size_t>(handle->stride) * y,
-+           bitmap.getAddr32(0, y), row_bytes);
 +  }
 +  const base::TimeDelta now = base::TimeTicks::Now() - base::TimeTicks();
 +  const int64_t seconds = now.InSeconds();
@@ -747,10 +863,10 @@ index 0000000000..199002d852
 +}  // namespace exo::wayland
 diff --git a/components/exo/wayland/ext_image_copy_capture.h b/components/exo/wayland/ext_image_copy_capture.h
 new file mode 100644
-index 0000000000..ba7ae74713
+index 0000000000..a7cdb05521
 --- /dev/null
 +++ b/components/exo/wayland/ext_image_copy_capture.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,59 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -768,9 +884,9 @@ index 0000000000..ba7ae74713
 +
 +// PLUTONIUM (EXO-CAPTURE, docs/features/CAPTURE.md): ext-image-copy-capture-v1
 +// with ext-image-capture-source-v1's output sources, for Wayland clients that
-+// capture the screen themselves (grim, wf-recorder, obs-wlrobs). Each frame is
-+// a copy of the output's root layer into the client's shared-memory buffer
-+// (XRGB8888 or ARGB8888). No toplevel sources (Exo has no foreign toplevel
++// capture the screen themselves (grim, wl-screenrec). Each frame is a copy of
++// the output's root layer into the client's buffer, shared memory or a linear
++// dmabuf (XRGB8888 or ARGB8888), written by the CPU. No toplevel sources (Exo has no foreign toplevel
 +// list) and no cursor: a cursor session's capture session stops at once.
 +//
 +// A session starts only once the embedder allows it: the same switches and
@@ -780,10 +896,13 @@ index 0000000000..ba7ae74713
 + public:
 +  virtual ~ImageCaptureDelegate() = default;
 +  // Whether client |pid| may capture display |display_id|: |done| gets the
-+  // answer, maybe after asking the user.
-+  virtual void RequestOutputCapture(int32_t pid,
-+                                    int64_t display_id,
-+                                    base::OnceCallback<void(bool)> done) = 0;
++  // answer, maybe after asking the user. Returns a token for
++  // CancelOutputCapture().
++  virtual int32_t RequestOutputCapture(int32_t pid,
++                                       int64_t display_id,
++                                       base::OnceCallback<void(bool)> done) = 0;
++  // The client went away before the answer: stop asking (|done| isn't run).
++  virtual void CancelOutputCapture(int32_t token) = 0;
 +  // A session runs; |stop| ends it (the user stopped it). Returns its id.
 +  virtual int32_t OnCaptureStarted(int32_t pid,
 +                                   int64_t display_id,
