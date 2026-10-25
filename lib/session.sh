@@ -49,21 +49,40 @@ ensure_helper_deps() {
 
 # EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend is the
 # helper (docs/features/CAPTURE.md, "The portal backend"). DRM sessions
-# install its files, inert unless xdg-desktop-portal runs with
-# XDG_CURRENT_DESKTOP=Plutonium, which PORTAL_SESSION=1 sets for the user's
-# whole session (D-Bus activation and systemd) and restarts it with: a
-# desktop of its own. X11 test sessions use tools/portal-bus.sh instead.
+# install its files, and point the user's xdg-desktop-portal at it: they set
+# XDG_CURRENT_DESKTOP=Plutonium for D-Bus activation and systemd and restart
+# the portal, and put back what was there when the session ends (Ash exits,
+# plutonium stop, Ctrl+Alt+Backspace, a crash), so a desktop on another VT
+# gets its own backends again. PORTAL_SESSION=0 leaves the portal alone. X11
+# test sessions use tools/portal-bus.sh instead.
 setup_portal() {
   [[ $MODE == drm ]] || return 0
   local data=${XDG_DATA_HOME:-$HOME/.local/share} config=${XDG_CONFIG_HOME:-$HOME/.config}
   install -Dm644 "$ROOT/helper/portal/plutonium.portal" "$data/xdg-desktop-portal/portals/plutonium.portal"
   install -Dm644 "$ROOT/helper/portal/plutonium-portals.conf" "$config/xdg-desktop-portal/plutonium-portals.conf"
-  [[ ${PORTAL_SESSION:-} == 1 ]] || return 0
+  [[ ${PORTAL_SESSION:-1} == 1 ]] || return 0
+  # What to put back. A session that ended without its teardown (killed)
+  # left Plutonium there: that isn't the user's.
+  PORTAL_PREVIOUS=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XDG_CURRENT_DESKTOP=//p')
+  [[ $PORTAL_PREVIOUS == Plutonium ]] && PORTAL_PREVIOUS=
+  trap restore_portal EXIT
   export XDG_CURRENT_DESKTOP=Plutonium
   dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=Plutonium 2>/dev/null ||
     log "WARNING: couldn't pass XDG_CURRENT_DESKTOP to D-Bus activation: apps' screen capture may not reach the helper"
   systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
-  log "portal: xdg-desktop-portal uses the helper for screen capture (XDG_CURRENT_DESKTOP=Plutonium)"
+  log "portal: xdg-desktop-portal uses the helper for screen capture (XDG_CURRENT_DESKTOP=Plutonium; PORTAL_SESSION=0 to leave it)"
+}
+
+restore_portal() {
+  if [[ -n $PORTAL_PREVIOUS ]]; then
+    dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP="$PORTAL_PREVIOUS" 2>/dev/null
+  else
+    # D-Bus activation can't unset a variable: empty is as good.
+    dbus-update-activation-environment XDG_CURRENT_DESKTOP= 2>/dev/null
+    systemctl --user unset-environment XDG_CURRENT_DESKTOP 2>/dev/null
+  fi
+  systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
+  log "portal: XDG_CURRENT_DESKTOP back to ${PORTAL_PREVIOUS:-unset}"
 }
 
 start_helper() {

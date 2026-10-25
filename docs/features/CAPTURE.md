@@ -164,7 +164,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 - Restore data is `("plutonium", 1, <JSON>)`: the output by name, a window by app id and title, a tab by URL.
 - A capture a shell stops ends its portal session (`Session.Closed`).
 - `PickColor` isn't there yet.
-- Files: `helper/portal/plutonium.portal` and `plutonium-portals.conf`. DRM sessions install them; `PORTAL_SESSION=1` sets `XDG_CURRENT_DESKTOP=Plutonium` for the session and restarts xdg-desktop-portal.
+- Files: `helper/portal/plutonium.portal` and `plutonium-portals.conf`. DRM sessions install them, set `XDG_CURRENT_DESKTOP=Plutonium` for D-Bus activation and systemd, and restart xdg-desktop-portal, so it picks this backend. When the session ends (Ash exits, `plutonium stop`, Ctrl+Alt+Backspace, a crash), the previous value goes back (or it's unset, if there was none) and the portal restarts again, so a desktop on another VT gets its own backends. `PORTAL_SESSION=0` (`plutonium.env`) leaves the portal alone. X11 sessions never touch it.
 
 ## Testing
 
