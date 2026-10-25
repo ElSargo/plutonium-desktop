@@ -556,8 +556,13 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   screen's frame. A parked window that nothing shows still gives no frames;
   PipeWire captures cover that.
 - [x] **The portal's `PickColor`.** S · The focused shell's picker over a frozen screen.
-- [x] **`ext-image-copy-capture-v1` in Exo,** for grim and wl-screenrec (wf-recorder
-  only speaks wlr-screencopy). M · Output sources, shared memory and linear dmabufs.
+- [x] **`ext-image-copy-capture-v1` in Exo,** for grim (wf-recorder only speaks
+  wlr-screencopy). M · Output sources, shared memory.
+- [ ] **dmabufs for `ext-image-copy-capture-v1`.** M · wl-screenrec takes only
+  dmabufs, and allocates them from its VAAPI encoder with the GPU's tiled
+  modifier whatever modifiers are offered (an AMD one, seen on X11), so a CPU
+  copy can't fill them: it needs a GPU copy (a CopyOutputRequest blitted into
+  the buffer's shared image).
 
 ## Several shells (`SHELLS.md`)
 
