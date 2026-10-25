@@ -358,7 +358,7 @@ index f3cfa9d807..b26596eaff 100644
    // EXO-PRESENT: see Present().
    int32_t presented_window_id_ = 0;
 diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
-index 9d8b034dff..d964d22265 100644
+index 9d8b034dff..e88f05406b 100644
 --- a/components/exo/shell_surface_base.cc
 +++ b/components/exo/shell_surface_base.cc
 @@ -6,6 +6,7 @@
@@ -381,7 +381,7 @@ index 9d8b034dff..d964d22265 100644
 +  }
 +  // Up to the root through the windows' bounds, leaving out the transform a
 +  // shown popup is scaled with.
-+  auto origin_in_root = [](aura::Window* window) {
++  auto origin_in_root = [](const aura::Window* window) {
 +    gfx::Point origin;
 +    for (; window && window->parent(); window = window->parent()) {
 +      origin += window->bounds().OffsetFromOrigin();
