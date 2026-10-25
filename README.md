@@ -15,11 +15,11 @@ Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (
 
 ## Status
 
-Early, but usable day to day. Not there yet:
+Early, but usable day to day: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), global shortcuts, and H.264 video in tabs work. Not there yet:
 - a login-screen session entry (you start it from a text console);
-- multiple monitors;
-- the clipboard between apps and pages;
-- desktop portals (Flatpak link opening, screen sharing).
+- the file picker for native apps (tabs have one), and the other desktop portals;
+- input methods in native apps (in progress);
+- installing and editing shells as packages (in progress).
 
 It has been developed on AMD graphics. Intel should work; NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
