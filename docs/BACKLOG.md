@@ -126,8 +126,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   16/9 scale isn't a 1/120 step, so buffers are 4 px short and the topmost-plane
   rule (no cursor plane on AMD) rejects the fullscreen strategy. Pick a shell
   scale such as 1.6 or 2, or relax the rule for sub-pixel scale errors. S
-- [ ] **Pixel-snap `<native-window>`.** Elements at fractional device positions
-  can't be promoted to planes (DRM takes whole-pixel rects). S
+- [x] **Pixel-snap `<native-window>`.** Elements at fractional device positions
+  can't be promoted to planes (DRM takes whole-pixel rects). S · Done
+  2026-10-26 (patch 0058, `WINDOW_SIZING.md`): the surface layer goes at whole
+  device pixels on screen; verified on Xvfb (crisp under a fractional
+  `translate()`), planes not yet checked on DRM.
 - [x] **Real input on the TTY** (evdev keyboard/mouse). Verified with virtual
   uinput devices on the panel (`PHASE4_PROGRESS.md`, item 3); not yet pressed
   by hand.
@@ -288,7 +291,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 
 ## App compatibility and features (Phase 5)
 
-- [ ] **Web pages should see generic Linux Chromium, not ChromeOS.** S ·
+- [x] **Web pages should see generic Linux Chromium, not ChromeOS.** S ·
   High priority: some sites already break. The user wants no ChromeOS
   fingerprint (`ARCHITECTURE.md`, "ChromeOS is an implementation detail").
   In `components/embedder_support/user_agent_utils.cc`, the `IS_CHROMEOS`
@@ -302,13 +305,39 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   Linux gives `X11; Linux x86_64`, `"Linux"` and `""`. `navigator.platform`
   is already `Linux x86_64`. Then compare the remaining fingerprint with
   Linux Chromium on the same machine, using a fingerprinting test page:
-  ChromeOS-only web APIs, fonts and WebGL strings.
-- [ ] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
+  ChromeOS-only web APIs, fonts and WebGL strings. Done 2026-10-26 (patch
+  0055, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
+  `userAgentData.platform` `"Linux"`, `platformVersion` `""`.
+- [x] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
   tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
   WebRTC (`rtc_use_pipewire`), printing (Linux's CUPS backend instead of
   Ash's printer manager), IME, notifications, branding strings, web APIs.
   Turn what we find into items here, each saying whether to switch on the
-  Linux path or patch the ChromeOS one out.
+  Linux path or patch the ChromeOS one out. Done 2026-10-25
+  (`LINUX_COMPAT.md`): a Plutonium tab against Linux Chromium; the timezone,
+  languages and ChromeOS-only web APIs fixed, the rest below.
+- [x] **H.264 and AAC in tabs.** M (a big rebuild) · High priority: no
+  proprietary codecs, so `canPlayType` says no to `avc1` and `mp4a`.
+  `proprietary_codecs = true` and `ffmpeg_branding = "Chrome"` in
+  `chromium/args.gn` (and the release args), as nixpkgs' Chromium.
+  Done 2026-10-26 (`LINUX_COMPAT.md`): verified on Xvfb, an H.264/AAC mp4
+  plays in a tab.
+- [ ] **Pages use the host's fonts.** S–M · Ash in the container renders
+  with its 135 fonts (DejaVu Sans), not the host's (Noto Sans and the
+  user's). Mount the host's font directories and fontconfig into the
+  container, or wait for Ash on the host.
+- [ ] **Web notifications from tabs.** M · A granted `new Notification()`
+  goes to Ash's message center, which shell mode blocks, so nothing shows.
+  Hand them to the shell (a tab request kind) or to the desktop's
+  `org.freedesktop.Notifications` through the helper, as Linux Chromium.
+- [ ] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
+  page's media session on D-Bus for media keys and desktop widgets; ours go
+  to Ash's media controls.
+- [ ] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
+  empty (ChromeOS's voices are TTS extensions); Linux Chromium uses
+  speech-dispatcher.
+- [ ] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
+  setting, not the desktop's (the portal's `color-scheme`).
 - [x] **Port the real shell web app** onto `<native-window>` and the broker.
   Done twice: T3 Code (`T3_SHELL_TEST.md`) and the plain shell (`shells/plain/`).
 - [x] **Browser tabs as elements.** Real pages as SurfaceEmbed `<embed>`s,
@@ -321,9 +350,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Window sizing on real input.** S · Verify on DRM: the "last pressed"
   rule for several elements on one window, pointer input on a scaled
   (`object-fit: contain`) window, and the niri/T3 animations at full speed.
-- [ ] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
+- [x] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
   or edge resize could become niri's interactive move or column resize. The
-  page would need the pointer for the rest of the drag.
+  page would need the pointer for the rest of the drag. Done 2026-10-26
+  (`WINDOW_SIZING.md`, patch 0057): the browser hands the rest of the drag to
+  the page; niri's move verified on X11 with two displays. Plain ignores both.
+- [ ] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
+  shadow, outside the geometry, where `<native-window>` clips the surface, so
+  they never get a press. Let presses within a few pixels outside the
+  content box reach the app (floating windows), or tell apps they're tiled.
 - [ ] **Cross-fade on the compositor thread.** S · The old frame's opacity is
   stepped from the main thread each frame; a busy shell page makes it stutter.
   A cc opacity animation on its effect node (as LinkHighlightImpl does) would
@@ -358,8 +393,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and file pickers; the system clipboard read before a context menu stalls
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
-- [ ] **Tabs don't survive a browser restart.** M · Session restore.
-  Not needed yet (2026-10-20). Also
+- [x] **Tabs don't survive a browser restart.** M · Session restore.
+  Done 2026-10-26 (patch 0056, `TABS.md`, "Surviving a restart"): addresses
+  and tags, through a clean stop and a kill -9; not history. Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
 - [x] **Drag and drop** between native apps, tabs and pages
@@ -581,7 +617,9 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   an app fullscreen.
 - [ ] **Switcher: app icons** in the window list and the launcher (the helper
   serves them; SVG needs decoding in the browser process).
-- [ ] **Switcher on DRM**: verify it there (only Xvfb so far).
+- [x] **Switcher on DRM**: verify it there (only Xvfb so far). Done 2026-10-26
+  (`SHELLS.md`): works; its text field colour, hover and the backup window's
+  stacking fixed after it.
 - [x] **Frontends** (step 4). M · T3 and the plain shell register threads,
   tag what they open, show an "Elsewhere" area with import.
 

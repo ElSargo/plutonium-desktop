@@ -25,6 +25,8 @@ The page's content box is always where the window is drawn, as Hyprland draws a 
   - **Fullscreen:** `none`, centered.
   - **`contain` / `scale-down`:** for a fixed-size app the page wants scaled into its box.
 
+**Whole device pixels** (0058): the element snaps the window's rect in its own transform space, and the compositor moves its surface layer by whatever fraction of a pixel the transforms above it add (when they are only 2D translations, e.g. a CSS `translate()` at scale 1.78). The window stays crisp, and viz can put it on a display plane, which takes whole-pixel rects. Verified on Xvfb: a niri tile at `translate(3.37px, 5.71px)` shows GTK Demo exactly as untransformed, shifted by (3, 6) px (screenshots, max difference 5 from the app redrawing). A transform that animates on the compositor isn't snapped while it runs.
+
 Before this, a resize showed the old frame unstretched until the app redrew, leaving a gap during a drag. The first attempt at niri's animation had the element animate its own size, which lagged behind a page that snapped its layout.
 
 ## Cross-fade: niri's resize animation
@@ -52,6 +54,12 @@ The element fires a `windowrequest` event (`NativeWindowRequestEvent`), which do
 - **`edge`:** for a resize, the edge or corner to resize from (`"top"`, `"bottom-right"`, …).
 
 The page decides what each request means. The niri shell maps maximize/unmaximize to maximize column. T3 Code maps them to the panel's maximize. Fullscreen requests work as before (`CONTROLS.md`).
+
+**Move and resize** come from a press the app is handling (its title bar, its edges). The browser then gives the page the rest of that drag: the input router stops sending it to the window (`HandForeignDragToPage()`), the app gets a pointer leave, and the page gets the moves and the release as ordinary pointer events (with `buttons` set; there was no `pointerdown` in the page). niri turns them into its interactive move (the column follows the pointer and drops where it's released, as Super+drag) or its column width resize (from the left or right edge; floating windows resize both ways). The plain shell, with one window per stage, ignores both.
+
+The page also has the mouse captured for the rest of the drag (the router's capture target is its root view), so the moves and the release reach it wherever the pointer goes, over a tab or over the window itself. The drag is the page's from the request on, whichever way the press was routed (directly, or through the renderer for regions where page content may overlap the window). GTK asks after its drag threshold, so the first few pixels of the drag still go to the app.
+
+GTK 4's resize edges are in its shadow, outside the window geometry, where the element clips the surface: a press there reaches the page, not the app, so an edge resize never starts in a shell (niri's Super+right-drag resizes a column instead). An app that asks for a resize from inside its window gets niri's column resize.
 
 ## Several elements on one window
 
@@ -95,5 +103,7 @@ Before this, a parked window's popups were drawn wherever the window was last pa
 | GTK Demo in a 300×300 element (it won't go below 379 px) | `none`: clipped at the top left; `contain`: scaled to fit |
 | Second element on the same window | newest on-screen element drives (400×300); off screen → the first drives (1380×875); back → 400×300; removed → 1380×875 |
 | niri: the app's maximize | column maximized (768 → 1560 px), app configured once; FLIP plus cross-fade, captured with animations at 1/10 speed |
+| niri, X11 with two host displays (2×1280×800): GTK Demo's header bar dragged left over the tab column | `drag … handed to the page` in Ash's log; the page gets every move with `buttons` 1 and the release; the columns swap (GTK Demo 648 → 16). Before the capture fix, moves over the tab or the window and the release went to them, and the drag never ended |
+| Same, dragged onto the second display | stays on its display and drops back, as niri's Super+drag (moving to another display is HTML drag and drop, `MULTI_MONITOR.md`); the second display's page unaffected |
 
 Not verified: pointer input on a scaled (`contain`) window, and the "last pressed" rule. On Xvfb, neither DevTools nor xdotool input reaches embedded apps. A press-driven driver change needs a session with real input (DRM, `tools/uinput.py`).

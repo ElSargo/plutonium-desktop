@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 01:05:53 +1300
+Subject: [PATCH 58/59] Plutonium: a native window's surface goes at whole
+ device pixels on screen
+
+EXO-EMBED: the foreign layer of a <native-window> (or a tab) is moved by
+the fractional part of its screen position, when everything above it is a
+2D translation, so a CSS transform with a fractional translation doesn't
+put it off the pixel grid: it stays crisp, and viz can promote it to a
+display plane, which takes whole-pixel rects.
+---
+ .../graphics/compositing/pending_layer.cc     | 21 +++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/third_party/blink/renderer/platform/graphics/compositing/pending_layer.cc b/third_party/blink/renderer/platform/graphics/compositing/pending_layer.cc
+index 7476ac9d59..c4db3df0b4 100644
+--- a/third_party/blink/renderer/platform/graphics/compositing/pending_layer.cc
++++ b/third_party/blink/renderer/platform/graphics/compositing/pending_layer.cc
+@@ -623,8 +623,25 @@ void PendingLayer::UpdateForeignLayer() {
+   gfx::Vector2dF layer_offset(
+       foreign_layer_display_item.VisualRect().OffsetFromOrigin());
+   cc_layer_ = foreign_layer_display_item.GetLayer();
+-  cc_layer_->SetOffsetToTransformParent(layer_offset +
+-                                        offset_of_decomposited_transforms_);
++  gfx::Vector2dF offset = layer_offset + offset_of_decomposited_transforms_;
++  // PLUTONIUM: EXO-EMBED: a <native-window>'s (or a tab's) surface goes at
++  // whole device pixels on screen, so it's crisp and viz can put it on a
++  // display plane (DRM takes whole-pixel rects). The element is snapped in its
++  // own transform space; a fractional translation above it (a CSS transform)
++  // would still move it off the pixel grid.
++  if (foreign_layer_display_item.GetType() ==
++      DisplayItem::kForeignLayerPlugin) {
++    const gfx::Transform to_screen =
++        GeometryMapper::SourceToDestinationProjection(
++            GetPropertyTreeState().Transform(),
++            TransformPaintPropertyNode::Root());
++    if (to_screen.IsIdentityOr2dTranslation()) {
++      const gfx::Vector2dF screen = offset + to_screen.To2dTranslation();
++      offset += gfx::Vector2dF(std::round(screen.x()) - screen.x(),
++                               std::round(screen.y()) - screen.y());
++    }
++  }
++  cc_layer_->SetOffsetToTransformParent(offset);
+ }
+ 
+ void PendingLayer::UpdateScrollHitTestLayer(PendingLayer* old_pending_layer) {

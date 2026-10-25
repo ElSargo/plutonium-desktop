@@ -143,7 +143,9 @@ Shells that the overlay adds aren't on the helper's command line. Each shell pag
 | (patch 0024) Left click on a tab: the page itself fullscreen; a click in it navigates it | ✓ |
 | (patch 0024) A tab Plain showed, opened fullscreen, then Super+F: back in Plain's `<embed>`, painting | ✓ |
 
-Not tried: DRM, the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
+Not tried: the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
+
+**On DRM** (2026-10-26, tty5, niri and plain, two monitors, the user driving): Super+Tab, search, a window fullscreen and back with Super+F, the backup terminal and launching an app all work, with no DCHECKs. Three things fixed after it (patch "the switcher's text fields…"): the search field's text was dark on the dark panel (the overlay's widget now takes the dark theme's colors); a GTK Demo window showed above the backup terminal (the active backup window now goes above floating windows, such as a parked window's popups, and back once something else is active); and a row's hover went off over its labels and didn't come back on a rebuilt list (enter/exit on children, and a check when a row is laid out). Those fixes aren't checked on DRM yet.
 
 ### Verified (steps 2–4, Xvfb `:99` and DRM, plain shell at startup, T3 second)
 
