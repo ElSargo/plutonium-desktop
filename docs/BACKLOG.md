@@ -505,13 +505,15 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 
 In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 
-- [ ] **Shell capture API and screenshots.** M · `shell.capture()` →
+- [x] **Shell capture API and screenshots.** M · `shell.capture()` →
   MediaStream and `shell.screenshot()` → PNG for outputs, windows, tabs and
   regions, on the snapshot and capturer code from patches 0005 and 0007.
   niri's Print key with a region/window selector, saving to
   `~/Pictures/Screenshots`. The global recording and screenshot switches, enforced in
-  Ash. Copying to the clipboard waits on the clipboard item.
-- [ ] **Capture requests to the focused shell; events to every shell.** M ·
+  Ash. Copying to the clipboard waits on the clipboard item. Done
+  (`features/CAPTURE.md`, "How it's built"); a shell's MediaStream of a
+  window only covers what fits on the screen (PipeWire captures don't).
+- [x] **Capture requests to the focused shell; events to every shell.** M ·
   `capturerequest`/`answerCapture`, `capturestart`/`capturestop`,
   `stopCapture`. Ash's fallback picker, and its own indicator when the
   focused shell doesn't acknowledge a capture.
@@ -536,12 +538,21 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
 - [ ] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
   Discord's away status.
-- [ ] **getDisplayMedia from tabs through the shell picker.** M · Replace
+- [x] **getDisplayMedia from tabs through the shell picker.** M · Replace
   Ash's `DesktopMediaPicker` with `capturerequest`.
 - [ ] **Agent recording over MCP.** M · Records the agent's own thread's items to a file, with no
   dialogs. It goes to every shell as `capturestart` and honours the global switch.
 - [ ] **Discord screen-share audio.** S to test, M to fix · If Discord wants a
   per-app node, publish one from the shared window's pid (as venmic does).
+- [ ] **dmabuf for Ash's PipeWire nodes.** M · They're shared memory (MemFd)
+  now, a CPU copy per frame. dmabuf with modifiers needs buffers Ash
+  allocates and the capturer renders into, rather than viz's own pool.
+- [ ] **A shell's MediaStream of a window bigger than the screen.** S–M ·
+  Chromium's window capture is a subtree of the screen's frame, so it only
+  covers what fits; PipeWire captures use the window's own copies instead.
+  The same for shells: a MediaStreamTrackGenerator fed by those copies, or
+  a capturer on the window's own frame sink.
+- [ ] **The portal's `PickColor`.** S · Answers "other" now.
 - [ ] **`ext-image-copy-capture-v1` in Exo,** for grim, wf-recorder and obs-wlrobs.
   M · Later.
 
