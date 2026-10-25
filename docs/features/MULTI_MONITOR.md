@@ -74,6 +74,10 @@ Patch "several displays, a shell per display, one window in one place" (Chromium
 - **Agents:** `list_displays` (number, size, scale, primary, focused, the shell each shows), and a `display` argument on `focus_window` and `focus_tab`. The helper asks the owning shell's page, which asks the browser for that display's visible shell (`/v1/displays`; `display` in the focus requests' body).
 - **Library:** `displays`, `display`, `displayParam`, `displayschange`, `showOnDisplay(windowId, indexOrId)`, `showTabOnDisplay()`, `focusDisplay()`. Each page tells the helper its display (`display=` on its request stream; `/v1/status` lists it).
 
+### Capture
+
+Capture requests go to `PlutoniumCapture::FocusedShell()`: the visible shell on the display that has focus. Its picker and the portal's "every output" list the displays in this order, so "Screen 2" is display 2.
+
 ### Dragging between shells
 
 Plain HTML drag and drop, with `application/x-plutonium-window` and `application/x-plutonium-tab` carrying the item's id (the library's `startItemDrag(event, {windowId | tabId})` and `itemFromDrop(event)`). The drop target shows the item, with a grant (`grantFor`) or `tabElement`, and that claim takes it from where it was. The browser's default drag image (the dragged element) stands in for a snapshot.
@@ -121,7 +125,13 @@ On X11 the drag is cancelled as the pointer enters the other display's host wind
 | Hotplug (the connector forced off and on, with a DRM change uevent), twice: the monitor's pages close, niri adopts foot; back on, both shells reopen, Plain is visible again and foot goes back to Plain | ✓ |
 | No crash, DCHECK or FATAL | ✓ |
 
-Fixed after it: a new display without a saved choice showed the first shell in the list rather than the startup shell; focus ended on the last display opened at startup (and on a display that came back) instead of staying where it was; Plain didn't give a window it was asked to show the keyboard (niri did).
+Rounds 2 and 3 (Oliver at the keyboard, real unplugging): the replug crash below is fixed (a real unplug and replug with foot on the monitor); Super+Ctrl+Shift+Right lands a window in niri on the monitor too; many VT switches in a row without a crash.
+
+Fixed after round 3: **a moved window's size was in the wrong display's DIPs.** An element sizes its window from its pixels; they were divided by the window's scale, but a window shown on another display is still on the old one (at its scale) until its element places it there, so on a move from the panel (1.78) to the monitor (1) the app got a size 1.78 times too small, drew in the top left of its element, and stayed so until something resized it (foot's Wayland log: the configure, then `preferred_scale` and `wl_surface.leave/enter`, and no configure after them). The page's own scale is used now. Reproduced on X11 with a host display at scale 2.
+
+Fixed after round 2: moving a parked window to a display that came back crashed Ash (a desk DCHECK): Ash had demoted it from the always-on-top container while a fullscreen shell window was on its display, and the fullscreen state change its arrival caused on the new display promoted it back from inside its own AddChild; it now moves in the always-on-top container. niri's startup hotkeys overlay kept the keyboard from a window niri took. Why a move didn't happen is logged.
+
+Fixed after round 1: a new display without a saved choice showed the first shell in the list rather than the startup shell; focus ended on the last display opened at startup (and on a display that came back) instead of staying where it was; Plain didn't give a window it was asked to show the keyboard (niri did).
 
 Fixed along the way: shell windows for display 2 opened on display 1 (app windows reopen at their saved bounds, whatever the display for new windows; now moved with `SetBoundsInScreen` before going fullscreen); `showShell()` used the focused display; a crash at startup (the tab registry asked for the visible shell before Ash's `display::Screen` existed); niri and Plain didn't take a window back on a focus request.
 

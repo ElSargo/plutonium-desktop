@@ -605,6 +605,10 @@ shells that want to span monitors run on each and sync themselves.
   Plain take drops, Plain's apps and tabs drag). Verified across displays on
   DRM with a real second monitor (on X11 the drag is cancelled at the host
   window's edge).
+- [ ] **Dragging a tile out of niri** to another shell or display. M · niri
+  takes drops but its tiles move by pointer drags of its own (Super+drag,
+  the overview), not HTML drag and drop; one leaving the page would have to
+  turn into a `startItemDrag()`. Plain's list drags today.
 - [ ] **Linked documents** (a shell's second display as a same-origin child
   document). Only if a shell needs shared in-page state; T3 shouldn't.
 
