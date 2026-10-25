@@ -288,7 +288,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 
 ## App compatibility and features (Phase 5)
 
-- [ ] **Web pages should see generic Linux Chromium, not ChromeOS.** S ·
+- [x] **Web pages should see generic Linux Chromium, not ChromeOS.** S ·
   High priority: some sites already break. The user wants no ChromeOS
   fingerprint (`ARCHITECTURE.md`, "ChromeOS is an implementation detail").
   In `components/embedder_support/user_agent_utils.cc`, the `IS_CHROMEOS`
@@ -302,7 +302,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   Linux gives `X11; Linux x86_64`, `"Linux"` and `""`. `navigator.platform`
   is already `Linux x86_64`. Then compare the remaining fingerprint with
   Linux Chromium on the same machine, using a fingerprinting test page:
-  ChromeOS-only web APIs, fonts and WebGL strings.
+  ChromeOS-only web APIs, fonts and WebGL strings. Done 2026-10-26 (patch
+  0051, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
+  `userAgentData.platform` `"Linux"`, `platformVersion` `""`.
 - [x] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
   tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
   WebRTC (`rtc_use_pipewire`), printing (Linux's CUPS backend instead of
@@ -380,8 +382,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and file pickers; the system clipboard read before a context menu stalls
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
-- [ ] **Tabs don't survive a browser restart.** M · Session restore.
-  Not needed yet (2026-10-20). Also
+- [x] **Tabs don't survive a browser restart.** M · Session restore.
+  Done 2026-10-26 (patch 0052, `TABS.md`, "Surviving a restart"): addresses
+  and tags, through a clean stop and a kill -9; not history. Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
 - [x] **Drag and drop** between native apps, tabs and pages

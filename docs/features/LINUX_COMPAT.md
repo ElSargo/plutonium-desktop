@@ -9,6 +9,8 @@ Plutonium is built as ChromeOS (Ash and Exo live there), but a page shouldn't be
 - **Languages** were `["en-US"]`; with `LANG` they are `["en-US", "en"]` as on Linux (`navigator.languages`, `Accept-Language`).
 - **Web APIs ChromeOS has and desktop Linux Chromium doesn't** are off (`--disable-blink-features=WebShare,HandwritingRecognition,BarcodeDetector,WebBluetooth`, from `lib/session.sh`): `navigator.share`/`canShare`, `navigator.createHandwritingRecognizer`, `BarcodeDetector`, `navigator.bluetooth`. A site seeing them on a Linux user agent could tell.
 
+Verified 2026-10-26 on Xvfb with the build of patch 0051, in a tab on example.com: `navigator.userAgent` `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36`, `navigator.platform` `Linux x86_64`, `userAgentData` platform `"Linux"`, `platformVersion` `""`, architecture `x86`, timezone `Pacific/Auckland`, `navigator.share` and `navigator.bluetooth` undefined.
+
 ## How it was compared
 
 `navigator`, `window` globals, `userAgentData` (with the high-entropy values), codecs (`canPlayType`), media capabilities and devices, fonts, WebGL strings, `window.chrome`, timezone and languages, read by one script in a Plutonium tab and in Linux Chromium (nixpkgs, 147, `--headless=new`) on a localhost page. Differences that come from the versions (158 against 147: `HTMLCameraElement`, `cpuPerformance`, `globalPrivacyControl`, …) or from headless (no WebGL) aren't listed.

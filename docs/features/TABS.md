@@ -172,9 +172,11 @@ Verified on Xvfb with the host's T3 data:
 
 The browser keeps the tabs in `Plutonium Tabs` in the profile, a JSON list of each tab's address, tags and `openedBy`, written a second after any change (an `ImportantFileWriter`, so a crash loses at most that second) and never once shutdown has started (closing the browser closes its tabs, which mustn't empty the list). At the next start, once the startup shell's page exists, each one opens again with its tags, so it is back in its thread in whichever shell shows that thread. Not kept: incognito tabs, DevTools, and tabs whose origin tag is T3 Code's (`t3:`), since T3's server reopens its browser panel's tabs itself. A restored tab is a new tab at its address: no back/forward history, and a new id.
 
+Verified 2026-10-26 on Xvfb (slot 2, plain shell, build f58de02): two tabs opened with tags `th-a` and `th-b` came back with those tags after `plutonium stop --x11` and a new session (the file kept both tabs through shutdown); a third tab was in the file within a second of opening, and all three came back after `kill -9` of the browser (`EXO-SESSION restored 3 tab(s)` in Ash's log).
+
 ## Limits and next steps
 - **No `Browser` behind a tab.** What Chrome reaches through a `Browser` window comes from tab helpers attached to the registry's `WebContents`, exposed to shells (`TAB_FEATURES.md`): find in page, zoom, permission prompts, downloads, file pickers and printing are built. Still missing: autofill (not wanted for now) and Chrome's password manager (`PASSWORDS.md` instead).
-- **Tabs don't survive a browser restart** (no session restore).
+- **Restored tabs lose their history**, scroll position and form state (a restart reopens addresses only).
 - **DevTools:** tabs are CDP targets of type `page` (`other` before `CHROME_UI.md`). A tab's DevTools is a tab of its own (`openedBy: "devtools"`), listed as `other`.
 - A key typed within milliseconds of switching tabs can be lost while the tab re-attaches. No key was lost with a 50 ms gap.
 - SurfaceEmbed is new upstream: enabled by default, but only used by the experimental WebUI browser. Its README describes it as the "secure and simple" replacement for iframe-based embedding (`GuestContents`, which is marked not for production).
