@@ -81,6 +81,19 @@
 // (tagWindow, tagTab) brings it into the thread, and gives the thread's agent
 // access to it. setGroups() tells the browser and the other shells what this
 // shell's tags are called; `groups` holds every shell's.
+//
+// Several displays (docs/features/MULTI_MONITOR.md): each display has its own
+// shell windows, a page per shell, and its own visible shell. `displays` lists
+// them ("displayschange" events), `display` is this page's (pages on displays
+// other than the first one also get "?display=<id>" in their URL:
+// `displayParam`), and showOnDisplay() / showTabOnDisplay() ask another
+// display's visible shell to show an item. A window is shown in one page at
+// a time: a <native-window> that attaches it takes it from other pages, whose
+// elements fire "windowtaken" (windowState "taken") and get it back when
+// their shell is shown again or once no page shows it. To move a window or a
+// tab between shells by drag and drop, drag it with startItemDrag() and read
+// the drop with itemFromDrop() (WINDOW_DRAG_TYPE, TAB_DRAG_TYPE); showing it
+// in the drop target takes it.
 
 const HELPER = new URL(import.meta.url).origin;
 
@@ -97,8 +110,14 @@ const HELPER = new URL(import.meta.url).origin;
  *   width, height: the size an agent holds it at (absent once the user took control, or if
  *   it never held one); busy: an agent gave it input in the last few seconds.
  * @typedef {{ id: string, name: string, url: string, origin: string, enabled: boolean,
- *   running: boolean, visible: boolean }} ShellEntry
- *   One of the browser's shells (several live at once; one is visible).
+ *   running: boolean, visible: boolean, displays: string[], visibleOn: string[] }} ShellEntry
+ *   One of the browser's shells (several live at once; one is visible on each display).
+ *   visible: on the focused display; displays: where it has a page; visibleOn: where it's visible.
+ * @typedef {{ id: string, index: number, label: string, x: number, y: number, width: number,
+ *   height: number, scaleFactor: number, rotation: number, primary: boolean, internal: boolean,
+ *   focused: boolean, current: boolean }} DisplayEntry
+ *   A display. index: 1-based, left to right ("display 2"); x, y, width, height: DIPs on the
+ *   desktop; focused: it has the keyboard; current: this page is on it.
  * @typedef {{ id: number, contentId: string, url: string, title: string, loading: boolean,
  *   canGoBack: boolean, canGoForward: boolean, embedded: boolean, focused: boolean, tag: string,
  *   openerId: number, openedBy: string, dialogType: string, dialogMessage: string,
@@ -166,6 +185,10 @@ export function registerTabRequestKind(kind, { option, draw }) {
 /** The <embed> type that shows a browser tab. */
 export const TAB_EMBED_TYPE = "application/x-chromium-surface-embed";
 
+/** Drag and drop data types for a window and a tab (the item's id, as text). */
+export const WINDOW_DRAG_TYPE = "application/x-plutonium-window";
+export const TAB_DRAG_TYPE = "application/x-plutonium-tab";
+
 export class PlutoniumShell extends EventTarget {
   /** @param {ConnectOptions} options */
   constructor(options = {}) {
@@ -201,6 +224,14 @@ export class PlutoniumShell extends EventTarget {
     this.groups = new Map();
     /** @type {ShellEntry[]} the browser's shells (empty outside shell mode) */
     this.shells = [];
+    /** @type {DisplayEntry[]} the displays, by index (empty outside shell mode) */
+    this.displays = [];
+    /** @type {DisplayEntry | null} this page's display, once known */
+    this.display = null;
+    /** This page's display id from its URL ("" on the first display, or with an older browser). */
+    this.displayParam = new URLSearchParams(location.search).get("display") ?? "";
+    /** Whether this Chromium knows displays. */
+    this.displaysAvailable = this.available && typeof this.broker.getDisplays === "function";
     /** @type {Map<number, BrowserTab>} */
     this.tabs = new Map();
     /** @type {Map<number, ShellWindow>} */
@@ -305,6 +336,11 @@ export class PlutoniumShell extends EventTarget {
         this._changed();
       });
     }
+    if (this.displaysAvailable) {
+      // Fired once on subscribing, then after every change.
+      this.broker.addEventListener("displayschanged", () => this._refreshDisplays());
+      await this._refreshDisplays();
+    }
     // The browser's shells overlay asks this shell to show an item.
     this.broker.addEventListener("windowfocusrequest", async (event) => {
       const window = this.windows.get(event.windowId) ?? { ...plain(event.entry), threadId: event.entry.tag || null };
@@ -346,6 +382,15 @@ export class PlutoniumShell extends EventTarget {
     const windows = await this.broker.getWindows();
     for (const entry of windows) this._setWindow(entry);
     this._live = true;
+  }
+
+  async _refreshDisplays() {
+    const displays = await this.broker.getDisplays().catch(() => null);
+    if (!displays) return;
+    this.displays = displays.map(plainDisplay);
+    this.display = this.displays.find((display) => display.current) ?? null;
+    this.dispatchEvent(new Event("displayschange"));
+    this._changed();
   }
 
   // A link this page opened in a new tab (the browser makes it a tab opened
@@ -535,6 +580,63 @@ export class PlutoniumShell extends EventTarget {
   /** Makes this page's shell the visible one (several shells; else nothing). */
   showShell() {
     this.broker?.showShell?.();
+  }
+
+  /** The display with id or index (1-based) `which`, or undefined. */
+  displayOf(which) {
+    return this.displays.find((display) => display.id === String(which) || display.index === which);
+  }
+
+  /**
+   * Asks the visible shell on display `which` (id or index) to show window `windowId`, which
+   * takes it from where it is shown now, and moves the keyboard there. Resolves to false if
+   * there's no such display or window, or that shell doesn't take requests.
+   */
+  async showOnDisplay(windowId, which) {
+    const display = this.displayOf(which);
+    if (!display || !this.displaysAvailable) return false;
+    return this.broker.showWindowOnDisplay(windowId, display.id);
+  }
+
+  /** As showOnDisplay(), for tab `tabId`. */
+  async showTabOnDisplay(tabId, which) {
+    const display = this.displayOf(which);
+    if (!display || !this.displaysAvailable) return false;
+    return this.broker.showTabOnDisplay(tabId, display.id);
+  }
+
+  /** Moves the keyboard to display `which` (id or index): its visible shell. */
+  async focusDisplay(which) {
+    const display = this.displayOf(which);
+    if (!display || !this.displaysAvailable) return false;
+    return this.broker.focusDisplay(display.id);
+  }
+
+  /**
+   * Starts dragging a window (`{ windowId }`) or a tab (`{ tabId }`) from a "dragstart"
+   * `event`, so that another shell (on any display) can take it: see itemFromDrop().
+   */
+  startItemDrag(event, { windowId, tabId }) {
+    const data = event.dataTransfer;
+    if (!data) return;
+    if (windowId) data.setData(WINDOW_DRAG_TYPE, String(windowId));
+    if (tabId) data.setData(TAB_DRAG_TYPE, String(tabId));
+    data.effectAllowed = "move";
+  }
+
+  /**
+   * The window or tab a drag carries (`{ windowId }` or `{ tabId }`), or null. On "dragover"
+   * only the types are known: `{ windowId: 0 }` or `{ tabId: 0 }` say which (call
+   * preventDefault() to accept). On "drop", show the item (an element with
+   * grantFor(windowId), or tabElement(tabId)): that takes it from the shell it was in.
+   */
+  itemFromDrop(event) {
+    const data = event.dataTransfer;
+    if (!data) return null;
+    const types = [...data.types];
+    if (types.includes(WINDOW_DRAG_TYPE)) return { windowId: Number(data.getData(WINDOW_DRAG_TYPE)) || 0 };
+    if (types.includes(TAB_DRAG_TYPE)) return { tabId: Number(data.getData(TAB_DRAG_TYPE)) || 0 };
+    return null;
   }
 
   /**
@@ -1278,7 +1380,10 @@ export class PlutoniumShell extends EventTarget {
     const page = this._pageId;
     const visible = () => (document.visibilityState === "visible" ? "1" : "0");
     const shell = encodeURIComponent(this.shellId);
-    const events = new EventSource(`${HELPER}/v1/shell/requests?page=${page}&shell=${shell}&visible=${visible()}`);
+    const display = encodeURIComponent(this.display?.id ?? "");
+    const events = new EventSource(
+      `${HELPER}/v1/shell/requests?page=${page}&shell=${shell}&visible=${visible()}&display=${display}`,
+    );
     this._events = events;
     // The helper knows a page's server tabs while its stream is open (and a
     // helper that restarted knows none).
@@ -1331,7 +1436,29 @@ export class PlutoniumShell extends EventTarget {
     switch (op) {
       case "windows":
         return (await this.broker.getWindows()).map(plain);
+      case "displays":
+        // With the shell each shows.
+        return this.displays.map(({ id, index, label, width, height, scaleFactor, primary, focused }) => ({
+          index,
+          id,
+          label,
+          width,
+          height,
+          scaleFactor,
+          primary,
+          focused,
+          shell: this.shells.find((shell) => shell.visibleOn.includes(id))?.name ?? "",
+        }));
       case "focus": {
+        if (args.display !== undefined) {
+          // Another display's visible shell shows it (the browser asks it).
+          const display = this.displayOf(args.display);
+          if (!display) throw new Error(`there is no display ${args.display}`);
+          if (await this.showOnDisplay(args.windowId, display.id)) {
+            return { how: `shown on display ${display.index}` };
+          }
+          throw new Error(`display ${display.index}'s shell doesn't take requests`);
+        }
         const window = this.windows.get(args.windowId);
         if (window && this.onFocus && (await this.onFocus(window))) {
           // This shell owns the window's thread but may be hidden.
@@ -1366,6 +1493,14 @@ export class PlutoniumShell extends EventTarget {
       case "snapshot_tab":
         return this.snapshotTab(args.tabId);
       case "focus_tab": {
+        if (args.display !== undefined) {
+          const display = this.displayOf(args.display);
+          if (!display) throw new Error(`there is no display ${args.display}`);
+          if (await this.showTabOnDisplay(args.tabId, display.id)) {
+            return { how: `shown on display ${display.index}` };
+          }
+          throw new Error(`display ${display.index}'s shell doesn't take requests`);
+        }
         // A tab opened just now (open_tab) may not have arrived as an event yet.
         const tab =
           this.tabs.get(args.tabId) ??
@@ -3049,6 +3184,26 @@ function plainShell(shell) {
     enabled: shell.enabled,
     running: shell.running,
     visible: shell.visible,
+    displays: [...(shell.displays ?? [])],
+    visibleOn: [...(shell.visibleOn ?? [])],
+  };
+}
+
+function plainDisplay(display) {
+  return {
+    id: display.id,
+    index: display.index,
+    label: display.label,
+    x: display.x,
+    y: display.y,
+    width: display.width,
+    height: display.height,
+    scaleFactor: display.scaleFactor,
+    rotation: display.rotation,
+    primary: display.primary,
+    internal: display.internal,
+    focused: display.focused,
+    current: display.current,
   };
 }
 

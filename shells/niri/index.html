@@ -15,8 +15,9 @@
     focused column on screen.
   - Workspaces are dynamic and stacked vertically: there is always one empty
     workspace at the bottom, and empty ones disappear once you leave them.
-  - The overview (Super+O, or the top-left hot corner) zooms out to every
-    workspace. Click a window to go to it, drag one to another workspace.
+  - The overview (Super+O, or the top-left hot corner: the desktop's, with
+    several displays) zooms out to every workspace. Click a window to go to
+    it, drag one to another workspace.
   - Super+Shift+/ lists the binds (also shown at startup).
 
   Windows and tabs are the shell's when tagged niri:desktop: everything
@@ -24,9 +25,22 @@
   come in through the browser's Super+Tab overlay. The layout is kept in
   this page's storage. Window ids restart with Ash, so a restart starts over.
 
+  Several displays: the browser runs a niri page on each, and each is one of
+  niri's outputs, with its own workspaces (and its own layout in storage, by
+  the page's ?display=). An item is on the output whose tag it carries
+  (niri:output/<display id>); new ones, and ones whose display went away, go
+  to the focused display's. The browser's Super+Shift+Left/Right focus the
+  monitor to the left or right, and Super+Ctrl+Shift+Left/Right move the
+  focused window there. A window or tab dropped here from another shell
+  joins this output. A window another page took (another display's shell
+  shows it) leaves a placeholder; focusing it brings the window back.
+
   The browser keeps Super+F (fullscreen), Super+Tab (shells) and Super+Escape
   (release the pointer), so niri's Super+F (maximize column) is Super+M here,
-  and Super+Shift+F is fullscreen as in niri. The helper is
+  and Super+Shift+F is fullscreen as in niri. Print, Ctrl+Print and
+  Alt+Print take screenshots as in niri; Super+Shift+S, Super+Ctrl+Shift+S
+  and Super+Alt+Shift+S do the same on keyboards without a Print key. The
+  helper is
   http://127.0.0.1:3780 unless the page URL says ?helper=<origin>.
 -->
 <style>
@@ -80,6 +94,11 @@
   .tile.floating { z-index: 2; }
   .tile.dragging { z-index: 3; transition: none; opacity: .85; }
   .tile.hidden { visibility: hidden; }
+  .tile.taken::before {
+    content: "Shown on another display. Focus it to bring it back.";
+    position: absolute; inset: 0; display: grid; place-items: center; padding: 1em; text-align: center;
+    color: var(--muted); background: var(--panel); font: 13px system-ui, sans-serif;
+  }
   .tile > native-window, .tile > embed {
     display: block; position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
   }
@@ -196,6 +215,9 @@ const TAG = "niri:desktop";
 
 const params = new URLSearchParams(location.search);
 const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+// Several displays: this page's output (see the comment at the top).
+const OUTPUT_PREFIX = "niri:output/";
+const LAYOUT_KEY = params.get("display") ? `niri-shell.layout.${params.get("display")}` : "niri-shell.layout";
 const $ = (id) => document.getElementById(id);
 const g = CONFIG.gaps;
 // The shell's animation (--anim), for animations run from script.
@@ -322,15 +344,66 @@ const tiles = new Map(); // key → { el, content, hit, kind, id }
 const live = () => {
   const keys = new Set();
   if (!shell) return keys;
-  for (const w of shell.windows.values()) if (manages(w)) keys.add(`w:${w.id}`);
-  if (shell.tabsAvailable) for (const t of shell.tabs.values()) if (t.tags.includes(TAG)) keys.add(`t:${t.id}`);
+  for (const w of shell.windows.values()) if (manages(w) || claiming.has(`w:${w.id}`)) keys.add(`w:${w.id}`);
+  if (shell.tabsAvailable) {
+    for (const t of shell.tabs.values()) {
+      if ((t.tags.includes(TAG) && onThisOutput(t.tags)) || claiming.has(`t:${t.id}`)) keys.add(`t:${t.id}`);
+    }
+  }
   return keys;
 };
+// Items this page took whose tags don't say so yet.
+const claiming = new Set();
 const tagsOf = (w) => (w.tags.length ? w.tags : w.threadId ? [w.threadId] : []);
 const adopted = new Set(); // windows taken in without tags (a browser without tags)
 function manages(w) {
   if (w.threadId === undefined) return false; // not known yet
-  return tagsOf(w).includes(TAG) || adopted.has(w.id);
+  return (tagsOf(w).includes(TAG) || adopted.has(w.id)) && onThisOutput(tagsOf(w));
+}
+
+// Several displays: this page's output tag ("" with one display, or an older browser).
+const ownOutput = () => (shell?.display && shell.displays.length > 1 ? OUTPUT_PREFIX + shell.display.id : "");
+// The output an item is on: its last output tag, if that display is there; else the
+// focused display's (it takes such items, see claimOutputs()).
+function outputOf(tags) {
+  const tag = tags.filter((t) => t.startsWith(OUTPUT_PREFIX)).at(-1);
+  if (tag && shell.displays.some((d) => OUTPUT_PREFIX + d.id === tag)) return tag;
+  const focused = shell.displays.find((d) => d.focused);
+  return focused ? OUTPUT_PREFIX + focused.id : "";
+}
+function onThisOutput(tags) {
+  const own = ownOutput();
+  return !own || outputOf(tags) === own;
+}
+// Tags that put an item on this output (and take it off the others).
+function outputTags(tags) {
+  const own = ownOutput();
+  return {
+    add: own ? [TAG, own] : [TAG],
+    remove: tags.filter((t) => t.startsWith(OUTPUT_PREFIX) && t !== own),
+  };
+}
+// The focused display's page names the output of items that have none (new ones), or
+// whose display went away.
+function claimOutputs() {
+  const own = ownOutput();
+  for (const key of [...claiming]) {
+    const [kind, raw] = key.split(":");
+    const item = kind === "w" ? shell.windows.get(Number(raw)) : shell.tabs.get(Number(raw));
+    if (!item || (kind === "w" ? manages(item) : item.tags.includes(TAG) && onThisOutput(item.tags))) {
+      claiming.delete(key);
+    }
+  }
+  if (!own || !shell.display?.focused || !shell.tagsAvailable) return;
+  const claim = (tags, tagItem) => {
+    if (!tags.includes(TAG) || !onThisOutput(tags) || tags.includes(own)) return;
+    const { add, remove } = outputTags(tags);
+    tagItem(add, remove).catch(() => {});
+  };
+  for (const w of shell.windows.values()) claim(tagsOf(w), (add, remove) => shell.tagWindow(w.id, add, remove));
+  if (shell.tabsAvailable) {
+    for (const t of shell.tabs.values()) claim(t.tags, (add, remove) => shell.tagTab(t.id, add, remove));
+  }
 }
 
 // Windows nobody claims (no tag at all) are this shell's: a window manager shows everything.
@@ -404,6 +477,7 @@ function removeItem(key) {
 function reconcile() {
   if (!ready) return;
   adoptStrays();
+  claimOutputs();
   const keys = live();
   for (const key of [...tiles.keys()]) if (!keys.has(key)) removeItem(key);
   for (const ws of layout.workspaces) {
@@ -446,6 +520,9 @@ function tileFor(key) {
       commit();
     });
     content.addEventListener("windowerror", () => notice("could not show a window"));
+    // Another page (another display's shell) shows it now: a placeholder until it's back.
+    content.addEventListener("windowtaken", () => el.classList.add("taken"));
+    content.addEventListener("windowchange", () => el.classList.toggle("taken", content.windowState === "taken"));
     shell.grantFor(id).then((grant) => {
       content.setAttribute("window", String(id));
       content.setAttribute("grant", grant);
@@ -725,10 +802,21 @@ function onItemFocused(key) {
   commit();
 }
 
+// A window another page took comes back here (attaching again is a new claim).
+function reclaim(key) {
+  const tile = tiles.get(key);
+  if (!tile || tile.kind !== "w" || tile.content.windowState !== "taken") return;
+  const grant = tile.content.getAttribute("grant");
+  tile.content.removeAttribute("grant");
+  tile.content.setAttribute("grant", grant);
+}
+
 /** Makes `key` the focused item (switching workspace if needed). */
 function focusItem(key) {
   const at = find(key);
   if (!at) return false;
+  // A hidden page asking gets it when it's shown (the browser decides).
+  reclaim(key);
   const ws = layout.workspaces[at.wi];
   layout.cur = at.wi;
   if (at.fi !== undefined) {
@@ -1096,9 +1184,9 @@ bind("Super+Shift+Equal", "Increase Window Height", () => actions.setWindowHeigh
 bind("Super+KeyV", "Move Window Between Floating and Tiling", () => actions.toggleFloating(), { repeat: false, hotkey: true });
 bind("Super+Shift+KeyV", "Switch Focus Between Floating and Tiling", () => actions.switchFocusFloatingTiling(), { repeat: false, hotkey: true });
 bind("Super+KeyW", "Toggle Column Tabbed Display", () => actions.toggleTabbed(), { repeat: false, hotkey: true });
-bind("PrintScreen", "Take a Screenshot", () => actions.screenshot(), { repeat: false, hotkey: true });
-bind("Ctrl+PrintScreen", "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
-bind("Alt+PrintScreen", "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
+bind(["PrintScreen", "Super+Shift+KeyS"], "Take a Screenshot", () => actions.screenshot(), { repeat: false, hotkey: true });
+bind(["Ctrl+PrintScreen", "Super+Ctrl+Shift+KeyS"], "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
+bind(["Alt+PrintScreen", "Super+Alt+Shift+KeyS"], "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
 
 const byCombo = new Map(binds.flatMap((b) => b.keys.map((k) => [k, b])));
 const comboOf = (e) =>
@@ -1266,8 +1354,19 @@ addEventListener("wheel", (e) => {
 
 // The hot corner opens (and closes) the overview.
 let cornerArmed = true;
+// Several displays: only a corner of the whole desktop is hot, not the top
+// left of a display with another one to its left or above it, which the
+// pointer crosses on its way from one to the other (it opened the overview,
+// and the overview's keys took Enter and O from the focused window).
+function cornerIsHot() {
+  const own = shell?.display;
+  if (!own) return true;
+  return !shell.displays.some((d) => d.id !== own.id && (
+    (d.x + d.width === own.x && d.y <= own.y && own.y < d.y + d.height) ||
+    (d.y + d.height === own.y && d.x <= own.x && own.x < d.x + d.width)));
+}
 $("hot-corner").addEventListener("pointerenter", () => {
-  if (!CONFIG.hotCorner || !cornerArmed) return;
+  if (!CONFIG.hotCorner || !cornerArmed || !cornerIsHot()) return;
   cornerArmed = false;
   actions.toggleOverview();
   commit();
@@ -1426,13 +1525,54 @@ function notice(text) {
 
 // ---------------------------------------------------------------- persistence
 function save() {
-  try { localStorage.setItem("niri-shell.layout", JSON.stringify(layout)); } catch {}
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch {}
 }
 function restore() {
   try {
-    const saved = JSON.parse(localStorage.getItem("niri-shell.layout"));
+    const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY));
     if (saved?.workspaces?.length) layout = saved;
   } catch {}
+}
+
+// ---------------------------------------------------------------- taking items
+// An agent, the browser's overlay or a drop asked to show a window here: bring it in
+// if it's another shell's (or on another output), then go to it.
+function takeWindow(window) {
+  const key = `w:${window.id}`;
+  // The hotkeys overlay (shown at startup) would keep the keyboard from it.
+  if (modal === "hotkeys") closeModal();
+  const own = ownOutput();
+  if (!manages(window) || (own && !tagsOf(window).includes(own))) {
+    adopted.add(window.id);
+    claiming.add(key);
+    if (shell.tagsAvailable) {
+      const { add, remove } = outputTags(tagsOf(window));
+      shell.tagWindow(window.id, add, remove).catch(() => {});
+    }
+    addItem(key);
+  }
+  overview = false;
+  focusItem(key);
+  refocus();
+  commit();
+  return true;
+}
+
+function takeTab(tab) {
+  const key = `t:${tab.id}`;
+  if (modal === "hotkeys") closeModal();
+  const own = ownOutput();
+  if ((!tab.tags.includes(TAG) || (own && !tab.tags.includes(own))) && shell.tagsAvailable) {
+    claiming.add(key);
+    const { add, remove } = outputTags(tab.tags);
+    shell.tagTab(tab.id, add, remove).catch(() => {});
+  }
+  if (!find(key)) addItem(key);
+  overview = false;
+  focusItem(key);
+  refocus();
+  commit();
+  return true;
 }
 
 // ---------------------------------------------------------------- start
@@ -1443,31 +1583,23 @@ try {
   shell = connect({
     // An agent or the browser's overlay asked to show a window: bring it in if
     // it's another shell's, then go to it.
-    onFocus(window) {
-      const key = `w:${window.id}`;
-      if (!manages(window)) {
-        adopted.add(window.id);
-        if (shell.tagsAvailable) shell.tagWindow(window.id, [TAG]).catch(() => {});
-        addItem(key);
-      }
-      overview = false;
-      focusItem(key);
-      refocus();
-      commit();
-      return true;
-    },
+    onFocus: (window) => takeWindow(window),
     // A link the page opened (Ctrl+click, target=_blank) is a tile here.
     onOpenTab: () => TAG,
-    onFocusTab(tab) {
-      const key = `t:${tab.id}`;
-      if (!tab.tags.includes(TAG) && shell.tagsAvailable) shell.tagTab(tab.id, [TAG]).catch(() => {});
-      if (!find(key)) addItem(key);
-      overview = false;
-      focusItem(key);
-      refocus();
-      commit();
-      return true;
-    },
+    onFocusTab: (tab) => takeTab(tab),
+  });
+  // An item dropped here from another shell (or display) joins this output.
+  addEventListener("dragover", (e) => {
+    if (shell.itemFromDrop(e)) e.preventDefault();
+  });
+  addEventListener("drop", (e) => {
+    const item = shell.itemFromDrop(e);
+    if (!item) return;
+    e.preventDefault();
+    const window = item.windowId && shell.windows.get(item.windowId);
+    const tab = item.tabId && shell.tabs.get(item.tabId);
+    if (window) takeWindow(window);
+    if (tab) takeTab(tab);
   });
   shell.addEventListener("change", () => {
     reconcile();

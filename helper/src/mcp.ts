@@ -27,6 +27,14 @@ const tabIdSchema = {
   additionalProperties: false,
 };
 
+// EXO-DISPLAYS: focus_window's and focus_tab's display.
+const displayProperty = {
+  type: "integer",
+  description:
+    "Show it on this display (1-based, left to right; see list_displays) instead of where the shell shows it: " +
+    "that display's shell takes it.",
+};
+
 const waitSecondsProperty = {
   type: "number",
   description: "How long to wait for the page to finish loading (default 15, 0 to not wait).",
@@ -270,7 +278,17 @@ const TOOLS = [
   {
     name: "focus_window",
     description: "Show one of this thread's windows to the user (the shell opens or raises it).",
-    inputSchema: windowIdSchema,
+    inputSchema: {
+      ...windowIdSchema,
+      properties: { ...windowIdSchema.properties, display: displayProperty },
+    },
+  },
+  {
+    name: "list_displays",
+    description:
+      "List the user's displays (monitors): each one's number (1-based, left to right), size in DIPs, scale, " +
+      "whether it is the primary one or has the keyboard, and which shell it shows.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "close_window",
@@ -631,7 +649,10 @@ const TOOLS = [
   {
     name: "focus_tab",
     description: "Show one of this thread's browser tabs to the user.",
-    inputSchema: tabIdSchema,
+    inputSchema: {
+      ...tabIdSchema,
+      properties: { ...tabIdSchema.properties, display: displayProperty },
+    },
   },
   {
     name: "close_tab",
@@ -662,6 +683,7 @@ export const WINDOW_TOOLS = new Set([
   "read_window",
   "act_window",
   "focus_window",
+  "list_displays",
   "close_window",
 ]);
 
@@ -685,6 +707,14 @@ export async function callTool(
     const id = args.window_id;
     if (typeof id !== "number" || !Number.isInteger(id)) throw new Error("window_id must be an integer.");
     return id;
+  };
+  const displayArg = () => {
+    const display = args.display;
+    if (display === undefined) return {};
+    if (typeof display !== "number" || !Number.isInteger(display) || display < 1) {
+      throw new Error("display must be a display's number (1, 2, …).");
+    }
+    return { display };
   };
   const tabId = () => {
     const id = args.tab_id;
@@ -911,7 +941,7 @@ export async function callTool(
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
     case "focus_tab":
-      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/focus`));
+      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/focus`, displayArg()));
     case "close_tab":
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/close`));
     case "list_windows":
@@ -956,7 +986,9 @@ export async function callTool(
       return [{ type: "image", data: response.body.toString("base64"), mimeType: "image/png" }];
     }
     case "focus_window":
-      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/focus`));
+      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/focus`, displayArg()));
+    case "list_displays":
+      return text(await helperJson(socket, "GET", `/v1/displays`));
     case "close_window":
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/close`));
     default:

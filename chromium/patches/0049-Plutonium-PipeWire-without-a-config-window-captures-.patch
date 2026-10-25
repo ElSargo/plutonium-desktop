@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 25 Oct 2026 14:48:14 +1300
-Subject: [PATCH 49/49] Plutonium: PipeWire without a config; window captures
+Subject: [PATCH 49/50] Plutonium: PipeWire without a config; window captures
  from the window's own copies
 
 EXO-CAPTURE:

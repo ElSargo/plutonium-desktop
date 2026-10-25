@@ -585,19 +585,30 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 In order. A shell window per display, each with its own shell instances;
 shells that want to span monitors run on each and sync themselves.
 
-- [ ] **Displays in the broker; a shell per display.** M–L · A display list
+- [x] **Displays in the broker; a shell per display.** M–L · A display list
   and events, one shell window per display, a shell choice per display,
   Super+Tab and the switcher on the focused display, agent routing to the
   set of visible shells. Hotplug moves an unplugged display's windows to
-  Elsewhere.
-- [ ] **One window, one place.** M · Replaces "only the visible shell
+  Elsewhere. Done 2026-10-25 (MULTI_MONITOR.md, "As built", "Verified"),
+  verified on X11 with two host displays and on DRM with a second monitor.
+- [x] **One window, one place.** M · Replaces "only the visible shell
   drives": the newest claim on a window wins and the loser gets
-  `windowtaken`. Tabs already work this way.
-- [ ] **Show on display N.** S · Routed like focus requests, for the
-  switcher, shortcuts and agents.
-- [ ] **Drag windows between shells.** M · `application/x-plutonium-window`
+  `windowtaken`. Tabs already work this way. Done 2026-10-25 (same).
+- [x] **Show on display N.** S · Routed like focus requests, for the
+  switcher, shortcuts and agents. Done 2026-10-25: the switcher's "Show on
+  display N", Super+Ctrl+Shift+Left/Right, `focus_window`/`focus_tab`
+  `display`, `showOnDisplay()`.
+- [x] **Drag windows between shells.** M · `application/x-plutonium-window`
   carrying the window id; the drop asks the broker to take it. Check that
   Ash's drag controller already carries ordinary data across displays.
+  Built 2026-10-25 (the library's `startItemDrag`/`itemFromDrop`, niri and
+  Plain take drops, Plain's apps and tabs drag). Verified across displays on
+  DRM with a real second monitor (on X11 the drag is cancelled at the host
+  window's edge).
+- [ ] **Dragging a tile out of niri** to another shell or display. M · niri
+  takes drops but its tiles move by pointer drags of its own (Super+drag,
+  the overview), not HTML drag and drop; one leaving the page would have to
+  turn into a `startItemDrag()`. Plain's list drags today.
 - [ ] **Linked documents** (a shell's second display as a same-origin child
   document). Only if a shell needs shared in-page state; T3 shouldn't.
 
