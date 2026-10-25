@@ -424,11 +424,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   more interfaces. The UI is drawn by the shell rather than GTK or KDE
   dialogs: FileChooser, OpenURI (Flatpak link opening, see
   `features/OPENING_LINKS.md`), Settings (color scheme, accent),
-  Notification, Inhibit, Print, Account, Access and Background. A
-  FileChooser dialog should open over its parent's element (see "Where do
-  dialogs go?") and uses the same picker as tabs' file inputs (`TAB_FEATURES.md`). Needs
-  the parent window handle mapped to Exo windows, which the capture picker
-  needs too.
+  Notification, Inhibit, Print, Account, Access and Background.
+  FileChooser is built (below, "The FileChooser portal on the same
+  picker"); its dialog opens over the app's window, found by the request's
+  pid (the parent window handle, an XID or an xdg-foreign handle, isn't
+  mapped to Exo windows).
 - [ ] **Password manager adapter** (`features/PASSWORDS.md`). L · Phase 5
   One adapter for the user's manager (Bitwarden first, then 1Password,
   KeePassXC, `pass`). Logins are auto-typed into tabs (origin-checked) and
@@ -531,9 +531,18 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
     Chrome flags as dangerous;
   - printing: a real printer through CUPS (two-sided, black and white);
     printing on DRM.
-- [ ] **FileChooser and Print portals on the same picker and dialog.** M ·
-  Part of "Our own portal backend for the rest": the same
-  `filechooserrequest` and print dialog for native apps.
+- [x] **The FileChooser portal on the same picker.** M · Built
+  2026-10-26 (`TAB_FEATURES.md`, "One picker with the FileChooser
+  portal"): OpenFile, SaveFile and SaveFiles on the library's picker, over
+  the app's window. Left: a Flatpak app through the document portal, checked
+  on a real session (the frontend exports the URIs itself; not tried on the
+  private test bus, which would start a second document portal on the
+  user's `$XDG_RUNTIME_DIR/doc`).
+- [ ] **The Print portal on the same dialog.** M · Part of "Our own portal
+  backend for the rest": `PreparePrint` shows the library's print dialog
+  without a preview and returns the settings; `Print` hands the helper the
+  document (an fd), which it sends to CUPS (`TAB_FEATURES.md`, "The Print
+  portal").
 - [ ] **Form autofill in tabs.** S–M to L · Not now (decided 2026-10-23).
   Later: identities and cards through the password adapter.
 

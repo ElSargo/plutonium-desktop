@@ -335,8 +335,8 @@ export class Portal {
     if (pid > 0) {
       try {
         const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
-        // Nix wraps programs: ".zenity-wrapped" is zenity.
-        if (comm) return comm.replace(/^\.(.+)-wrapped$/, "$1");
+        // Nix wraps programs: ".zenity-wrapped" is zenity (cut to 15 characters).
+        if (comm) return comm.replace(/^\.(.+)-wrap(?:p|pe|ped)?$/, "$1");
       } catch {
         // It ended.
       }
