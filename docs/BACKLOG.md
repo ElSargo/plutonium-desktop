@@ -347,9 +347,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Window sizing on real input.** S · Verify on DRM: the "last pressed"
   rule for several elements on one window, pointer input on a scaled
   (`object-fit: contain`) window, and the niri/T3 animations at full speed.
-- [ ] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
+- [x] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
   or edge resize could become niri's interactive move or column resize. The
-  page would need the pointer for the rest of the drag.
+  page would need the pointer for the rest of the drag. Done 2026-10-26
+  (`WINDOW_SIZING.md`, patch 0054): the browser hands the rest of the drag to
+  the page; niri's move verified on X11 with two displays. Plain ignores both.
+- [ ] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
+  shadow, outside the geometry, where `<native-window>` clips the surface, so
+  they never get a press. Let presses within a few pixels outside the
+  content box reach the app (floating windows), or tell apps they're tiled.
 - [ ] **Cross-fade on the compositor thread.** S · The old frame's opacity is
   stepped from the main thread each frame; a busy shell page makes it stutter.
   A cc opacity animation on its effect node (as LinkHighlightImpl does) would
