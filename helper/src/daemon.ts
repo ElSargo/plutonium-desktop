@@ -345,6 +345,12 @@ export class Daemon {
   readonly pages: ThreadPages | null;
   /** When each window last got input (windowInput). */
   private readonly lastInput = new Map<number, number>();
+  /**
+   * The windows each thread's agent has been told of (by an action's result,
+   * list_windows or launch_app): an action names the others as new, so a
+   * dialog that came after the last action's wait is named by the next.
+   */
+  private readonly reportedWindows = new Map<string, Set<number>>();
   /** Windows kept awake after input, with the timer that lets them sleep. */
   private readonly awakeWindows = new Map<number, ReturnType<typeof setTimeout>>();
   /** The sizes agents hold windows at, and which they're working in (for the shells). */
@@ -632,6 +638,7 @@ export class Daemon {
         `plutoniumd: pid ${pid}'s windows after ${seconds(started)}: ` +
           settled.map((entry) => `#${entry.id} ${JSON.stringify(entry.appId)}`).join(", "),
       );
+      for (const entry of settled) this.reportedWindows.get(threadId)?.add(entry.id);
       return { pid, windows: settled.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))) };
     }
     // What came instead, if anything: windows the thread didn't get.
@@ -1222,9 +1229,10 @@ export class Daemon {
   }
 
   /**
-   * Runs an agent's action in a window, then says what it opened: the
-   * thread's new windows (a dialog), the ones that closed, and the window's
-   * open menus, so the agent needn't snapshot to find out.
+   * Runs an agent's action in a window, then says what changed: the
+   * thread's windows that opened (a dialog) or closed since its agent last
+   * heard (reportedWindows), and the window's open menus, so the agent
+   * needn't snapshot to find out.
    */
   private async withWindowChanges(
     threadId: string,
@@ -1233,11 +1241,13 @@ export class Daemon {
     run: () => Promise<unknown>,
   ): Promise<unknown> {
     if (action === "resize" || !(await this.direct())) return run();
-    const before = new Set((await this.threadWindows(threadId)).map((window) => window.id));
+    const before =
+      this.reportedWindows.get(threadId) ?? new Set((await this.threadWindows(threadId)).map((window) => window.id));
     const popupsBefore = (await this.windowPopups(windowId)).length;
     const result = await run();
     await sleep(ACTION_SETTLE_MS);
     const after = await this.threadWindows(threadId);
+    this.reportedWindows.set(threadId, new Set(after.map((window) => window.id)));
     const changes: Record<string, unknown> = {};
     const opened = after.filter((window) => !before.has(window.id));
     if (opened.length) {
@@ -1806,10 +1816,12 @@ export class Daemon {
       const windows = path.match(/^\/v1\/threads\/([^/]+)\/windows$/);
       if (method === "GET" && windows) {
         const threadId = decodeURIComponent(windows[1]!);
+        const entries = await this.threadWindows(threadId);
+        this.reportedWindows.set(threadId, new Set(entries.map((entry) => entry.id)));
         return sendJson(
           response,
           200,
-          (await this.threadWindows(threadId)).map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))),
+          entries.map((entry) => threadWindow(entry, this.agentWindows.get(entry.id))),
         );
       }
       const action = path.match(/^\/v1\/threads\/([^/]+)\/windows\/(\d+)\/(focus|close|snapshot|input|a11y)$/);

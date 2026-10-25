@@ -139,7 +139,8 @@ const TOOLS = [
       "Click in one of this thread's windows at a point of its snapshot_window image. The app gets the click " +
       "even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. " +
       "A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no " +
-      "further. Returns the windows the click opened (newWindows) or closed, and the window's open popups. " +
+      "further. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) " +
+      "or closed, and the window's open popups. " +
       "Take a new snapshot to see what happened.",
     inputSchema: {
       type: "object",
@@ -209,8 +210,8 @@ const TOOLS = [
     name: "press_window",
     description:
       'Press keys in one of this thread\'s windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", ' +
-      '"Down", "ctrl+]", or a list of them pressed in turn. Returns the windows the keys opened (newWindows) ' +
-      "or closed, and the window's open popups (menus).",
+      '"Down", "ctrl+]", or a list of them pressed in turn. Returns the windows that opened (newWindows: a ' +
+      "dialog, or one that came after your last action) or closed, and the window's open popups (menus).",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,8 +269,8 @@ const TOOLS = [
       "an editable text's contents with text; the keyboard stays where it was, so to commit a field that acts on " +
       'Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its ' +
       'list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the ' +
-      "actions read_window lists for it. Returns the windows it opened (newWindows) or closed, and the window's " +
-      "open popups (menus). Read again to see the result.",
+      "actions read_window lists for it. Returns the windows that opened (newWindows: a dialog, or one that came " +
+      "after your last action) or closed, and the window's open popups (menus). Read again to see the result.",
     inputSchema: {
       type: "object",
       properties: {
