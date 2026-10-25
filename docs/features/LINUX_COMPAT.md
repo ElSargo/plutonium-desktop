@@ -8,6 +8,7 @@ Plutonium is built as ChromeOS (Ash and Exo live there), but a page shouldn't be
 - **The timezone** was UTC (the container's), so pages' clocks were off. Ash now gets the host's zone as `TZ` (`timedatectl`, else `/etc/localtime`), and `LANG`, from `lib/session.sh`, on every launch path. `Intl` and `Date` show the host's zone.
 - **Languages** were `["en-US"]`; with `LANG` they are `["en-US", "en"]` as on Linux (`navigator.languages`, `Accept-Language`).
 - **Web APIs ChromeOS has and desktop Linux Chromium doesn't** are off (`--disable-blink-features=WebShare,HandwritingRecognition,BarcodeDetector,WebBluetooth`, from `lib/session.sh`): `navigator.share`/`canShare`, `navigator.createHandwritingRecognizer`, `BarcodeDetector`, `navigator.bluetooth`. A site seeing them on a Linux user agent could tell.
+- **H.264 and AAC** (`proprietary_codecs = true`, `ffmpeg_branding = "Chrome"` in `chromium/args*.gn`, as nixpkgs' Chromium). Verified 2026-10-26 on Xvfb: `canPlayType` says `probably` to `avc1.42E01E` and `mp4a.40.2`, MSE and WebCodecs accept them, and a 320×240 H.264/AAC mp4 (made with ffmpeg) plays in a tab (frames presented, audio decoded). A tab no shell shows is hidden, and like Chrome's background tabs it doesn't load media until it is shown.
 
 Verified 2026-10-26 on Xvfb with the build of patch 0051, in a tab on example.com: `navigator.userAgent` `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36`, `navigator.platform` `Linux x86_64`, `userAgentData` platform `"Linux"`, `platformVersion` `""`, architecture `x86`, timezone `Pacific/Auckland`, `navigator.share` and `navigator.bluetooth` undefined.
 
@@ -17,7 +18,6 @@ Verified 2026-10-26 on Xvfb with the build of patch 0051, in a tab on example.co
 
 ## Still different (backlog)
 
-- **No H.264 or AAC** (`canPlayType` "" for `avc1`, `mp4a.40.2`): the build has no proprietary codecs (`proprietary_codecs = true`, `ffmpeg_branding = "Chrome"` in `args.gn`, as nixpkgs' Chromium has). Many sites need them. A rebuild of most of media, Blink and content.
 - **Fonts**: pages render with the container's fonts (135, DejaVu Sans as sans-serif), not the host's (1201 here, Noto Sans). Until Ash runs on the host, the container could see the host's fonts and fontconfig.
 - **Web notifications from tabs** go to Ash's message center, which shell mode blocks: a granted `new Notification()` shows nothing. Linux Chromium shows them through the desktop's notification daemon. They could go to the shell (as tab requests), or through the helper to `org.freedesktop.Notifications`.
 - **Speech synthesis** has no voices (ChromeOS's come from its TTS extensions; Linux Chromium's from speech-dispatcher).

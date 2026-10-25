@@ -313,10 +313,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   Linux path or patch the ChromeOS one out. Done 2026-10-25
   (`LINUX_COMPAT.md`): a Plutonium tab against Linux Chromium; the timezone,
   languages and ChromeOS-only web APIs fixed, the rest below.
-- [ ] **H.264 and AAC in tabs.** M (a big rebuild) · High priority: no
+- [x] **H.264 and AAC in tabs.** M (a big rebuild) · High priority: no
   proprietary codecs, so `canPlayType` says no to `avc1` and `mp4a`.
   `proprietary_codecs = true` and `ffmpeg_branding = "Chrome"` in
   `chromium/args.gn` (and the release args), as nixpkgs' Chromium.
+  Done 2026-10-26 (`LINUX_COMPAT.md`): verified on Xvfb, an H.264/AAC mp4
+  plays in a tab.
 - [ ] **Pages use the host's fonts.** S–M · Ash in the container renders
   with its 135 fonts (DejaVu Sans), not the host's (Noto Sans and the
   user's). Mount the host's font directories and fontconfig into the
