@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 07:22:46 +1300
+Subject: [PATCH 54/54] Plutonium: a shell's MediaStream of a window is its
+ surface tree's own frames
+
+EXO-CAPTURE: a window source's DesktopMediaID is the window that embeds the
+Exo surface tree (EmbeddedWindows::GetSurfaceWindow()), and
+AuraWindowVideoCaptureDevice captures a non-root window that embeds another
+client's frame sink from that sink, rather than as a subtree of the root's
+frame. A subtree is clipped to the screen, so a window partly off it, or
+held at a size bigger than it, gave no frames or only what fit. The sink's
+frames come while its surface is drawn somewhere (the screen, or a shell
+showing it); a parked window that nothing shows gives none (PipeWire
+captures use the window's own copies for that).
+---
+ chrome/browser/plutonium_capture.cc              |  4 +++-
+ components/exo/embedded_windows.cc               |  5 +++++
+ components/exo/embedded_windows.h                |  3 +++
+ .../capture/aura_window_video_capture_device.cc  | 16 +++++++++++++++-
+ 4 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+index 4a7acfe11b..213d8e5dac 100644
+--- a/chrome/browser/plutonium_capture.cc
++++ b/chrome/browser/plutonium_capture.cc
+@@ -482,7 +482,9 @@ content::DesktopMediaID PlutoniumCapture::ToMediaId(
+           content::DesktopMediaID::TYPE_SCREEN, root);
+     }
+     case Source::Type::kWindow: {
+-      aura::Window* window = exo::EmbeddedWindows::Get()->GetCaptureWindow(
++      // Its surface tree's own frame sink: all of it, also where it's off
++      // the screen or bigger than it (but no frames while it's parked).
++      aura::Window* window = exo::EmbeddedWindows::Get()->GetSurfaceWindow(
+           static_cast<int32_t>(source.id));
+       if (!window) {
+         return content::DesktopMediaID();
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index 37cbf5190e..585fc23a0e 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -348,6 +348,11 @@ aura::Window* EmbeddedWindows::GetCaptureWindow(int32_t window_id) const {
+   return widget ? widget->GetNativeWindow() : nullptr;
+ }
+ 
++aura::Window* EmbeddedWindows::GetSurfaceWindow(int32_t window_id) const {
++  ShellSurfaceBase* shell_surface = FindShellSurface(window_id);
++  return shell_surface ? shell_surface->host_window() : nullptr;
++}
++
+ // static
+ gfx::Size EmbeddedWindows::SizeFor(const Entry& entry) {
+   return entry.capture_size.IsEmpty() ? entry.embed_size : entry.capture_size;
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index af97506430..f3cfa9d807 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -165,6 +165,9 @@ class EmbeddedWindows : public aura::WindowObserver {
+   // EXO-CAPTURE: the aura window to capture for |window_id| (its widget's),
+   // or null.
+   aura::Window* GetCaptureWindow(int32_t window_id) const;
++  // EXO-CAPTURE: the window that embeds |window_id|'s surface tree (its own
++  // frame sink, so a capture of it isn't clipped to the screen), or null.
++  aura::Window* GetSurfaceWindow(int32_t window_id) const;
+   // EXO-FULLSCREEN: whether an element showing the window is fullscreen;
+   // the app is told it is fullscreen while one is.
+   void SetFullscreen(int32_t window_id, bool fullscreen);
+diff --git a/content/browser/media/capture/aura_window_video_capture_device.cc b/content/browser/media/capture/aura_window_video_capture_device.cc
+index e3e05445f0..337bc20402 100644
+--- a/content/browser/media/capture/aura_window_video_capture_device.cc
++++ b/content/browser/media/capture/aura_window_video_capture_device.cc
+@@ -91,7 +91,14 @@ class AuraWindowVideoCaptureDevice::WindowTracker final
+ 
+     target_window_ = window;
+     target_ = viz::VideoCaptureTarget(root_window->GetFrameSinkId());
+-    if (!target_window_->IsRootWindow()) {
++    // PLUTONIUM (EXO-CAPTURE): a window that embeds another client's frame
++    // sink (an Exo surface tree) is captured from that sink, whole: a
++    // subtree of the root's frame is clipped to the screen.
++    if (!target_window_->IsRootWindow() &&
++        target_window_->GetFrameSinkId().is_valid()) {
++      target_ = viz::VideoCaptureTarget(target_window_->GetFrameSinkId());
++      own_frame_sink_ = true;
++    } else if (!target_window_->IsRootWindow()) {
+       capture_request_ = target_window_->MakeWindowCapturable();
+       target_->sub_target = capture_request_.GetCaptureId();
+     }
+@@ -146,6 +153,11 @@ class AuraWindowVideoCaptureDevice::WindowTracker final
+       return;
+     }
+ 
++    // PLUTONIUM (EXO-CAPTURE): the window's own sink doesn't change.
++    if (own_frame_sink_) {
++      return;
++    }
++
+     viz::FrameSinkId new_frame_sink_id = root_window->GetFrameSinkId();
+ 
+     // Since the window is not destroyed, only re-parented, we can keep the
+@@ -181,6 +193,8 @@ class AuraWindowVideoCaptureDevice::WindowTracker final
+ 
+   aura::ScopedWindowCaptureRequest capture_request_;
+   std::optional<viz::VideoCaptureTarget> target_;
++  // PLUTONIUM (EXO-CAPTURE): |target_| is the window's own frame sink.
++  bool own_frame_sink_ = false;
+ 
+   std::unique_ptr<aura::WindowTreeHost::VideoCaptureLock> video_capture_lock_;
+   base::WeakPtrFactory<AuraWindowVideoCaptureDevice::WindowTracker>

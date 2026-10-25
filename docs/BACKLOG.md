@@ -551,11 +551,10 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   through their mapping, shared memory after); not yet tried with a consumer
   that takes dmabufs (OBS). Still a CPU copy per frame: no copy at all needs
   buffers Ash allocates and the capturer renders into, rather than viz's pool.
-- [ ] **A shell's MediaStream of a window bigger than the screen.** S–M ·
-  Chromium's window capture is a subtree of the screen's frame, so it only
-  covers what fits; PipeWire captures use the window's own copies instead.
-  The same for shells: a MediaStreamTrackGenerator fed by those copies, or
-  a capturer on the window's own frame sink.
+- [x] **A shell's MediaStream of a window bigger than the screen.** S–M ·
+  From the window's own frame sink (patch 0054), not a subtree of the
+  screen's frame. A parked window that nothing shows still gives no frames;
+  PipeWire captures cover that.
 - [x] **The portal's `PickColor`.** S · The focused shell's picker over a frozen screen.
 - [x] **`ext-image-copy-capture-v1` in Exo,** for grim and wl-screenrec (wf-recorder
   only speaks wlr-screencopy). M · Output sources, shared memory and linear dmabufs.
