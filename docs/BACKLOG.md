@@ -549,7 +549,11 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   backend for the rest": `PreparePrint` shows the library's print dialog
   without a preview and returns the settings; `Print` hands the helper the
   document (an fd), which it sends to CUPS (`TAB_FEATURES.md`, "The Print
-  portal").
+  portal"). In the way: `Print` passes the document as a Unix fd (`h`),
+  and the helper's D-Bus client (`dbus.ts`) can't receive fds, since Node
+  has no SCM_RIGHTS on its sockets. It needs a small native or Python
+  receiver (as `ptybridge.py` is for terminals), or the backend's `Print`
+  in another process. The dialog also has to work without a tab's preview.
 - [ ] **Form autofill in tabs.** S–M to L · Not now (decided 2026-10-23).
   Later: identities and cards through the password adapter.
 
