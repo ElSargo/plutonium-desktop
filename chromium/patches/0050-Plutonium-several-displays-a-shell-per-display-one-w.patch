@@ -52,8 +52,11 @@ EXO-DISPLAYS (docs/features/MULTI_MONITOR.md):
  .../ash/main_extra_parts/plutonium_overlay.cc |  62 ++
  .../main_extra_parts/plutonium_shells_impl.cc | 624 +++++++++++++++---
  .../main_extra_parts/plutonium_shells_impl.h  |  86 ++-
- components/exo/shell_surface_base.cc          |  23 +
+ components/exo/shell_surface.cc               |  13 +
+ components/exo/shell_surface.h                |   3 +
+ components/exo/shell_surface_base.cc          |  29 +-
  components/exo/shell_surface_base.h           |   5 +
+ .../wayland_dmabuf_feedback_manager.cc        |   3 +
  .../browser/surface_embed_host.cc             |  22 +-
  .../browser/surface_embed_host.h              |  12 +-
  .../mojom/native_window/native_window.mojom   |   8 +
@@ -69,7 +72,7 @@ EXO-DISPLAYS (docs/features/MULTI_MONITOR.md):
  .../renderer/core/html/native_window_broker.h |  20 +
  .../core/html/native_window_broker.idl        |  18 +
  .../blink/renderer/core/html/shell_entry.idl  |   5 +
- 33 files changed, 1588 insertions(+), 162 deletions(-)
+ 36 files changed, 1612 insertions(+), 163 deletions(-)
  create mode 100644 third_party/blink/renderer/core/html/native_display_entry.idl
 
 diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
@@ -2239,11 +2242,69 @@ index 5300306576..8ca7110f43 100644
    base::WeakPtrFactory<PlutoniumShellsImpl> weak_ptr_factory_{this};
  };
  
+diff --git a/components/exo/shell_surface.cc b/components/exo/shell_surface.cc
+index cc42bd4850..852bb5ba64 100644
+--- a/components/exo/shell_surface.cc
++++ b/components/exo/shell_surface.cc
+@@ -39,6 +39,8 @@
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ #include "ui/base/ui_base_types.h"
+ #include "ui/compositor/layer_surface.h"
++#include "ui/display/screen.h"
++#include "ui/display/types/display_constants.h"
+ #include "ui/views/widget/widget.h"
+ #include "ui/wm/core/coordinate_conversion.h"
+ #include "ui/wm/core/scoped_animation_disabler.h"
+@@ -792,6 +794,17 @@ void ShellSurface::OnWindowAddedToRootWindow(aura::Window* window) {
+   } else {
+     OnWidgetScreenPositionChanged();
+   }
++  // EXO-DISPLAYS: a parked window that moved to another display (a page
++  // there shows it) was just sent that display's output and scale; a
++  // configure after them makes the client draw at that scale at once, rather
++  // than at its next input.
++  const int64_t display_id =
++      display::Screen::Get()->GetDisplayNearestWindow(window).id();
++  if (embed_parked() && embed_display_id_ != display::kInvalidDisplayId &&
++      display_id != embed_display_id_ && !window_state_is_changing_) {
++    Configure();
++  }
++  embed_display_id_ = display_id;
+ }
+ 
+ void ShellSurface::OnWindowPropertyChanged(aura::Window* window,
+diff --git a/components/exo/shell_surface.h b/components/exo/shell_surface.h
+index 6cc08d75ac..218716f4be 100644
+--- a/components/exo/shell_surface.h
++++ b/components/exo/shell_surface.h
+@@ -323,6 +323,9 @@ class ShellSurface : public ShellSurfaceBase, public ash::WindowStateObserver {
+   gfx::Vector2d pending_origin_offset_;
+   gfx::Vector2d pending_origin_offset_accumulator_;
+   gfx::Rect old_screen_bounds_for_pending_move_;
++  // EXO-DISPLAYS: the display a parked window was last added on
++  // (display::kInvalidDisplayId before that).
++  int64_t embed_display_id_ = -1;
+ 
+   int resize_component_ = HTCAPTION;  // HT constant (see ui/base/hit_test.h)
+   int pending_resize_component_ = HTCAPTION;
 diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
-index bb641fcf5d..a2365a5a5f 100644
+index bb641fcf5d..9d8b034dff 100644
 --- a/components/exo/shell_surface_base.cc
 +++ b/components/exo/shell_surface_base.cc
-@@ -2956,6 +2956,26 @@ void ShellSurfaceBase::UpdateEmbedCoversDisplay(const gfx::Size& size) {
+@@ -2908,7 +2908,11 @@ void ShellSurfaceBase::SetEmbedSize(const gfx::Size& size) {
+     if (widget_size == bounds.size()) {
+       return;
+     }
+-    widget_->SetBounds(gfx::Rect(bounds.origin(), widget_size));
++    // EXO-DISPLAYS: on the display it is on. Bounds in screen coordinates
++    // (widget_->SetBounds()) of a bigger size could fall mostly on another
++    // display and move it there; only SetShown() moves a parked window.
++    aura::Window* window = widget_->GetNativeWindow();
++    window->SetBounds(gfx::Rect(window->bounds().origin(), widget_size));
+   }
+ }
+ 
+@@ -2956,6 +2960,26 @@ void ShellSurfaceBase::UpdateEmbedCoversDisplay(const gfx::Size& size) {
    root_surface()->OnFullscreenStateChanged(covers || widget_->IsFullscreen());
  }
  
@@ -2270,7 +2331,7 @@ index bb641fcf5d..a2365a5a5f 100644
  void ShellSurfaceBase::MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen) {
    if (!widget_ || !embed_parked_ || !host_window()) {
      return;
-@@ -2967,6 +2987,7 @@ void ShellSurfaceBase::MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen)
+@@ -2967,6 +2991,7 @@ void ShellSurfaceBase::MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen)
    }
    gfx::Rect bounds = widget_->GetWindowBoundsInScreen();
    bounds.Offset(delta);
@@ -2278,7 +2339,7 @@ index bb641fcf5d..a2365a5a5f 100644
    widget_->SetBounds(bounds);
    // Popups are placed relative to their parent: they move with it.
    for (ShellSurfaceBase* popup : GetEmbedPopups()) {
-@@ -2974,6 +2995,8 @@ void ShellSurfaceBase::MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen)
+@@ -2974,6 +2999,8 @@ void ShellSurfaceBase::MoveEmbedOrigin(const gfx::PointF& host_origin_in_screen)
      if (popup->widget_) {
        gfx::Rect popup_bounds = popup->widget_->GetWindowBoundsInScreen();
        popup_bounds.Offset(delta);
@@ -2303,6 +2364,20 @@ index e18998420a..a2d470bc4c 100644
    bool embed_layout_check_pending_ = false;
    bool can_minimize_ = true;
    bool has_frame_colors_ = false;
+diff --git a/components/exo/wayland/wayland_dmabuf_feedback_manager.cc b/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
+index 69ad58f13a..7524b7c721 100644
+--- a/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
++++ b/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
+@@ -548,6 +548,9 @@ void WaylandDmabufFeedbackManager::MaybeResendFeedback(Surface* surface) {
+ 
+   const auto& surface_feedback = surface_feedbacks_[surface];
+   auto* feedback = surface_feedback->GetFeedback();
++  // PLUTONIUM (EXO-DISPLAYS): an embedded window that is a scanout candidate
++  // moves between displays: its old display's tranche goes first.
++  feedback->ClearScanoutTranche();
+   feedback->MaybeAddScanoutTranche(surface);
+ 
+   for (WaylandDmabufSurfaceFeedbackResourceWrapper* feedback_ref :
 diff --git a/components/surface_embed/browser/surface_embed_host.cc b/components/surface_embed/browser/surface_embed_host.cc
 index ffeffaa5a3..c7767a9af5 100644
 --- a/components/surface_embed/browser/surface_embed_host.cc
