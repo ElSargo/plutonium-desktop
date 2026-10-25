@@ -69,7 +69,9 @@ const TOOLS = [
       "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them. " +
       "Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where " +
       "it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can " +
-      "be told apart. With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
+      "be told apart. Every install is listed: one the launcher doesn't show, since another file has its desktop id, " +
+      "names that file (launcherShows). With a filter, also the matching programs on PATH (onPath, mostly " +
+      "command-line ones).",
     inputSchema: {
       type: "object",
       properties: {
@@ -126,7 +128,9 @@ const TOOLS = [
     description:
       "Take a screenshot of one of this thread's windows, even if the user isn't looking at it. " +
       "Returns a PNG of the window's contents (no other windows, no desktop). Points for click_window and the " +
-      "other window tools are in this image's pixels.",
+      "other window tools are in this image's pixels. Open menus and other popups are drawn in it where they " +
+      "are (the image grows right and down to hold one that goes past the window), and listed as popups " +
+      "({x, y, width, height}); the window tools reach them.",
     inputSchema: windowIdSchema,
   },
   {
@@ -134,6 +138,9 @@ const TOOLS = [
     description:
       "Click in one of this thread's windows at a point of its snapshot_window image. The app gets the click " +
       "even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. " +
+      "A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no " +
+      "further. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) " +
+      "or closed, and the window's open popups. " +
       "Take a new snapshot to see what happened.",
     inputSchema: {
       type: "object",
@@ -203,7 +210,8 @@ const TOOLS = [
     name: "press_window",
     description:
       'Press keys in one of this thread\'s windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", ' +
-      '"Down", "ctrl+]", or a list of them pressed in turn.',
+      '"Down", "ctrl+]", or a list of them pressed in turn. Returns the windows that opened (newWindows: a ' +
+      "dialog, or one that came after your last action) or closed, and the window's open popups (menus).",
     inputSchema: {
       type: "object",
       properties: {
@@ -261,7 +269,8 @@ const TOOLS = [
       "an editable text's contents with text; the keyboard stays where it was, so to commit a field that acts on " +
       'Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its ' +
       'list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the ' +
-      "actions read_window lists for it. Read again to see the result.",
+      "actions read_window lists for it. Returns the windows that opened (newWindows: a dialog, or one that came " +
+      "after your last action) or closed, and the window's open popups (menus). Read again to see the result.",
     inputSchema: {
       type: "object",
       properties: {
@@ -983,7 +992,9 @@ export async function callTool(
         })();
         throw new Error(message ?? `Snapshot failed (${response.status}).`);
       }
-      return [{ type: "image", data: response.body.toString("base64"), mimeType: "image/png" }];
+      const image: Content = { type: "image", data: response.body.toString("base64"), mimeType: "image/png" };
+      if (!response.popups) return [image];
+      return [image, { type: "text", text: JSON.stringify({ popups: JSON.parse(response.popups) }) }];
     }
     case "focus_window":
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/focus`, displayArg()));

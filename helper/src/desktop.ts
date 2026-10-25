@@ -48,6 +48,14 @@ export interface DesktopWindow {
   readonly tags: readonly string[];
 }
 
+/** A popup (menu, tooltip) open on a window, in the window's DIPs. */
+export interface WindowPopup {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 /** EXO-TAB-FEATURES: a download (Plutonium.downloadAdded's JSON; TAB_FEATURES.md). */
 export interface DesktopDownload {
   readonly id: number;
@@ -363,6 +371,20 @@ export class Desktop {
 
   async resizeWindow(id: number, width: number, height: number): Promise<void> {
     await this.cdp.send("Plutonium.resizeWindow", { id, width, height });
+  }
+
+  /**
+   * The window's open popups (menus, tooltips), in its DIPs, parents first.
+   * captureWindow draws them over the window. [] from a browser without them.
+   */
+  async windowPopups(id: number): Promise<WindowPopup[]> {
+    try {
+      const { popups } = (await this.cdp.send("Plutonium.getWindowPopups", { id })) as { popups: WindowPopup[] };
+      return popups;
+    } catch (error) {
+      if (error instanceof CdpError && /wasn't found|not found/i.test(error.message)) return [];
+      throw error;
+    }
   }
 
   async mouse(id: number, event: WindowMouseEvent): Promise<void> {

@@ -52,6 +52,11 @@ export interface FoundApp {
   readonly source: AppSource;
   /** Its desktop file, which tells two installs of one app apart. */
   readonly desktopFile: string;
+  /**
+   * Another install of the same desktop id: the desktop file the launcher
+   * shows instead (an earlier data dir's, such as the user's or a Nix profile's).
+   */
+  readonly launcherShows?: string;
 }
 
 export interface FoundApps {
@@ -324,6 +329,8 @@ function sizeScore(size: string): number {
 
 export class DesktopApps {
   private entries = new Map<string, Entry>();
+  /** Other installs of an id in `entries`, which the launcher doesn't show (later data dirs). */
+  private others: Entry[] = [];
   private icons: IconIndex | null = null;
   private loadedAt = 0;
 
@@ -331,13 +338,17 @@ export class DesktopApps {
     if (Date.now() - this.loadedAt < MAX_AGE_MS) return;
     const dirs = dataDirs();
     const entries = new Map<string, Entry>();
+    const others: Entry[] = [];
     const seen = new Set<string>();
     for (const dir of dirs) {
       const root = join(dir, "applications");
       for (const path of walk(root)) {
         const id = relative(root, path).split("/").join("-");
-        if (seen.has(id)) continue;
+        // The first file of an id is the one the launcher shows; the rest
+        // are other installs of it (a Nix profile's and the system's).
+        const first = !seen.has(id);
         seen.add(id);
+        if (!first && !entries.has(id)) continue;
         let values: Map<string, string>;
         try {
           values = parseDesktopEntry(readFileSync(path, "utf8"));
@@ -353,7 +364,7 @@ export class DesktopApps {
         if (tryExec && !isExecutable(unescapeValue(tryExec))) continue;
         const name = localized(values, "Name");
         if (!name) continue;
-        entries.set(id, {
+        const entry: Entry = {
           id,
           name,
           genericName: localized(values, "GenericName"),
@@ -367,7 +378,9 @@ export class DesktopApps {
           path,
           workingDirectory: unescapeValue(values.get("Path") ?? ""),
           dataDir: dir,
-        });
+        };
+        if (first) entries.set(id, entry);
+        else others.push(entry);
       }
     }
     this.icons = new IconIndex(dirs);
@@ -375,6 +388,7 @@ export class DesktopApps {
       entries.set(id, { ...entry, hasIcon: this.icons.find(entry.icon) !== undefined });
     }
     this.entries = entries;
+    this.others = others;
     this.loadedAt = Date.now();
   }
 
@@ -414,11 +428,12 @@ export class DesktopApps {
     this.load();
     const pattern = filterPattern(filter);
     const apps: FoundApp[] = [];
-    for (const entry of this.entries.values()) {
+    for (const entry of [...this.entries.values(), ...this.others]) {
       if (pattern && !appMatches(entry, pattern)) continue;
+      const shown = this.entries.get(entry.id);
       let command;
       try {
-        command = this.command(entry.id);
+        command = this.commandFor(entry);
       } catch {
         // No terminal to run it in: listed as it is.
         command = { argv: expandExec(entry), cwd: entry.workingDirectory || undefined };
@@ -432,9 +447,16 @@ export class DesktopApps {
         ...(command.cwd ? { cwd: command.cwd } : {}),
         source: appSource(entry),
         desktopFile: entry.path,
+        ...(shown && shown !== entry ? { launcherShows: shown.path } : {}),
       });
     }
-    apps.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    // An id's installs together, the launcher's first.
+    apps.sort(
+      (a, b) =>
+        a.name.localeCompare(b.name) ||
+        a.id.localeCompare(b.id) ||
+        Number(a.launcherShows !== undefined) - Number(b.launcherShows !== undefined),
+    );
     if (!pattern) return { apps };
     const programs = pathPrograms(pattern);
     return {
@@ -448,7 +470,10 @@ export class DesktopApps {
   command(id: string): { argv: string[]; cwd: string | undefined; name: string } | undefined {
     this.load();
     const entry = this.entries.get(id);
-    if (!entry) return undefined;
+    return entry && this.commandFor(entry);
+  }
+
+  private commandFor(entry: Entry): { argv: string[]; cwd: string | undefined; name: string } | undefined {
     const argv = expandExec(entry);
     if (argv.length === 0) return undefined;
     return {

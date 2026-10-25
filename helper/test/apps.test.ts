@@ -105,6 +105,12 @@ describe("find", () => {
       Exec: "/nix/store/abc-libreoffice/bin/libreoffice --calc %U",
     });
     desktop("usr/share", "org.gnome.Calculator.desktop", { Name: "Calculator", Exec: "gnome-calculator" });
+    // The same id in a Nix profile and the system.
+    desktop("home/.nix-profile/share", "org.inkscape.Inkscape.desktop", {
+      Name: "Inkscape",
+      Exec: "/nix/store/def-inkscape/bin/inkscape %F",
+    });
+    desktop("usr/share", "org.inkscape.Inkscape.desktop", { Name: "Inkscape", Exec: "inkscape %F" });
     desktop("usr/share", "hidden.desktop", { Name: "Hidden Calc", Exec: "hidden", NoDisplay: "true" });
     desktop("home/.local/share", "mine.desktop", { Name: "My Tool", Exec: "mytool %f", Path: "/srv" });
     program("bin", "libreoffice-calc-helper");
@@ -144,6 +150,20 @@ describe("find", () => {
     assert.deepEqual(found.onPath, []);
   });
 
+  test("every install of one desktop id, the launcher's first", () => {
+    const found = new DesktopApps().find("inkscape");
+    assert.deepEqual(
+      found.apps.map((app) => [app.source, app.argv, app.launcherShows?.endsWith("/home/.nix-profile/share/applications/org.inkscape.Inkscape.desktop") ?? false]),
+      [
+        ["nix profile", ["/nix/store/def-inkscape/bin/inkscape"], false],
+        ["system", ["inkscape"], true],
+      ],
+    );
+    // The launcher shows (and launches by id) the first.
+    assert.deepEqual(new DesktopApps().command("org.inkscape.Inkscape.desktop")?.argv, ["/nix/store/def-inkscape/bin/inkscape"]);
+    assert.equal(new DesktopApps().list().filter((app) => app.name === "Inkscape").length, 1);
+  });
+
   test("hidden apps are left out; PATH programs are listed separately, once each, executables only", () => {
     const found = new DesktopApps().find("calc");
     assert.deepEqual(
@@ -156,7 +176,7 @@ describe("find", () => {
 
   test("no filter: every app, no PATH programs", () => {
     const found = new DesktopApps().find();
-    assert.equal(found.apps.length, 4);
+    assert.equal(found.apps.length, 6);
     assert.equal(found.onPath, undefined);
     const mine = found.apps.find((app) => app.id === "mine.desktop")!;
     assert.deepEqual([mine.source, mine.argv, mine.cwd], ["user", ["mytool"], "/srv"]);

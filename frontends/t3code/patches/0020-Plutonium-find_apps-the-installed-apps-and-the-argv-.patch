@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 12:19:41 +1300
-Subject: [PATCH 20/29] Plutonium: find_apps, the installed apps and the argv
+Subject: [PATCH 20/30] Plutonium: find_apps, the installed apps and the argv
  launch_app takes
 
 launch_app's argv example was ["libreoffice", ...], which isn't on PATH
