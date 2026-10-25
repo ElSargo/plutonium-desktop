@@ -1,6 +1,6 @@
 # Several monitors
 
-**Status:** steps 1–3 below are built (displays and a shell per display, one window in one place, dragging windows between shells), and "show on display N" with them; "As built" says how, and "Verified" what was checked (on X11 with two host displays; a real second monitor on DRM is still to do). Linked documents aren't (no shell needs them yet).
+**Status:** steps 1–3 below are built (displays and a shell per display, one window in one place, dragging windows between shells), and "show on display N" with them; "As built" says how, and "Verified" what was checked (on X11 with two host displays, and on DRM with a real second monitor). Linked documents aren't (no shell needs them yet).
 
 Each display gets its own shell window, and the user picks a shell for each one. A shell that wants to span monitors (T3 with its sidebar on the second one, say) is built on top of that: it runs on both displays and keeps the two in sync itself.
 
@@ -48,7 +48,7 @@ Patch "several displays, a shell per display, one window in one place" (Chromium
 
 - **Pages.** `PlutoniumShells` opens every enabled shell's page on every display, each in a fullscreen app window there (`display::ScopedDisplayForNewWindows`). With two displays and three shells that's six pages. Pages on the startup display have the shell's URL as before; pages on the others get `display=<id>` in the query, which the frontends key their per-display state by.
 - **Visible shells.** Each display has its own visible shell. "The visible shell" without a display (the overlay, keys, tab requests, where hidden tabs park) is the focused display's: the one with the active window. `Super+Tab` and the switcher act on the focused display; the switcher opens there.
-- **The choice per display** is which shell is visible there: Super+Tab on that display, or the switcher's "Show on display N" on a shell's page. The last choice per display id is kept in local state (`plutonium.display_shells`) and comes back with the display. The startup display starts on the startup shell, as before.
+- **The choice per display** is which shell is visible there: Super+Tab on that display, or the switcher's "Show on display N" on a shell's page. The last choice per display id is kept in local state (`plutonium.display_shells`) and comes back with the display; a display without one shows the startup shell. The startup display starts on the startup shell, as before. Opening a display's windows doesn't move the keyboard: at startup it stays on the startup display, and when a display comes, where it was.
 - **Driving.** Only the visible shell on each display drives what it shows (sizes, focus, fullscreen). A switch on one display takes only that display's previous shell's elements out of fullscreen, and the new shell's `<embed>`s don't take tabs that another display's visible shell shows.
 - **Hotplug.** A new display gets every shell's page. An unplugged display's shell windows are hidden before Ash moves them to another display, then closed. Everything they showed is still in the shared pool: windows the remaining shells' elements had shown go back to them (below), and the rest are in their Elsewhere lists.
 - **Keyboard focus** stays global. `Super+Shift+Left/Right` move it to the display to the left or right (its visible shell's window); `Super+Ctrl+Shift+Left/Right` move the focused window or tab there. A shell that registers these keys (`setShellShortcuts`) gets them instead.
@@ -108,9 +108,20 @@ Session: `XVFB_SIZE=2560x1000 BOUNDS="0+0-1280x800,1280+0-1280x800" plutonium ru
 | T3: "To display 2" in an app tab's header moves the window to display 2's shell; the tab shows "Shown on another display" and "Bring it back" takes it back | ✓ |
 | No crash or DCHECK in Ash's log through all of the above | ✓ |
 
-Not verified:
-- **Dragging across displays** on X11: the drag is cancelled as the pointer enters the other display's host window. Ash's drag tracker cancels when its capture is lost, and each X11 host window loses its own grab there. On DRM there are no host windows (one cursor, the controller finds the target by screen position), so this needs a real second monitor.
-- **A real second monitor on DRM** (scale, EDID label, hotplug through the kernel).
+On X11 the drag is cancelled as the pointer enters the other display's host window (Ash's drag tracker cancels when its capture is lost, and each X11 host window loses its own grab there); on DRM it works (below).
+
+### Verified on DRM (2026-10-25, tty5, panel eDP-1 1440×900 at 1.78 plus HDMI-A-1 "LF24T370F" 1920×1080, uinput keyboard and mouse)
+
+| Check | |
+|---|---|
+| Four pages; the monitor's have `&display=<id>`; `getDisplays()`: the panel "Built-in display" (primary, internal, scale 1.78), the monitor "LF24T370F" at x 1440, scale 1; `current` right everywhere | ✓ |
+| Super+Shift+Left/Right move the keyboard between displays; Super+Tab and Enter on the monitor switch only the monitor | ✓ |
+| Super+Ctrl+Shift+Right moves foot from niri on the panel to Plain on the monitor, at device pixel ratio 1 | ✓ |
+| A drag of foot's entry from Plain on the monitor onto niri on the panel (a real evdev mouse): `dragenter`, `dragover`, `drop` on niri, `dragend` with effect "move"; niri shows foot, Plain's element goes "taken" | ✓ |
+| Hotplug (the connector forced off and on, with a DRM change uevent), twice: the monitor's pages close, niri adopts foot; back on, both shells reopen, Plain is visible again and foot goes back to Plain | ✓ |
+| No crash, DCHECK or FATAL | ✓ |
+
+Fixed after it: a new display without a saved choice showed the first shell in the list rather than the startup shell; focus ended on the last display opened at startup (and on a display that came back) instead of staying where it was; Plain didn't give a window it was asked to show the keyboard (niri did).
 
 Fixed along the way: shell windows for display 2 opened on display 1 (app windows reopen at their saved bounds, whatever the display for new windows; now moved with `SetBoundsInScreen` before going fullscreen); `showShell()` used the focused display; a crash at startup (the tab registry asked for the visible shell before Ash's `display::Screen` existed); niri and Plain didn't take a window back on a focus request.
 

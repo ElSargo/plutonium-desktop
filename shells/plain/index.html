@@ -241,6 +241,7 @@ try {
       openTab(threadId, window.id);
       render();
       bringBack(window.id);
+      focusShown(window.id);
       return true;
     },
     // A link this page opened (Ctrl+click, target=_blank): a tab in the
@@ -256,6 +257,7 @@ try {
       tabsOf(threadId).active = webKey(tab.id);
       persist();
       render();
+      if (shown?.tabId === tab.id) shown.element.focus();
       return true;
     },
   });
@@ -538,6 +540,23 @@ function bringBack(windowId) {
   if (!grant || element.windowState !== "taken") return;
   element.removeAttribute("grant");
   element.setAttribute("grant", grant);
+}
+
+// A window shown on request (an agent, the switcher, another display) gets the keyboard
+// once it's in the page.
+function focusShown(windowId) {
+  const element = shown?.windowId === windowId ? shown.element : null;
+  if (!element) return;
+  if (element.windowState === "attached") {
+    element.focusWindow();
+    return;
+  }
+  const onChange = () => {
+    if (element.windowState !== "attached") return;
+    element.removeEventListener("windowchange", onChange);
+    element.focusWindow();
+  };
+  element.addEventListener("windowchange", onChange);
 }
 
 // One <native-window> for the active tab, replaced when the tab changes.
