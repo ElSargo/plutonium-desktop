@@ -95,6 +95,8 @@ const MAX_BODY = 1 << 26;
 const GROUPS_TTL_MS = 2_000;
 // How long a window snapshot waits after input, for the app to draw.
 const INPUT_SETTLE_MS = 200;
+// How long a window action waits for the windows and menus it opens.
+const ACTION_SETTLE_MS = 250;
 // How long after launch_app's wait an agent's app's new windows are still held
 // at its size (a slow first start; the main window after a splash).
 const LATE_WINDOWS_MS = 60_000;
@@ -1205,6 +1207,54 @@ export class Daemon {
     return {};
   }
 
+  /** A window's open popups (menus), in snapshot_window's pixels. */
+  async windowPopups(windowId: number): Promise<{ x: number; y: number; width: number; height: number }[]> {
+    const desktop = await this.direct();
+    if (!desktop) return [];
+    const scale = desktop.window(windowId)?.deviceScaleFactor || 1;
+    const popups = await desktop.windowPopups(windowId).catch(() => []);
+    return popups.map((popup) => ({
+      x: Math.round(popup.x * scale),
+      y: Math.round(popup.y * scale),
+      width: Math.round(popup.width * scale),
+      height: Math.round(popup.height * scale),
+    }));
+  }
+
+  /**
+   * Runs an agent's action in a window, then says what it opened: the
+   * thread's new windows (a dialog), the ones that closed, and the window's
+   * open menus, so the agent needn't snapshot to find out.
+   */
+  private async withWindowChanges(
+    threadId: string,
+    windowId: number,
+    action: unknown,
+    run: () => Promise<unknown>,
+  ): Promise<unknown> {
+    if (action === "resize" || !(await this.direct())) return run();
+    const before = new Set((await this.threadWindows(threadId)).map((window) => window.id));
+    const popupsBefore = (await this.windowPopups(windowId)).length;
+    const result = await run();
+    await sleep(ACTION_SETTLE_MS);
+    const after = await this.threadWindows(threadId);
+    const changes: Record<string, unknown> = {};
+    const opened = after.filter((window) => !before.has(window.id));
+    if (opened.length) {
+      changes.newWindows = opened.map(
+        (window) =>
+          `new window #${window.id} (${window.title ? JSON.stringify(window.title) : "untitled"}, ${window.width}×${window.height})`,
+      );
+    }
+    const closed = [...before].filter((id) => !after.some((window) => window.id === id));
+    if (closed.length) changes.closedWindows = closed.map((id) => `window #${id} closed`);
+    const popups = await this.windowPopups(windowId);
+    if (popups.length) changes.popups = popups;
+    else if (popupsBefore) changes.popups = "closed";
+    if (!Object.keys(changes).length) return result;
+    return result && typeof result === "object" && !Array.isArray(result) ? { ...result, ...changes } : { result, ...changes };
+  }
+
   /** The window as accessibility knows it (its pid, title and size). */
   private async a11yWindow(threadId: string, windowId: number) {
     const entry = await this.ownedWindow(threadId, windowId);
@@ -1768,7 +1818,11 @@ export class Daemon {
         const windowId = Number(action[2]);
         if (method === "GET" && action[3] === "snapshot") {
           const png = await this.snapshot(threadId, windowId);
-          response.writeHead(200, { "Content-Type": "image/png" });
+          const popups = await this.windowPopups(windowId);
+          response.writeHead(200, {
+            "Content-Type": "image/png",
+            ...(popups.length ? { "X-Plutonium-Popups": JSON.stringify(popups) } : {}),
+          });
           response.end(png);
           return;
         }
@@ -1792,14 +1846,28 @@ export class Daemon {
         }
         if (method === "POST" && action[3] === "a11y") {
           try {
-            return sendJson(response, 200, await this.actInWindow(threadId, windowId, await readJson(request)));
+            const body = await readJson(request);
+            return sendJson(
+              response,
+              200,
+              await this.withWindowChanges(threadId, windowId, body.action, () =>
+                this.actInWindow(threadId, windowId, body),
+              ),
+            );
           } finally {
             this.lastInput.set(windowId, Date.now());
           }
         }
         if (method === "POST" && action[3] === "input") {
           try {
-            return sendJson(response, 200, await this.windowInput(threadId, windowId, await readJson(request)));
+            const body = await readJson(request);
+            return sendJson(
+              response,
+              200,
+              await this.withWindowChanges(threadId, windowId, body.action, () =>
+                this.windowInput(threadId, windowId, body),
+              ),
+            );
           } finally {
             this.lastInput.set(windowId, Date.now());
           }

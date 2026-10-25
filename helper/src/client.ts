@@ -5,6 +5,8 @@ export interface HelperResponse {
   readonly status: number;
   readonly contentType: string;
   readonly body: Buffer;
+  /** X-Plutonium-Popups: a window snapshot's open popups (JSON), if any. */
+  readonly popups?: string;
 }
 
 export function helperRequest(
@@ -29,6 +31,7 @@ export function helperRequest(
           resolve({
             status: res.statusCode ?? 0,
             contentType: res.headers["content-type"] ?? "",
+            popups: [res.headers["x-plutonium-popups"]].flat()[0],
             body: Buffer.concat(chunks),
           }),
         );
