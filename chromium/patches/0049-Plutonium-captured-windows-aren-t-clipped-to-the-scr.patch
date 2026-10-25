@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 25 Oct 2026 13:55:57 +1300
+Subject: [PATCH 49/49] Plutonium: captured windows aren't clipped to the
+ screen; PipeWire without a config
+
+EXO-CAPTURE:
+- cc: a render surface for a subtree capture isn't clipped, as a copy
+  request's isn't. Viz captures nothing of a subtree its render pass
+  doesn't hold whole, so a window reaching past the screen (or held at a
+  capture size larger than the screen) gave no frames at all.
+- The PipeWire producer needs no client.conf: config.name=null, and it
+  loads the protocol, client-node and adapter modules itself (the image
+  has PipeWire's libraries and modules, not its configuration). Warnings on
+  each way it can fail.
+- Screenshots of a source that's gone say so; an X11 host window's made-up
+  display label becomes "Screen N".
+---
+ cc/layers/render_surface_impl.cc     |  6 +++++-
+ chrome/browser/plutonium_capture.cc  | 24 ++++++++++-----------
+ chrome/browser/plutonium_pipewire.cc | 32 ++++++++++++++++++++++++++--
+ 3 files changed, 47 insertions(+), 15 deletions(-)
+
+diff --git a/cc/layers/render_surface_impl.cc b/cc/layers/render_surface_impl.cc
+index 2ca564c6ea..322e6e2699 100644
+--- a/cc/layers/render_surface_impl.cc
++++ b/cc/layers/render_surface_impl.cc
+@@ -667,8 +667,12 @@ void RenderSurfaceImpl::AppendQuads(const AppendQuadsContext& context,
+ }
+ 
+ bool RenderSurfaceImpl::ShouldClip() const {
++  // PLUTONIUM (EXO-CAPTURE): a captured subtree (a window being recorded) is
++  // copied whole, as a copy request's is, also where it reaches past the
++  // screen: viz captures nothing of a pass that doesn't hold all of it.
+   return !HasCopyRequest() && !ShouldCacheRenderSurface() &&
+-         !IsViewTransitionElement() && !IsUnbounded();
++         !IsViewTransitionElement() && !IsUnbounded() &&
++         !SubtreeCaptureId().is_valid();
+ }
+ 
+ }  // namespace cc
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+index 0067955179..d2d5a726a8 100644
+--- a/chrome/browser/plutonium_capture.cc
++++ b/chrome/browser/plutonium_capture.cc
+@@ -94,10 +94,12 @@ std::optional<display::Display> FindDisplay(int64_t id) {
+ }
+ 
+ std::string DisplayName(const display::Display& display, size_t index) {
+-  if (!display.label().empty()) {
++  // A monitor's own name (from its EDID); an X11 host window's is made up.
++  if (!display.label().empty() &&
++      !display.label().starts_with("Display-")) {
+     return display.label();
+   }
+-  return "Display " + base::NumberToString(index + 1);
++  return "Screen " + base::NumberToString(index + 1);
+ }
+ 
+ // |bitmap| cropped to |region| (its pixels; empty: all of it). Empty if
+@@ -514,6 +516,14 @@ void PlutoniumCapture::Screenshot(const Source& source,
+             std::move(callback)));
+     return;
+   }
++  const int32_t id = static_cast<int32_t>(source.id);
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (source.type == Source::Type::kWindow
++          ? !broker || !broker->GetWindow(id)
++          : !PlutoniumTabs::Get()->GetTab(id)) {
++    std::move(callback).Run(SkBitmap(), kNoSource);
++    return;
++  }
+   auto crop = base::BindOnce(
+       [](const gfx::Rect& region, ScreenshotCallback callback,
+          const SkBitmap& bitmap) {
+@@ -522,20 +532,10 @@ void PlutoniumCapture::Screenshot(const Source& source,
+             cropped, cropped.drawsNothing() ? "The copy failed" : "");
+       },
+       source.region, std::move(callback));
+-  const int32_t id = static_cast<int32_t>(source.id);
+   if (source.type == Source::Type::kWindow) {
+-    ExoWindowBroker* broker = ExoWindowBroker::Get();
+-    if (!broker || !broker->GetWindow(id)) {
+-      std::move(crop).Run(SkBitmap());
+-      return;
+-    }
+     exo::EmbeddedWindows::Get()->Snapshot(id, std::move(crop));
+     return;
+   }
+-  if (!PlutoniumTabs::Get()->GetTab(id)) {
+-    std::move(crop).Run(SkBitmap());
+-    return;
+-  }
+   PlutoniumTabs::Get()->Snapshot(id, std::move(crop));
+ }
+ 
+diff --git a/chrome/browser/plutonium_pipewire.cc b/chrome/browser/plutonium_pipewire.cc
+index a91de52399..d3736c71f4 100644
+--- a/chrome/browser/plutonium_pipewire.cc
++++ b/chrome/browser/plutonium_pipewire.cc
+@@ -10,6 +10,7 @@
+ #include "chrome/browser/plutonium_pipewire.h"
+ 
+ #include <dlfcn.h>
++#include <pipewire/impl-module.h>
+ #include <pipewire/pipewire.h>
+ #include <spa/buffer/meta.h>
+ #include <spa/param/video/format-utils.h>
+@@ -20,6 +21,7 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <initializer_list>
+ #include <optional>
+ #include <type_traits>
+ #include <utility>
+@@ -75,6 +77,7 @@ struct PipeWire {
+   decltype(&pw_context_new) context_new = nullptr;
+   decltype(&pw_context_destroy) context_destroy = nullptr;
+   decltype(&pw_context_connect) context_connect = nullptr;
++  decltype(&pw_context_load_module) context_load_module = nullptr;
+   decltype(&pw_core_disconnect) core_disconnect = nullptr;
+   decltype(&pw_properties_new) properties_new = nullptr;
+   decltype(&pw_stream_new) stream_new = nullptr;
+@@ -119,6 +122,7 @@ struct PipeWire {
+     load(lib.context_new, "pw_context_new");
+     load(lib.context_destroy, "pw_context_destroy");
+     load(lib.context_connect, "pw_context_connect");
++    load(lib.context_load_module, "pw_context_load_module");
+     load(lib.core_disconnect, "pw_core_disconnect");
+     load(lib.properties_new, "pw_properties_new");
+     load(lib.stream_new, "pw_stream_new");
+@@ -198,10 +202,29 @@ class PipeWireStream {
+   bool Connect(const std::string& name) {
+     loop_ = pw_->thread_loop_new("plutonium-screencast", nullptr);
+     if (!loop_) {
++      LOG(WARNING) << "EXO-CAPTURE no PipeWire loop";
+       return false;
+     }
+-    context_ = pw_->context_new(pw_->thread_loop_get_loop(loop_), nullptr, 0);
+-    if (!context_ || pw_->thread_loop_start(loop_) < 0) {
++    // No client.conf: the image needn't have PipeWire's configuration (and
++    // the user's mustn't change what Ash does). The modules a stream needs:
++    // the protocol, exporting a node, and the stream's adapter.
++    context_ = pw_->context_new(
++        pw_->thread_loop_get_loop(loop_),
++        pw_->properties_new(PW_KEY_CONFIG_NAME, "null", nullptr), 0);
++    if (!context_) {
++      LOG(WARNING) << "EXO-CAPTURE no PipeWire context";
++      return false;
++    }
++    for (const char* module :
++         {"libpipewire-module-protocol-native",
++          "libpipewire-module-client-node", "libpipewire-module-adapter"}) {
++      if (!pw_->context_load_module(context_, module, nullptr, nullptr)) {
++        LOG(WARNING) << "EXO-CAPTURE no PipeWire module " << module;
++        return false;
++      }
++    }
++    if (pw_->thread_loop_start(loop_) < 0) {
++      LOG(WARNING) << "EXO-CAPTURE PipeWire's thread didn't start";
+       return false;
+     }
+     pw_->thread_loop_lock(loop_);
+@@ -219,6 +242,7 @@ class PipeWireStream {
+                             name.c_str(), nullptr));
+     if (!stream_) {
+       pw_->thread_loop_unlock(loop_);
++      LOG(WARNING) << "EXO-CAPTURE no PipeWire stream";
+       return false;
+     }
+     events_.version = PW_VERSION_STREAM_EVENTS;
+@@ -243,6 +267,9 @@ class PipeWireStream {
+                                      PW_STREAM_FLAG_ALLOC_BUFFERS),
+         params, 2);
+     pw_->thread_loop_unlock(loop_);
++    if (result < 0) {
++      LOG(WARNING) << "EXO-CAPTURE PipeWire stream didn't connect: " << result;
++    }
+     return result >= 0;
+   }
+ 
+@@ -539,6 +566,7 @@ class ScreencastImpl : public PlutoniumScreencast,
+     } else {
+       aura::Window* root = window_ ? window_->GetRootWindow() : nullptr;
+       if (!root || !root->GetFrameSinkId().is_valid()) {
++        LOG(WARNING) << "EXO-CAPTURE nothing to capture: no root frame sink";
+         return false;
+       }
+       window_->AddObserver(this);

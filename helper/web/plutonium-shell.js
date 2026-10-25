@@ -1229,6 +1229,17 @@ export class PlutoniumShell extends EventTarget {
    * writes it to ~/Pictures/Screenshots, as `path`.
    */
   async takeScreenshot({ targets = [], save = true } = {}) {
+    // One at a time: Print again while choosing does nothing.
+    if (this._choosingArea) return null;
+    this._choosingArea = true;
+    try {
+      return await this._takeScreenshot(targets, save);
+    } finally {
+      this._choosingArea = false;
+    }
+  }
+
+  async _takeScreenshot(targets, save) {
     const output = await this.outputSource();
     const frozen = await this.screenshot(output);
     const choice = await new AreaSelector(frozen, targets).choose();
@@ -3430,7 +3441,8 @@ const CAPTURE_STYLE = `@layer plutonium {
   .plutonium-capture-indicator .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plutonium-capture-dot, #e5484d); }
   .plutonium-capture-indicator button { font: inherit; }
   .plutonium-area-selector { position: fixed; inset: 0; z-index: 2147483647; cursor: crosshair; user-select: none;
-    background-size: 100% 100%; outline: none; }
+    width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+    background: transparent no-repeat 0 0 / 100% 100%; outline: none; overflow: hidden; }
   .plutonium-area-selector .shade { position: absolute; inset: 0; background: #0006; pointer-events: none; }
   .plutonium-area-selector .target { position: absolute; outline: 2px solid var(--plutonium-dialog-accent, AccentColor);
     background: color-mix(in srgb, var(--plutonium-dialog-accent, AccentColor) 15%, transparent); pointer-events: none; }
