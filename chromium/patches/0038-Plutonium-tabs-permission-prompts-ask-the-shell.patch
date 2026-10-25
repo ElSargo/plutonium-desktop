@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 09:17:38 +1300
-Subject: [PATCH 38/52] Plutonium: tabs' permission prompts ask the shell
+Subject: [PATCH 38/54] Plutonium: tabs' permission prompts ask the shell
 
 EXO-TAB-PERMISSIONS (docs/features/TAB_FEATURES.md, "Permission prompts"):
 a registry tab's permission requests become a tab request of kind
