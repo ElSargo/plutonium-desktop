@@ -107,9 +107,15 @@ report_gpu() {
   esac
 }
 
+# Web APIs ChromeOS has and desktop Linux Chromium doesn't, so pages can't
+# tell them apart (LINUX_COMPAT.md): Blink's HandwritingRecognition and
+# BarcodeDetector follow these features (Web Share and Web Bluetooth are off
+# in the UA patch). Not --disable-blink-features, which shows Chrome's
+# "unsupported command-line flag" infobar.
 FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
        "--remote-debugging-port=$CDP_PORT" "--user-data-dir=$PROFILE"
-       --disable-features=Forest --disable-sync --exo-viability-no-signin-error
+       --disable-features=Forest,HandwritingRecognition,BarcodeDetector
+       --disable-sync --exo-viability-no-signin-error
        "--plutonium-shell-origin=${ORIGINS%%,*}" "--plutonium-shell-url=$SHELL_URL"
        --plutonium-hide-windows
        "--plutonium-helper-url=http://127.0.0.1:$HELPER_PORT"

@@ -9,33 +9,31 @@ say platform "Linux" with an empty platform version (not "Chromium OS"),
 and the OS/CPU string is "Linux <cpu>", as Linux Chromium's. The unit
 test's ChromeOS expectations follow.
 ---
- .../chrome_content_renderer_client.cc         | 13 ++++++++--
+ .../chrome_content_renderer_client.cc         | 11 ++++++--
  .../embedder_support/user_agent_utils.cc      | 25 ++++++++-----------
  .../user_agent_utils_unittest.cc              | 25 +++++++------------
- 3 files changed, 30 insertions(+), 33 deletions(-)
+ 3 files changed, 28 insertions(+), 33 deletions(-)
 
 diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
-index 4bbd129c5e..4c67fe9963 100644
+index 4bbd129c5e..0cd640fb93 100644
 --- a/chrome/renderer/chrome_content_renderer_client.cc
 +++ b/chrome/renderer/chrome_content_renderer_client.cc
-@@ -1554,10 +1554,19 @@ void ChromeContentRendererClient::
+@@ -1554,10 +1554,17 @@ void ChromeContentRendererClient::
  
  // Web Share is conditionally enabled here in chrome/, to avoid it
  // being made available in WebView or Linux.
 -#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
 -    BUILDFLAG(IS_MAC)
-+// PLUTONIUM: pages see Linux Chromium, which has none of these (only
-+// ChromeOS has them on by default). Turned off here rather than with
-+// --disable-blink-features, which shows the "unsupported command-line flag"
-+// infobar.
++// PLUTONIUM: pages see Linux Chromium, which has neither Web Share nor Web
++// Bluetooth (ChromeOS has both on by default). Turned off here rather than
++// with --disable-blink-features, which shows the "unsupported command-line
++// flag" infobar. HandwritingRecognition and BarcodeDetector follow base
++// features, which the launcher turns off (--disable-features).
 +#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
    blink::WebRuntimeFeatures::EnableWebShare(true);
  #endif
 +#if BUILDFLAG(IS_CHROMEOS)
-+  for (const char* feature : {"HandwritingRecognition", "BarcodeDetector",
-+                              "WebBluetooth"}) {
-+    blink::WebRuntimeFeatures::EnableFeatureFromString(feature, false);
-+  }
++  blink::WebRuntimeFeatures::EnableWebBluetooth(false);
 +#endif
  
    if (base::FeatureList::IsEnabled(
