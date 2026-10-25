@@ -1260,7 +1260,16 @@ case "$cmd" in
   killswitch) killswitch_cmd "$@" ;;
   live) live_cmd "$@" ;;
   worktree) worktree_cmd "$@" ;;
-  helper) session_vars drm; PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-$SOCKET} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
+  helper)
+    session_vars drm
+    # In a worktree's slot, a thread's variables (an agent in a T3 thread of
+    # the live session) name slot 0's helper: launching there would put
+    # windows on the user's desktop. Keep them only if they are this slot's.
+    if (( SLOT )); then
+      [[ ${PLUTONIUM_HELPER:-} == *"$SLOT_SUFFIX.sock" ]] || unset PLUTONIUM_HELPER PLUTONIUM_THREAD_ID
+      [[ ${PLUTONIUM_WAYLAND_DISPLAY:-} == *"$SLOT_SUFFIX" ]] || unset PLUTONIUM_WAYLAND_DISPLAY
+    fi
+    PLUTONIUM_WAYLAND_DISPLAY=${PLUTONIUM_WAYLAND_DISPLAY:-$SOCKET} exec node "$ROOT/helper/plutonium.ts" "$@" ;;
   # tools/cdp.py from the main checkout, which the container mounts.
   cdp) need_ash_runtime; session_vars drm; on_ash -e "CDP=${CDP:-localhost:$CDP_PORT}" python3 "$MAIN_ROOT/tools/cdp.py" "$@" ;;
   help|-h|--help) usage ;;
