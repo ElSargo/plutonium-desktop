@@ -21,7 +21,7 @@ sources:  output · window (parked or not) · tab · a region of any of these
 - **Tab frames** (patch 0007): a `FrameSinkVideoCapturer` on a hidden tab's view.
 - **Agents** take PNGs of their thread's windows and tabs (`snapshot_window`, `snapshot_tab`). T3's browser panel reports recording as unsupported (`startScreencast` in its patch 0005).
 
-Not there yet: a portal backend, PipeWire output, a shell API, routing getDisplayMedia from tabs, and global shortcuts.
+Built since (below): the portal backend (ScreenCast, Screenshot, GlobalShortcuts), PipeWire output, a shell API, and getDisplayMedia from tabs through the shell's picker.
 
 ## Decisions
 
@@ -164,6 +164,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 - Restore data is `("plutonium", 1, <JSON>)`: the output by name, a window by app id and title, a tab by URL.
 - A capture a shell stops ends its portal session (`Session.Closed`).
 - `PickColor` isn't there yet.
+- **GlobalShortcuts** (version 1, `helper/src/shortcuts.ts`): `BindShortcuts` asks the focused shell ("bind_shortcuts" over the shell relay; the library's dialog lists each shortcut with the app's preferred key, "Press a key…" to change it, Allow or Don't allow). Bindings are kept per app id in `$XDG_STATE_HOME/plutonium/global-shortcuts.json`, so an app that binds the same ids again (OBS at every start) isn't asked again. Every shell gets the bound combos ("global_shortcuts") and adds them to its `setShellShortcuts` list, so they're caught whatever has the keyboard; the library posts a press and a release to `POST /v1/shell/global-shortcut`, which the portal emits as `Activated` and `Deactivated`. Triggers are the XDG spelling (`CTRL+ALT+p`) with the modifiers CTRL, ALT, SHIFT and LOGO and the common keysyms; others are left unbound. Without a shell to ask, the app's preferred triggers are taken as they are (Ash has no binding dialog of its own). A release is only seen if the key-up reaches the shell's page: holding the key while the focus moves gives the release on blur.
 - Files: `helper/portal/plutonium.portal` and `plutonium-portals.conf`. DRM sessions install them, set `XDG_CURRENT_DESKTOP=Plutonium` for D-Bus activation and systemd, and restart xdg-desktop-portal, so it picks this backend. When the session ends (Ash exits, `plutonium stop`, Ctrl+Alt+Backspace, a crash), the previous value goes back (or it's unset, if there was none) and the portal restarts again, so a desktop on another VT gets its own backends. `PORTAL_SESSION=0` (`plutonium.env`) leaves the portal alone. X11 sessions never touch it.
 
 ## Testing
@@ -195,7 +196,7 @@ Quirks seen only on Xvfb: Alt+Print arrives with an empty `code` (X maps it to S
 
 - `cd helper && node --test test/portal.test.ts`: restore data, screenshots on disk, and the backend end to end on a private `dbus-daemon`, called as xdg-desktop-portal calls it.
 - `tools/portal-screencast.py` is a portal client (ScreenCast through `OpenPipeWireRemote` and GStreamer's `pipewiresrc`, or `--screenshot`): with PyGObject and GStreamer, e.g. `nix-shell -p 'python3.withPackages (p: [ p.pygobject3 ])' gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good pipewire`.
-- `tools/portal-bus.sh start` gives a private bus with its own xdg-desktop-portal that uses this backend; run the session's helper with `PLUTONIUM_PORTAL_BUS` set to it, and apps with `DBUS_SESSION_BUS_ADDRESS`. Its xdg-desktop-portal finds the files through `XDG_DATA_DIRS` and `XDG_CONFIG_HOME` (checked with 1.22.1). Its Screenshot portal wants the permission store and an access dialog for non-interactive screenshots, which a bare bus doesn't have.
+- `tools/portal-bus.sh start` gives a private bus with its own xdg-desktop-portal that uses this backend; run the session's helper with `PLUTONIUM_PORTAL_BUS` set to it, and apps with `DBUS_SESSION_BUS_ADDRESS`. Its xdg-desktop-portal finds the files through `XDG_DATA_HOME`, `XDG_DATA_DIRS` and `XDG_CONFIG_HOME` (checked with 1.22.1); its own `XDG_DATA_HOME`, so a `plutonium.portal` a DRM session installed in `~/.local/share` doesn't shadow this checkout's. Its Screenshot portal wants the permission store and an access dialog for non-interactive screenshots, which a bare bus doesn't have.
 
 ## Not planned
 

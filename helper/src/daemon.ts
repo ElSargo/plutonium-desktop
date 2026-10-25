@@ -396,7 +396,11 @@ export class Daemon {
     // The shells show the windows agents work in as such (agent_windows),
     // also to a page that connects later.
     this.agentWindows.onChange = (windows) => this.relay.notifyAll("agent_windows", { windows });
-    this.relay.onAttach = (key) => this.relay.notify(key, "agent_windows", { windows: this.agentWindows.list() });
+    this.relay.onAttach = (key) => {
+      this.relay.notify(key, "agent_windows", { windows: this.agentWindows.list() });
+      // EXO-CAPTURE: the keys apps bound through the portal.
+      if (this.portal) this.relay.notify(key, "global_shortcuts", { shortcuts: this.portal.globalShortcuts() });
+    };
     if (this.desktop) {
       const desktop = this.desktop;
       desktop.changeListeners.add(() => {
@@ -1427,6 +1431,17 @@ export class Daemon {
         response.writeHead(found ? 204 : 404).end();
         return;
       }
+      // EXO-CAPTURE: a shell caught a key an app bound through the portal.
+      if (method === "POST" && path === "/v1/shell/global-shortcut") {
+        const { session, id, phase } = await readJson(request);
+        const known =
+          typeof session === "string" &&
+          typeof id === "string" &&
+          (phase === "activated" || phase === "deactivated") &&
+          (this.portal?.shortcut(session, id, phase) ?? false);
+        response.writeHead(known ? 204 : 404).end();
+        return;
+      }
       if (method === "POST" && path === "/v1/shell/origins") {
         // The browser's shells, from a page that is already a shell: what
         // the shells overlay added or removed.
@@ -1952,7 +1967,16 @@ export class Daemon {
     check.unref();
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
-      const portal = new Portal({ desktop: this.desktop, apps: this.apps, threadForPid });
+      const portal = new Portal({
+        desktop: this.desktop,
+        apps: this.apps,
+        threadForPid,
+        askShell: async (op, args, timeoutMs) => {
+          const reply = await this.relay.request(op, args, timeoutMs);
+          return reply.kind === "json" ? reply.value : null;
+        },
+        notifyShells: (op, args) => this.relay.notifyAll(op, args),
+      });
       portal.start().then(
         () => (this.portal = portal),
         (error: unknown) => console.warn(`plutoniumd: no portal backend: ${(error as Error).message}`),

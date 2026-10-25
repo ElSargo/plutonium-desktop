@@ -269,6 +269,12 @@ export class PlutoniumShell extends EventTarget {
     this.captureSettings = { recording: true, screenshots: true };
     /** @type {Map<number, AbortController>} capture requests this page took, by id */
     this._captureRequests = new Map();
+    /** This page's own shortcuts (setShellShortcuts()), and the keys apps bound through the portal. */
+    this._ownShortcuts = [];
+    /** @type {{ session: string, id: string, combo: string }[]} */
+    this.globalShortcuts = [];
+    /** @type {Map<string, { session: string, id: string, code: string }>} bound keys held down, by combo */
+    this._heldShortcuts = new Map();
     this._captureIndicator = null;
     this.ready = this.available ? this._start() : Promise.resolve();
   }
@@ -378,6 +384,7 @@ export class PlutoniumShell extends EventTarget {
     }
     // Captures (docs/features/CAPTURE.md).
     if (this.captureAvailable) this._startCaptures();
+    this._startGlobalShortcuts();
     this._serveBridge();
     const windows = await this.broker.getWindows();
     for (const entry of windows) this._setWindow(entry);
@@ -1135,7 +1142,56 @@ export class PlutoniumShell extends EventTarget {
    * browser's (fullscreen) and can't be taken.
    */
   setShellShortcuts(shortcuts) {
-    this.broker?.setShellShortcuts?.(shortcuts);
+    this._ownShortcuts = [...shortcuts];
+    this._applyShortcuts();
+  }
+
+  // This page's own shortcuts, and the keys apps bound (global shortcuts).
+  _applyShortcuts() {
+    this.broker?.setShellShortcuts?.([...this._ownShortcuts, ...this.globalShortcuts.map((shortcut) => shortcut.combo)]);
+  }
+
+  // Global shortcuts (docs/features/CAPTURE.md): keys apps bound through the
+  // desktop portal. The page gets them whatever has the keyboard (they're in
+  // its shell shortcuts); a press and the release go to the helper, which
+  // tells the app. Bound keys are the app's: the page's own handlers don't
+  // see them.
+  _startGlobalShortcuts() {
+    const comboOf = (event) =>
+      `${event.ctrlKey ? "Ctrl+" : ""}${event.altKey ? "Alt+" : ""}${event.shiftKey ? "Shift+" : ""}${event.metaKey ? "Super+" : ""}${event.code}`;
+    const send = (shortcut, phase) =>
+      fetch(`${HELPER}/v1/shell/global-shortcut`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: shortcut.session, id: shortcut.id, phase }),
+      }).catch(() => {});
+    addEventListener(
+      "keydown",
+      (event) => {
+        if (this._bindingShortcuts) return;
+        const combo = comboOf(event);
+        const bound = this.globalShortcuts.filter((shortcut) => shortcut.combo === combo);
+        if (!bound.length) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.repeat || [...this._heldShortcuts.values()].some((held) => held.code === event.code)) return;
+        for (const shortcut of bound) {
+          this._heldShortcuts.set(`${combo} ${shortcut.session} ${shortcut.id}`, { ...shortcut, code: event.code });
+          send(shortcut, "activated");
+        }
+      },
+      true,
+    );
+    // The release: of the key, whatever the modifiers are by then.
+    const release = (code) => {
+      for (const [key, held] of [...this._heldShortcuts]) {
+        if (code !== undefined && held.code !== code) continue;
+        this._heldShortcuts.delete(key);
+        send(held, "deactivated");
+      }
+    };
+    addEventListener("keyup", (event) => release(event.code), true);
+    addEventListener("blur", () => release(undefined));
   }
 
   // Captures (docs/features/CAPTURE.md). Every capture, whoever started it,
@@ -1334,8 +1390,19 @@ export class PlutoniumShell extends EventTarget {
     // One at a time: Print again while choosing does nothing.
     if (this._choosingArea) return null;
     this._choosingArea = true;
-    // The keys (Escape, Enter) are the selector's while it's open: an app
-    // window that has the keyboard gives it up, and gets it back after.
+    // The keys (Escape, Enter) are the selector's while it's open.
+    const giveBack = this._takeKeyboard();
+    try {
+      return await this._takeScreenshot(targets, save);
+    } finally {
+      this._choosingArea = false;
+      giveBack();
+    }
+  }
+
+  // An app window that has the keyboard gives it up (to this page's own UI);
+  // the returned function gives it back.
+  _takeKeyboard() {
     const blurred = [];
     for (const element of document.querySelectorAll("native-window")) {
       const id = Number(element.getAttribute("window"));
@@ -1344,12 +1411,9 @@ export class PlutoniumShell extends EventTarget {
         blurred.push(element);
       }
     }
-    try {
-      return await this._takeScreenshot(targets, save);
-    } finally {
-      this._choosingArea = false;
+    return () => {
       for (const element of blurred) if (element.isConnected) element.focusWindow();
-    }
+    };
   }
 
   async _takeScreenshot(targets, save) {
@@ -1402,6 +1466,11 @@ export class PlutoniumShell extends EventTarget {
       if (id === undefined) {
         // A notice: nothing to answer.
         if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
+        if (op === "global_shortcuts") {
+          this.globalShortcuts = args.shortcuts ?? [];
+          this._applyShortcuts();
+          return;
+        }
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
           this.dispatchEvent(new Event("agentwindowschange"));
@@ -1492,6 +1561,15 @@ export class PlutoniumShell extends EventTarget {
         return (await this.broker.getGroups()).map(plainGroup);
       case "snapshot_tab":
         return this.snapshotTab(args.tabId);
+      case "bind_shortcuts": {
+        // An app binds global shortcuts: this page asks the user (the
+        // "shortcutBinder" option: false leaves it to the helper, which takes
+        // the app's own keys).
+        const option = this.options.shortcutBinder;
+        if (option === false) throw new Error("this shell doesn't bind shortcuts");
+        if (typeof option === "function") return option(args);
+        return new ShortcutBinder(this, args).ask();
+      }
       case "focus_tab": {
         if (args.display !== undefined) {
           const display = this.displayOf(args.display);
@@ -3602,6 +3680,13 @@ const CAPTURE_STYLE = `@layer plutonium {
     object-fit: contain; background: color-mix(in srgb, currentColor 10%, transparent); border-radius: 4px; }
   .plutonium-capture-picker .source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9em; }
   .plutonium-capture-picker .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .plutonium-shortcut-binder { width: min(440px, calc(100vw - 32px)); max-width: none; display: grid; gap: 8px; }
+  .plutonium-shortcut-binder .title { font-weight: 600; }
+  .plutonium-shortcut-binder .hint { opacity: .75; font-size: .9em; }
+  .plutonium-shortcut-binder .row { display: flex; align-items: center; gap: 8px; }
+  .plutonium-shortcut-binder .row span { flex: 1; }
+  .plutonium-shortcut-binder .key { font: inherit; font-variant-numeric: tabular-nums; min-width: 8em; }
+  .plutonium-shortcut-binder .buttons { display: flex; justify-content: flex-end; gap: 8px; }
   .plutonium-capture-indicator { top: 8px; right: 8px; padding: 6px 8px; display: grid; gap: 4px; }
   .plutonium-capture-indicator .row { display: flex; align-items: center; gap: 8px; }
   .plutonium-capture-indicator .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plutonium-capture-dot, #e5484d); }
@@ -3951,4 +4036,105 @@ class AreaSelector {
       });
     });
   }
+}
+
+// The library's binding dialog for global shortcuts: what the app wants each
+// key for, the key it proposes (or none), a button to press another, then
+// Allow (the keys as shown) or Don't allow.
+class ShortcutBinder {
+  constructor(shell, request) {
+    ensureCaptureStyle();
+    this.shell = shell;
+    this.request = request;
+    this.shortcuts = (request.shortcuts ?? []).map((shortcut) => ({ ...shortcut }));
+  }
+
+  ask() {
+    return new Promise((resolve) => {
+      const element = document.createElement("div");
+      element.className = "plutonium-dialog plutonium-shortcut-binder";
+      element.popover = "manual";
+      element.setAttribute("role", "dialog");
+      element.style.left = "50%";
+      element.style.top = "50%";
+      element.style.transform = "translate(-50%, -50%)";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = `${this.request.appName || "An app"} wants keyboard shortcuts`;
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "They work whatever has the keyboard. Click a key to change it.";
+      const list = document.createElement("div");
+      list.className = "shortcuts";
+      let capturing = null;
+      const giveBack = this.shell._takeKeyboard();
+      const label = (shortcut) => (shortcut.combo ? describeCombo(shortcut.combo) : "None");
+      for (const shortcut of this.shortcuts) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const text = document.createElement("span");
+        text.textContent = shortcut.description;
+        const key = document.createElement("button");
+        key.className = "key";
+        key.textContent = label(shortcut);
+        key.onclick = () => {
+          capturing?.button && (capturing.button.textContent = label(capturing.shortcut));
+          capturing = { shortcut, button: key };
+          key.textContent = "Press a key…";
+          element.focus();
+        };
+        row.append(text, key);
+        list.append(row);
+      }
+      const buttons = document.createElement("div");
+      buttons.className = "buttons";
+      const refuse = document.createElement("button");
+      refuse.textContent = "Don't allow";
+      const allow = document.createElement("button");
+      allow.className = "default";
+      allow.textContent = "Allow";
+      buttons.append(refuse, allow);
+      element.tabIndex = -1;
+      element.append(title, hint, list, buttons);
+      const onKey = (event) => {
+        if (!capturing) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+        if (event.key === "Escape") {
+          capturing.button.textContent = label(capturing.shortcut);
+          capturing = null;
+          return;
+        }
+        capturing.shortcut.combo =
+          `${event.ctrlKey ? "Ctrl+" : ""}${event.altKey ? "Alt+" : ""}${event.shiftKey ? "Shift+" : ""}${event.metaKey ? "Super+" : ""}${event.code}`;
+        capturing.button.textContent = label(capturing.shortcut);
+        capturing = null;
+      };
+      // Before the page's own keys and the bound ones.
+      this.shell._bindingShortcuts = true;
+      addEventListener("keydown", onKey, true);
+      const finish = (answer) => {
+        removeEventListener("keydown", onKey, true);
+        this.shell._bindingShortcuts = false;
+        element.remove();
+        giveBack();
+        resolve(answer);
+      };
+      refuse.onclick = () => finish(null);
+      allow.onclick = () => finish({ shortcuts: this.shortcuts.map(({ id, combo }) => ({ id, combo })) });
+      document.body.append(element);
+      element.showPopover();
+      this.shell.showShell();
+      allow.focus();
+    });
+  }
+}
+
+/** How a combo reads: "Ctrl+Alt+P". */
+function describeCombo(combo) {
+  const parts = combo.split("+");
+  const code = parts.pop() ?? "";
+  const key = /^Key([A-Z])$/.exec(code)?.[1] ?? /^Digit([0-9])$/.exec(code)?.[1] ?? code;
+  return [...parts, key].join("+");
 }
