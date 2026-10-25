@@ -854,6 +854,51 @@ export class PlutoniumShell extends EventTarget {
     return document.querySelector(`embed[data-content-id="${CSS.escape(tab.contentId)}"]`);
   }
 
+  /** The element in this page that shows native window `windowId` now, if any. */
+  shownWindowElement(windowId) {
+    if (windowId === undefined || windowId === null) return null;
+    return document.querySelector(`native-window[window="${CSS.escape(String(windowId))}"]`);
+  }
+
+  // A native app asks for files (the helper's FileChooser portal): a request as a tab's
+  // fileChooser one, with `source` ({appId, pid, windowId, name}) instead of a tab. It
+  // resolves to the answer, {paths, filter?, choices?}, or null.
+  _appFileChooser(args, option) {
+    return new Promise((resolve) => {
+      const controller = new AbortController();
+      this._appFileChoosers ??= new Map();
+      this._appFileChoosers.set(args.handle, controller);
+      const giveBack = this._takeKeyboard();
+      let done = false;
+      const end = (answer) => {
+        if (done) return false;
+        done = true;
+        this._appFileChoosers.delete(args.handle);
+        giveBack();
+        resolve(answer ?? null);
+        return true;
+      };
+      controller.signal.addEventListener("abort", () => end(null));
+      const request = {
+        requestId: args.handle,
+        kind: "fileChooser",
+        detail: args.detail ?? {},
+        source: args.source ?? {},
+        thread: args.thread ?? null,
+        signal: controller.signal,
+        answer: async (answer) => end(answer),
+      };
+      let taken = false;
+      try {
+        if (typeof option === "function") taken = !!option(request);
+        else taken = (new FileChooser(this, request).open(), true);
+      } catch (error) {
+        console.error("plutonium: drawing an app's file picker", error);
+      }
+      if (!taken) end(null);
+    });
+  }
+
   /**
    * A short message over tab `tabId`'s element (at its top centre), such as "110%"; a new
    * one for the same tab replaces it. Nothing if this page doesn't show the tab.
@@ -1488,6 +1533,7 @@ export class PlutoniumShell extends EventTarget {
           this._applyShortcuts();
           return;
         }
+        if (op === "file_chooser_cancel") this._appFileChoosers?.get(args.handle)?.abort();
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
           this.dispatchEvent(new Event("agentwindowschange"));
@@ -1586,6 +1632,13 @@ export class PlutoniumShell extends EventTarget {
         if (option === false) throw new Error("this shell doesn't bind shortcuts");
         if (typeof option === "function") return option(args);
         return new ShortcutBinder(this, args).ask();
+      }
+      case "file_chooser": {
+        // A native app's file picker (the FileChooser portal): the same picker as tabs'
+        // (the "fileChooser" option: false leaves the app without one).
+        const option = this.options.fileChooser;
+        if (option === false) throw new Error("this shell doesn't pick files");
+        return this._appFileChooser(args, option);
       }
       case "pick_color": {
         // An app asks for a color from the screen (the "colorPicker" option:
@@ -2403,8 +2456,9 @@ class FileChooser {
     this.acceptButton = $(".accept");
     this.message = $(".message");
     $("header b").textContent = detail.title || titles[this.mode] || titles.open;
-    $(".origin").textContent = detail.origin ?? this.request.tab?.url ?? "";
-    this.acceptButton.textContent = accept[this.mode] ?? "Open";
+    $(".origin").textContent = detail.origin ?? this.request.tab?.url ?? this.request.source?.name ?? "";
+    this.acceptButton.textContent = detail.acceptLabel || (accept[this.mode] ?? "Open");
+    this.addChoices($(".spacer"));
     this.list.setAttribute("aria-multiselectable", String(this.mode === "open-multiple"));
     if (!this.isSave) this.nameInput.hidden = true;
     else this.nameInput.value = detail.currentName ?? "";
@@ -2454,9 +2508,36 @@ class FileChooser {
     this.start(detail.currentFolder);
   }
 
-  // Over the tab's element, else in the middle of the page.
+  // An app's extra choices (the portal's, such as an encoding): a select each, or a
+  // checkbox for one without options; answered as {id: value}.
+  addChoices(before) {
+    this.choices = {};
+    for (const choice of this.request.detail?.choices ?? []) {
+      this.choices[choice.id] = choice.value;
+      const label = document.createElement("label");
+      if (choice.options.length === 0) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = choice.value === "true";
+        box.addEventListener("change", () => (this.choices[choice.id] = String(box.checked)));
+        label.append(box, ` ${choice.label}`);
+      } else {
+        const select = document.createElement("select");
+        for (const option of choice.options) {
+          select.append(new Option(option.label, option.id, false, option.id === choice.value));
+        }
+        select.addEventListener("change", () => (this.choices[choice.id] = select.value));
+        label.append(`${choice.label} `, select);
+      }
+      before.before(label);
+    }
+  }
+
+  // Over the tab's (or the app window's) element, else in the middle of the page.
   place() {
-    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect() ?? {
+    const element =
+      this.shell.shownTabElement(this.request.tabId) ?? this.shell.shownWindowElement(this.request.source?.windowId);
+    const box = element?.getBoundingClientRect() ?? {
       left: 0,
       top: 0,
       width: window.innerWidth,
@@ -2788,6 +2869,7 @@ class FileChooser {
     if (this.closed) return;
     if (paths && this.dir) this.shell._lastFileFolder = this.dir;
     const answer = paths ? { paths, ...(this.filter >= 0 && !this.isFolder ? { filter: this.filter } : {}) } : null;
+    if (answer && this.request.detail?.choices?.length) answer.choices = this.choices;
     const ok = await this.request.answer(answer);
     if (!ok && paths) {
       this.setMessage("The page didn't take that.");
