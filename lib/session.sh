@@ -114,11 +114,7 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
        --plutonium-hide-windows
        "--plutonium-helper-url=http://127.0.0.1:$HELPER_PORT"
        "--plutonium-helper-socket=$RUN_DIR/plutonium/$SOCKET.sock"
-       --enable-logging=stderr --v=0 "--vmodule=$VMODULE"
-       # Web APIs ChromeOS has and desktop Linux Chromium doesn't: pages
-       # shouldn't tell them apart (BACKLOG, "Audit what still behaves like
-       # ChromeOS").
-       --disable-blink-features=WebShare,HandwritingRecognition,BarcodeDetector,WebBluetooth)
+       --enable-logging=stderr --v=0 "--vmodule=$VMODULE")
 [[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS")
 # Pages see the host's timezone and language, which the container doesn't
 # have (it says UTC): a zone name the container's tzdata knows.

@@ -617,7 +617,9 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   an app fullscreen.
 - [ ] **Switcher: app icons** in the window list and the launcher (the helper
   serves them; SVG needs decoding in the browser process).
-- [ ] **Switcher on DRM**: verify it there (only Xvfb so far).
+- [x] **Switcher on DRM**: verify it there (only Xvfb so far). Done 2026-10-26
+  (`SHELLS.md`): works; its text field colour, hover and the backup window's
+  stacking fixed after it.
 - [x] **Frontends** (step 4). M · T3 and the plain shell register threads,
   tag what they open, show an "Elsewhere" area with import.
 

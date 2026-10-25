@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <datzeesix@gmail.com>
 Date: Sun, 25 Oct 2026 19:54:36 +1300
-Subject: [PATCH 53/55] Plutonium: the shells' tabs survive a restart
+Subject: [PATCH 53/56] Plutonium: the shells' tabs survive a restart
 
 EXO-SESSION: PlutoniumTabSession writes every tab's address, tags and
 opener kind to "Plutonium Tabs" in the profile (ImportantFileWriter, a

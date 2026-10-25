@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <datzeesix@gmail.com>
 Date: Sun, 25 Oct 2026 19:45:26 +1300
-Subject: [PATCH 52/55] Plutonium: pages see Linux, not ChromeOS
+Subject: [PATCH 52/56] Plutonium: pages see Linux, not ChromeOS
 
 ChromeOS is an implementation detail: the user agent's platform is
 "X11; Linux x86_64" (not "X11; CrOS x86_64 14541.0.0"), UA client hints
@@ -9,10 +9,37 @@ say platform "Linux" with an empty platform version (not "Chromium OS"),
 and the OS/CPU string is "Linux <cpu>", as Linux Chromium's. The unit
 test's ChromeOS expectations follow.
 ---
+ .../chrome_content_renderer_client.cc         | 13 ++++++++--
  .../embedder_support/user_agent_utils.cc      | 25 ++++++++-----------
  .../user_agent_utils_unittest.cc              | 25 +++++++------------
- 2 files changed, 19 insertions(+), 31 deletions(-)
+ 3 files changed, 30 insertions(+), 33 deletions(-)
 
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index 4bbd129c5e..4c67fe9963 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -1554,10 +1554,19 @@ void ChromeContentRendererClient::
+ 
+ // Web Share is conditionally enabled here in chrome/, to avoid it
+ // being made available in WebView or Linux.
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
+-    BUILDFLAG(IS_MAC)
++// PLUTONIUM: pages see Linux Chromium, which has none of these (only
++// ChromeOS has them on by default). Turned off here rather than with
++// --disable-blink-features, which shows the "unsupported command-line flag"
++// infobar.
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+   blink::WebRuntimeFeatures::EnableWebShare(true);
+ #endif
++#if BUILDFLAG(IS_CHROMEOS)
++  for (const char* feature : {"HandwritingRecognition", "BarcodeDetector",
++                              "WebBluetooth"}) {
++    blink::WebRuntimeFeatures::EnableFeatureFromString(feature, false);
++  }
++#endif
+ 
+   if (base::FeatureList::IsEnabled(
+           autofill::features::kAutofillPolicyControlledFeatureAutofill)) {
 diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
 index bf4a8960a0..eeb207b121 100644
 --- a/components/embedder_support/user_agent_utils.cc

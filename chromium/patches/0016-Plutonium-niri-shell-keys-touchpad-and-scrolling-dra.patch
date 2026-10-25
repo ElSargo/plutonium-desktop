@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 19:00:09 +1300
-Subject: [PATCH 16/55] Plutonium: niri shell keys, touchpad and scrolling,
+Subject: [PATCH 16/56] Plutonium: niri shell keys, touchpad and scrolling,
  drag and drop, shell links as tabs
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
