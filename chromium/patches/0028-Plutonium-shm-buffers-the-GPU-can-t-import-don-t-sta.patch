@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Tue, 20 Oct 2026 20:17:33 +1300
-Subject: [PATCH 28/51] Plutonium: shm buffers the GPU can't import don't stall
+Subject: [PATCH 28/52] Plutonium: shm buffers the GPU can't import don't stall
  the display; EXO-DIAG logs at VLOG(1)
 
 EXO-IMPORT: creating a shared image the GPU process can't back stops the
