@@ -303,7 +303,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   is already `Linux x86_64`. Then compare the remaining fingerprint with
   Linux Chromium on the same machine, using a fingerprinting test page:
   ChromeOS-only web APIs, fonts and WebGL strings. Done 2026-10-26 (patch
-  0051, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
+  0052, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
   `userAgentData.platform` `"Linux"`, `platformVersion` `""`.
 - [x] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
   tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
@@ -385,7 +385,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
 - [x] **Tabs don't survive a browser restart.** M · Session restore.
-  Done 2026-10-26 (patch 0052, `TABS.md`, "Surviving a restart"): addresses
+  Done 2026-10-26 (patch 0053, `TABS.md`, "Surviving a restart"): addresses
   and tags, through a clean stop and a kill -9; not history. Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
