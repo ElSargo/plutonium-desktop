@@ -22,6 +22,8 @@
 // - FileChooser: OpenFile, SaveFile and SaveFiles ask the focused shell
 //   ("file_chooser" over the shell relay), whose picker is the one tabs use,
 //   over the app's window (fileChooser.ts).
+// - Print: the shell's print dialog, then CUPS; served under a name of its
+//   own by printportal.py, which can take the document's fd (printPortal.ts).
 //
 // The session's environment picks it: XDG_CURRENT_DESKTOP=Plutonium and
 // plutonium-portals.conf (helper/portal/).
@@ -31,6 +33,7 @@ import { type DesktopApps } from "./apps.ts";
 import { DBusConnection, DBusError, type Message, type Reply, type Variant } from "./dbus.ts";
 import { type Desktop, type DesktopCapture } from "./desktop.ts";
 import { type FileChooserMethod, fileChooserDetail, fileChooserResults, type PickerAnswer } from "./fileChooser.ts";
+import { PrintBackend } from "./printPortal.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import {
   type Bindings,
@@ -141,6 +144,8 @@ export interface PortalOptions {
   readonly notifyShells?: (op: string, args: Record<string, unknown>) => void;
   /** Where global shortcuts are kept (default shortcuts.ts' bindingsPath()). */
   readonly bindingsPath?: string;
+  /** Whether to serve the Print portal too (printportal.py; default true). */
+  readonly print?: boolean;
   /** The native windows (the shell relay's), to find a request's parent. */
   readonly windows?: () => Promise<readonly { id: number; appId: string; pid: number; focused: boolean }[]>;
 }
@@ -166,6 +171,7 @@ export class Portal {
   /** Requests waiting on the user, by handle: how to cancel each. */
   private readonly requests = new Map<string, () => void>();
   private readonly shortcutSessions = new Map<string, ShortcutSession>();
+  private printBackend: PrintBackend | null = null;
 
   constructor(options: PortalOptions) {
     this.options = options;
@@ -191,9 +197,20 @@ export class Portal {
     })) as [number];
     this.bus = bus;
     console.log(`plutoniumd: portal backend ${result === 1 ? "serving" : "queued"} as ${PORTAL_NAME}`);
+    const askShell = this.options.askShell;
+    if (askShell && this.options.print !== false) {
+      this.printBackend = new PrintBackend({
+        address,
+        askShell,
+        notifyShells: this.options.notifyShells,
+        source: (handle, appId) => this.source(handle, appId),
+      });
+      this.printBackend.start();
+    }
   }
 
   stop(): void {
+    this.printBackend?.stop();
     this.bus?.close();
     this.bus = null;
   }
@@ -618,6 +635,14 @@ export class Portal {
     return (own.find((window) => window.focused) ?? own.at(-1))?.id;
   }
 
+  /** A dialog's source ({appId, pid, windowId, name}: who asks, over which window) and thread. */
+  private async source(handle: string, appId: string): Promise<{ source: Record<string, unknown>; thread: string | null }> {
+    const consumer = await this.consumer(handle, appId);
+    const pid = (consumer.pid as number | undefined) ?? 0;
+    const windowId = await this.parentWindow(pid, appId);
+    return { source: { appId, pid, windowId, name: consumer.name }, thread: (consumer.thread as string | undefined) ?? null };
+  }
+
   /** OpenFile, SaveFile, SaveFiles: the shell's file picker; without a shell, there's none to show. */
   private async chooseFiles(
     method: FileChooserMethod,
@@ -628,9 +653,7 @@ export class Portal {
     options: Map<string, unknown>,
   ): Promise<Reply> {
     if (!this.options.askShell) return this.response(OTHER);
-    const consumer = await this.consumer(handle, appId);
-    const pid = (consumer.pid as number | undefined) ?? 0;
-    const windowId = await this.parentWindow(pid, appId);
+    const { source, thread } = await this.source(handle, appId);
     const detail = fileChooserDetail(method, title, options);
     let cancelled = false;
     this.requests.set(handle, () => {
@@ -643,14 +666,14 @@ export class Portal {
         {
           handle,
           detail,
-          source: { appId, pid, windowId, name: consumer.name, parent },
-          thread: consumer.thread ?? null,
+          source: { ...source, parent },
+          thread,
         },
         3_600_000,
       )) as PickerAnswer | null;
       const results = cancelled ? null : fileChooserResults(method, options, detail, answer);
       if (!results) return this.response(CANCELLED);
-      console.log(`plutoniumd: portal: ${consumer.name} ${method}: ${(results[0]![1][1] as string[]).join(" ")}`);
+      console.log(`plutoniumd: portal: ${source.name} ${method}: ${(results[0]![1][1] as string[]).join(" ")}`);
       return this.response(SUCCESS, results);
     } catch (error) {
       console.warn(`plutoniumd: portal: file chooser: ${(error as Error).message}`);
