@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Plutonium test IME",
+  "version": "1",
+  "description": "A tiny input method for testing composition in native apps (docs/features/IME.md).",
+  "permissions": [
+    "input",
+    "inputMethodPrivate"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "input_components": [
+    {
+      "name": "Plutonium test IME",
+      "id": "pltest",
+      "language": "en-US",
+      "layouts": [
+        "us"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 09:13:12 +1300
+Subject: [PATCH 62/65] Plutonium: an input method composes and commits into
+ embedded windows
+
+EXO-EMBED stopped the propagation of every key for an embedded window, so
+the page whose view a key was aimed at didn't also get it. That included
+the input method's own keys: the VKEY_PROCESSKEY it sends before
+composing or committing, and the key it passes on before committing a
+single character. InputMethodAsh reads a stopped key as taken by its
+target and drops the composition or the commit, so an IME's text never
+reached a native window. Those keys are now only marked handled, which
+keeps them from the page all the same.
+
+Verified with an extension IME (chrome.input.ime) and gtk4-demo over
+zwp_text_input_v3 on Xvfb.
+---
+ components/exo/keyboard.cc | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/components/exo/keyboard.cc b/components/exo/keyboard.cc
+index fcee60ef4f..681559132d 100644
+--- a/components/exo/keyboard.cc
++++ b/components/exo/keyboard.cc
+@@ -283,7 +283,15 @@ void Keyboard::ProcessKeyEvent(ui::KeyEvent* event) {
+   // the page whose view they were aimed at.
+   absl::Cleanup stop_embedded_propagation = [this, event] {
+     if (embedded_owner_) {
+-      event->StopPropagation();
++      // A key the input method handled (its VKEY_PROCESSKEY, or the key it
++      // passes on before committing a character) is only marked handled:
++      // InputMethodAsh drops the composition or commit when that key's
++      // propagation is stopped.
++      if (ConsumedByIme(*event)) {
++        event->SetHandled();
++      } else {
++        event->StopPropagation();
++      }
+     }
+   };
+ 

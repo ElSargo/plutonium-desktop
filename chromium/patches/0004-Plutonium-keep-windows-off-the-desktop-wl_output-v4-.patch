@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 09:10:39 +1300
-Subject: [PATCH 04/60] Plutonium: keep windows off the desktop, wl_output v4,
+Subject: [PATCH 04/65] Plutonium: keep windows off the desktop, wl_output v4,
  embed input logs
 
 --plutonium-hide-windows parks every toplevel from creation and again on its last detach unless popped out with ShowOnDesktop. wl_output v4 sends name/description (xwayland-satellite needs it). VLOG(1) traces of where pointer presses into embedded windows go.
