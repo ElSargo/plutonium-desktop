@@ -25,7 +25,7 @@ The page's content box is always where the window is drawn, as Hyprland draws a 
   - **Fullscreen:** `none`, centered.
   - **`contain` / `scale-down`:** for a fixed-size app the page wants scaled into its box.
 
-**Whole device pixels** (0055): the element snaps the window's rect in its own transform space, and the compositor moves its surface layer by whatever fraction of a pixel the transforms above it add (when they are only 2D translations, e.g. a CSS `translate()` at scale 1.78). The window stays crisp, and viz can put it on a display plane, which takes whole-pixel rects. Verified on Xvfb: a niri tile at `translate(3.37px, 5.71px)` shows GTK Demo exactly as untransformed, shifted by (3, 6) px (screenshots, max difference 5 from the app redrawing). A transform that animates on the compositor isn't snapped while it runs.
+**Whole device pixels** (0058): the element snaps the window's rect in its own transform space, and the compositor moves its surface layer by whatever fraction of a pixel the transforms above it add (when they are only 2D translations, e.g. a CSS `translate()` at scale 1.78). The window stays crisp, and viz can put it on a display plane, which takes whole-pixel rects. Verified on Xvfb: a niri tile at `translate(3.37px, 5.71px)` shows GTK Demo exactly as untransformed, shifted by (3, 6) px (screenshots, max difference 5 from the app redrawing). A transform that animates on the compositor isn't snapped while it runs.
 
 Before this, a resize showed the old frame unstretched until the app redrew, leaving a gap during a drag. The first attempt at niri's animation had the element animate its own size, which lagged behind a page that snapped its layout.
 

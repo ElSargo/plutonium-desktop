@@ -128,7 +128,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   scale such as 1.6 or 2, or relax the rule for sub-pixel scale errors. S
 - [x] **Pixel-snap `<native-window>`.** Elements at fractional device positions
   can't be promoted to planes (DRM takes whole-pixel rects). S · Done
-  2026-10-26 (patch 0055, `WINDOW_SIZING.md`): the surface layer goes at whole
+  2026-10-26 (patch 0058, `WINDOW_SIZING.md`): the surface layer goes at whole
   device pixels on screen; verified on Xvfb (crisp under a fractional
   `translate()`), planes not yet checked on DRM.
 - [x] **Real input on the TTY** (evdev keyboard/mouse). Verified with virtual
@@ -306,7 +306,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   is already `Linux x86_64`. Then compare the remaining fingerprint with
   Linux Chromium on the same machine, using a fingerprinting test page:
   ChromeOS-only web APIs, fonts and WebGL strings. Done 2026-10-26 (patch
-  0052, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
+  0055, `LINUX_COMPAT.md`): verified on Xvfb, a tab sees `X11; Linux x86_64`,
   `userAgentData.platform` `"Linux"`, `platformVersion` `""`.
 - [x] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
   tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
@@ -353,7 +353,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
   or edge resize could become niri's interactive move or column resize. The
   page would need the pointer for the rest of the drag. Done 2026-10-26
-  (`WINDOW_SIZING.md`, patch 0054): the browser hands the rest of the drag to
+  (`WINDOW_SIZING.md`, patch 0057): the browser hands the rest of the drag to
   the page; niri's move verified on X11 with two displays. Plain ignores both.
 - [ ] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
   shadow, outside the geometry, where `<native-window>` clips the surface, so
@@ -394,7 +394,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
 - [x] **Tabs don't survive a browser restart.** M · Session restore.
-  Done 2026-10-26 (patch 0053, `TABS.md`, "Surviving a restart"): addresses
+  Done 2026-10-26 (patch 0056, `TABS.md`, "Surviving a restart"): addresses
   and tags, through a clean stop and a kill -9; not history. Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
