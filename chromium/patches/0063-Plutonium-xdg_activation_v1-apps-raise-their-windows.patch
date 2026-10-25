@@ -1,0 +1,444 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 09:17:25 +1300
+Subject: [PATCH 63/65] Plutonium: xdg_activation_v1, apps raise their windows
+ through the shell
+
+Apps raise each other's windows with xdg_activation_v1: a terminal opens
+a link in a browser that is already running, a second launch of a
+single-instance app brings up its window. Exo had no such global.
+
+A token is valid if the client that committed it had keyboard focus
+(the surface and serial it names aren't checked), and for 60 s; each is
+used once. Activating a toplevel with a valid token notifies
+EmbeddedWindows' observers (OnEmbeddedWindowActivationRequested), and
+the broker asks the shell that owns the window's group, else the
+visible shell, to show it: the "windowfocusrequest" event the overlay
+uses. The shell isn't switched to.
+---
+ chrome/browser/exo_window_broker.cc      |   7 +
+ chrome/browser/exo_window_broker.h       |   1 +
+ chrome/browser/plutonium_shell.cc        |  26 ++++
+ chrome/browser/plutonium_shell.h         |   6 +
+ components/exo/embedded_windows.cc       |  16 +++
+ components/exo/embedded_windows.h        |   6 +
+ components/exo/wayland/BUILD.gn          |   3 +
+ components/exo/wayland/server.cc         |   7 +
+ components/exo/wayland/xdg_activation.cc | 176 +++++++++++++++++++++++
+ components/exo/wayland/xdg_activation.h  |  29 ++++
+ 10 files changed, 277 insertions(+)
+ create mode 100644 components/exo/wayland/xdg_activation.cc
+ create mode 100644 components/exo/wayland/xdg_activation.h
+
+diff --git a/chrome/browser/exo_window_broker.cc b/chrome/browser/exo_window_broker.cc
+index 0b4fd5e0ff..ac00c71844 100644
+--- a/chrome/browser/exo_window_broker.cc
++++ b/chrome/browser/exo_window_broker.cc
+@@ -15,6 +15,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
+ #include "chrome/browser/plutonium_groups.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "content/public/browser/document_user_data.h"
+ #include "content/public/browser/render_frame_host.h"
+ 
+@@ -287,6 +288,12 @@ bool ExoWindowBroker::SetOriginTag(int32_t window_id, const std::string& tag) {
+   return true;
+ }
+ 
++// EXO-ACTIVATION: an app raising its window (xdg_activation_v1) is the
++// shell's to show, as the overlay asks it to.
++void ExoWindowBroker::OnEmbeddedWindowActivationRequested(int32_t window_id) {
++  plutonium_shell::RequestActivateWindow(window_id);
++}
++
+ void ExoWindowBroker::OnEmbeddedWindowDestroyed(int32_t window_id) {
+   reading_tags_.erase(window_id);
+   origin_unknown_.erase(window_id);
+diff --git a/chrome/browser/exo_window_broker.h b/chrome/browser/exo_window_broker.h
+index 56c8426a5c..3a0157d486 100644
+--- a/chrome/browser/exo_window_broker.h
++++ b/chrome/browser/exo_window_broker.h
+@@ -142,6 +142,7 @@ class ExoWindowBroker : public exo::EmbeddedWindows::Observer {
+   // exo::EmbeddedWindows::Observer:
+   void OnEmbeddedWindowChanged(int32_t window_id) override;
+   void OnEmbeddedWindowDestroyed(int32_t window_id) override;
++  void OnEmbeddedWindowActivationRequested(int32_t window_id) override;
+ 
+  private:
+   class DocumentGrants;
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index c7c5bdf7fe..6edd120e59 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -1227,6 +1227,32 @@ bool RequestShowWindow(content::WebContents* shell, int32_t window_id) {
+   return requested;
+ }
+ 
++bool RequestActivateWindow(int32_t window_id) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  std::optional<ExoWindowBroker::WindowInfo> window =
++      broker ? broker->GetWindow(window_id) : std::nullopt;
++  if (!window || !shells) {
++    return false;
++  }
++  content::WebContents* shell = nullptr;
++  for (const std::string& tag : window->tags) {
++    std::optional<PlutoniumGroups::Group> group =
++        PlutoniumGroups::Get()->Find(tag);
++    shell = group ? shells->GetContents(group->shell_id) : nullptr;
++    if (shell) {
++      break;
++    }
++  }
++  if (!shell) {
++    shell = shells->GetVisibleContents();
++  }
++  const bool requested = shell && RequestShowWindow(shell, window_id);
++  VLOG(1) << "EXO-ACTIVATION window #" << window_id
++          << (requested ? " asked of its shell" : ": no shell takes it");
++  return requested;
++}
++
+ bool ShowWindowOnDisplay(int32_t window_id, int64_t display_id) {
+   PlutoniumShells* shells = PlutoniumShells::Get();
+   content::WebContents* shell =
+diff --git a/chrome/browser/plutonium_shell.h b/chrome/browser/plutonium_shell.h
+index 6bb09fa3b3..7e266789cb 100644
+--- a/chrome/browser/plutonium_shell.h
++++ b/chrome/browser/plutonium_shell.h
+@@ -126,6 +126,12 @@ void OnVisibleShellChanged(content::WebContents* previous,
+ bool RequestShowWindow(content::WebContents* shell, int32_t window_id);
+ bool RequestShowTab(content::WebContents* shell, int32_t tab_id);
+ 
++// EXO-ACTIVATION: an app asked for window |window_id| to be shown
++// (xdg_activation_v1): asks the shell that owns its group, else the visible
++// shell, as RequestShowWindow() does. The shell isn't switched to. False if
++// no shell takes it.
++bool RequestActivateWindow(int32_t window_id);
++
+ // EXO-DISPLAYS: asks the visible shell on display |display_id| to show window
+ // |window_id| or tab |tab_id| (as above: it takes the item from where it is
+ // shown now), and moves keyboard focus to that display. False if there's no
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index 22befe1174..f9bedc3a24 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -897,6 +897,22 @@ void EmbeddedWindows::OnToplevelRequested(ShellSurfaceBase* shell_surface,
+   }
+ }
+ 
++void EmbeddedWindows::RequestActivation(Surface* surface) {
++  if (!surface || !surface->window()) {
++    return;
++  }
++  ShellSurfaceBase* shell_surface =
++      GetShellSurfaceBaseForWindow(surface->window()->GetToplevelWindow());
++  int32_t window_id = shell_surface ? FindWindowId(shell_surface) : 0;
++  if (!window_id) {
++    return;
++  }
++  VLOG(1) << "EXO-ACTIVATION window #" << window_id;
++  for (Observer& observer : observers_) {
++    observer.OnEmbeddedWindowActivationRequested(window_id);
++  }
++}
++
+ void EmbeddedWindows::SetFullscreen(int32_t window_id, bool fullscreen) {
+   if (ShellSurfaceBase* shell_surface = FindShellSurface(window_id)) {
+     shell_surface->SetEmbedFullscreen(fullscreen);
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index b26596eaff..acebcae05f 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -114,6 +114,9 @@ class EmbeddedWindows : public aura::WindowObserver {
+     virtual void OnEmbeddedWindowRequested(int32_t window_id,
+                                            Request request,
+                                            int component) {}
++    // EXO-ACTIVATION: the app asked, with a valid xdg_activation token, for
++    // the window to be shown and focused.
++    virtual void OnEmbeddedWindowActivationRequested(int32_t window_id) {}
+   };
+ 
+   // Receives the app's cursor while the pointer is over its embedded surface.
+@@ -145,6 +148,9 @@ class EmbeddedWindows : public aura::WindowObserver {
+   // --plutonium-hide-windows this is the only way onto the desktop, and the
+   // window leaves it again when an element next shows it.
+   void ShowOnDesktop(int32_t window_id);
++  // EXO-ACTIVATION: the toplevel whose surface is |surface| asks to be
++  // activated (xdg_activation_v1); observers decide.
++  void RequestActivation(Surface* surface);
+   static bool HideWindows();
+   // EXO-PRESENT: shows the window on the desktop, fullscreen and active,
+   // even while page elements show it (the shells overlay's "open
+diff --git a/components/exo/wayland/BUILD.gn b/components/exo/wayland/BUILD.gn
+index 2f13537bf5..e82fefee34 100644
+--- a/components/exo/wayland/BUILD.gn
++++ b/components/exo/wayland/BUILD.gn
+@@ -85,6 +85,8 @@ source_set("wayland") {
+     "wp_single_pixel_buffer.h",
+     "wp_viewporter.cc",
+     "wp_viewporter.h",
++    "xdg_activation.cc",
++    "xdg_activation.h",
+     "xdg_shell.cc",
+     "xdg_shell.h",
+     "zaura_output_manager.cc",
+@@ -198,6 +200,7 @@ source_set("wayland") {
+     "//third_party/wayland-protocols:ui_controls_v1_protocol",
+     "//third_party/wayland-protocols:viewporter_protocol",
+     "//third_party/wayland-protocols:vsync_feedback_protocol",
++    "//third_party/wayland-protocols:xdg_activation",
+     "//third_party/wayland-protocols:xdg_decoration_protocol",
+     "//third_party/wayland-protocols:xdg_dialog_protocol",
+     "//third_party/wayland-protocols:ext_image_copy_capture_protocol",
+diff --git a/components/exo/wayland/server.cc b/components/exo/wayland/server.cc
+index 5aa938076d..05bd2cc2e5 100644
+--- a/components/exo/wayland/server.cc
++++ b/components/exo/wayland/server.cc
+@@ -30,6 +30,7 @@
+ #include <touchpad-haptics-unstable-v1-server-protocol.h>
+ #include <viewporter-server-protocol.h>
+ #include <vsync-feedback-unstable-v1-server-protocol.h>
++#include <xdg-activation-v1-server-protocol.h>
+ #include <xdg-decoration-unstable-v1-server-protocol.h>
+ #include <xdg-dialog-v1-server-protocol.h>
+ #include <ext-image-capture-source-v1-server-protocol.h>
+@@ -74,6 +75,7 @@
+ #include "components/exo/wayland/wp_presentation.h"
+ #include "components/exo/wayland/wp_single_pixel_buffer.h"
+ #include "components/exo/wayland/wp_viewporter.h"
++#include "components/exo/wayland/xdg_activation.h"
+ #include "components/exo/wayland/xdg_shell.h"
+ #include "components/exo/wayland/zaura_shell.h"
+ #include "components/exo/wayland/zcr_alpha_compositing.h"
+@@ -391,6 +393,11 @@ void Server::Initialize() {
+   wl_global_create(wl_display_.get(),
+                    &ext_image_copy_capture_manager_v1_interface,
+                    /*version=*/1, display_, bind_image_copy_capture_manager);
++
++  // PLUTONIUM (EXO-ACTIVATION): apps raise each other's windows through the
++  // shell (xdg_activation.h).
++  wl_global_create(wl_display_.get(), &xdg_activation_v1_interface,
++                   /*version=*/1, display_, bind_xdg_activation);
+ }
+ 
+ void Server::Finalize(StartCallback callback, bool success) {
+diff --git a/components/exo/wayland/xdg_activation.cc b/components/exo/wayland/xdg_activation.cc
+new file mode 100644
+index 0000000000..eb7edc4261
+--- /dev/null
++++ b/components/exo/wayland/xdg_activation.cc
+@@ -0,0 +1,176 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/xdg_activation.h"
++
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++#include <xdg-activation-v1-server-protocol.h>
++
++#include <map>
++#include <memory>
++#include <string>
++
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/time/time.h"
++#include "base/unguessable_token.h"
++#include "components/exo/display.h"
++#include "components/exo/embedded_windows.h"
++#include "components/exo/seat.h"
++#include "components/exo/surface.h"
++#include "components/exo/wayland/server_util.h"
++
++namespace exo {
++namespace wayland {
++namespace {
++
++// How long a token can be used for.
++constexpr base::TimeDelta kTokenLifetime = base::Seconds(60);
++
++// The tokens handed out and not used yet, by token: whether each is valid
++// (its client had keyboard focus) and when it was made.
++struct Token {
++  bool valid = false;
++  base::TimeTicks created;
++};
++
++std::map<std::string, Token>& Tokens() {
++  static base::NoDestructor<std::map<std::string, Token>> tokens;
++  return *tokens;
++}
++
++// Whether a surface of |client| has keyboard focus.
++bool ClientHasKeyboardFocus(Display* display, wl_client* client) {
++  Surface* focused = display->seat()->GetFocusedSurface();
++  wl_resource* resource = focused ? GetSurfaceResource(focused) : nullptr;
++  return resource && wl_resource_get_client(resource) == client;
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// xdg_activation_token_v1 interface:
++
++class ActivationToken {
++ public:
++  explicit ActivationToken(Display* display) : display_(display) {}
++  ActivationToken(const ActivationToken&) = delete;
++  ActivationToken& operator=(const ActivationToken&) = delete;
++
++  // Returns false if it was committed before.
++  bool Commit(wl_resource* resource) {
++    if (committed_) {
++      return false;
++    }
++    committed_ = true;
++    wl_client* client = wl_resource_get_client(resource);
++    // What counts is that the client is the one the user is using, not the
++    // surface or serial it names.
++    const bool valid = ClientHasKeyboardFocus(display_, client);
++    std::string token = base::UnguessableToken::Create().ToString();
++    std::erase_if(Tokens(), [](const auto& entry) {
++      return base::TimeTicks::Now() - entry.second.created > kTokenLifetime;
++    });
++    Tokens()[token] = {valid, base::TimeTicks::Now()};
++    VLOG(1) << "EXO-ACTIVATION token for client "
++            << static_cast<const void*>(client) << (valid ? "" : " (invalid)");
++    xdg_activation_token_v1_send_done(resource, token.c_str());
++    wl_client_flush(client);
++    return true;
++  }
++
++ private:
++  const raw_ptr<Display> display_;
++  bool committed_ = false;
++};
++
++void activation_token_set_serial(wl_client* client,
++                                 wl_resource* resource,
++                                 uint32_t serial,
++                                 wl_resource* seat) {
++  // Nothing needs to be done: keyboard focus at commit decides.
++}
++
++void activation_token_set_app_id(wl_client* client,
++                                 wl_resource* resource,
++                                 const char* app_id) {
++  // Nothing needs to be done.
++}
++
++void activation_token_set_surface(wl_client* client,
++                                  wl_resource* resource,
++                                  wl_resource* surface_resource) {
++  // Nothing needs to be done.
++}
++
++void activation_token_commit(wl_client* client, wl_resource* resource) {
++  if (!GetUserDataAs<ActivationToken>(resource)->Commit(resource)) {
++    wl_resource_post_error(resource, XDG_ACTIVATION_TOKEN_V1_ERROR_ALREADY_USED,
++                           "the activation token was already committed");
++  }
++}
++
++void activation_token_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct xdg_activation_token_v1_interface
++    activation_token_implementation = {
++        activation_token_set_serial, activation_token_set_app_id,
++        activation_token_set_surface, activation_token_commit,
++        activation_token_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// xdg_activation_v1 interface:
++
++void activation_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void activation_get_activation_token(wl_client* client,
++                                     wl_resource* resource,
++                                     uint32_t id) {
++  wl_resource* token_resource =
++      wl_resource_create(client, &xdg_activation_token_v1_interface, 1, id);
++  SetImplementation(
++      token_resource, &activation_token_implementation,
++      std::make_unique<ActivationToken>(GetUserDataAs<Display>(resource)));
++}
++
++void activation_activate(wl_client* client,
++                         wl_resource* resource,
++                         const char* token,
++                         wl_resource* surface_resource) {
++  auto it = Tokens().find(token);
++  if (it == Tokens().end()) {
++    VLOG(1) << "EXO-ACTIVATION unknown token";
++    return;
++  }
++  const Token found = it->second;
++  Tokens().erase(it);
++  if (!found.valid || base::TimeTicks::Now() - found.created > kTokenLifetime) {
++    VLOG(1) << "EXO-ACTIVATION token not valid";
++    return;
++  }
++  EmbeddedWindows::Get()->RequestActivation(
++      GetUserDataAs<Surface>(surface_resource));
++}
++
++constexpr struct xdg_activation_v1_interface activation_implementation = {
++    activation_destroy, activation_get_activation_token, activation_activate};
++
++}  // namespace
++
++void bind_xdg_activation(wl_client* client,
++                         void* data,
++                         uint32_t version,
++                         uint32_t id) {
++  wl_resource* resource =
++      wl_resource_create(client, &xdg_activation_v1_interface, 1, id);
++  wl_resource_set_implementation(resource, &activation_implementation, data,
++                                 nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/xdg_activation.h b/components/exo/wayland/xdg_activation.h
+new file mode 100644
+index 0000000000..cbe37d8305
+--- /dev/null
++++ b/components/exo/wayland/xdg_activation.h
+@@ -0,0 +1,29 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
++#define COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM (EXO-ACTIVATION): xdg_activation_v1, for apps that raise each
++// other's windows (a link opened in a browser that is already running, a
++// second launch of a single-instance app). A token is valid if the client
++// that asked for it had keyboard focus; activating with one asks the shell
++// to show the window (EmbeddedWindows::RequestActivation()). |data| is the
++// Display.
++void bind_xdg_activation(wl_client* client,
++                         void* data,
++                         uint32_t version,
++                         uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_

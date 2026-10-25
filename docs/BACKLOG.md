@@ -406,15 +406,21 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   2026-10-20); an automated check in both directions is part of the DRM
   verification pass. The primary selection (middle-click paste) isn't a
   requirement.
-- [ ] **text-input-v3 (IME for GTK 4, Qt, foot).** L · Phase 5
-  Exo only has text-input-v1. With v1, activation and focus handoff to and
-  from the page work (`weston-editor`).
-- [ ] **Test real IME composition.** S · Phase 5
-  No IME engine runs on the Xvfb Ash, so pre-edit/commit was never
-  exercised. Needs a session with a ChromeOS IME available.
-- [ ] **Other missing Wayland protocols** as apps need them: `xdg_activation`,
-  `wp_cursor_shape_v1`, `xdg_toplevel_icon`, explicit sync,
-  `ext_data_control`. M each · Phase 5
+- [x] **text-input-v3 (IME for GTK 4, Qt, foot).** Done (patch 0061,
+  `features/IME.md`). foot and gtk4-demo bind it, get enter/leave and
+  enable, and take pre-edit and commits. Qt 6 is untested.
+- [x] **Test real IME composition.** Done on Xvfb with a test extension IME
+  (`tools/ime-test.sh`). It showed that no IME text had ever reached an
+  embedded window, over v1 or v3 (fixed in 0062), and that keys an IME passes
+  on were dropped (fixed in 0065).
+- [ ] **Choosing an input method.** M · Phase 5
+  Shell mode has no IME menu or language settings, so a user can't pick or
+  install an IME. That needs shell UI over `inputMethodPrivate`, or the
+  settings page (`features/IME.md`, "What's missing").
+- [ ] **Other missing Wayland protocols** as apps need them:
+  `xdg_toplevel_icon`, explicit sync, `ext_data_control`. M each · Phase 5
+  `xdg_activation_v1` and `wp_cursor_shape_v1` are done (0063, 0064,
+  `features/WAYLAND_PROTOCOLS.md`).
 - [x] **X11 apps** via rootless Xwayland as an Exo client. Done
   (xwayland-satellite per thread, now in the helper).
 - [ ] **Our own portal backend for the rest** (`org.freedesktop.impl.portal.*`
