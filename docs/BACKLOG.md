@@ -537,7 +537,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   only its own windows. With `XDG_SESSION_TYPE=wayland`, which Electron 38+
   goes by instead; the helper resolves the apps it launched by pid, as
   Electron 43 blanks its environ.
-- [ ] **GlobalShortcuts portal.** M · The helper answers it; the focused shell
+- [x] **GlobalShortcuts portal.** M · The helper answers it; the focused shell
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
 - [ ] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
   Discord's away status.
@@ -547,17 +547,22 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   dialogs. It goes to every shell as `capturestart` and honours the global switch.
 - [ ] **Discord screen-share audio.** S to test, M to fix · If Discord wants a
   per-app node, publish one from the shared window's pid (as venmic does).
-- [ ] **dmabuf for Ash's PipeWire nodes.** M · They're shared memory (MemFd)
-  now, a CPU copy per frame. dmabuf with modifiers needs buffers Ash
-  allocates and the capturer renders into, rather than viz's own pool.
-- [ ] **A shell's MediaStream of a window bigger than the screen.** S–M ·
-  Chromium's window capture is a subtree of the screen's frame, so it only
-  covers what fits; PipeWire captures use the window's own copies instead.
-  The same for shells: a MediaStreamTrackGenerator fed by those copies, or
-  a capturer on the window's own frame sink.
-- [ ] **The portal's `PickColor`.** S · Answers "other" now.
-- [ ] **`ext-image-copy-capture-v1` in Exo,** for grim, wf-recorder and obs-wlrobs.
-  M · Later.
+- [ ] **dmabuf for Ash's PipeWire nodes.** M · Built (linear GBM buffers written
+  through their mapping, shared memory after); not yet tried with a consumer
+  that takes dmabufs (OBS). Still a CPU copy per frame: no copy at all needs
+  buffers Ash allocates and the capturer renders into, rather than viz's pool.
+- [x] **A shell's MediaStream of a window bigger than the screen.** S–M ·
+  From the window's own frame sink (patch 0054), not a subtree of the
+  screen's frame. A parked window that nothing shows still gives no frames;
+  PipeWire captures cover that.
+- [x] **The portal's `PickColor`.** S · The focused shell's picker over a frozen screen.
+- [x] **`ext-image-copy-capture-v1` in Exo,** for grim (wf-recorder only speaks
+  wlr-screencopy). M · Output sources, shared memory.
+- [ ] **dmabufs for `ext-image-copy-capture-v1`.** M · wl-screenrec takes only
+  dmabufs, and allocates them from its VAAPI encoder with the GPU's tiled
+  modifier whatever modifiers are offered (an AMD one, seen on X11), so a CPU
+  copy can't fill them: it needs a GPU copy (a CopyOutputRequest blitted into
+  the buffer's shared image).
 
 ## Several shells (`SHELLS.md`)
 

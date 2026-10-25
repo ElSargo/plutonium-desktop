@@ -14,6 +14,11 @@
 //   every shell as "capturestart".
 // - Screenshot: interactive asks; otherwise the output, without asking.
 //   The file goes to ~/Pictures/Screenshots.
+// - GlobalShortcuts: the focused shell shows the binding UI ("bind_shortcuts"
+//   over the shell relay; without a shell, the app's preferred keys are
+//   taken). Every shell catches the bound keys (setShellShortcuts) and posts
+//   them back; they go to the app as Activated and Deactivated
+//   (shortcuts.ts).
 //
 // The session's environment picks it: XDG_CURRENT_DESKTOP=Plutonium and
 // plutonium-portals.conf (helper/portal/).
@@ -23,11 +28,21 @@ import { type DesktopApps } from "./apps.ts";
 import { DBusConnection, DBusError, type Message, type Reply, type Variant } from "./dbus.ts";
 import { type Desktop, type DesktopCapture } from "./desktop.ts";
 import { saveScreenshot } from "./screenshots.ts";
+import {
+  type Bindings,
+  bindingsPath,
+  comboOfTrigger,
+  describeCombo,
+  loadBindings,
+  saveBindings,
+  triggerOfCombo,
+} from "./shortcuts.ts";
 
 export const PORTAL_NAME = "org.freedesktop.impl.portal.desktop.plutonium";
 const PORTAL_PATH = "/org/freedesktop/portal/desktop";
 const SCREENCAST = "org.freedesktop.impl.portal.ScreenCast";
 const SCREENSHOT = "org.freedesktop.impl.portal.Screenshot";
+const GLOBAL_SHORTCUTS = "org.freedesktop.impl.portal.GlobalShortcuts";
 const REQUEST = "org.freedesktop.impl.portal.Request";
 const SESSION = "org.freedesktop.impl.portal.Session";
 const PROPERTIES = "org.freedesktop.DBus.Properties";
@@ -115,6 +130,26 @@ export interface PortalOptions {
   readonly threadForPid: (pid: number) => string | undefined;
   /** The bus to serve on; default $PLUTONIUM_PORTAL_BUS, else the session bus. */
   readonly address?: string;
+  /** Asks the focused shell (the shell relay); rejects if none answers. */
+  readonly askShell?: (op: string, args: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
+  /** Tells every shell. */
+  readonly notifyShells?: (op: string, args: Record<string, unknown>) => void;
+  /** Where global shortcuts are kept (default shortcuts.ts' bindingsPath()). */
+  readonly bindingsPath?: string;
+}
+
+/** A global shortcut an app bound: its combo, if it has one. */
+interface BoundShortcut {
+  readonly description: string;
+  combo: string | undefined;
+}
+
+interface ShortcutSession {
+  readonly handle: string;
+  /** Whose bindings: the app id, else its process's name. */
+  readonly app: string;
+  readonly name: string;
+  readonly shortcuts: Map<string, BoundShortcut>;
 }
 
 export class Portal {
@@ -123,6 +158,7 @@ export class Portal {
   private readonly sessions = new Map<string, Session>();
   /** Requests waiting on the user, by handle: how to cancel each. */
   private readonly requests = new Map<string, () => void>();
+  private readonly shortcutSessions = new Map<string, ShortcutSession>();
 
   constructor(options: PortalOptions) {
     this.options = options;
@@ -174,8 +210,19 @@ export class Portal {
       return {};
     }
     if (iface === SESSION && member === "Close") {
+      if (this.shortcutSessions.delete(message.path ?? "")) this.announceShortcuts();
       await this.closeSession(message.path ?? "", { signal: false });
       return {};
+    }
+    if (iface === GLOBAL_SHORTCUTS) {
+      switch (member) {
+        case "CreateSession":
+          return this.createShortcutSession(String(body[0]), String(body[1]), String(body[2]));
+        case "BindShortcuts":
+          return this.bindShortcuts(String(body[1]), body[2] as [string, Map<string, unknown>][]);
+        case "ListShortcuts":
+          return this.listShortcuts(String(body[1]));
+      }
     }
     if (iface === SCREENCAST) {
       switch (member) {
@@ -192,7 +239,7 @@ export class Portal {
         case "Screenshot":
           return this.screenshot(String(body[0]), String(body[1]), optionsOf(body[3]));
         case "PickColor":
-          return this.pickColor();
+          return this.pickColor(String(body[1]));
       }
     }
     throw new DBusError("org.freedesktop.DBus.Error.UnknownMethod", `No such method ${iface}.${member}`);
@@ -207,6 +254,7 @@ export class Portal {
       };
     }
     if (iface === SCREENSHOT) return { version: ["u", 2] };
+    if (iface === GLOBAL_SHORTCUTS) return { version: ["u", 1] };
     return {};
   }
 
@@ -448,9 +496,121 @@ export class Portal {
     }
   }
 
-  private pickColor(): Reply {
-    // Not yet: there's no color picker to show.
-    return this.response(OTHER);
+  private async createShortcutSession(handle: string, sessionHandle: string, appId: string): Promise<Reply> {
+    const consumer = await this.consumer(handle, appId);
+    this.shortcutSessions.set(sessionHandle, {
+      handle: sessionHandle,
+      app: appId || String(consumer.name),
+      name: String(consumer.name),
+      shortcuts: new Map(),
+    });
+    return this.response(SUCCESS, [["session_handle", ["s", sessionHandle]]]);
+  }
+
+  /** The shortcuts as the portal lists them: a(sa{sv}). */
+  private shortcutResults(session: ShortcutSession): [string, Variant][] {
+    const list = [...session.shortcuts].map(([id, shortcut]): [string, Map<string, Variant>] => [
+      id,
+      new Map<string, Variant>([
+        ["description", ["s", shortcut.description]],
+        ["trigger_description", ["s", shortcut.combo ? describeCombo(shortcut.combo) : ""]],
+      ]),
+    ]);
+    return [["shortcuts", ["a(sa{sv})", list]]];
+  }
+
+  private async bindShortcuts(sessionHandle: string, requested: [string, Map<string, unknown>][]): Promise<Reply> {
+    const session = this.shortcutSessions.get(sessionHandle);
+    if (!session) return this.response(OTHER);
+    const path = this.options.bindingsPath ?? bindingsPath();
+    const bindings: Bindings = loadBindings(path);
+    const kept = bindings[session.app] ?? {};
+    const proposed = requested.map(([id, options]): { id: string; description: string; combo: string | undefined } => {
+      const preferred = typeof options.get("preferred_trigger") === "string"
+        ? comboOfTrigger(options.get("preferred_trigger") as string)
+        : undefined;
+      return { id, description: String(options.get("description") ?? id), combo: id in kept ? kept[id] : preferred };
+    });
+    let chosen = proposed;
+    // Asked unless every one was bound before.
+    if (proposed.some(({ id }) => !(id in kept)) && this.options.askShell) {
+      try {
+        const answer = (await this.options.askShell(
+          "bind_shortcuts",
+          { appName: session.name, shortcuts: proposed },
+          120_000,
+        )) as { shortcuts?: { id: string; combo?: string }[] } | null;
+        if (!answer) return this.response(CANCELLED);
+        const combos = new Map((answer.shortcuts ?? []).map(({ id, combo }) => [id, combo]));
+        chosen = proposed.map((shortcut) => ({ ...shortcut, combo: combos.get(shortcut.id) }));
+      } catch (error) {
+        // No shell to ask: the app's own choice.
+        console.warn(`plutoniumd: portal: no shell for the shortcuts (${(error as Error).message}); taking the app's keys`);
+      }
+    }
+    session.shortcuts.clear();
+    for (const { id, description, combo } of chosen) {
+      session.shortcuts.set(id, { description, combo: combo && triggerOfCombo(combo) ? combo : undefined });
+    }
+    bindings[session.app] = Object.fromEntries(
+      [...session.shortcuts].filter(([, s]) => s.combo).map(([id, s]) => [id, s.combo!]),
+    );
+    saveBindings(bindings, path);
+    console.log(
+      `plutoniumd: portal: ${session.name} bound ` +
+        [...session.shortcuts].map(([id, s]) => `${id}=${s.combo ?? "none"}`).join(", "),
+    );
+    this.announceShortcuts();
+    return this.response(SUCCESS, this.shortcutResults(session));
+  }
+
+  private listShortcuts(sessionHandle: string): Reply {
+    const session = this.shortcutSessions.get(sessionHandle);
+    if (!session) return this.response(OTHER);
+    return this.response(SUCCESS, this.shortcutResults(session));
+  }
+
+  /** The keys the shells catch: every session's bound shortcuts. */
+  globalShortcuts(): { session: string; id: string; combo: string }[] {
+    const all: { session: string; id: string; combo: string }[] = [];
+    for (const session of this.shortcutSessions.values()) {
+      for (const [id, shortcut] of session.shortcuts) {
+        if (shortcut.combo) all.push({ session: session.handle, id, combo: shortcut.combo });
+      }
+    }
+    return all;
+  }
+
+  private announceShortcuts(): void {
+    this.options.notifyShells?.("global_shortcuts", { shortcuts: this.globalShortcuts() });
+  }
+
+  /** A shell caught a bound key: the app hears of it. */
+  shortcut(sessionHandle: string, id: string, phase: "activated" | "deactivated"): boolean {
+    if (!this.shortcutSessions.get(sessionHandle)?.shortcuts.has(id)) return false;
+    this.bus?.emit(PORTAL_PATH, GLOBAL_SHORTCUTS, phase === "activated" ? "Activated" : "Deactivated", "osta{sv}", [
+      sessionHandle,
+      id,
+      Date.now(),
+      new Map(),
+    ]);
+    return true;
+  }
+
+  /** The focused shell's color picker; without a shell, there's none to show. */
+  private async pickColor(appId: string): Promise<Reply> {
+    if (!this.options.askShell) return this.response(OTHER);
+    try {
+      const answer = (await this.options.askShell("pick_color", { appName: this.appName(appId, 0) }, 120_000)) as {
+        color?: number[] | null;
+      } | null;
+      const color = answer?.color;
+      if (!Array.isArray(color) || color.length !== 3) return this.response(CANCELLED);
+      return this.response(SUCCESS, [["color", ["(ddd)", color.map((value) => Math.min(1, Math.max(0, value / 255)))]]]);
+    } catch (error) {
+      console.warn(`plutoniumd: portal: pick color: ${(error as Error).message}`);
+      return this.response(OTHER);
+    }
   }
 }
 
@@ -468,6 +628,15 @@ const INTROSPECTION = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object I
   <interface name="${SCREENSHOT}">
     <method name="Screenshot"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
     <method name="PickColor"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
+    <property name="version" type="u" access="read"/>
+  </interface>
+  <interface name="${GLOBAL_SHORTCUTS}">
+    <method name="CreateSession"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
+    <method name="BindShortcuts"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="a(sa{sv})" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
+    <method name="ListShortcuts"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
+    <signal name="Activated"><arg type="o"/><arg type="s"/><arg type="t"/><arg type="a{sv}"/></signal>
+    <signal name="Deactivated"><arg type="o"/><arg type="s"/><arg type="t"/><arg type="a{sv}"/></signal>
+    <signal name="ShortcutsChanged"><arg type="o"/><arg type="a(sa{sv})"/></signal>
     <property name="version" type="u" access="read"/>
   </interface>
 </node>`;

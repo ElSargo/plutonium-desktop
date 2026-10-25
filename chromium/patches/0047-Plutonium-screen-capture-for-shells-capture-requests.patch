@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 22:20:36 +1300
-Subject: [PATCH 47/50] Plutonium: screen capture for shells, capture requests
+Subject: [PATCH 47/54] Plutonium: screen capture for shells, capture requests
  to the focused shell
 
 EXO-CAPTURE (docs/features/CAPTURE.md): PlutoniumCapture, the capture

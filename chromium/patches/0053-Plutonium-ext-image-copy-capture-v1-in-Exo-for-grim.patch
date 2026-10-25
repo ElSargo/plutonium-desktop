@@ -1,0 +1,907 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 25 Oct 2026 18:59:23 +1300
+Subject: [PATCH 53/54] Plutonium: ext-image-copy-capture-v1 in Exo, for grim
+
+EXO-CAPTURE: ext-image-copy-capture-v1 with ext-image-capture-source-v1's
+output sources. Each frame is a copy of the output's root layer written
+into the client's shared-memory buffer (XRGB8888 or ARGB8888), with full
+damage. A session starts once the embedder allows it
+(exo::wayland::ImageCaptureDelegate): PlutoniumCapture asks the user as for
+the portal ("capturerequest" to the focused shell, else Ash's picker),
+needs both switches on (it can be a screenshot or a recording), and
+publishes it as a capture of kind "wayland" that any shell can stop. A
+client that goes away while asked cancels the request (its picker
+closes). No toplevel sources (Exo has no foreign toplevel list), no
+cursor: a cursor session's capture session stops at once, and no dmabufs
+(wl-screenrec wants its encoder's tiled ones, which need a GPU copy).
+exo::Buffer gains a getter for its handle. The capture source protocol's
+target generates ext-foreign-toplevel-list too, which its toplevel
+sources refer to.
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ chrome/browser/plutonium_capture.cc           | 107 ++++
+ chrome/browser/plutonium_capture.h            |  22 +-
+ components/exo/buffer.h                       |   5 +
+ components/exo/wayland/BUILD.gn               |   3 +
+ .../exo/wayland/ext_image_copy_capture.cc     | 497 ++++++++++++++++++
+ .../exo/wayland/ext_image_copy_capture.h      |  59 +++
+ components/exo/wayland/server.cc              |  13 +
+ third_party/wayland-protocols/BUILD.gn        |  12 +
+ 9 files changed, 718 insertions(+), 1 deletion(-)
+ create mode 100644 components/exo/wayland/ext_image_copy_capture.cc
+ create mode 100644 components/exo/wayland/ext_image_copy_capture.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 161bc9b87d..899ebdab7f 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -896,6 +896,7 @@ if (is_chromeos) {
+ 
+       # EXO-CAPTURE: plutonium_capture.cc.
+       ":plutonium_pipewire",
++      "//components/exo/wayland",
+       "//ui/display",
+       "//ui/snapshot",
+     ]
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+index 0e1a2199bc..4a7acfe11b 100644
+--- a/chrome/browser/plutonium_capture.cc
++++ b/chrome/browser/plutonium_capture.cc
+@@ -8,18 +8,23 @@
+ #include <utility>
+ 
+ #include "ash/shell.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+ #include "base/logging.h"
+ #include "base/notreached.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/bind_post_task.h"
+ #include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/exo_window_broker.h"
+ #include "chrome/browser/plutonium_agent.h"
++#include "chrome/browser/plutonium_groups.h"
+ #include "chrome/browser/plutonium_pipewire.h"
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_tabs.h"
+@@ -281,6 +286,7 @@ PlutoniumCapture::PlutoniumCapture() {
+   if (PlutoniumShells* shells = PlutoniumShells::Get()) {
+     shells_observation_.Observe(shells);
+   }
++  exo::wayland::SetImageCaptureDelegate(this);
+ }
+ 
+ PlutoniumCapture::~PlutoniumCapture() = default;
+@@ -1396,3 +1402,104 @@ void PlutoniumCapture::OnShellGone(int32_t taker) {
+         base::BindOnce(&PlutoniumCapture::Pick, base::Unretained(this), id));
+   }
+ }
++
++int32_t PlutoniumCapture::RequestOutputCapture(
++    int32_t pid,
++    int64_t display_id,
++    base::OnceCallback<void(bool)> done) {
++  if (!recording_allowed() || !screenshots_allowed()) {
++    std::move(done).Run(false);
++    return 0;
++  }
++  const int32_t token = next_wayland_token_++;
++  wayland_requests_[token] = 0;
++  // Who asks: its process's name and thread, from /proc (off this thread).
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++      base::BindOnce(
++          [](int32_t pid) {
++            std::string name;
++            base::ReadFileToString(
++                base::FilePath("/proc/" + base::NumberToString(pid) + "/comm"),
++                &name);
++            base::TrimWhitespaceASCII(name, base::TRIM_ALL, &name);
++            base::DictValue consumer;
++            consumer.Set("kind", "app");
++            consumer.Set("name", name.empty() ? std::string("A Wayland app")
++                                              : name);
++            consumer.Set("pid", pid);
++            if (std::optional<std::string> thread =
++                    plutonium_tags::ReadThreadTag(pid)) {
++              consumer.Set("thread", *thread);
++            }
++            return consumer;
++          },
++          pid),
++      base::BindOnce(
++          [](PlutoniumCapture* self, int32_t token, int64_t display_id,
++             base::OnceCallback<void(bool)> done, base::DictValue consumer) {
++            auto pending = self->wayland_requests_.find(token);
++            if (pending == self->wayland_requests_.end()) {
++              return;  // The client went away.
++            }
++            // For OnCaptureStarted().
++            self->wayland_consumers_[consumer.FindInt("pid").value_or(0)] =
++                consumer.Clone();
++            base::ListValue types;
++            types.Append("output");
++            pending->second = self->Request(
++                base::DictValue()
++                    .Set("kind", "screencast")
++                    .Set("consumer", std::move(consumer))
++                    .Set("types", std::move(types))
++                    .Set("multiple", false),
++                base::BindOnce(
++                    [](PlutoniumCapture* self, int32_t token,
++                       base::OnceCallback<void(bool)> done,
++                       std::optional<base::Value> answer) {
++                      self->wayland_requests_.erase(token);
++                      std::move(done).Run(answer.has_value());
++                    },
++                    base::Unretained(self), token, std::move(done)));
++          },
++          base::Unretained(this), token, display_id, std::move(done)));
++  return token;
++}
++
++void PlutoniumCapture::CancelOutputCapture(int32_t token) {
++  auto pending = wayland_requests_.find(token);
++  if (pending == wayland_requests_.end()) {
++    return;
++  }
++  const int32_t request_id = pending->second;
++  wayland_requests_.erase(pending);
++  if (request_id) {
++    CancelRequest(request_id);
++  }
++}
++
++int32_t PlutoniumCapture::OnCaptureStarted(int32_t pid,
++                                           int64_t display_id,
++                                           base::RepeatingClosure stop) {
++  auto capture = std::make_unique<Capture>();
++  capture->kind = "wayland";
++  capture->source.type = Source::Type::kOutput;
++  capture->source.id = display_id;
++  auto known = wayland_consumers_.find(pid);
++  if (known != wayland_consumers_.end()) {
++    capture->consumer = std::move(known->second);
++    wayland_consumers_.erase(known);
++  } else {
++    capture->consumer.Set("kind", "app");
++    capture->consumer.Set("pid", pid);
++    capture->consumer.Set("name", "A Wayland app");
++  }
++  capture->cursor = "hidden";
++  const int32_t id = Add(std::move(capture));
++  OnStreamStarted(id, std::move(stop));
++  return id;
++}
++
++void PlutoniumCapture::OnCaptureStopped(int32_t id) {
++  Remove(id);
++}
+diff --git a/chrome/browser/plutonium_capture.h b/chrome/browser/plutonium_capture.h
+index 31b90c299e..c596176f53 100644
+--- a/chrome/browser/plutonium_capture.h
++++ b/chrome/browser/plutonium_capture.h
+@@ -24,6 +24,7 @@
+ #include "base/types/expected.h"
+ #include "base/values.h"
+ #include "chrome/browser/plutonium_shells.h"
++#include "components/exo/wayland/ext_image_copy_capture.h"
+ #include "content/public/browser/desktop_media_id.h"
+ #include "content/public/browser/global_routing_id.h"
+ #include "ui/gfx/geometry/rect.h"
+@@ -70,7 +71,8 @@ struct MediaStreamRequest;
+ // Settings: two global switches, in local state (kSettingsPref), refuse
+ // recording and screenshots to everyone: shells, the portal, tabs and
+ // agents. Ash checks them here.
+-class PlutoniumCapture : public PlutoniumShells::Observer {
++class PlutoniumCapture : public PlutoniumShells::Observer,
++                         public exo::wayland::ImageCaptureDelegate {
+  public:
+   inline static constexpr char kSettingsPref[] = "plutonium.capture";
+   // How long the focused shell has to acknowledge a capture before Ash
+@@ -220,6 +222,19 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+   // TYPE_NONE if it's gone.
+   content::DesktopMediaID ToMediaId(const Source& source) const;
+ 
++  // exo::wayland::ImageCaptureDelegate (ext-image-copy-capture: grim,
++  // wf-recorder): it can be a screenshot or a recording, so both switches
++  // must be on; the user is asked as for the portal; it's a capture of kind
++  // "wayland" while it runs.
++  int32_t RequestOutputCapture(int32_t pid,
++                               int64_t display_id,
++                               base::OnceCallback<void(bool)> done) override;
++  void CancelOutputCapture(int32_t token) override;
++  int32_t OnCaptureStarted(int32_t pid,
++                           int64_t display_id,
++                           base::RepeatingClosure stop) override;
++  void OnCaptureStopped(int32_t id) override;
++
+   // PlutoniumShells::Observer:
+   void OnVisibleShellChanged(content::WebContents* previous,
+                              content::WebContents* visible) override;
+@@ -322,6 +337,11 @@ class PlutoniumCapture : public PlutoniumShells::Observer {
+   int32_t next_request_id_ = 1;
+   std::map<int32_t, std::unique_ptr<Capture>> captures_;
+   std::map<int32_t, std::unique_ptr<PendingRequest>> requests_;
++  // ext-image-copy-capture clients asked about, by pid: who they are.
++  std::map<int32_t, base::DictValue> wayland_consumers_;
++  // Their requests by token: the Request() id (0 until it's made).
++  std::map<int32_t, int32_t> wayland_requests_;
++  int32_t next_wayland_token_ = 1;
+   raw_ptr<Ui> ui_ = nullptr;
+   base::ObserverList<Observer> observers_;
+   base::OneShotTimer indicator_timer_;
+diff --git a/components/exo/buffer.h b/components/exo/buffer.h
+index ec219b90f1..5dc4d8984a 100644
+--- a/components/exo/buffer.h
++++ b/components/exo/buffer.h
+@@ -107,6 +107,11 @@ class Buffer {
+ 
+   // Returns the format of the buffer.
+   viz::SharedImageFormat GetFormat() const;
++  // PLUTONIUM (EXO-CAPTURE): what the buffer is (ext-image-copy-capture
++  // writes into a client's shared-memory buffer).
++  const gfx::GpuMemoryBufferHandle& gpu_memory_buffer_handle() const {
++    return gpu_memory_buffer_handle_;
++  }
+ 
+   // Returns the |gpu_memory_buffer_| pointer to be used as id. It can also be
+   // used as a bool to identify if |gpu_memory_buffer_| is null or not.
+diff --git a/components/exo/wayland/BUILD.gn b/components/exo/wayland/BUILD.gn
+index 54738dbec4..ea971d4789 100644
+--- a/components/exo/wayland/BUILD.gn
++++ b/components/exo/wayland/BUILD.gn
+@@ -20,6 +20,8 @@ source_set("wayland") {
+     "client_tracker.h",
+     "content_type.cc",
+     "content_type.h",
++    "ext_image_copy_capture.cc",
++    "ext_image_copy_capture.h",
+     "org_kde_kwin_server_decoration.cc",
+     "org_kde_kwin_server_decoration.h",
+     "output_configuration_change.cc",
+@@ -198,6 +200,7 @@ source_set("wayland") {
+     "//third_party/wayland-protocols:vsync_feedback_protocol",
+     "//third_party/wayland-protocols:xdg_decoration_protocol",
+     "//third_party/wayland-protocols:xdg_dialog_protocol",
++    "//third_party/wayland-protocols:ext_image_copy_capture_protocol",
+     "//third_party/wayland-protocols:xdg_output_protocol",
+     "//third_party/wayland-protocols:xdg_shell_protocol",
+     "//ui/accessibility",
+diff --git a/components/exo/wayland/ext_image_copy_capture.cc b/components/exo/wayland/ext_image_copy_capture.cc
+new file mode 100644
+index 0000000000..ab16a16fdb
+--- /dev/null
++++ b/components/exo/wayland/ext_image_copy_capture.cc
+@@ -0,0 +1,497 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// PLUTONIUM: rows copied into a client's shared-memory buffer.
++#pragma allow_unsafe_buffers
++#endif
++
++#include "components/exo/wayland/ext_image_copy_capture.h"
++
++#include <ext-image-capture-source-v1-server-protocol.h>
++#include <ext-image-copy-capture-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <algorithm>
++#include <cstring>
++#include <memory>
++#include <utility>
++
++#include "ash/shell.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "components/exo/buffer.h"
++#include "components/exo/wayland/server_util.h"
++#include "components/exo/wayland/wayland_display_observer.h"
++#include "components/viz/common/frame_sinks/copy_output_request.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/aura/window.h"
++#include "ui/compositor/layer.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#include "ui/gfx/gpu_memory_buffer_handle.h"
++
++namespace exo::wayland {
++namespace {
++
++ImageCaptureDelegate* g_delegate = nullptr;
++
++// An output capture source: which display.
++struct CaptureSource {
++  int64_t display_id = 0;
++};
++
++class CaptureSession;
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_image_copy_capture_frame_v1:
++
++// A frame the client asked for: its buffer, filled and announced once the
++// output's copy comes.
++class CaptureFrame {
++ public:
++  CaptureFrame(wl_resource* resource, base::WeakPtr<CaptureSession> session)
++      : resource_(resource), session_(std::move(session)) {}
++  CaptureFrame(const CaptureFrame&) = delete;
++  CaptureFrame& operator=(const CaptureFrame&) = delete;
++  ~CaptureFrame() { ForgetBuffer(); }
++
++  void AttachBuffer(wl_resource* buffer) {
++    ForgetBuffer();
++    buffer_ = buffer;
++    buffer_destroyed_.listener.notify = &CaptureFrame::OnBufferDestroyed;
++    buffer_destroyed_.frame = this;
++    wl_resource_add_destroy_listener(buffer, &buffer_destroyed_.listener);
++  }
++
++  void Capture();
++
++  void Fail(uint32_t reason) {
++    ext_image_copy_capture_frame_v1_send_failed(resource_, reason);
++    wl_client_flush(wl_resource_get_client(resource_));
++  }
++
++  // Writes |bitmap| into the buffer and says it's ready.
++  void OnCopied(const SkBitmap& bitmap);
++
++  base::WeakPtr<CaptureFrame> GetWeakPtr() {
++    return weak_factory_.GetWeakPtr();
++  }
++
++ private:
++  // The buffer went away before its copy: the listener comes first, so the
++  // listener's address is its struct's.
++  struct BufferListener {
++    wl_listener listener = {};
++    raw_ptr<CaptureFrame> frame = nullptr;
++  };
++
++  static void OnBufferDestroyed(wl_listener* listener, void* data) {
++    CaptureFrame* frame = reinterpret_cast<BufferListener*>(listener)->frame;
++    wl_list_remove(&frame->buffer_destroyed_.listener.link);
++    frame->buffer_ = nullptr;
++  }
++
++  void ForgetBuffer() {
++    if (buffer_) {
++      wl_list_remove(&buffer_destroyed_.listener.link);
++      buffer_ = nullptr;
++    }
++  }
++
++  const raw_ptr<wl_resource> resource_;
++  base::WeakPtr<CaptureSession> session_;
++  raw_ptr<wl_resource> buffer_ = nullptr;
++  BufferListener buffer_destroyed_;
++  bool captured_ = false;
++  base::WeakPtrFactory<CaptureFrame> weak_factory_{this};
++};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_image_copy_capture_session_v1:
++
++class CaptureSession {
++ public:
++  // |display_id| 0: a session that only stops (a cursor session's).
++  CaptureSession(wl_resource* resource, int64_t display_id)
++      : resource_(resource), display_id_(display_id) {}
++  CaptureSession(const CaptureSession&) = delete;
++  CaptureSession& operator=(const CaptureSession&) = delete;
++  ~CaptureSession() {
++    if (request_token_ && g_delegate) {
++      g_delegate->CancelOutputCapture(request_token_);
++    }
++    if (capture_id_ && g_delegate) {
++      g_delegate->OnCaptureStopped(capture_id_);
++    }
++  }
++
++  // Asks the embedder, then sends the buffer constraints, or stops.
++  void Start() {
++    if (!display_id_ || !g_delegate) {
++      // Not from inside the request that made it.
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE,
++          base::BindOnce(&CaptureSession::Stop, weak_factory_.GetWeakPtr()));
++      return;
++    }
++    pid_t pid = 0;
++    wl_client_get_credentials(wl_resource_get_client(resource_), &pid, nullptr,
++                              nullptr);
++    pid_ = pid;
++    request_token_ = g_delegate->RequestOutputCapture(
++        pid_, display_id_,
++        base::BindOnce(&CaptureSession::OnAnswered,
++                       weak_factory_.GetWeakPtr()));
++  }
++
++  void Stop() {
++    if (stopped_) {
++      return;
++    }
++    stopped_ = true;
++    active_ = false;
++    ext_image_copy_capture_session_v1_send_stopped(resource_);
++    wl_client_flush(wl_resource_get_client(resource_));
++  }
++
++  bool active() const { return active_; }
++  bool stopped() const { return stopped_; }
++  int64_t display_id() const { return display_id_; }
++  const gfx::Size& size() const { return size_; }
++
++  base::WeakPtr<CaptureSession> GetWeakPtr() {
++    return weak_factory_.GetWeakPtr();
++  }
++
++ private:
++  void OnAnswered(bool allowed) {
++    request_token_ = 0;
++    if (stopped_) {
++      return;
++    }
++    std::optional<display::Display> display;
++    for (const display::Display& candidate :
++         display::Screen::Get()->GetAllDisplays()) {
++      if (candidate.id() == display_id_) {
++        display = candidate;
++      }
++    }
++    if (!allowed || !display || !g_delegate) {
++      VLOG(1) << "EXO-CAPTURE ext-image-copy-capture refused for pid " << pid_;
++      Stop();
++      return;
++    }
++    size_ = display->GetSizeInPixel();
++    capture_id_ = g_delegate->OnCaptureStarted(
++        pid_, display_id_,
++        base::BindRepeating(&CaptureSession::Stop,
++                            weak_factory_.GetWeakPtr()));
++    active_ = true;
++    ext_image_copy_capture_session_v1_send_buffer_size(resource_, size_.width(),
++                                                       size_.height());
++    ext_image_copy_capture_session_v1_send_shm_format(resource_,
++                                                      WL_SHM_FORMAT_XRGB8888);
++    ext_image_copy_capture_session_v1_send_shm_format(resource_,
++                                                      WL_SHM_FORMAT_ARGB8888);
++    ext_image_copy_capture_session_v1_send_done(resource_);
++    wl_client_flush(wl_resource_get_client(resource_));
++  }
++
++  const raw_ptr<wl_resource> resource_;
++  const int64_t display_id_;
++  int32_t pid_ = 0;
++  // While the embedder asks.
++  int32_t request_token_ = 0;
++  int32_t capture_id_ = 0;
++  gfx::Size size_;
++  bool active_ = false;
++  bool stopped_ = false;
++  base::WeakPtrFactory<CaptureSession> weak_factory_{this};
++};
++
++void CaptureFrame::Capture() {
++  if (captured_) {
++    wl_resource_post_error(resource_,
++                           EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_ALREADY_CAPTURED,
++                           "capture sent twice");
++    return;
++  }
++  if (!buffer_) {
++    wl_resource_post_error(resource_,
++                           EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_NO_BUFFER,
++                           "no buffer attached");
++    return;
++  }
++  captured_ = true;
++  CaptureSession* session = session_.get();
++  if (!session || session->stopped()) {
++    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
++    return;
++  }
++  if (!session->active()) {
++    // Before the constraints: the client can't know the buffer is right.
++    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
++    return;
++  }
++  aura::Window* root =
++      ash::Shell::HasInstance()
++          ? ash::Shell::GetRootWindowForDisplayId(session->display_id())
++          : nullptr;
++  if (!root) {
++    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
++    return;
++  }
++  auto request = std::make_unique<viz::CopyOutputRequest>(
++      viz::CopyOutputRequest::ResultFormat::RGBA,
++      viz::CopyOutputRequest::ResultDestination::kSystemMemory,
++      base::BindOnce(
++          [](base::WeakPtr<CaptureFrame> frame,
++             std::unique_ptr<viz::CopyOutputResult> result) {
++            if (!frame) {
++              return;
++            }
++            if (result->IsEmpty()) {
++              frame->Fail(
++                  EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
++              return;
++            }
++            auto scoped = result->ScopedAccessSkBitmap();
++            frame->OnCopied(scoped.GetOutScopedBitmap());
++          },
++          GetWeakPtr()));
++  request->set_result_task_runner(
++      base::SequencedTaskRunner::GetCurrentDefault());
++  root->layer()->RequestCopyOfOutput(std::move(request));
++}
++
++void CaptureFrame::OnCopied(const SkBitmap& bitmap) {
++  Buffer* buffer = buffer_ ? GetUserDataAs<Buffer>(buffer_) : nullptr;
++  const gfx::GpuMemoryBufferHandle* handle =
++      buffer ? &buffer->gpu_memory_buffer_handle() : nullptr;
++  if (!handle || handle->type != gfx::SHARED_MEMORY_BUFFER ||
++      !handle->region().IsValid() || buffer->GetSize() !=
++                                         gfx::Size(bitmap.width(),
++                                                   bitmap.height())) {
++    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
++    return;
++  }
++  base::WritableSharedMemoryMapping mapping = handle->region().Map();
++  const size_t row_bytes = static_cast<size_t>(bitmap.width()) * 4;
++  const size_t needed =
++      handle->offset + static_cast<size_t>(handle->stride) *
++                           (bitmap.height() - 1) +
++      row_bytes;
++  if (!mapping.IsValid() || mapping.size() < needed ||
++      handle->stride < row_bytes) {
++    Fail(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
++    return;
++  }
++  // N32 is BGRA in memory: wl_shm's (A|X)RGB8888 little-endian.
++  uint8_t* pixels = mapping.GetMemoryAsSpan<uint8_t>().data() + handle->offset;
++  for (int y = 0; y < bitmap.height(); ++y) {
++    memcpy(pixels + static_cast<size_t>(handle->stride) * y,
++           bitmap.getAddr32(0, y), row_bytes);
++  }
++  const base::TimeDelta now = base::TimeTicks::Now() - base::TimeTicks();
++  const int64_t seconds = now.InSeconds();
++  const uint32_t nanoseconds =
++      static_cast<uint32_t>((now - base::Seconds(seconds)).InNanoseconds());
++  ext_image_copy_capture_frame_v1_send_transform(resource_,
++                                                 WL_OUTPUT_TRANSFORM_NORMAL);
++  ext_image_copy_capture_frame_v1_send_damage(resource_, 0, 0, bitmap.width(),
++                                              bitmap.height());
++  ext_image_copy_capture_frame_v1_send_presentation_time(
++      resource_, static_cast<uint32_t>(seconds >> 32),
++      static_cast<uint32_t>(seconds & 0xffffffff), nanoseconds);
++  ext_image_copy_capture_frame_v1_send_ready(resource_);
++  wl_client_flush(wl_resource_get_client(resource_));
++}
++
++void frame_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void frame_attach_buffer(wl_client* client,
++                         wl_resource* resource,
++                         wl_resource* buffer) {
++  GetUserDataAs<CaptureFrame>(resource)->AttachBuffer(buffer);
++}
++
++void frame_damage_buffer(wl_client* client,
++                         wl_resource* resource,
++                         int32_t x,
++                         int32_t y,
++                         int32_t width,
++                         int32_t height) {
++  // Every frame is copied whole.
++  if (x < 0 || y < 0 || width <= 0 || height <= 0) {
++    wl_resource_post_error(
++        resource, EXT_IMAGE_COPY_CAPTURE_FRAME_V1_ERROR_INVALID_BUFFER_DAMAGE,
++        "invalid damage");
++  }
++}
++
++void frame_capture(wl_client* client, wl_resource* resource) {
++  GetUserDataAs<CaptureFrame>(resource)->Capture();
++}
++
++const struct ext_image_copy_capture_frame_v1_interface frame_implementation =
++    {frame_destroy, frame_attach_buffer, frame_damage_buffer, frame_capture};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_image_copy_capture_session_v1 requests:
++
++void session_create_frame(wl_client* client,
++                          wl_resource* resource,
++                          uint32_t id) {
++  wl_resource* frame_resource =
++      wl_resource_create(client, &ext_image_copy_capture_frame_v1_interface,
++                         wl_resource_get_version(resource), id);
++  SetImplementation(frame_resource, &frame_implementation,
++                    std::make_unique<CaptureFrame>(
++                        frame_resource,
++                        GetUserDataAs<CaptureSession>(resource)->GetWeakPtr()));
++}
++
++void session_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++const struct ext_image_copy_capture_session_v1_interface
++    session_implementation = {session_create_frame, session_destroy};
++
++wl_resource* CreateSession(wl_client* client,
++                           uint32_t version,
++                           uint32_t id,
++                           int64_t display_id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_image_copy_capture_session_v1_interface, version, id);
++  SetImplementation(resource, &session_implementation,
++                    std::make_unique<CaptureSession>(resource, display_id));
++  GetUserDataAs<CaptureSession>(resource)->Start();
++  return resource;
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_image_copy_capture_cursor_session_v1 (no cursor: its session stops):
++
++void cursor_session_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void cursor_session_get_capture_session(wl_client* client,
++                                        wl_resource* resource,
++                                        uint32_t id) {
++  CreateSession(client, wl_resource_get_version(resource), id,
++                /*display_id=*/0);
++}
++
++const struct ext_image_copy_capture_cursor_session_v1_interface
++    cursor_session_implementation = {cursor_session_destroy,
++                                     cursor_session_get_capture_session};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_image_copy_capture_manager_v1:
++
++void manager_create_session(wl_client* client,
++                            wl_resource* resource,
++                            uint32_t id,
++                            wl_resource* source,
++                            uint32_t options) {
++  if (options & ~EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS) {
++    wl_resource_post_error(resource,
++                           EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_ERROR_INVALID_OPTION,
++                           "invalid options 0x%x", options);
++    return;
++  }
++  CreateSession(client, wl_resource_get_version(resource), id,
++                GetUserDataAs<CaptureSource>(source)->display_id);
++}
++
++void manager_create_pointer_cursor_session(wl_client* client,
++                                           wl_resource* resource,
++                                           uint32_t id,
++                                           wl_resource* source,
++                                           wl_resource* pointer) {
++  wl_resource* cursor_resource = wl_resource_create(
++      client, &ext_image_copy_capture_cursor_session_v1_interface,
++      wl_resource_get_version(resource), id);
++  SetImplementation(cursor_resource, &cursor_session_implementation);
++}
++
++void manager_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++const struct ext_image_copy_capture_manager_v1_interface manager_implementation =
++    {manager_create_session, manager_create_pointer_cursor_session,
++     manager_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_output_image_capture_source_manager_v1:
++
++void source_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++const struct ext_image_capture_source_v1_interface source_implementation = {
++    source_destroy};
++
++void source_manager_create_source(wl_client* client,
++                                  wl_resource* resource,
++                                  uint32_t id,
++                                  wl_resource* output) {
++  auto source = std::make_unique<CaptureSource>();
++  if (auto* handler = GetUserDataAs<WaylandDisplayHandler>(output)) {
++    source->display_id = handler->id();
++  }
++  wl_resource* source_resource =
++      wl_resource_create(client, &ext_image_capture_source_v1_interface,
++                         wl_resource_get_version(resource), id);
++  SetImplementation(source_resource, &source_implementation,
++                    std::move(source));
++}
++
++void source_manager_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++const struct ext_output_image_capture_source_manager_v1_interface
++    source_manager_implementation = {source_manager_create_source,
++                                     source_manager_destroy};
++
++}  // namespace
++
++void SetImageCaptureDelegate(ImageCaptureDelegate* delegate) {
++  g_delegate = delegate;
++}
++
++void bind_output_image_capture_source_manager(wl_client* client,
++                                              void* data,
++                                              uint32_t version,
++                                              uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_output_image_capture_source_manager_v1_interface,
++      std::min(version, 1u), id);
++  SetImplementation(resource, &source_manager_implementation);
++}
++
++void bind_image_copy_capture_manager(wl_client* client,
++                                     void* data,
++                                     uint32_t version,
++                                     uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_image_copy_capture_manager_v1_interface,
++      std::min(version, 1u), id);
++  SetImplementation(resource, &manager_implementation);
++}
++
++}  // namespace exo::wayland
+diff --git a/components/exo/wayland/ext_image_copy_capture.h b/components/exo/wayland/ext_image_copy_capture.h
+new file mode 100644
+index 0000000000..c23103411e
+--- /dev/null
++++ b/components/exo/wayland/ext_image_copy_capture.h
+@@ -0,0 +1,59 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_EXT_IMAGE_COPY_CAPTURE_H_
++#define COMPONENTS_EXO_WAYLAND_EXT_IMAGE_COPY_CAPTURE_H_
++
++#include <stdint.h>
++
++#include "base/functional/callback.h"
++
++struct wl_client;
++
++namespace exo::wayland {
++
++// PLUTONIUM (EXO-CAPTURE, docs/features/CAPTURE.md): ext-image-copy-capture-v1
++// with ext-image-capture-source-v1's output sources, for Wayland clients that
++// capture the screen themselves (grim). Each frame is a copy of the output's
++// root layer into the client's shared-memory buffer (XRGB8888 or ARGB8888).
++// No toplevel sources (Exo has no foreign toplevel
++// list) and no cursor: a cursor session's capture session stops at once.
++//
++// A session starts only once the embedder allows it: the same switches and
++// the same request to the user as other captures (ImageCaptureDelegate).
++// Without a delegate, sessions stop at once.
++class ImageCaptureDelegate {
++ public:
++  virtual ~ImageCaptureDelegate() = default;
++  // Whether client |pid| may capture display |display_id|: |done| gets the
++  // answer, maybe after asking the user. Returns a token for
++  // CancelOutputCapture().
++  virtual int32_t RequestOutputCapture(int32_t pid,
++                                       int64_t display_id,
++                                       base::OnceCallback<void(bool)> done) = 0;
++  // The client went away before the answer: stop asking (|done| isn't run).
++  virtual void CancelOutputCapture(int32_t token) = 0;
++  // A session runs; |stop| ends it (the user stopped it). Returns its id.
++  virtual int32_t OnCaptureStarted(int32_t pid,
++                                   int64_t display_id,
++                                   base::RepeatingClosure stop) = 0;
++  // The session |id| ended (the client destroyed it, or went away).
++  virtual void OnCaptureStopped(int32_t id) = 0;
++};
++
++// The embedder's (null: none). It must outlive the server, or be unset.
++void SetImageCaptureDelegate(ImageCaptureDelegate* delegate);
++
++void bind_output_image_capture_source_manager(wl_client* client,
++                                              void* data,
++                                              uint32_t version,
++                                              uint32_t id);
++void bind_image_copy_capture_manager(wl_client* client,
++                                     void* data,
++                                     uint32_t version,
++                                     uint32_t id);
++
++}  // namespace exo::wayland
++
++#endif  // COMPONENTS_EXO_WAYLAND_EXT_IMAGE_COPY_CAPTURE_H_
+diff --git a/components/exo/wayland/server.cc b/components/exo/wayland/server.cc
+index 1aea55644c..334a90eeca 100644
+--- a/components/exo/wayland/server.cc
++++ b/components/exo/wayland/server.cc
+@@ -31,6 +31,8 @@
+ #include <vsync-feedback-unstable-v1-server-protocol.h>
+ #include <xdg-decoration-unstable-v1-server-protocol.h>
+ #include <xdg-dialog-v1-server-protocol.h>
++#include <ext-image-capture-source-v1-server-protocol.h>
++#include <ext-image-copy-capture-v1-server-protocol.h>
+ #include <xdg-shell-server-protocol.h>
+ 
+ #include <array>
+@@ -52,6 +54,7 @@
+ #include "components/exo/security_delegate.h"
+ #include "components/exo/wayland/client_tracker.h"
+ #include "components/exo/wayland/content_type.h"
++#include "components/exo/wayland/ext_image_copy_capture.h"
+ #include "components/exo/wayland/org_kde_kwin_server_decoration.h"
+ #include "components/exo/wayland/overlay_prioritizer.h"
+ #include "components/exo/wayland/serial_tracker.h"
+@@ -374,6 +377,16 @@ void Server::Initialize() {
+ 
+   wl_global_create(wl_display_.get(), &zcr_touchpad_haptics_v1_interface,
+                    /*version=*/1, display_, bind_touchpad_haptics);
++
++  // PLUTONIUM (EXO-CAPTURE): screen capture for clients (grim, wf-recorder),
++  // as the embedder allows (ext_image_copy_capture.h).
++  wl_global_create(wl_display_.get(),
++                   &ext_output_image_capture_source_manager_v1_interface,
++                   /*version=*/1, display_,
++                   bind_output_image_capture_source_manager);
++  wl_global_create(wl_display_.get(),
++                   &ext_image_copy_capture_manager_v1_interface,
++                   /*version=*/1, display_, bind_image_copy_capture_manager);
+ }
+ 
+ void Server::Finalize(StartCallback callback, bool success) {
+diff --git a/third_party/wayland-protocols/BUILD.gn b/third_party/wayland-protocols/BUILD.gn
+index 14d520e2be..5b3fef2512 100644
+--- a/third_party/wayland-protocols/BUILD.gn
++++ b/third_party/wayland-protocols/BUILD.gn
+@@ -55,6 +55,18 @@ wayland_protocol("gtk_shell_protocol") {
+   sources = [ "gtk/gdk/wayland/protocol/gtk-shell.xml" ]
+ }
+ 
++# PLUTONIUM (EXO-CAPTURE): screen capture for Wayland clients (grim,
++# wf-recorder).
++wayland_protocol("ext_image_copy_capture_protocol") {
++  sources = [
++    "src/staging/ext-image-capture-source/ext-image-capture-source-v1.xml",
++    "src/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml",
++
++    # The capture source protocol's toplevel sources refer to its handles.
++    "src/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml",
++  ]
++}
++
+ wayland_protocol("idle_inhibit_protocol") {
+   sources = [ "src/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" ]
+ }

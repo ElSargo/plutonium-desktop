@@ -31,7 +31,7 @@ case $cmd in
       for _ in $(seq 1 20); do [[ -S $dir/bus ]] && break; sleep 0.1; done
     fi
     setsid env DBUS_SESSION_BUS_ADDRESS="$address" XDG_CURRENT_DESKTOP=Plutonium \
-      XDG_DATA_DIRS="$dir/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" XDG_CONFIG_HOME="$dir/config" \
+      XDG_DATA_HOME="$dir/share" XDG_DATA_DIRS="$dir/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" XDG_CONFIG_HOME="$dir/config" \
       "$portal" -r -v > "$dir/portal.log" 2>&1 < /dev/null &
     echo $! > "$dir/portal.pid"
     echo "export DBUS_SESSION_BUS_ADDRESS=$address PLUTONIUM_PORTAL_BUS=$address"

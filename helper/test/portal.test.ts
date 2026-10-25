@@ -245,3 +245,147 @@ describe("portal backend on a bus", { skip: dbusDaemon ? false : "no dbus-daemon
     assert.deepEqual(readFileSync(path), PNG);
   });
 });
+
+describe("global shortcut triggers", () => {
+  test("go between the portal's spelling and the shells'", async () => {
+    const { comboOfTrigger, triggerOfCombo, describeCombo } = await import("../src/shortcuts.ts");
+    assert.equal(comboOfTrigger("CTRL+ALT+p"), "Ctrl+Alt+KeyP");
+    assert.equal(comboOfTrigger("LOGO+F12"), "Super+F12");
+    assert.equal(comboOfTrigger("SHIFT+space"), "Shift+Space");
+    assert.equal(comboOfTrigger("grave"), "Backquote");
+    assert.equal(comboOfTrigger("HYPER+a"), undefined);
+    assert.equal(comboOfTrigger("CTRL+XF86Nonsense"), undefined);
+    assert.equal(triggerOfCombo("Ctrl+Alt+KeyP"), "CTRL+ALT+p");
+    assert.equal(triggerOfCombo("Super+Digit1"), "LOGO+1");
+    assert.equal(triggerOfCombo("Ctrl+Unknown"), undefined);
+    assert.equal(describeCombo("Ctrl+Alt+KeyP"), "Ctrl+Alt+P");
+  });
+});
+
+describe("global shortcuts on a bus", { skip: dbusDaemon ? false : "no dbus-daemon" }, () => {
+  let dir: string;
+  let daemon: ChildProcess;
+  let address: string;
+  let portal: Portal;
+  let client: DBusConnection;
+  const asked: Record<string, unknown>[] = [];
+  const notices: unknown[] = [];
+  let answer: unknown = null;
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), "plutonium-shortcuts-"));
+    address = `unix:path=${join(dir, "bus")}`;
+    daemon = spawn(dbusDaemon, ["--session", "--nofork", `--address=${address}`], { stdio: "ignore" });
+    for (let i = 0; i < 50 && !existsSync(join(dir, "bus")); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    portal = new Portal({
+      desktop: new FakeDesktop() as never,
+      apps: { list: () => [{ id: "com.discordapp.Discord.desktop", name: "Discord" }] } as never,
+      threadForPid: () => undefined,
+      address,
+      bindingsPath: join(dir, "bindings.json"),
+      askShell: async (op, args) => {
+        asked.push({ op, ...args });
+        return answer;
+      },
+      notifyShells: (op, args) => notices.push({ op, ...args }),
+    });
+    await portal.start();
+    client = await DBusConnection.connect(address);
+  });
+
+  after(() => {
+    client?.close();
+    portal?.stop();
+    daemon?.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const SHORTCUTS = "org.freedesktop.impl.portal.GlobalShortcuts";
+  const call = (member: string, signature: string, body: unknown[]) =>
+    client.call({ destination: PORTAL_NAME, path: "/org/freedesktop/portal/desktop", interface: SHORTCUTS, member, signature, body });
+  const handle = (token: string) => `/org/freedesktop/portal/desktop/request/${client.name.slice(1).replace(".", "_")}/${token}`;
+  const session = "/org/freedesktop/portal/desktop/session/1_1/gs";
+  const shortcuts: [string, Map<string, unknown>][] = [
+    ["ptt", new Map<string, unknown>([["description", ["s", "Push to talk"]], ["preferred_trigger", ["s", "CTRL+grave"]]])],
+    ["mute", new Map<string, unknown>([["description", ["s", "Mute"]]])],
+  ];
+
+  test("binds what the shell answers, and keeps it for next time", async () => {
+    await call("CreateSession", "oosa{sv}", [handle("a"), session, "com.discordapp.Discord", new Map()]);
+    answer = { shortcuts: [{ id: "ptt", combo: "Ctrl+Backquote" }, { id: "mute", combo: "Ctrl+Shift+KeyM" }] };
+    const [code, results] = (await call("BindShortcuts", "ooa(sa{sv})sa{sv}", [handle("b"), session, shortcuts, "", new Map()])) as [
+      number,
+      Map<string, unknown>,
+    ];
+    assert.equal(code, 0);
+    assert.equal(asked.length, 1);
+    const proposed = (asked[0]!.shortcuts as { id: string; combo?: string }[]).map(({ id, combo }) => [id, combo]);
+    assert.deepEqual(proposed, [["ptt", "Ctrl+Backquote"], ["mute", undefined]]);
+    const bound = results.get("shortcuts") as [string, Map<string, unknown>][];
+    assert.deepEqual(bound.map(([id, options]) => [id, options.get("trigger_description")]), [
+      ["ptt", "Ctrl+Backquote"],
+      ["mute", "Ctrl+Shift+M"],
+    ]);
+    assert.deepEqual((notices.at(-1) as { shortcuts: unknown[] }).shortcuts, [
+      { session, id: "ptt", combo: "Ctrl+Backquote" },
+      { session, id: "mute", combo: "Ctrl+Shift+KeyM" },
+    ]);
+
+    // The same app again: no asking.
+    const again = "/org/freedesktop/portal/desktop/session/1_1/gs2";
+    await call("CreateSession", "oosa{sv}", [handle("c"), again, "com.discordapp.Discord", new Map()]);
+    const [code2] = await call("BindShortcuts", "ooa(sa{sv})sa{sv}", [handle("d"), again, shortcuts, "", new Map()]);
+    assert.equal(code2, 0);
+    assert.equal(asked.length, 1);
+    await client.call({ destination: PORTAL_NAME, path: again, interface: "org.freedesktop.impl.portal.Session", member: "Close" });
+  });
+
+  test("a caught key is Activated, then Deactivated", async () => {
+    const signals: [string, unknown[]][] = [];
+    client.onSignal = (message) => signals.push([String(message.member), [...(message.body ?? [])]]);
+    await client.call({
+      destination: "org.freedesktop.DBus",
+      path: "/org/freedesktop/DBus",
+      interface: "org.freedesktop.DBus",
+      member: "AddMatch",
+      signature: "s",
+      body: [`type='signal',interface='${SHORTCUTS}'`],
+    });
+    assert.ok(portal.shortcut(session, "ptt", "activated"));
+    assert.ok(portal.shortcut(session, "ptt", "deactivated"));
+    assert.equal(portal.shortcut(session, "nope", "activated"), false);
+    for (let i = 0; i < 50 && signals.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(signals.map(([member, body]) => [member, body[0], body[1]]), [
+      ["Activated", session, "ptt"],
+      ["Deactivated", session, "ptt"],
+    ]);
+  });
+
+  test("a refusal cancels", async () => {
+    const other = "/org/freedesktop/portal/desktop/session/1_1/gs3";
+    await call("CreateSession", "oosa{sv}", [handle("e"), other, "org.other.App", new Map()]);
+    answer = null;
+    const [code] = await call("BindShortcuts", "ooa(sa{sv})sa{sv}", [handle("f"), other, shortcuts, "", new Map()]);
+    assert.equal(code, 1);
+  });
+
+  // PickColor is the Screenshot portal's, but asks the shell as these do.
+  test("PickColor: the shell's color, as fractions; Escape cancels", async () => {
+    const pick = () =>
+      client.call({
+        destination: PORTAL_NAME,
+        path: "/org/freedesktop/portal/desktop",
+        interface: "org.freedesktop.impl.portal.Screenshot",
+        member: "PickColor",
+        signature: "ossa{sv}",
+        body: [handle("g"), "com.discordapp.Discord", "", new Map()],
+      }) as Promise<[number, Map<string, unknown>]>;
+    answer = { color: [255, 0, 51] };
+    const [code, results] = await pick();
+    assert.equal(code, 0);
+    assert.deepEqual(results.get("color"), [1, 0, 0.2]);
+    assert.deepEqual(asked.at(-1), { op: "pick_color", appName: "Discord" });
+    answer = { color: null };
+    assert.equal((await pick())[0], 1);
+  });
+});

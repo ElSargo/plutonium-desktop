@@ -1,8 +1,8 @@
 // A small D-Bus client: method calls over a bus connection, for AT-SPI
 // (a11y.ts). Authenticates as the user (EXTERNAL), marshals the basic and
 // container types, and matches replies to calls. It can also serve method
-// calls and send signals, for the portal backend (portal.ts). No incoming
-// signals, no fds.
+// calls and send signals, for the portal backend (portal.ts), and hand the
+// signals it gets (after an AddMatch) to onSignal. No fds.
 import { createConnection, type Socket } from "node:net";
 import { userInfo } from "node:os";
 
@@ -354,6 +354,8 @@ export class DBusConnection {
   name = "";
   /** Serves the method calls that come in; without one, they get UnknownMethod. */
   onCall: CallHandler | null = null;
+  /** Signals that come in (the bus sends only those matched with AddMatch). */
+  onSignal: ((message: Message) => void) | null = null;
 
   private readonly socket: Socket;
 
@@ -507,6 +509,10 @@ export class DBusConnection {
   private onMessage(message: Message): void {
     if (message.type === METHOD_CALL) {
       void this.serve(message);
+      return;
+    }
+    if (message.type === SIGNAL) {
+      this.onSignal?.(message);
       return;
     }
     if (message.type !== METHOD_RETURN && message.type !== ERROR) return;
