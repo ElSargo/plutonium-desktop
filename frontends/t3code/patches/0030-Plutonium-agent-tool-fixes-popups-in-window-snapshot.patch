@@ -1,0 +1,890 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 08:55:52 +1300
+Subject: [PATCH 30/30] Plutonium: agent tool fixes: popups in window
+ snapshots, results that say what happened, private tabs marked
+
+- snapshot_window passes on the window's open popups; click_window,
+  press_window and act_window say they reach menus and name new windows.
+- preview_press and preview_drag say what they did.
+- A snapshot's [active] (keyboard focus) reads [focused].
+- preview_navigate's status doesn't list itself as busy.
+- preview_evaluate is in the action timeline.
+- Recordings get their length in their header (WebM Duration, MP4 mvhd/
+  tkhd/mdhd/mehd), so players can show and seek them.
+- The idle sweep and the tab the user is looking at count a Plutonium
+  shell showing the tab.
+- The floating preview follows the tab whose cursor the agent moves.
+- A private tab shows a mask in its panel tab and a Private badge in the
+  floating preview.
+---
+ .../src/mcp/toolkits/preview/handlers.ts      |  28 ++-
+ .../src/mcp/toolkits/preview/tools.test.ts    |  12 +-
+ apps/server/src/mcp/toolkits/preview/tools.ts |  16 +-
+ apps/server/src/plutonium/windowTools.ts      |  31 ++-
+ apps/server/src/preview/ServerBrowser.ts      |  69 ++++--
+ apps/server/src/preview/ServerBrowserPage.ts  |   3 +
+ .../src/preview/recordingDuration.test.ts     | 100 +++++++++
+ apps/server/src/preview/recordingDuration.ts  | 209 ++++++++++++++++++
+ apps/web/src/components/ChatView.tsx          |  26 +++
+ apps/web/src/components/RightPanelTabs.tsx    |  15 +-
+ .../preview/ThreadPreviewMiniPlayer.tsx       |  24 +-
+ 11 files changed, 501 insertions(+), 32 deletions(-)
+ create mode 100644 apps/server/src/preview/recordingDuration.test.ts
+ create mode 100644 apps/server/src/preview/recordingDuration.ts
+
+diff --git a/apps/server/src/mcp/toolkits/preview/handlers.ts b/apps/server/src/mcp/toolkits/preview/handlers.ts
+index 70b20677a5..3bf69ab821 100644
+--- a/apps/server/src/mcp/toolkits/preview/handlers.ts
++++ b/apps/server/src/mcp/toolkits/preview/handlers.ts
+@@ -98,6 +98,21 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
+   };
+ });
+ 
++/** Plutonium: what a drag did, for its result. */
++const describeDrag = (input: {
++  readonly path?: ReadonlyArray<{ readonly x: number; readonly y: number }> | undefined;
++  readonly source?: string | undefined;
++  readonly target?: string | undefined;
++}) => {
++  const path = input.path;
++  if (path && path.length > 0) {
++    const first = path[0]!;
++    const last = path[path.length - 1]!;
++    return `Dragged through ${path.length} points, from ${first.x},${first.y} to ${last.x},${last.y}.`;
++  }
++  return `Dragged ${input.source} onto ${input.target}.`;
++};
++
+ const invokeTargeted = <A extends object>(
+   operation: PreviewAutomationOperation,
+   input: {
+@@ -226,12 +241,21 @@ const handlers = {
+     invokeTargeted<PreviewAutomationSelectResult>("select", input, input.timeoutMs),
+   ),
+   preview_drag: McpToolAccess.actsAsCaller((input) =>
+-    invokeTargeted<object>("drag", input, input.timeoutMs),
++    invokeTargeted<object>("drag", input, input.timeoutMs).pipe(
++      Effect.map((result) => ({ done: describeDrag(input), ...result })),
++    ),
+   ),
+   preview_upload: McpToolAccess.actsAsCaller((input) =>
+     invokeTargeted<object>("upload", input, input.timeoutMs),
+   ),
+-  preview_press: McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("press", input)),
++  preview_press: McpToolAccess.actsAsCaller((input) =>
++    invokeTargeted<object>("press", input).pipe(
++      Effect.map((result) => ({
++        done: `Pressed ${[...(input.modifiers ?? []), input.key].join("+")}.`,
++        ...result,
++      })),
++    ),
++  ),
+   preview_scroll: McpToolAccess.actsAsCaller((input) => invokeTargeted<object>("scroll", input)),
+   preview_evaluate: McpToolAccess.actsAsCaller(({ tabId, ...input }) =>
+     invoke<unknown>("evaluate", input, undefined, tabId).pipe(
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.test.ts b/apps/server/src/mcp/toolkits/preview/tools.test.ts
+index 5c3f195243..511eb79ecb 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.test.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.test.ts
+@@ -63,9 +63,7 @@ it("exports exact object result schemas for preview actions", () => {
+     "preview_click",
+     "preview_type",
+     "preview_hover",
+-    "preview_drag",
+     "preview_upload",
+-    "preview_press",
+     "preview_scroll",
+     "preview_wait_for",
+   ] as const;
+@@ -79,6 +77,16 @@ it("exports exact object result schemas for preview actions", () => {
+       description: "The preview action completed successfully.",
+     });
+   }
++  // These say what they did.
++  for (const name of ["preview_press", "preview_drag"] as const) {
++    expect(Tool.getJsonSchemaFromSchema(PreviewToolkit.tools[name].successSchema)).toEqual({
++      type: "object",
++      properties: { done: expect.any(Object), toolIcon: expect.any(Object) },
++      required: ["done"],
++      additionalProperties: true,
++      description: "The preview action completed successfully.",
++    });
++  }
+ });
+ 
+ it("takes a drag as two elements or a path of points, not both", () => {
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
+index 39605f91bc..fe97e245cc 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.ts
+@@ -50,6 +50,12 @@ const PreviewActionResult = Schema.Struct(presentationFields).annotate({
+   description: "The preview action completed successfully.",
+ });
+ 
++/** Plutonium: an action whose result says what it did. */
++const PreviewDoneResult = Schema.Struct({
++  done: Schema.String.annotate({ description: "What the action did." }),
++  ...presentationFields,
++}).annotate({ description: "The preview action completed successfully." });
++
+ /** Drives the real browser and can destroy page state. */
+ const browserTool = <T extends Tool.Any>(tool: T): T =>
+   tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+@@ -143,7 +149,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
+ export const PreviewSnapshotTool = safeBrowserTool(
+   Tool.make("preview_snapshot", {
+     description:
+-      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. The image shows the viewport one pixel per CSS pixel, so a point read off it is the x/y that preview_click, preview_hover and preview_drag take; screenshot.viewport gives the viewport's CSS size, and an image narrower than it (viewports over 1280 wide) is scaled down by that ratio. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
++      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. In it, [focused] marks the element with keyboard focus (not a chosen option: those are [checked], [selected] or [pressed]). Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. The image shows the viewport one pixel per CSS pixel, so a point read off it is the x/y that preview_click, preview_hover and preview_drag take; screenshot.viewport gives the viewport's CSS size, and an image narrower than it (viewports over 1280 wide) is scaled down by that ratio. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
+     parameters: Schema.Struct({
+       ...PreviewAutomationTabTargetInput.fields,
+       includeImage: Schema.optional(
+@@ -215,9 +221,9 @@ const PreviewSelectTool = browserTool(
+ const PreviewDragTool = browserTool(
+   Tool.make("preview_drag", {
+     description:
+-      "Drag with the mouse in the tab selected by tabId, or this agent session's current tab when omitted. Either drag one element onto another (source and target locators), or press the button and move along a path of points, to draw on a canvas, sketch a shape or curve, drag out a selection box, or move something to an exact spot. A path is a list of {x,y} in CSS pixels from the viewport's top-left, the same as preview_click x/y and a snapshot image's pixels: two points for a straight drag, more for a curve. The button goes down at the first point and up at the last; button and modifiers (for example Shift) are held for the whole drag. These are real mouse events, as from a person. Server browser tabs only.",
++      "Drag with the mouse in the tab selected by tabId, or this agent session's current tab when omitted. Either drag one element onto another (source and target locators), or press the button and move along a path of points, to draw on a canvas, sketch a shape or curve, drag out a selection box, or move something to an exact spot. A path is a list of {x,y} in CSS pixels from the viewport's top-left, the same as preview_click x/y and a snapshot image's pixels: two points for a straight drag, more for a curve. The button goes down at the first point and up at the last; button and modifiers (for example Shift) are held for the whole drag. These are real mouse events, as from a person. Returns what it did. Server browser tabs only.",
+     parameters: PreviewAutomationDragInput,
+-    success: PreviewActionResult,
++    success: PreviewDoneResult,
+     failure: PreviewToolFailure,
+     dependencies,
+   }).annotate(Tool.Title, "Drag in preview page"),
+@@ -237,9 +243,9 @@ const PreviewUploadTool = browserTool(
+ const PreviewPressTool = browserTool(
+   Tool.make("preview_press", {
+     description:
+-      "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}.",
++      "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}. Returns the keys it pressed.",
+     parameters: PreviewAutomationPressInput,
+-    success: PreviewActionResult,
++    success: PreviewDoneResult,
+     failure: PreviewToolFailure,
+     dependencies,
+   }).annotate(Tool.Title, "Press key in preview page"),
+diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
+index eed75a0efa..bd164cd93c 100644
+--- a/apps/server/src/plutonium/windowTools.ts
++++ b/apps/server/src/plutonium/windowTools.ts
+@@ -143,7 +143,7 @@ const LaunchAppTool = windowTool(
+ 
+ export const SnapshotWindowTool = Tool.make("snapshot_window", {
+   description:
+-    "Take a screenshot of one of this thread's app windows, even if the user isn't looking at it: a PNG of the window's contents only. Points for click_window and the other window tools are in this image's pixels. Menus and other popups don't appear in it.",
++    "Take a screenshot of one of this thread's app windows, even if the user isn't looking at it: a PNG of the window's contents only. Points for click_window and the other window tools are in this image's pixels. Open menus and other popups are drawn in it where they are (the image grows right and down to hold one that goes past the window) and listed in popups; the window tools reach them.",
+   parameters: Schema.Struct({ window_id: windowId }),
+   success: Schema.Struct({
+     window_id: Schema.Int,
+@@ -153,6 +153,13 @@ export const SnapshotWindowTool = Tool.make("snapshot_window", {
+       width: Schema.Int,
+       height: Schema.Int,
+     }),
++    popups: Schema.optional(
++      Schema.Array(
++        Schema.Struct({ x: Schema.Int, y: Schema.Int, width: Schema.Int, height: Schema.Int }),
++      ).annotate({
++        description: "The window's open menus and other popups, in the image's pixels.",
++      }),
++    ),
+   }),
+   failure: WindowToolFailure,
+   dependencies,
+@@ -165,7 +172,7 @@ export const SnapshotWindowTool = Tool.make("snapshot_window", {
+ 
+ const ClickWindowTool = windowTool(
+   "click_window",
+-  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. Take a new snapshot to see what happened.",
++  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no further. Returns the windows the click opened (newWindows) or closed, and the window's open popups. Take a new snapshot to see what happened.",
+   {
+     window_id: windowId,
+     x: coordinate("x"),
+@@ -218,7 +225,7 @@ const TypeWindowTool = windowTool(
+ 
+ const PressWindowTool = windowTool(
+   "press_window",
+-  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn.',
++  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn. Returns the windows the keys opened (newWindows) or closed, and the window\'s open popups (menus).',
+   {
+     window_id: windowId,
+     keys: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({
+@@ -261,7 +268,7 @@ const ReadWindowTool = Tool.make("read_window", {
+ 
+ const ActWindowTool = windowTool(
+   "act_window",
+-  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Read again to see the result.',
++  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Returns the windows it opened (newWindows) or closed, and the window\'s open popups (menus). Read again to see the result.',
+   {
+     window_id: windowId,
+     ref: Schema.String.annotate({
+@@ -423,6 +430,21 @@ export const layerSnapshot = McpToolAccess.toLayer(WindowSnapshotToolkit, {
+     callHelper("snapshot_window", input).pipe(
+       Effect.flatMap((content) => {
+         const image = content.find((part) => part.type === "image");
++        const popups = Option.flatMap(decodeJson(texts(content)), (value) =>
++          typeof value === "object" &&
++          value !== null &&
++          "popups" in value &&
++          Array.isArray(value.popups)
++            ? Option.some(
++                value.popups as ReadonlyArray<{
++                  x: number;
++                  y: number;
++                  width: number;
++                  height: number;
++                }>,
++              )
++            : Option.none(),
++        );
+         return image?.mimeType === "image/png"
+           ? Effect.succeed({
+               window_id: input.window_id,
+@@ -431,6 +453,7 @@ export const layerSnapshot = McpToolAccess.toLayer(WindowSnapshotToolkit, {
+                 data: image.data,
+                 ...pngSize(image.data),
+               },
++              ...(Option.isSome(popups) ? { popups: popups.value } : {}),
+             })
+           : Effect.fail(failure(texts(content) || "The window gave no image."));
+       }),
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index 4001dd66be..cf20224467 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -78,6 +78,7 @@ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+ import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
+ import * as PreviewManager from "./Manager.ts";
+ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
++import { withRecordingDuration } from "./recordingDuration.ts";
+ import * as PreviewBrowser from "./PreviewBrowser.ts";
+ import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
+ import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
+@@ -322,6 +323,8 @@ interface ServerTab {
+     /** Whether the desktop shows the page now. False where it cannot tell. */
+     readonly shown: () => Promise<boolean>;
+   } | null;
++  /** Plutonium: what `desktop.shown()` last said (the idle sweep refreshes it). */
++  shownByDesktop: boolean;
+   readonly profileId: string | undefined;
+   /** Set when a page in another tab opened this one with `window.open` or a link. */
+   readonly openerTabId: string | undefined;
+@@ -853,6 +856,7 @@ const make = Effect.gen(function* () {
+       control,
+       isolatedContext,
+       desktop: desktop === null ? null : { close: desktop.close, shown: desktop.shown },
++      shownByDesktop: false,
+       profileId: snapshot.profileId,
+       openerTabId: adopted?.openerTabId,
+       downloads: [],
+@@ -1375,8 +1379,28 @@ const make = Effect.gen(function* () {
+   const closeIdleAgentTabs = () => {
+     const cutoff = Date.now() - AGENT_TAB_IDLE_MS;
+     for (const tab of tabs.values()) {
+-      if (tab.control.agentId !== null && tab.viewers.size === 0 && tab.usedAt < cutoff)
+-        dropTab(tab, true);
++      // Plutonium: a shell showing it (the panel, the floating preview) is
++      // someone watching too.
++      if (tab.desktop) void onScreen(tab);
++      if (
++        tab.control.agentId !== null &&
++        tab.viewers.size === 0 &&
++        tab.usedAt < cutoff &&
++        !tab.shownByDesktop
++      ) {
++        if (!tab.desktop) {
++          dropTab(tab, true);
++          continue;
++        }
++        void (async () => {
++          if (
++            !(await onScreen(tab)) &&
++            tab.usedAt < cutoff &&
++            tabs.get(tabKey(tab.threadId, tab.tabId)) === tab
++          )
++            dropTab(tab, true);
++        })();
++      }
+     }
+   };
+ 
+@@ -1392,8 +1416,8 @@ const make = Effect.gen(function* () {
+         .sort((left, right) => right.createdAt - left.createdAt)[0] ??
+       threadTabs.sort(
+         (left, right) =>
+-          Number(right.viewers.size > 0) - Number(left.viewers.size > 0) ||
+-          right.usedAt - left.usedAt,
++          Number(right.viewers.size > 0 || right.shownByDesktop) -
++            Number(left.viewers.size > 0 || left.shownByDesktop) || right.usedAt - left.usedAt,
+       )[0]
+     );
+   };
+@@ -1451,8 +1475,10 @@ const make = Effect.gen(function* () {
+   };
+ 
+   /** Whether the user sees the tab now: a viewer streams it, or the desktop shows its page. */
+-  const onScreen = async (tab: ServerTab) =>
+-    tab.viewers.size > 0 || ((await tab.desktop?.shown().catch(() => false)) ?? false);
++  const onScreen = async (tab: ServerTab) => {
++    if (tab.desktop) tab.shownByDesktop = await tab.desktop.shown().catch(() => false);
++    return tab.viewers.size > 0 || tab.shownByDesktop;
++  };
+ 
+   /** Waits a moment for a preview a client was asked to open; false if none shows it. */
+   const awaitOnScreen = async (tab: ServerTab, timeoutMs: number) => {
+@@ -1467,6 +1493,7 @@ const make = Effect.gen(function* () {
+   const statusWithTitle = async (
+     tab: ServerTab | undefined,
+     agentSessionId?: string,
++    fromRunningAction = false,
+   ): Promise<PreviewAutomationStatus> => {
+     if (!tab) {
+       return {
+@@ -1498,7 +1525,7 @@ const make = Effect.gen(function* () {
+         generation: tab.control.generation,
+       },
+       dialog: dialogStatus(tab),
+-      ...busyStatus(tab),
++      ...busyStatus(tab, fromRunningAction),
+       fileChooser: tab.fileChooser
+         ? { multiple: tab.fileChooser.chooser.isMultiple(), accept: tab.fileChooser.accept }
+         : null,
+@@ -1742,13 +1769,19 @@ const make = Effect.gen(function* () {
+         await recording.closeEncoder().catch(constVoid);
+         tab.recording = null;
+       }
+-      const data = Buffer.concat(chunks);
+-      if (!mimeType || data.byteLength === 0) {
++      const raw = Buffer.concat(chunks);
++      if (!mimeType || raw.byteLength === 0) {
+         throw new ServerBrowserPage.ServerBrowserOperationError(
+           "PreviewAutomationExecutionError",
+           "The recording captured no frames.",
+         );
+       }
++      // Plutonium: its length, which the encoder's streamed file lacks.
++      const data = withRecordingDuration(
++        raw,
++        mimeType,
++        Date.now() - Date.parse(recording.startedAt),
++      );
+       // Use the desktop upload location so the MCP handler can claim the recording.
+       const extension = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+       const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${NodeCrypto.randomUUID()}-${extension}`;
+@@ -1898,8 +1931,9 @@ const make = Effect.gen(function* () {
+       ),
+   });
+ 
+-  const busyStatus = (tab: ServerTab) => {
+-    const { running, stuck } = tab.control.activity;
++  const busyStatus = (tab: ServerTab, fromRunningAction = false) => {
++    const { stuck } = tab.control.activity;
++    const running = fromRunningAction ? undefined : tab.control.activity.running;
+     const describe = (activity: ActionActivity) => ({
+       operation: activity.operation,
+       since: new Date(activity.since).toISOString(),
+@@ -2128,7 +2162,8 @@ const make = Effect.gen(function* () {
+             navigateInput.timeoutMs ?? request.timeoutMs,
+           ),
+         );
+-        return statusWithTitle(tab, request.agentSessionId);
++        // Answered from inside the action: it isn't busy with itself.
++        return statusWithTitle(tab, request.agentSessionId, true);
+       }
+       case "resize": {
+         const setting = resolvePreviewViewport(input as PreviewAutomationResizeInput);
+@@ -2191,10 +2226,12 @@ const make = Effect.gen(function* () {
+           ServerBrowserPage.scroll(tab.page, input as PreviewAutomationScrollInput),
+         );
+       case "evaluate":
+-        return ServerBrowserPage.evaluate(
+-          tab.cdp,
+-          input as PreviewAutomationEvaluateInput,
+-          request.timeoutMs,
++        return recordAction(tab, "evaluate", () =>
++          ServerBrowserPage.evaluate(
++            tab.cdp,
++            input as PreviewAutomationEvaluateInput,
++            request.timeoutMs,
++          ),
+         );
+       case "waitFor":
+         return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput);
+diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
+index 80c1aa37b4..3726c8c279 100644
+--- a/apps/server/src/preview/ServerBrowserPage.ts
++++ b/apps/server/src/preview/ServerBrowserPage.ts
+@@ -247,6 +247,9 @@ export const snapshot = async (input: {
+   }
+   const accessibilityTree = tree
+     .slice(0, MAX_VISIBLE_TEXT_LENGTH)
++    // Plutonium: Playwright's [active] is the element with keyboard focus,
++    // which agents took for a chosen option.
++    .replace(/ \[active\](?= \[|$)/gm, " [focused]")
+     .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
+       const ref = `t3-${generation}-${nativeRef}`;
+       state.refs.set(ref, nativeRef);
+diff --git a/apps/server/src/preview/recordingDuration.test.ts b/apps/server/src/preview/recordingDuration.test.ts
+new file mode 100644
+index 0000000000..4de985f82b
+--- /dev/null
++++ b/apps/server/src/preview/recordingDuration.test.ts
+@@ -0,0 +1,100 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { withRecordingDuration } from "./recordingDuration.ts";
++
++const element = (id: number[], body: Buffer, unknownSize = false) =>
++  Buffer.concat([
++    Buffer.from(id),
++    unknownSize
++      ? Buffer.from([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
++      : Buffer.from([0x80 | body.length]),
++    body,
++  ]);
++
++/** What MediaRecorder writes: a live Segment, an Info without a Duration, then clusters. */
++const webm = () =>
++  Buffer.concat([
++    element([0x1a, 0x45, 0xdf, 0xa3], element([0x42, 0x82], Buffer.from("webm"))),
++    element(
++      [0x18, 0x53, 0x80, 0x67],
++      Buffer.concat([
++        element(
++          [0x15, 0x49, 0xa9, 0x66],
++          Buffer.concat([
++            element([0x2a, 0xd7, 0xb1], Buffer.from([0x0f, 0x42, 0x40])),
++            element([0x4d, 0x80], Buffer.from("Chrome")),
++          ]),
++        ),
++        element([0x1f, 0x43, 0xb6, 0x75], Buffer.from([0xe7, 0x81, 0x00])),
++      ]),
++      true,
++    ),
++  ]);
++
++const box = (type: string, body: Buffer) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(8 + body.length, 0);
++  header.write(type, 4, "latin1");
++  return Buffer.concat([header, body]);
++};
++
++/** A fragmented MP4's moov: every duration 0. */
++const mp4 = () => {
++  const mvhd = Buffer.alloc(100);
++  mvhd.writeUInt32BE(1000, 12);
++  const tkhd = Buffer.alloc(84);
++  const mdhd = Buffer.alloc(24);
++  mdhd.writeUInt32BE(90000, 12);
++  return Buffer.concat([
++    box("ftyp", Buffer.from("isom")),
++    box(
++      "moov",
++      Buffer.concat([
++        box("mvhd", mvhd),
++        box("trak", Buffer.concat([box("tkhd", tkhd), box("mdia", box("mdhd", mdhd))])),
++        box("mvex", box("mehd", Buffer.alloc(8))),
++      ]),
++    ),
++    box("moof", Buffer.alloc(8)),
++  ]);
++};
++
++describe("withRecordingDuration", () => {
++  it("adds a Duration to a WebM's Info", () => {
++    const original = webm();
++    const result = withRecordingDuration(original, "video/webm;codecs=vp9", 2500);
++    expect(result.length).toBe(original.length + 11);
++    const at = result.indexOf(Buffer.from([0x44, 0x89, 0x88]));
++    expect(at).toBeGreaterThan(0);
++    // In ticks of the timecode scale (1 ms here).
++    expect(result.readDoubleBE(at + 3)).toBe(2500);
++    // The Info's size grew by the element; the cluster follows it.
++    const info = result.indexOf(Buffer.from([0x15, 0x49, 0xa9, 0x66]));
++    expect(result[info + 4]! & 0x7f).toBe(original[info + 4]! - 0x80 + 11);
++    expect(result.indexOf(Buffer.from([0x1f, 0x43, 0xb6, 0x75]))).toBe(
++      info + 5 + (result[info + 4]! & 0x7f),
++    );
++  });
++
++  it("leaves a WebM that has a Duration, or isn't one, as it is", () => {
++    const once = withRecordingDuration(webm(), "video/webm", 2500);
++    expect(withRecordingDuration(once, "video/webm", 4000)).toEqual(once);
++    const junk = Buffer.from("not a video");
++    expect(withRecordingDuration(junk, "video/webm", 1000)).toEqual(junk);
++  });
++
++  it("sets an MP4's movie, track, media and fragment durations", () => {
++    const original = mp4();
++    const result = withRecordingDuration(original, "video/mp4;codecs=avc1.640033", 2500);
++    expect(result.length).toBe(original.length);
++    const mvhd = result.indexOf("mvhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mvhd + 16)).toBe(2500);
++    const tkhd = result.indexOf("tkhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(tkhd + 20)).toBe(2500);
++    const mdhd = result.indexOf("mdhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mdhd + 16)).toBe(225000);
++    const mehd = result.indexOf("mehd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mehd + 4)).toBe(2500);
++    expect(original.readUInt32BE(mvhd + 16)).toBe(0);
++  });
++});
+diff --git a/apps/server/src/preview/recordingDuration.ts b/apps/server/src/preview/recordingDuration.ts
+new file mode 100644
+index 0000000000..b59dd7c2a5
+--- /dev/null
++++ b/apps/server/src/preview/recordingDuration.ts
+@@ -0,0 +1,209 @@
++/**
++ * Plutonium: a recording's length, written into its header. MediaRecorder
++ * streams its file as it goes, so it never knows the length: a WebM has no
++ * Duration in its Info, an MP4 a duration of 0, and players can't show or
++ * seek well. Without ffmpeg (NixOS has none on the server's PATH), the
++ * length is written in place.
++ */
++
++// EBML element ids (Matroska).
++const SEGMENT = 0x18538067;
++const INFO = 0x1549a966;
++const TIMECODE_SCALE = 0x2ad7b1;
++const DURATION = 0x4489;
++const CLUSTER = 0x1f43b675;
++
++interface Element {
++  readonly id: number;
++  /** Where the element starts, its size field starts, and its data starts. */
++  readonly start: number;
++  readonly sizeAt: number;
++  readonly dataAt: number;
++  /** The size field's length in bytes. */
++  readonly sizeLength: number;
++  /** The data's size, or null for "unknown" (a live stream's Segment). */
++  readonly size: number | null;
++}
++
++const readElement = (data: Buffer, at: number): Element | null => {
++  if (at >= data.length) return null;
++  const first = data[at]!;
++  const idLength = Math.clz32(first) - 23;
++  if (idLength < 1 || idLength > 4 || at + idLength >= data.length) return null;
++  const id = data.readUIntBE(at, idLength);
++  const sizeAt = at + idLength;
++  const sizeFirst = data[sizeAt]!;
++  const sizeLength = Math.clz32(sizeFirst) - 23;
++  if (sizeLength < 1 || sizeLength > 8 || sizeAt + sizeLength > data.length) return null;
++  let size = sizeFirst & (0xff >> sizeLength);
++  let unknown = size === 0xff >> sizeLength;
++  for (let index = 1; index < sizeLength; index += 1) {
++    const byte = data[sizeAt + index]!;
++    if (byte !== 0xff) unknown = false;
++    size = size * 256 + byte;
++  }
++  return {
++    id,
++    start: at,
++    sizeAt,
++    dataAt: sizeAt + sizeLength,
++    sizeLength,
++    size: unknown ? null : size,
++  };
++};
++
++/** `size` as a size field `length` bytes long, or null if it doesn't fit. */
++const encodeSize = (size: number, length: number): Buffer | null => {
++  if (size >= 2 ** (7 * length) - 1) return null;
++  const field = Buffer.alloc(length);
++  let rest = size;
++  for (let index = length - 1; index >= 0; index -= 1) {
++    field[index] = rest % 256;
++    rest = Math.floor(rest / 256);
++  }
++  field[0]! |= 0x80 >> (length - 1);
++  return field;
++};
++
++const withWebmDuration = (data: Buffer, durationMs: number): Buffer => {
++  const segment = findTopLevel(data, SEGMENT);
++  if (!segment) return data;
++  const segmentEnd = segment.size === null ? data.length : segment.dataAt + segment.size;
++  let info: Element | null = null;
++  for (let at = segment.dataAt; at < segmentEnd;) {
++    const element = readElement(data, at);
++    if (!element || element.size === null) return data;
++    if (element.id === INFO) {
++      info = element;
++      break;
++    }
++    if (element.id === CLUSTER) return data;
++    at = element.dataAt + element.size;
++  }
++  if (!info || info.size === null) return data;
++  // Durations count in the timecode scale (ns per tick, 1 ms by default).
++  let scale = 1_000_000;
++  const infoEnd = info.dataAt + info.size;
++  for (let at = info.dataAt; at < infoEnd;) {
++    const element = readElement(data, at);
++    if (!element || element.size === null) return data;
++    if (element.id === DURATION) return data;
++    if (element.id === TIMECODE_SCALE && element.size <= 6) {
++      scale = data.readUIntBE(element.dataAt, element.size) || scale;
++    }
++    at = element.dataAt + element.size;
++  }
++  const duration = Buffer.alloc(11);
++  duration.writeUInt16BE(DURATION, 0);
++  duration[2] = 0x88;
++  duration.writeDoubleBE((durationMs * 1_000_000) / scale, 3);
++  const infoSize = encodeSize(info.size + duration.length, info.sizeLength);
++  if (!infoSize) return data;
++  let segmentSize: Buffer | null = null;
++  if (segment.size !== null) {
++    segmentSize = encodeSize(segment.size + duration.length, segment.sizeLength);
++    if (!segmentSize) return data;
++  }
++  const result = Buffer.concat([data.subarray(0, infoEnd), duration, data.subarray(infoEnd)]);
++  infoSize.copy(result, info.sizeAt);
++  segmentSize?.copy(result, segment.sizeAt);
++  return result;
++};
++
++const findTopLevel = (data: Buffer, id: number): Element | null => {
++  for (let at = 0; at < data.length;) {
++    const element = readElement(data, at);
++    if (!element) return null;
++    if (element.id === id) return element;
++    if (element.size === null) return null;
++    at = element.dataAt + element.size;
++  }
++  return null;
++};
++
++/** MP4 boxes in [start, end): type, where it starts, its header's end, its end. */
++const boxes = (data: Buffer, start: number, end: number) => {
++  const found: Array<{ type: string; start: number; body: number; end: number }> = [];
++  for (let at = start; at + 8 <= end;) {
++    let size = data.readUInt32BE(at);
++    let body = at + 8;
++    if (size === 1) {
++      if (at + 16 > end) break;
++      size = Number(data.readBigUInt64BE(at + 8));
++      body = at + 16;
++    } else if (size === 0) {
++      size = end - at;
++    }
++    if (size < body - at || at + size > end) break;
++    found.push({ type: data.toString("latin1", at + 4, at + 8), start: at, body, end: at + size });
++    at += size;
++  }
++  return found;
++};
++
++/**
++ * Sets a full box's duration (mvhd, tkhd, mdhd) where it is 0, in its own
++ * timescale or, for tkhd, the movie's. Returns the box's timescale, if it has one.
++ */
++const setBoxDuration = (
++  data: Buffer,
++  box: { type: string; body: number; end: number },
++  durationMs: number,
++  movieTimescale: number,
++): number | undefined => {
++  const version = data[box.body]!;
++  // After version and flags: creation and modification times, then (except
++  // tkhd) the timescale, then (tkhd) the track id and a reserved field.
++  const times = version === 1 ? 16 : 8;
++  const timescaleAt = box.body + 4 + times;
++  const timescale = box.type === "tkhd" ? movieTimescale : data.readUInt32BE(timescaleAt);
++  const durationAt = box.type === "tkhd" ? timescaleAt + 8 : timescaleAt + 4;
++  if (durationAt + (version === 1 ? 8 : 4) > box.end || !timescale) return undefined;
++  const duration = Math.round((durationMs * timescale) / 1000);
++  if (version === 1) {
++    if (data.readBigUInt64BE(durationAt) === 0n)
++      data.writeBigUInt64BE(BigInt(duration), durationAt);
++  } else if (data.readUInt32BE(durationAt) === 0 && duration < 2 ** 32) {
++    data.writeUInt32BE(duration, durationAt);
++  }
++  return box.type === "tkhd" ? undefined : timescale;
++};
++
++const withMp4Duration = (data: Buffer, durationMs: number): Buffer => {
++  const moov = boxes(data, 0, data.length).find((box) => box.type === "moov");
++  if (!moov) return data;
++  const result = Buffer.from(data);
++  const children = boxes(result, moov.body, moov.end);
++  const mvhd = children.find((box) => box.type === "mvhd");
++  if (!mvhd) return data;
++  const movieTimescale = setBoxDuration(result, mvhd, durationMs, 0) ?? 0;
++  for (const trak of children.filter((box) => box.type === "trak")) {
++    for (const box of boxes(result, trak.body, trak.end)) {
++      if (box.type === "tkhd") setBoxDuration(result, box, durationMs, movieTimescale);
++      if (box.type === "mdia") {
++        const mdhd = boxes(result, box.body, box.end).find((child) => child.type === "mdhd");
++        if (mdhd) setBoxDuration(result, mdhd, durationMs, movieTimescale);
++      }
++    }
++  }
++  const mvex = children.find((box) => box.type === "mvex");
++  const mehd = mvex && boxes(result, mvex.body, mvex.end).find((box) => box.type === "mehd");
++  if (mehd && movieTimescale) {
++    const duration = Math.round((durationMs * movieTimescale) / 1000);
++    if (result[mehd.body] === 1) result.writeBigUInt64BE(BigInt(duration), mehd.body + 4);
++    else if (duration < 2 ** 32) result.writeUInt32BE(duration, mehd.body + 4);
++  }
++  return result;
++};
++
++/** The recording with its length in its header; as it was if it can't tell where. */
++export const withRecordingDuration = (data: Buffer, mimeType: string, durationMs: number) => {
++  if (!(durationMs > 0)) return data;
++  try {
++    return mimeType.startsWith("video/mp4")
++      ? withMp4Duration(data, durationMs)
++      : withWebmDuration(data, durationMs);
++  } catch {
++    return data;
++  }
++};
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 23f891ebd5..2559aa5895 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -272,6 +272,7 @@ import {
+ } from "../previewStateStore";
+ import { BrowserSettingsReadError, openUrlInPreview } from "../browser/openFileInPreview";
+ import { resolveDiscoveredServerUrl } from "../browser/browserTargetResolver";
++import { useBrowserPointerStore } from "../browser/browserPointerStore";
+ import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
+ import { addBrowserSurface } from "./preview/addBrowserSurface";
+ import { closePreviewSession } from "./preview/closePreviewSession";
+@@ -5527,6 +5528,31 @@ export default function ChatView(props: ChatViewProps) {
+     autoShowFloatingPreview,
+     rightPanelState.surfaces,
+   ]);
++  // The floating preview follows the tab the agent drives: the agent's cursor
++  // in another of the thread's tabs brings that one up in it.
++  useEffect(() => {
++    if (!activeThreadRef) return;
++    return useBrowserPointerStore.subscribe((state, previous) => {
++      const source = selectThreadPreviewMiniPlayer(
++        usePreviewMiniPlayerStore.getState().byThreadKey,
++        activeThreadRef,
++      )?.source;
++      if (source?.kind !== "browser") return;
++      for (const [runtimeTabId, event] of Object.entries(state.byTabId)) {
++        if (previous.byTabId[runtimeTabId] === event) continue;
++        const session = Object.values(activePreviewState.sessions).find(
++          (candidate) =>
++            previewRuntimeTabId(activeThreadRef, activePreviewServerEpoch, candidate.tabId) ===
++            runtimeTabId,
++        );
++        if (!session || session.tabId === source.tabId) continue;
++        usePreviewMiniPlayerStore
++          .getState()
++          .open(activeThreadRef, browserMiniPlayerSource(session.tabId));
++        return;
++      }
++    });
++  }, [activePreviewServerEpoch, activePreviewState.sessions, activeThreadRef]);
+   // A floating device follows its session: once the agent or another client
+   // closes the device there is nothing left to stream.
+   useEffect(() => {
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index b5fda46d0c..b1d3b26ef9 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -1,4 +1,8 @@
+-import { pullRequestHostOf, type SourceControlProviderKind } from "@t3tools/contracts";
++import {
++  INCOGNITO_BROWSER_PROFILE_ID,
++  pullRequestHostOf,
++  type SourceControlProviderKind,
++} from "@t3tools/contracts";
+ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+ import { useProjects, useServerConfigs, useThreadShells } from "~/state/entities";
+ import {
+@@ -37,6 +41,7 @@ import {
+   Globe2,
+   Plus,
+   TerminalSquare,
++  VenetianMask,
+ } from "lucide-react";
+ import { Volume2, VolumeOff } from "lucide";
+ import {
+@@ -700,6 +705,14 @@ function SurfaceIcon({
+       const favicon = snapshot ? (desktopByTabId[snapshot.tabId]?.favicon ?? null) : null;
+       const capturedUrl =
+         favicon && url && sameOrigin(favicon.pageUrl, url) ? favicon.dataUrl : null;
++      // A private tab shows it is one, in place of its site's icon.
++      if (snapshot?.profileId === INCOGNITO_BROWSER_PROFILE_ID) {
++        return (
++          <span role="img" aria-label="Private tab" title="Private tab" className="flex shrink-0">
++            <VenetianMask className="size-3 shrink-0" />
++          </span>
++        );
++      }
+       return <PreviewFavicon capturedUrl={capturedUrl} url={url} />;
+     }
+     case "diff":
+diff --git a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx b/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
+index 72ae6554d6..faf4ccf454 100644
+--- a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
++++ b/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
+@@ -1,7 +1,11 @@
+ "use client";
+ 
+-import { FILL_PREVIEW_VIEWPORT, type ScopedThreadRef } from "@t3tools/contracts";
+-import { PanelRightIcon, PictureInPicture2, XIcon } from "lucide-react";
++import {
++  FILL_PREVIEW_VIEWPORT,
++  INCOGNITO_BROWSER_PROFILE_ID,
++  type ScopedThreadRef,
++} from "@t3tools/contracts";
++import { PanelRightIcon, PictureInPicture2, VenetianMask, XIcon } from "lucide-react";
+ import {
+   type PointerEvent as ReactPointerEvent,
+   type ReactNode,
+@@ -186,6 +190,18 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly
+       sourceSize={sourceSize}
+       label="Floating browser preview"
+       recording={recording}
++      badge={
++        snapshot?.profileId === INCOGNITO_BROWSER_PROFILE_ID ? (
++          <div
++            role="note"
++            aria-label="Private tab"
++            className="pointer-events-none absolute left-1.5 top-1.5 z-[49] flex items-center gap-1 rounded-md bg-popover/92 px-1.5 py-0.5 text-[11px] font-medium text-foreground shadow-sm ring-1 ring-border/80 backdrop-blur-xl"
++          >
++            <VenetianMask className="size-3" />
++            Private
++          </div>
++        ) : undefined
++      }
+       onOpenInPanel={openInPanel}
+       pillActions={
+         canPopOut ? (
+@@ -337,6 +353,7 @@ function MiniPlayerShell({
+   onOpenInPanel,
+   pillActions,
+   recording = false,
++  badge,
+   cornerRadius = frameCornerRadius,
+   children,
+ }: {
+@@ -347,6 +364,8 @@ function MiniPlayerShell({
+   readonly onOpenInPanel: () => void;
+   readonly pillActions?: ReactNode;
+   readonly recording?: boolean;
++  /** Drawn over the preview's top-left corner (a private tab's marker). */
++  readonly badge?: ReactNode;
+   /** The clip radius for a given frame; the pill stays inside the curve. */
+   readonly cornerRadius?: (frame: PreviewMiniPlayerSize) => number;
+   readonly children: (frame: PreviewMiniPlayerFrame) => ReactNode;
+@@ -556,6 +575,7 @@ function MiniPlayerShell({
+           <div className="absolute inset-0 z-[47] rounded-[inherit] bg-muted shadow-2xl/35" />
+           {children(frame)}
+           <div className="pointer-events-none absolute inset-0 z-[49] rounded-[inherit] ring-1 ring-inset ring-border/80" />
++          {badge}
+           {RESIZE_HANDLES.map(({ direction, className }) => (
+             <div
+               key={direction}
