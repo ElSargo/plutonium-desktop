@@ -15,8 +15,9 @@
     focused column on screen.
   - Workspaces are dynamic and stacked vertically: there is always one empty
     workspace at the bottom, and empty ones disappear once you leave them.
-  - The overview (Super+O, or the top-left hot corner) zooms out to every
-    workspace. Click a window to go to it, drag one to another workspace.
+  - The overview (Super+O, or the top-left hot corner: the desktop's, with
+    several displays) zooms out to every workspace. Click a window to go to
+    it, drag one to another workspace.
   - Super+Shift+/ lists the binds (also shown at startup).
 
   Windows and tabs are the shell's when tagged niri:desktop: everything
@@ -1353,8 +1354,19 @@ addEventListener("wheel", (e) => {
 
 // The hot corner opens (and closes) the overview.
 let cornerArmed = true;
+// Several displays: only a corner of the whole desktop is hot, not the top
+// left of a display with another one to its left or above it, which the
+// pointer crosses on its way from one to the other (it opened the overview,
+// and the overview's keys took Enter and O from the focused window).
+function cornerIsHot() {
+  const own = shell?.display;
+  if (!own) return true;
+  return !shell.displays.some((d) => d.id !== own.id && (
+    (d.x + d.width === own.x && d.y <= own.y && own.y < d.y + d.height) ||
+    (d.y + d.height === own.y && d.x <= own.x && own.x < d.x + d.width)));
+}
 $("hot-corner").addEventListener("pointerenter", () => {
-  if (!CONFIG.hotCorner || !cornerArmed) return;
+  if (!CONFIG.hotCorner || !cornerArmed || !cornerIsHot()) return;
   cornerArmed = false;
   actions.toggleOverview();
   commit();

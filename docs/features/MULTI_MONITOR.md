@@ -84,7 +84,7 @@ Plain HTML drag and drop, with `application/x-plutonium-window` and `application
 
 ### The frontends
 
-- **niri:** each display's page is one of niri's outputs, with its own workspaces and its own stored layout. An item is on the output whose `niri:output/<display id>` tag it carries; new items, and those whose display went away, go to the focused display's page, which tags them. A window or tab focused or dropped on a page moves to its output. A tile whose window another page took shows a placeholder, and focusing it brings the window back.
+- **niri:** the hot corner is the desktop's top left only (not a display's with another display left of it or above). Each display's page is one of niri's outputs, with its own workspaces and its own stored layout. An item is on the output whose `niri:output/<display id>` tag it carries; new items, and those whose display went away, go to the focused display's page, which tags them. A window or tab focused or dropped on a page moves to its output. A tile whose window another page took shows a placeholder, and focusing it brings the window back.
 - **Plain:** the threads are shared; each display has its own current thread and open tabs. A taken window shows "Shown on another display" with "Bring it back". Apps and tabs can be dragged (to another shell or display), the stage takes drops, and "To display N" sends the shown item to another display.
 - **T3:** an app tab whose window another display took shows a placeholder with "Bring it back"; the app header has "To display N". T3's own state is on its server, so a T3 page per display stays in sync without more.
 
@@ -124,6 +124,8 @@ On X11 the drag is cancelled as the pointer enters the other display's host wind
 | A drag of foot's entry from Plain on the monitor onto niri on the panel (a real evdev mouse): `dragenter`, `dragover`, `drop` on niri, `dragend` with effect "move"; niri shows foot, Plain's element goes "taken" | ✓ |
 | Hotplug (the connector forced off and on, with a DRM change uevent), twice: the monitor's pages close, niri adopts foot; back on, both shells reopen, Plain is visible again and foot goes back to Plain | ✓ |
 | No crash, DCHECK or FATAL | ✓ |
+
+Round 5 (Oliver at the keyboard): moves of foot and kitty, with Plain and with niri on the monitor, sharp at once from the first move; no crash; Super+Shift+S screenshots. Fixed after it: Return (and O) sometimes didn't reach a window: the pointer crossing from the panel to the monitor along the top edge passes the monitor's top-left corner, niri's hot corner there opened its overview, and the overview's keys (Enter, Escape, O) are the shell's while it is open. niri's hot corner is now only a corner of the whole desktop (reproduced and checked on X11).
 
 Round 4 (the size fix, Oliver at the keyboard): windows scale and fill their element right after a move, and input lands in the right place. Fixed after it: text stayed slightly blurry until the window's next input (the client kept its old-scale buffer): a parked window whose display changed now gets a configure after Exo sends it the new display's output and scale; a crash (a dmabuf feedback DCHECK, `!scanout_tranche_`) when a window that is a scanout candidate changed displays: Exo added the new display's tranche without clearing the old one, and a resize (`SetEmbedSize`, in screen coordinates) could move a parked window to another display by itself; a resize now keeps it on its display (only `SetShown()` moves it), and the old tranche goes first.
 
