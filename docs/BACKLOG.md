@@ -303,12 +303,34 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   is already `Linux x86_64`. Then compare the remaining fingerprint with
   Linux Chromium on the same machine, using a fingerprinting test page:
   ChromeOS-only web APIs, fonts and WebGL strings.
-- [ ] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
+- [x] **Audit what still behaves like ChromeOS.** S–M · Grep the patched
   tree for `IS_CHROMEOS` / `IS_LINUX` gates in the areas we use: media and
   WebRTC (`rtc_use_pipewire`), printing (Linux's CUPS backend instead of
   Ash's printer manager), IME, notifications, branding strings, web APIs.
   Turn what we find into items here, each saying whether to switch on the
-  Linux path or patch the ChromeOS one out.
+  Linux path or patch the ChromeOS one out. Done 2026-10-25
+  (`LINUX_COMPAT.md`): a Plutonium tab against Linux Chromium; the timezone,
+  languages and ChromeOS-only web APIs fixed, the rest below.
+- [ ] **H.264 and AAC in tabs.** M (a big rebuild) · High priority: no
+  proprietary codecs, so `canPlayType` says no to `avc1` and `mp4a`.
+  `proprietary_codecs = true` and `ffmpeg_branding = "Chrome"` in
+  `chromium/args.gn` (and the release args), as nixpkgs' Chromium.
+- [ ] **Pages use the host's fonts.** S–M · Ash in the container renders
+  with its 135 fonts (DejaVu Sans), not the host's (Noto Sans and the
+  user's). Mount the host's font directories and fontconfig into the
+  container, or wait for Ash on the host.
+- [ ] **Web notifications from tabs.** M · A granted `new Notification()`
+  goes to Ash's message center, which shell mode blocks, so nothing shows.
+  Hand them to the shell (a tab request kind) or to the desktop's
+  `org.freedesktop.Notifications` through the helper, as Linux Chromium.
+- [ ] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
+  page's media session on D-Bus for media keys and desktop widgets; ours go
+  to Ash's media controls.
+- [ ] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
+  empty (ChromeOS's voices are TTS extensions); Linux Chromium uses
+  speech-dispatcher.
+- [ ] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
+  setting, not the desktop's (the portal's `color-scheme`).
 - [x] **Port the real shell web app** onto `<native-window>` and the broker.
   Done twice: T3 Code (`T3_SHELL_TEST.md`) and the plain shell (`shells/plain/`).
 - [x] **Browser tabs as elements.** Real pages as SurfaceEmbed `<embed>`s,

@@ -114,8 +114,17 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
        --plutonium-hide-windows
        "--plutonium-helper-url=http://127.0.0.1:$HELPER_PORT"
        "--plutonium-helper-socket=$RUN_DIR/plutonium/$SOCKET.sock"
-       --enable-logging=stderr --v=0 "--vmodule=$VMODULE")
+       --enable-logging=stderr --v=0 "--vmodule=$VMODULE"
+       # Web APIs ChromeOS has and desktop Linux Chromium doesn't: pages
+       # shouldn't tell them apart (BACKLOG, "Audit what still behaves like
+       # ChromeOS").
+       --disable-blink-features=WebShare,HandwritingRecognition,BarcodeDetector,WebBluetooth)
 [[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS")
+# Pages see the host's timezone and language, which the container doesn't
+# have (it says UTC): a zone name the container's tzdata knows.
+HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
+[[ -n $HOST_TZ ]] || HOST_TZ=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
+ASH_ENV=(-e "TZ=${HOST_TZ:-UTC}" -e "LANG=${LANG:-C.UTF-8}")
 
 : > "$LOG"
 need_ash_runtime
@@ -152,9 +161,9 @@ if [[ $MODE == x11 ]]; then
   fi
   start_helper
   if [[ -n ${HOST:-} ]]; then
-    setsid env DISPLAY="$XDISP" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+    setsid env DISPLAY="$XDISP" "TZ=${HOST_TZ:-UTC}" "LANG=${LANG:-C.UTF-8}" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
   else
-    setsid $PODMAN exec -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "$CONTAINER" \
+    setsid $PODMAN exec -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "${ASH_ENV[@]}" "$CONTAINER" \
       "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
   fi
   for _ in $(seq 1 40); do
@@ -222,7 +231,7 @@ FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
 # shellcheck disable=SC2206
 FLAGS+=(${EXTRA_FLAGS:-})
 log "starting Ash (log $ASH_LOG)"
-on_ash "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+on_ash "${ASH_ENV[@]}" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
 ash=$!
 ( for _ in $(seq 1 40); do [[ -S $RUN_DIR/$SOCKET ]] && break; sleep 1; done; sleep 3; report_gpu ) &
 if [[ -n ${HOLD_S:-} ]]; then

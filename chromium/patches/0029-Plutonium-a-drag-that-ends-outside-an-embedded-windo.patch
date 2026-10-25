@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Tue, 20 Oct 2026 20:17:34 +1300
-Subject: [PATCH 29/54] Plutonium: a drag that ends outside an embedded window
+Subject: [PATCH 29/51] Plutonium: a drag that ends outside an embedded window
  leaves it
 
 EXO-EMBED: when a press in an embedded window ends with the pointer over
