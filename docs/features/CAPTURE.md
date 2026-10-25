@@ -185,10 +185,14 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 | niri: Print, then a drag (600x400 file) or a click on a tile (the window: 768x947); Ctrl+Print (the screen) | ✓ (xdotool) |
 | The portal end to end: `tools/portal-screencast.py` through xdg-desktop-portal 1.22.1 on `tools/portal-bus.sh`'s bus: niri's picker named the client (its process name, pid and thread), Ash's PipeWire node 84 at 1600x1000, GStreamer's `pipewiresrc` through the portal's fd recorded the screen with the cursor drawn in | ✓ |
 | A restore token: the second run started without a picker | ✓ |
+| PipeWire: a parked window held at 1920x1080 on a 1600x1000 screen (foot snapped to 1920x1066, letterboxed): 40 live frames through `pipewiresrc`; stopping it lets the window go and removes the node | ✓ |
+| The portal, a window (`types` 2, cursor metadata): node at the window's size; its restore token brings back the same window by app id and title, without a picker | ✓ |
+| The Screenshot portal, interactive: niri's picker, the file's URI back through xdg-desktop-portal | ✓ |
 
 Quirks seen only on Xvfb: Alt+Print arrives with an empty `code` (X maps it to SysRq; on evdev it stays PrintScreen); xdotool's instant `click` is sometimes lost on Ash's own widgets, a press and release 150 ms apart isn't.
 
 - `cd helper && node --test test/portal.test.ts`: restore data, screenshots on disk, and the backend end to end on a private `dbus-daemon`, called as xdg-desktop-portal calls it.
+- `tools/portal-screencast.py` is a portal client (ScreenCast through `OpenPipeWireRemote` and GStreamer's `pipewiresrc`, or `--screenshot`): with PyGObject and GStreamer, e.g. `nix-shell -p 'python3.withPackages (p: [ p.pygobject3 ])' gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good pipewire`.
 - `tools/portal-bus.sh start` gives a private bus with its own xdg-desktop-portal that uses this backend; run the session's helper with `PLUTONIUM_PORTAL_BUS` set to it, and apps with `DBUS_SESSION_BUS_ADDRESS`. Its xdg-desktop-portal finds the files through `XDG_DATA_DIRS` and `XDG_CONFIG_HOME` (checked with 1.22.1). Its Screenshot portal wants the permission store and an access dialog for non-interactive screenshots, which a bare bus doesn't have.
 
 ## Not planned

@@ -517,18 +517,21 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   `capturerequest`/`answerCapture`, `capturestart`/`capturestop`,
   `stopCapture`. Ash's fallback picker, and its own indicator when the
   focused shell doesn't acknowledge a capture.
-- [ ] **Resizing a window for capture.** M · A capture size that overrides the
+- [x] **Resizing a window for capture.** M · A capture size that overrides the
   element's in `configure`. The element shows the frame with `object-fit`, and
   the stream letterboxes when the app picks another size. Check that a parked
   window gets steady frame callbacks while it's captured.
-- [ ] **PipeWire output from Ash.** L · A producer of our own (WebRTC's
+- [x] **PipeWire output from Ash.** L · A producer of our own (WebRTC's
   `rtc_use_pipewire` is off for `target_os = "chromeos"`, and its code is
   consumer-only): dmabuf with modifiers, a shared-memory fallback, the three cursor
-  modes. libpipewire in the container image.
-- [ ] **Portal backend in the helper.** L · `impl.portal.ScreenCast` and
+  modes. libpipewire in the container image. Done with shared memory (dmabuf
+  below); a window's frames are its own copies, so it can be parked, off the
+  screen, or bigger than it.
+- [x] **Portal backend in the helper.** L · `impl.portal.ScreenCast` and
   `Screenshot`, `plutonium.portal`, `plutonium-portals.conf`,
   `XDG_CURRENT_DESKTOP=Plutonium`, restore tokens that name stable things.
-  Test with OBS and native Discord.
+  Test with OBS and native Discord. Done and checked with a real portal
+  client (`tools/portal-screencast.py`); OBS and Discord themselves not yet.
 - [x] **`ELECTRON_OZONE_PLATFORM_HINT=wayland` in the thread environment.** S ·
   The XWayland Discord can't share a screen: its rootless Xwayland holds
   only its own windows. With `XDG_SESSION_TYPE=wayland`, which Electron 38+
