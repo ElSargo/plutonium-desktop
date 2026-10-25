@@ -510,6 +510,10 @@ function tileFor(key) {
     content.addEventListener("windowfocus", () => onItemFocused(key));
     // The app's own maximize button: niri's maximize column.
     content.addEventListener("windowrequest", (e) => {
+      if (e.request === "move" || e.request === "resize") {
+        startAppDrag(key, e.request === "resize", e.edge);
+        return;
+      }
       if (e.request !== "maximize" && e.request !== "unmaximize") return;
       const where = find(key);
       if (!where || where.ci === undefined) return;
@@ -623,8 +627,13 @@ function applyPlacements() {
   }
 }
 
+// Whole device pixels: at a fractional scale (1.78) a whole CSS pixel isn't
+// one, and a window drawn at a fractional device position is blurred and
+// can't go on a display plane. (Blink snaps the window inside the tile.)
+const snap = (v) => Math.round(v * devicePixelRatio) / devicePixelRatio;
+
 function applyPlacement({ tile, x, y, w, h }) {
-  tile.el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  tile.el.style.transform = `translate3d(${snap(x)}px, ${snap(y)}px, 0)`;
   tile.el.style.width = `${w}px`;
   tile.el.style.height = `${h}px`;
 }
@@ -1241,58 +1250,100 @@ function setMod(on) { document.body.classList.toggle("mod", on); }
 addEventListener("pointermove", (e) => { if (!e.metaKey && !drag) setMod(false); }, true);
 
 let drag = null;
+// A move (or with |resize|, a resize from |edge|: "right", "bottom-left"…;
+// "" is Super+right-drag's, from the bottom right) of |key| from (x, y).
+function beginDrag(key, x, y, resize, edge = "") {
+  const at = find(key);
+  if (!at) return null;
+  const ws = layout.workspaces[at.wi];
+  const tile = tiles.get(key);
+  drag = {
+    key, resize, edge, startX: x, startY: y, moved: false, tile,
+    base: tile.el.style.transform,
+    col: at.fi === undefined ? ws.columns[at.ci] : null,
+    float: at.fi !== undefined ? ws.floating[at.fi] : null,
+    startW: at.fi === undefined ? colWidth(ws.columns[at.ci]) : ws.floating[at.fi].w,
+    startH: at.fi !== undefined ? ws.floating[at.fi].h : 0,
+    startFX: at.fi !== undefined ? ws.floating[at.fi].x : 0,
+    startFY: at.fi !== undefined ? ws.floating[at.fi].y : 0,
+  };
+  return drag;
+}
+
+function moveDrag(x, y) {
+  const dx = x - drag.startX;
+  const dy = y - drag.startY;
+  if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+  drag.moved = true;
+  const z = overview ? CONFIG.overviewZoom : 1;
+  if (drag.resize) {
+    // Live, as niri resizes interactively: no transitions, no transactions.
+    // From the left or top edge, a drag that way grows it.
+    const sx = drag.edge.includes("left") ? -dx : dx;
+    const sy = drag.edge.includes("top") ? -dy : dy;
+    document.body.classList.add("noanim");
+    if (drag.float) { drag.float.w = clamp(drag.startW + sx, MIN, W()); drag.float.h = clamp(drag.startH + sy, MIN, H()); }
+    else if (drag.edge !== "top" && drag.edge !== "bottom") { drag.col.full = false; drag.col.width = { px: clamp(drag.startW + sx, MIN, W() - 2 * g) }; }
+    render();
+    return;
+  }
+  if (drag.float && !overview) {
+    drag.float.x = drag.startFX + dx;
+    drag.float.y = drag.startFY + dy;
+    render();
+    return;
+  }
+  drag.tile.el.classList.add("dragging");
+  drag.tile.el.style.transform = `${drag.base} translate3d(${dx / z}px, ${dy / z}px, 0)`;
+}
+
+// Ends the drag; a move drops the column where (x, y) is. The drag, or null.
+function endDrag(x, y) {
+  const d = drag;
+  drag = null;
+  if (!d) return null;
+  d.tile.el.classList.remove("dragging");
+  if (d.resize) document.body.classList.remove("noanim");
+  if (d.moved && !d.resize && !(d.float && !overview)) dropItem(d.key, x, y);
+  return d;
+}
+
+// An app's own title-bar drag or edge resize (its windowrequest): niri's
+// interactive move or resize. The browser gives this page the pointer for
+// the rest of the drag; it starts where the pointer next moves.
+let appDrag = null;
+function startAppDrag(key, resize, edge) {
+  if (drag) return;
+  appDrag = { key, resize, edge };
+}
+addEventListener("pointermove", (e) => {
+  if (!appDrag) return;
+  if (!(e.buttons & 1)) { finishAppDrag(e); return; }
+  if (!drag) beginDrag(appDrag.key, e.clientX, e.clientY, appDrag.resize, appDrag.edge ?? "");
+  if (drag) moveDrag(e.clientX, e.clientY);
+}, true);
+function finishAppDrag(e) {
+  appDrag = null;
+  const d = endDrag(e.clientX, e.clientY);
+  if (d?.moved) commit();
+}
+addEventListener("pointerup", (e) => { if (appDrag) finishAppDrag(e); }, true);
+
 function bindPointer(hit, key) {
   hit.addEventListener("contextmenu", (e) => e.preventDefault());
   hit.addEventListener("pointerdown", (e) => {
     if (!overview && !e.metaKey) return;
     e.preventDefault();
     hit.setPointerCapture(e.pointerId);
-    const at = find(key);
-    if (!at) return;
-    const ws = layout.workspaces[at.wi];
-    const tile = tiles.get(key);
-    const resize = e.button === 2 && !overview;
-    drag = {
-      key, resize, startX: e.clientX, startY: e.clientY, moved: false, tile,
-      base: tile.el.style.transform,
-      col: at.fi === undefined ? ws.columns[at.ci] : null,
-      float: at.fi !== undefined ? ws.floating[at.fi] : null,
-      startW: at.fi === undefined ? colWidth(ws.columns[at.ci]) : ws.floating[at.fi].w,
-      startH: at.fi !== undefined ? ws.floating[at.fi].h : 0,
-      startFX: at.fi !== undefined ? ws.floating[at.fi].x : 0,
-      startFY: at.fi !== undefined ? ws.floating[at.fi].y : 0,
-    };
+    beginDrag(key, e.clientX, e.clientY, e.button === 2 && !overview);
   });
   hit.addEventListener("pointermove", (e) => {
-    if (!drag || drag.key !== key) return;
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    if (!drag.moved && Math.hypot(dx, dy) < 6) return;
-    drag.moved = true;
-    const z = overview ? CONFIG.overviewZoom : 1;
-    if (drag.resize) {
-      // Live, as niri resizes interactively: no transitions, no transactions.
-      document.body.classList.add("noanim");
-      if (drag.float) { drag.float.w = clamp(drag.startW + dx, MIN, W()); drag.float.h = clamp(drag.startH + dy, MIN, H()); }
-      else { drag.col.full = false; drag.col.width = { px: clamp(drag.startW + dx, MIN, W() - 2 * g) }; }
-      render();
-      return;
-    }
-    if (drag.float && !overview) {
-      drag.float.x = drag.startFX + dx;
-      drag.float.y = drag.startFY + dy;
-      render();
-      return;
-    }
-    drag.tile.el.classList.add("dragging");
-    drag.tile.el.style.transform = `${drag.base} translate3d(${dx / z}px, ${dy / z}px, 0)`;
+    if (!drag || drag.key !== key || appDrag) return;
+    moveDrag(e.clientX, e.clientY);
   });
   const end = (e) => {
-    if (!drag || drag.key !== key) return;
-    const d = drag;
-    drag = null;
-    d.tile.el.classList.remove("dragging");
-    if (d.resize) document.body.classList.remove("noanim");
+    if (!drag || drag.key !== key || appDrag) return;
+    const d = endDrag(e.clientX, e.clientY);
     if (!d.moved) {
       // A click: go to the window.
       overview = false;
@@ -1302,7 +1353,6 @@ function bindPointer(hit, key) {
       commit();
       return;
     }
-    if (!d.resize && !(d.float && !overview)) dropItem(key, e.clientX, e.clientY);
     commit();
   };
   hit.addEventListener("pointerup", end);
