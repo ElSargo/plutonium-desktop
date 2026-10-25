@@ -1524,6 +1524,8 @@ function restore() {
 // if it's another shell's (or on another output), then go to it.
 function takeWindow(window) {
   const key = `w:${window.id}`;
+  // The hotkeys overlay (shown at startup) would keep the keyboard from it.
+  if (modal === "hotkeys") closeModal();
   const own = ownOutput();
   if (!manages(window) || (own && !tagsOf(window).includes(own))) {
     adopted.add(window.id);
@@ -1543,6 +1545,7 @@ function takeWindow(window) {
 
 function takeTab(tab) {
   const key = `t:${tab.id}`;
+  if (modal === "hotkeys") closeModal();
   const own = ownOutput();
   if ((!tab.tags.includes(TAG) || (own && !tab.tags.includes(own))) && shell.tagsAvailable) {
     claiming.add(key);
