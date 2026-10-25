@@ -192,6 +192,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 | The portal, a window (`types` 2, cursor metadata): node at the window's size; its restore token brings back the same window by app id and title, without a picker | ✓ |
 | The Screenshot portal, interactive: niri's picker, the file's URI back through xdg-desktop-portal | ✓ |
 | `grim` (1.5.0) on the session's socket: niri's picker ("grim wants to share your screen"), then a 1600x1000 PNG of the screen (build 2c719f7dbcb2, 2026-10-26) | ✓ |
+| A shell's MediaStream of a window (0054, build 3f5ff6241236): foot held at 1920x1080 on the 1600x1000 screen, `shell.capture()` → 1920x1080 frames of the whole window (16 in 3 s from `top -d 0.2`); the first frame can still be the old size, letterboxed | ✓ |
 | grim killed while its picker is open: the picker closes (build 39742c2a2d20) | ✓ |
 | GlobalShortcuts: `tools/portal-shortcuts.py` on `tools/portal-bus.sh`'s bus: niri's binding dialog (Push to talk: Ctrl+Backquote, Mute: none), Allow; Ctrl+\` through Ash gives `Activated` and, 0.4 s later, `Deactivated` | ✓ (xdotool) |
 | PickColor through xdg-desktop-portal: the library's picker, the pointer moved and clicked with xdotool: (27, 57, 73)/255, the X server's pixel there | ✓ (xdotool) |
