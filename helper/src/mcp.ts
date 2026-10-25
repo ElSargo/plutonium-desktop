@@ -69,7 +69,9 @@ const TOOLS = [
       "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them. " +
       "Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where " +
       "it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can " +
-      "be told apart. With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
+      "be told apart. Every install is listed: one the launcher doesn't show, since another file has its desktop id, " +
+      "names that file (launcherShows). With a filter, also the matching programs on PATH (onPath, mostly " +
+      "command-line ones).",
     inputSchema: {
       type: "object",
       properties: {
