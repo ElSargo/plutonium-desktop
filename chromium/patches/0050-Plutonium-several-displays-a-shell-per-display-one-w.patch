@@ -52,7 +52,7 @@ EXO-DISPLAYS (docs/features/MULTI_MONITOR.md):
  .../ash/main_extra_parts/plutonium_overlay.cc |  62 ++
  .../main_extra_parts/plutonium_shells_impl.cc | 624 +++++++++++++++---
  .../main_extra_parts/plutonium_shells_impl.h  |  86 ++-
- components/exo/shell_surface.cc               |  13 +
+ components/exo/shell_surface.cc               |  14 +
  components/exo/shell_surface.h                |   3 +
  components/exo/shell_surface_base.cc          |  29 +-
  components/exo/shell_surface_base.h           |   5 +
@@ -72,7 +72,7 @@ EXO-DISPLAYS (docs/features/MULTI_MONITOR.md):
  .../renderer/core/html/native_window_broker.h |  20 +
  .../core/html/native_window_broker.idl        |  18 +
  .../blink/renderer/core/html/shell_entry.idl  |   5 +
- 36 files changed, 1612 insertions(+), 163 deletions(-)
+ 36 files changed, 1613 insertions(+), 163 deletions(-)
  create mode 100644 third_party/blink/renderer/core/html/native_display_entry.idl
 
 diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
@@ -2243,7 +2243,7 @@ index 5300306576..8ca7110f43 100644
  };
  
 diff --git a/components/exo/shell_surface.cc b/components/exo/shell_surface.cc
-index cc42bd4850..852bb5ba64 100644
+index cc42bd4850..549fc4d23e 100644
 --- a/components/exo/shell_surface.cc
 +++ b/components/exo/shell_surface.cc
 @@ -39,6 +39,8 @@
@@ -2255,18 +2255,19 @@ index cc42bd4850..852bb5ba64 100644
  #include "ui/views/widget/widget.h"
  #include "ui/wm/core/coordinate_conversion.h"
  #include "ui/wm/core/scoped_animation_disabler.h"
-@@ -792,6 +794,17 @@ void ShellSurface::OnWindowAddedToRootWindow(aura::Window* window) {
+@@ -792,6 +794,18 @@ void ShellSurface::OnWindowAddedToRootWindow(aura::Window* window) {
    } else {
      OnWidgetScreenPositionChanged();
    }
 +  // EXO-DISPLAYS: a parked window that moved to another display (a page
 +  // there shows it) was just sent that display's output and scale; a
 +  // configure after them makes the client draw at that scale at once, rather
-+  // than at its next input.
++  // than at its next input. (The window is observed only once it is on its
++  // first display, so the first one seen here is a move too.)
 +  const int64_t display_id =
 +      display::Screen::Get()->GetDisplayNearestWindow(window).id();
-+  if (embed_parked() && embed_display_id_ != display::kInvalidDisplayId &&
-+      display_id != embed_display_id_ && !window_state_is_changing_) {
++  if (embed_parked() && display_id != embed_display_id_ &&
++      !window_state_is_changing_) {
 +    Configure();
 +  }
 +  embed_display_id_ = display_id;
@@ -2274,14 +2275,14 @@ index cc42bd4850..852bb5ba64 100644
  
  void ShellSurface::OnWindowPropertyChanged(aura::Window* window,
 diff --git a/components/exo/shell_surface.h b/components/exo/shell_surface.h
-index 6cc08d75ac..218716f4be 100644
+index 6cc08d75ac..ec88cd6c6a 100644
 --- a/components/exo/shell_surface.h
 +++ b/components/exo/shell_surface.h
 @@ -323,6 +323,9 @@ class ShellSurface : public ShellSurfaceBase, public ash::WindowStateObserver {
    gfx::Vector2d pending_origin_offset_;
    gfx::Vector2d pending_origin_offset_accumulator_;
    gfx::Rect old_screen_bounds_for_pending_move_;
-+  // EXO-DISPLAYS: the display a parked window was last added on
++  // EXO-DISPLAYS: the display a parked window was last seen added to
 +  // (display::kInvalidDisplayId before that).
 +  int64_t embed_display_id_ = -1;
  
