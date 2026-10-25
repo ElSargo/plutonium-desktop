@@ -240,8 +240,9 @@ So a tab and a native app show one picker with the same places and the same rece
   - gtk4-print-editor (GTK 4): Open and Save As from its window, the picker over that window, the saved file written;
   - Firefox (`widget.use-xdg-desktop-portal.file-picker` 1): Ctrl+O, its six filters, the picker over its window, the file opened in a tab;
   - `tools/portal-filechooser.py`: the accept label, a select and a checkbox (answered `latin1` and `true`), a MIME filter (`text/markdown` listed `.md` files) and the chosen filter back; `save-files x.png y.png` into a chosen folder;
+  - Chromium 147.0.7727.137 (Wayland; it uses the portal by default, as Electron does): Ctrl+O, the picker over its window, the file opened;
   - a tab's `<input type=file multiple>` still opens the picker over the tab and gets the file.
-  - Not tried: a Flatpak app (the document portal on a private bus would mount over the user's), Electron and Chromium (they use the portal by default; not run here), and DRM.
+  - Not tried: a Flatpak app (the document portal on a private bus would mount over the user's), an Electron app itself, and DRM.
 
 ### Paths in the container
 
