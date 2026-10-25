@@ -368,4 +368,24 @@ describe("global shortcuts on a bus", { skip: dbusDaemon ? false : "no dbus-daem
     const [code] = await call("BindShortcuts", "ooa(sa{sv})sa{sv}", [handle("f"), other, shortcuts, "", new Map()]);
     assert.equal(code, 1);
   });
+
+  // PickColor is the Screenshot portal's, but asks the shell as these do.
+  test("PickColor: the shell's color, as fractions; Escape cancels", async () => {
+    const pick = () =>
+      client.call({
+        destination: PORTAL_NAME,
+        path: "/org/freedesktop/portal/desktop",
+        interface: "org.freedesktop.impl.portal.Screenshot",
+        member: "PickColor",
+        signature: "ossa{sv}",
+        body: [handle("g"), "com.discordapp.Discord", "", new Map()],
+      }) as Promise<[number, Map<string, unknown>]>;
+    answer = { color: [255, 0, 51] };
+    const [code, results] = await pick();
+    assert.equal(code, 0);
+    assert.deepEqual(results.get("color"), [1, 0, 0.2]);
+    assert.deepEqual(asked.at(-1), { op: "pick_color", appName: "Discord" });
+    answer = { color: null };
+    assert.equal((await pick())[0], 1);
+  });
 });

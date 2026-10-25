@@ -556,7 +556,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   covers what fits; PipeWire captures use the window's own copies instead.
   The same for shells: a MediaStreamTrackGenerator fed by those copies, or
   a capturer on the window's own frame sink.
-- [ ] **The portal's `PickColor`.** S · Answers "other" now.
+- [x] **The portal's `PickColor`.** S · The focused shell's picker over a frozen screen.
 - [x] **`ext-image-copy-capture-v1` in Exo,** for grim and wl-screenrec (wf-recorder
   only speaks wlr-screencopy). M · Output sources, shared memory and linear dmabufs.
 

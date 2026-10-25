@@ -239,7 +239,7 @@ export class Portal {
         case "Screenshot":
           return this.screenshot(String(body[0]), String(body[1]), optionsOf(body[3]));
         case "PickColor":
-          return this.pickColor();
+          return this.pickColor(String(body[1]));
       }
     }
     throw new DBusError("org.freedesktop.DBus.Error.UnknownMethod", `No such method ${iface}.${member}`);
@@ -597,9 +597,20 @@ export class Portal {
     return true;
   }
 
-  private pickColor(): Reply {
-    // Not yet: there's no color picker to show.
-    return this.response(OTHER);
+  /** The focused shell's color picker; without a shell, there's none to show. */
+  private async pickColor(appId: string): Promise<Reply> {
+    if (!this.options.askShell) return this.response(OTHER);
+    try {
+      const answer = (await this.options.askShell("pick_color", { appName: this.appName(appId, 0) }, 120_000)) as {
+        color?: number[] | null;
+      } | null;
+      const color = answer?.color;
+      if (!Array.isArray(color) || color.length !== 3) return this.response(CANCELLED);
+      return this.response(SUCCESS, [["color", ["(ddd)", color.map((value) => Math.min(1, Math.max(0, value / 255)))]]]);
+    } catch (error) {
+      console.warn(`plutoniumd: portal: pick color: ${(error as Error).message}`);
+      return this.response(OTHER);
+    }
   }
 }
 

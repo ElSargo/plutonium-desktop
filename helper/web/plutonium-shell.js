@@ -1400,6 +1400,23 @@ export class PlutoniumShell extends EventTarget {
     }
   }
 
+  /**
+   * The color picker (the desktop portal's PickColor): freezes this page's output, then
+   * the user clicks a pixel. Resolves to [r, g, b] (0 to 255), or null on Escape.
+   */
+  async pickColor() {
+    if (this._choosingArea) return null;
+    this._choosingArea = true;
+    const giveBack = this._takeKeyboard();
+    try {
+      const frozen = await this.screenshot(await this.outputSource());
+      return await new ColorPicker(frozen).choose();
+    } finally {
+      this._choosingArea = false;
+      giveBack();
+    }
+  }
+
   // An app window that has the keyboard gives it up (to this page's own UI);
   // the returned function gives it back.
   _takeKeyboard() {
@@ -1569,6 +1586,14 @@ export class PlutoniumShell extends EventTarget {
         if (option === false) throw new Error("this shell doesn't bind shortcuts");
         if (typeof option === "function") return option(args);
         return new ShortcutBinder(this, args).ask();
+      }
+      case "pick_color": {
+        // An app asks for a color from the screen (the "colorPicker" option:
+        // false leaves the helper without one).
+        const option = this.options.colorPicker;
+        if (option === false) throw new Error("this shell doesn't pick colors");
+        const color = typeof option === "function" ? await option(args) : await this.pickColor();
+        return { color };
       }
       case "focus_tab": {
         if (args.display !== undefined) {
@@ -3699,6 +3724,9 @@ const CAPTURE_STYLE = `@layer plutonium {
     background: color-mix(in srgb, var(--plutonium-dialog-accent, AccentColor) 15%, transparent); pointer-events: none; }
   .plutonium-area-selector .region { position: absolute; box-shadow: 0 0 0 100vmax #0006;
     outline: 1px solid #fff; pointer-events: none; }
+  .plutonium-color-picker .swatch { position: absolute; display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 4px;
+    border-radius: 6px; background: #000c; color: #fff; font: 12px ui-monospace, monospace; pointer-events: none; }
+  .plutonium-color-picker .swatch i { width: 20px; height: 20px; border-radius: 4px; outline: 1px solid #fff8; }
   .plutonium-area-selector .help { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
     padding: 6px 12px; border-radius: 6px; background: #000c; color: #fff; font: 13px system-ui, sans-serif; pointer-events: none; }
 }`;
@@ -4033,6 +4061,75 @@ class AreaSelector {
         event.preventDefault();
         if (event.key === "Escape") done(null);
         if (event.key === "Enter" || event.key === " ") done({});
+      });
+    });
+  }
+}
+
+// The color picker: the frozen output, a swatch with the color under the
+// pointer, a click to take it.
+class ColorPicker {
+  constructor(png) {
+    ensureCaptureStyle();
+    this.png = png;
+  }
+
+  async choose() {
+    const bitmap = await createImageBitmap(this.png);
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(this.png);
+      const element = document.createElement("div");
+      element.className = "plutonium-area-selector plutonium-color-picker";
+      element.tabIndex = -1;
+      element.style.backgroundImage = `url("${url}")`;
+      const swatch = document.createElement("div");
+      swatch.className = "swatch";
+      swatch.hidden = true;
+      const chip = document.createElement("i");
+      const label = document.createElement("span");
+      swatch.append(chip, label);
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = "Click to pick a color · Esc to cancel";
+      element.append(swatch, help);
+      element.popover = "manual";
+      document.body.append(element);
+      element.showPopover();
+      element.focus();
+
+      // The screenshot is in pixels, the page in CSS pixels.
+      const colorAt = (x, y) => {
+        const px = Math.min(canvas.width - 1, Math.max(0, Math.floor((x * canvas.width) / window.innerWidth)));
+        const py = Math.min(canvas.height - 1, Math.max(0, Math.floor((y * canvas.height) / window.innerHeight)));
+        const [r, g, b] = context.getImageData(px, py, 1, 1).data;
+        return [r, g, b];
+      };
+      const done = (color) => {
+        element.remove();
+        URL.revokeObjectURL(url);
+        resolve(color);
+      };
+      element.addEventListener("pointermove", (event) => {
+        const color = colorAt(event.clientX, event.clientY);
+        const hex = `#${color.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+        chip.style.background = hex;
+        label.textContent = hex;
+        swatch.hidden = false;
+        // Beside the pointer, kept on the screen.
+        const left = Math.min(event.clientX + 16, window.innerWidth - swatch.offsetWidth - 4);
+        const top = Math.min(event.clientY + 16, window.innerHeight - swatch.offsetHeight - 4);
+        Object.assign(swatch.style, { left: `${left}px`, top: `${top}px` });
+      });
+      element.addEventListener("pointerdown", (event) => {
+        if (event.button === 0) done(colorAt(event.clientX, event.clientY));
+      });
+      element.addEventListener("keydown", (event) => {
+        event.preventDefault();
+        if (event.key === "Escape") done(null);
       });
     });
   }
