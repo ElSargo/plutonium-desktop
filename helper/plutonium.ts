@@ -20,7 +20,8 @@ import { helperJson } from "./src/client.ts";
 import { Daemon, defaultSocketPath } from "./src/daemon.ts";
 import { runMcpServer } from "./src/mcp.ts";
 import { runOpen } from "./src/opener.ts";
-import { plutoHome, ShellPackages } from "./src/shells.ts";
+import { ShellPackages } from "./src/shellPackages.ts";
+import { plutoHome } from "./src/shells.ts";
 import { PLUTONIUM_ROOT, runShellsCommand } from "./src/shellsCli.ts";
 import { HELPER_VARIABLE, stopXDisplays, wantsShow, xDisplayStatePath } from "./src/threads.ts";
 

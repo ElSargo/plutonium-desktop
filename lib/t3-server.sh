@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T3 Code's server under Plutonium's launcher (t3_start in bin/plutonium):
+# T3 Code's server under Plutonium's launcher (t3_serve in bin/plutonium):
 #
 #   t3-server.sh <T3 Code's server.ts> <its arguments, but --host>
 #

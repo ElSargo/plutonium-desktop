@@ -32,8 +32,8 @@ Sessions:
                              Default: the shells that are on in $PLUTO_HOME/shells.json
   shells <command>           the installed shells in $PLUTO_HOME/shells: plutonium shells help
   stop [--drm|--x11]         stop a session's Ash (both if neither is given)
-  t3 server [--x11]          (re)start the T3 Code server for a session ('run t3' starts it)
-  t3 stop                    stop the T3 Code server
+  t3 server [--x11]          restart the T3 Code server of a session (its helper runs it)
+  t3 stop [--x11]            stop it
   t3 <command>               T3 Code's own CLI on the same data: t3 pair, t3 connect link, ...
   status                     what is running
   live apply|revert|status   swap what a running session's shells serve (niri, plain, shell.js,
@@ -536,48 +536,42 @@ t3_fingerprint() {
   (cd "$1" && git ls-files -co --exclude-standard -z -- apps/server/src packages/contracts/src ':!:*.test.ts' |
     sort -z | xargs -0 sha256sum 2> /dev/null || true) | sha256sum | cut -c1-12
 }
-# Start the server for a session's socket: "restart" restarts ours, otherwise
-# ours is reused if it serves that socket.
-t3_start() {
-  local socket=$1 restart=${2:-} port=$T3_PORT satellite pid pidfile=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid
+# The T3 shell's server, in the foreground: the session's helper starts and
+# supervises it (shells/t3/shell.json; its log is $PLUTO_HOME/logs/t3.log),
+# and a helper of the same session adopts it after a restart.
+t3_serve() {
+  local port=$1 socket=$2 satellite
   local tailscale=()
   [[ -n ${T3_TAILSCALE:-} ]] && tailscale=(--tailscale-serve --tailscale-serve-port "$T3_TAILSCALE_PORT")
   [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
   t3_refuse_others
-  pid=$(cat "$pidfile" 2>/dev/null || true)
-  if [[ -n $pid ]] && t3_ours "$pid"; then
-    if [[ -z $restart ]]; then
-      tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF "PLUTONIUM_WAYLAND_DISPLAY=$socket" && return
-      local flag=; [[ $socket == *-x11* ]] && flag=" --x11"
-      die "the T3 Code server is serving the other session; restart it for this one (plutonium t3 server$flag)"
-    fi
-    t3_stop
-  fi
   curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
   t3_check_db
   satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
   mkdir -p "$T3_HOME" "$RUN_DIR/plutonium"
-  (
-    cd "$T3CODE_DIR"
-    # T3 Connect (remote devices through T3's relay): its public settings.
-    [[ -f .env ]] && { set -a; . ./.env; set +a; }
-    # Under a supervisor that picks the host: Settings, Connections, Network
-    # access in the shell switches it (lib/t3-server.sh).
-    # Its own session's helper, not the one of a session this was started
-    # from (a terminal or an agent in a thread has a thread's variables).
-    setsid env -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
-      PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
-      PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" \
-      PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
-      ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
-      bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser \
-      > "$LOGS/t3-server.log" 2>&1 < /dev/null &
-    echo $! > "$pidfile"
-  )
   # What its clients talk to, for `live apply t3` (t3_fingerprint).
   t3_fingerprint "$T3CODE_DIR" > "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint"
-  for _ in $(seq 1 30); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
-  die "the T3 Code server didn't start (logs/t3-server.log)"
+  cd "$T3CODE_DIR"
+  # T3 Connect (remote devices through T3's relay): its public settings.
+  [[ -f .env ]] && { set -a; . ./.env; set +a; }
+  # Under a supervisor that picks the host: Settings, Connections, Network
+  # access in the shell switches it (lib/t3-server.sh). Its own session's
+  # helper, not the one of a session this was started from.
+  exec env -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
+    PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+    PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" \
+    PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
+    ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
+    bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser < /dev/null
+}
+# Asks a session's helper to start, stop or restart an installed shell's server.
+shell_server() {   # <mode> <name> <start|stop|restart>
+  session_vars "$1"
+  local sock=$RUN_DIR/plutonium/$SOCKET.sock reply
+  [[ -S $sock ]] || die "no $1 session is running (its helper's socket $sock)"
+  reply=$(curl -s -m 120 --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://helper/v1/shells/$2/$3") || die "the helper didn't answer"
+  grep -o '"detail":"[^"]*"\|"error":"[^"]*"' <<< "$reply" | cut -d'"' -f4
 }
 # T3 Code's own CLI, on the same data and settings as the server.
 t3_cli() {
@@ -585,22 +579,13 @@ t3_cli() {
   [[ -f .env ]] && { set -a; . ./.env; set +a; }
   T3CODE_HOME="$T3_HOME" exec node apps/server/src/bin.ts "$@"
 }
-# Stops ours (a server this checkout started), and waits for it to let go of
-# the database.
-t3_stop() {
-  local pid
-  pid=$(cat "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid" 2>/dev/null) && t3_ours "$pid" || return 1
-  kill "$pid"
-  for _ in $(seq 1 50); do [[ -z $(t3_pids) ]] && break; sleep 0.2; done
-  rm -f "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid"
-}
 # A one-time pairing token for the shell's profile, good for 5 minutes, offered
 # as #plutoniumPair: the page uses it only if the profile isn't paired yet, or
 # its session lacks some of the token's scopes. The shell is the machine's own
 # desktop app, so it gets what T3 Code's desktop app gets: every scope,
 # including pairing other devices (access:write).
 t3_pair_url() {
-  local port=$T3_PORT token scopes
+  local port=${1:-$T3_PORT} token scopes
   scopes=$(cd "$T3CODE_DIR" && node --input-type=module -e '
     const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
     console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
@@ -663,11 +648,28 @@ t3_cmd() {
     server)
       local mode=drm
       [[ ${2:-} == --x11 ]] && mode=x11
-      session_vars "$mode"
-      t3_start "$SOCKET" restart
-      echo "T3 Code server on http://127.0.0.1:$T3_PORT for $SOCKET, data in $T3_HOME (log logs/t3-server.log)" ;;
+      shell_server "$mode" t3 restart
+      echo "T3 Code server on http://127.0.0.1:$T3_PORT, data in $T3_HOME (log $PLUTO_HOME/logs/t3.log)" ;;
     stop)
-      t3_stop || echo "no T3 Code server from this checkout is running" ;;
+      local mode=drm
+      [[ ${2:-} == --x11 ]] && mode=x11
+      shell_server "$mode" t3 stop ;;
+    serve)
+      # shells/t3/shell.json: the helper runs this.
+      local port=$T3_PORT socket=${PLUTONIUM_WAYLAND_DISPLAY:-}
+      shift
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --port) port=$2; shift ;;
+          --wayland-display) socket=$2; shift ;;
+        esac
+        shift
+      done
+      [[ -n $socket ]] || die "t3 serve needs --wayland-display"
+      t3_serve "$port" "$socket" ;;
+    pair-url)
+      # The page to open, with a one-time pairing token (shells/t3/shell.json).
+      t3_pair_url "${3:-$T3_PORT}" ;;
     export)
       [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "commit your changes in $T3CODE_DIR first"
       rm -f "$ROOT"/frontends/t3code/patches/*.patch
@@ -917,7 +919,7 @@ live_take() {   # <part> <source> <follow>
 }
 
 # Whether a T3 checkout's server and contracts are what the running server was
-# started from (t3_start records it; before that, T3CODE_DIR as it is now).
+# started from (t3_serve records it; before that, T3CODE_DIR as it is now).
 live_t3_compatible() {
   local file=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint want
   if [[ -f $file ]]; then want=$(cat "$file"); else want=$(t3_fingerprint "$T3CODE_DIR"); fi

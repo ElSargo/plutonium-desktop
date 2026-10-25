@@ -46,7 +46,8 @@ import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
-import { type BrowserShell, ShellPackages } from "./shells.ts";
+import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
+import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -94,6 +95,8 @@ const TERMINAL_FILES: Record<string, readonly [string, string]> = {
   "/v1/terminal/xterm.css": [join(HELPER_ROOT, "web", "vendor", "xterm", "xterm.css"), "text/css"],
   "/v1/terminal/addon-fit.js": [join(HELPER_ROOT, "web", "vendor", "xterm", "addon-fit.js"), "text/javascript"],
 };
+// The installed shells' page (history, log, updates, adding one).
+const SHELLS_PAGE = join(HELPER_ROOT, "web", "shells", "index.html");
 const MAX_BODY = 1 << 26;
 // How long a group list from the browser is used for routing.
 const GROUPS_TTL_MS = 2_000;
@@ -391,6 +394,13 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
+    if (options.shells) {
+      options.shells.hooks = {
+        reloadPages: async (origin) => (cdp ? reloadPages(cdp, origin) : 0),
+        openTerminal: (terminal) => this.terminals.create(24, 80, terminal).id,
+        threadSetup: (thread) => this.threadSetup(thread),
+      };
+    }
     this.serverTabs = cdp ? new ServerTabs(cdp) : null;
     this.desktop = cdp ? new Desktop(cdp) : null;
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
@@ -409,6 +419,9 @@ export class Daemon {
     // also to a page that connects later.
     this.agentWindows.onChange = (windows) => this.relay.notifyAll("agent_windows", { windows });
     this.relay.onAttach = (key) => {
+      // An installed shell that came up (after a change, or at the start).
+      const origin = this.relay.originOf(key);
+      if (origin) this.options.shells?.connected(origin);
       this.relay.notify(key, "agent_windows", { windows: this.agentWindows.list() });
       // EXO-CAPTURE: the keys apps bound through the portal.
       if (this.portal) this.relay.notify(key, "global_shortcuts", { shortcuts: this.portal.globalShortcuts() });
@@ -1448,6 +1461,10 @@ export class Daemon {
       await this.handleTerminal(request, response, url, local);
       return;
     }
+    if (path.startsWith("/v1/shells/")) {
+      await this.handleShells(request, response, url, local);
+      return;
+    }
 
     if (!local) {
       // The shell library is public: any page may load it, only the shell can use it.
@@ -2000,6 +2017,65 @@ export class Daemon {
     throw new HttpError(404, "Not found.");
   }
 
+  // The installed shells (shellPackages.ts): for the switcher (the socket),
+  // the shells page (/v1/shells/page/, on the helper's own origin, as the
+  // terminal page is) and shells.
+  private async handleShells(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    local: boolean,
+  ): Promise<void> {
+    const method = request.method ?? "GET";
+    const path = url.pathname;
+    if (method === "GET" && (path === "/v1/shells/page" || path === "/v1/shells/page/")) {
+      if (path === "/v1/shells/page") return void response.writeHead(308, { Location: "/v1/shells/page/" }).end();
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": "frame-ancestors 'none'",
+        "X-Frame-Options": "DENY",
+      });
+      response.end(readFileSync(SHELLS_PAGE));
+      return;
+    }
+    if (!local) {
+      const uid = loopbackPeerUid(request.socket.remotePort ?? 0, this.options.port);
+      const origin = request.headers.origin;
+      const page = request.headers["sec-fetch-site"] === "same-origin" &&
+        (origin === undefined || origin === `http://127.0.0.1:${this.options.port}`);
+      if (uid !== process.getuid?.() || !(page || (origin && this.isShellOrigin(origin)))) {
+        throw new HttpError(403, "Only the shells page, a shell or the switcher may use this.");
+      }
+      if (origin && !page) {
+        response.setHeader("Access-Control-Allow-Origin", origin);
+        response.setHeader("Vary", "Origin");
+      }
+    }
+    const shells = this.options.shells;
+    if (!shells) throw new HttpError(404, "This session has no installed shells.");
+    try {
+      if (method === "GET" && path === "/v1/shells/list") return sendJson(response, 200, shells.status());
+      if (method === "GET" && path === "/v1/shells/wait") {
+        await shells.whenServersUp();
+        return sendJson(response, 200, shells.status());
+      }
+      const match = path.match(/^\/v1\/shells\/([a-z0-9-]+)\/([a-z]+)$/);
+      if (!match) throw new HttpError(404, "No such shells request.");
+      const [, name, what] = match as unknown as [string, string, string];
+      if (method === "GET" && ["log", "history", "diff"].includes(what)) {
+        response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        response.end(shells.text(name, what));
+        return;
+      }
+      if (method === "POST") return sendJson(response, 200, (await shells.action(name, what, await readJson(request))) ?? {});
+      throw new HttpError(405, "GET or POST.");
+    } catch (error) {
+      if (error instanceof ShellError) throw new HttpError(400, error.message);
+      throw error;
+    }
+  }
+
   private serve(local: boolean): Server {
     const server = createServer((request, response) => {
       this.handle(request, response, local).catch((error: unknown) => {
@@ -2062,6 +2138,7 @@ export class Daemon {
         });
       }
     }
+    shells?.start(this.options.shellOrigins);
     console.log(
       `plutoniumd: ${this.options.waylandDisplay}, shells ${this.options.shellOrigins.join(" ")}, ` +
         `socket ${socketPath}, shell API http://127.0.0.1:${port}` +
@@ -2094,6 +2171,7 @@ export class Daemon {
   }
 
   stop(): void {
+    this.options.shells?.stop();
     this.portal?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();
@@ -2105,4 +2183,28 @@ export class Daemon {
       // Gone.
     }
   }
+}
+
+/** Reloads the browser's pages on `origin`, bypassing the cache; returns how many. */
+async function reloadPages(cdp: BrowserCdp, origin: string): Promise<number> {
+  const { targetInfos } = (await cdp.send("Target.getTargets")) as {
+    targetInfos: { targetId: string; type: string; url: string }[];
+  };
+  let reloaded = 0;
+  for (const target of targetInfos) {
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(target.url).origin;
+    } catch {
+      continue;
+    }
+    if (target.type !== "page" || targetOrigin !== origin) continue;
+    const { sessionId } = (await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true })) as {
+      sessionId: string;
+    };
+    await cdp.send("Page.reload", { ignoreCache: true }, sessionId).catch(() => {});
+    await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+    reloaded++;
+  }
+  return reloaded;
 }

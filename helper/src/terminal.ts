@@ -29,9 +29,18 @@ export interface TerminalEvent {
 
 type Listener = (event: TerminalEvent) => void;
 
+/** A session that isn't a login shell in $HOME (an installed shell's folder, an agent). */
+export interface TerminalOptions {
+  readonly cwd?: string;
+  readonly argv?: readonly string[];
+  readonly title?: string;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
 export class TerminalSession {
   readonly id = randomUUID();
   readonly createdAt = Date.now();
+  readonly title: string | undefined;
   exitStatus: number | null = null;
   private readonly child: ChildProcess;
   private readonly control: Writable;
@@ -41,12 +50,20 @@ export class TerminalSession {
   private idleTimer: NodeJS.Timeout | undefined;
   private readonly onGone: () => void;
 
-  constructor(environment: NodeJS.ProcessEnv, rows: number, cols: number, onGone: () => void) {
+  constructor(
+    environment: NodeJS.ProcessEnv,
+    rows: number,
+    cols: number,
+    onGone: () => void,
+    options: TerminalOptions = {},
+  ) {
     this.onGone = onGone;
+    this.title = options.title;
     const shell = environment.SHELL || "/bin/sh";
-    this.child = spawn("python3", ["-I", PTY, String(rows), String(cols), shell], {
-      cwd: environment.HOME || "/",
-      env: environment,
+    const argv = options.argv?.length ? options.argv : [shell];
+    this.child = spawn("python3", ["-I", PTY, String(rows), String(cols), ...argv], {
+      cwd: options.cwd || environment.HOME || "/",
+      env: { ...environment, ...options.env },
       stdio: ["pipe", "pipe", "pipe", "pipe"],
     });
     this.control = this.child.stdio[3] as Writable;
@@ -125,12 +142,16 @@ export class Terminals {
     this.environment = environment;
   }
 
-  create(rows: number, cols: number): TerminalSession {
+  create(rows: number, cols: number, options: TerminalOptions = {}): TerminalSession {
     if (this.sessions.size >= MAX_SESSIONS) throw new Error(`At most ${MAX_SESSIONS} terminals.`);
     const clamp = (value: number, fallback: number) =>
       Number.isInteger(value) && value > 0 ? Math.min(value, 1000) : fallback;
-    const session = new TerminalSession(this.environment(), clamp(rows, 24), clamp(cols, 80), () =>
-      this.sessions.delete(session.id),
+    const session = new TerminalSession(
+      this.environment(),
+      clamp(rows, 24),
+      clamp(cols, 80),
+      () => this.sessions.delete(session.id),
+      options,
     );
     this.sessions.set(session.id, session);
     return session;
@@ -140,8 +161,13 @@ export class Terminals {
     return this.sessions.get(id);
   }
 
-  list(): { id: string; alive: boolean; createdAt: number }[] {
-    return [...this.sessions.values()].map(({ id, alive, createdAt }) => ({ id, alive, createdAt }));
+  list(): { id: string; alive: boolean; createdAt: number; title?: string }[] {
+    return [...this.sessions.values()].map(({ id, alive, createdAt, title }) => ({
+      id,
+      alive,
+      createdAt,
+      ...(title ? { title } : {}),
+    }));
   }
 
   closeAll(): void {

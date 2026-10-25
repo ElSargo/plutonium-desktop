@@ -104,6 +104,15 @@ start_helper() {
   echo $! > "$pidfile"
 }
 
+# The servers of the session's installed shells (T3 Code's) start with the
+# helper: wait for them before the browser opens their pages.
+wait_shell_servers() {
+  local sock=$RUN_DIR/plutonium/$SOCKET.sock
+  for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+  curl -s -m 120 --unix-socket "$sock" http://helper/v1/shells/wait | grep -o '"detail":"[^"]*"' | cut -d'"' -f4 |
+    grep -v '^Stopped' | sed 's/^/shell server: /' | while read -r line; do log "$line"; done
+}
+
 report_gpu() {
   case "$(curl -s --unix-socket "$RUN_DIR/plutonium/$SOCKET.sock" http://helper/v1/status)" in
     *'"accelerated":true'*) log "GPU: apps on $SOCKET render on the GPU" ;;
@@ -168,6 +177,7 @@ if [[ $MODE == x11 ]]; then
     XAUTHORITY=$RUN_DIR/plutonium/xauthority
   fi
   start_helper
+  wait_shell_servers
   if [[ -n ${HOST:-} ]]; then
     setsid env DISPLAY="$XDISP" "TZ=${HOST_TZ:-UTC}" "LANG=${LANG:-C.UTF-8}" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
   else
@@ -230,6 +240,7 @@ fi
   log "session $SID ($(session_prop TTY)) is not in front; Ash comes up when it is (Ctrl+Alt+F$(session_prop VTNr))"
 
 start_helper
+wait_shell_servers
 echo "Starting Ash on DRM in session $SID ($(session_prop TTY)). Ctrl+Alt+F1…F12 switch VTs, Ctrl+Alt+Backspace ends it."
 FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
         "--plutonium-logind-session=$SID"
