@@ -53,6 +53,8 @@ The element fires a `windowrequest` event (`NativeWindowRequestEvent`), which do
 
 The page decides what each request means. The niri shell maps maximize/unmaximize to maximize column. T3 Code maps them to the panel's maximize. Fullscreen requests work as before (`CONTROLS.md`).
 
+**Move and resize** come from a press the app is handling (its title bar, its edges). The browser then gives the page the rest of that drag: the input router stops sending it to the window (`HandForeignDragToPage()`), the app gets a pointer leave, and the page gets the moves and the release as ordinary pointer events (with `buttons` set; there was no `pointerdown` in the page). niri turns them into its interactive move (the column follows the pointer and drops where it's released, as Super+drag) or its column width resize (from the left or right edge; floating windows resize both ways). The plain shell, with one window per stage, ignores both.
+
 ## Several elements on one window
 
 One element drives the window: its size is the window's, and it gets the requests. It is chosen in this order:

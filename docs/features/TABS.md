@@ -168,6 +168,10 @@ Verified on Xvfb with the host's T3 data:
 | The agent's cursor (`pointer` from the server) | ✅ drawn by T3's overlay over the real tab |
 | A popup from a click (`window.open(url, "auth", "width=500,…")`, cross-origin), with two T3 shell pages | ✅ one new panel tab, `window.opener` set; its `postMessage` reaches the opener; its `window.close()` closes the panel tab and brings the opener back |
 
+## Surviving a restart (EXO-SESSION)
+
+The browser keeps the tabs in `Plutonium Tabs` in the profile, a JSON list of each tab's address, tags and `openedBy`, written a second after any change (an `ImportantFileWriter`, so a crash loses at most that second) and never once shutdown has started (closing the browser closes its tabs, which mustn't empty the list). At the next start, once the startup shell's page exists, each one opens again with its tags, so it is back in its thread in whichever shell shows that thread. Not kept: incognito tabs, DevTools, and tabs whose origin tag is T3 Code's (`t3:`), since T3's server reopens its browser panel's tabs itself. A restored tab is a new tab at its address: no back/forward history, and a new id.
+
 ## Limits and next steps
 - **No `Browser` behind a tab.** What Chrome reaches through a `Browser` window comes from tab helpers attached to the registry's `WebContents`, exposed to shells (`TAB_FEATURES.md`): find in page, zoom, permission prompts, downloads, file pickers and printing are built. Still missing: autofill (not wanted for now) and Chrome's password manager (`PASSWORDS.md` instead).
 - **Tabs don't survive a browser restart** (no session restore).
