@@ -157,7 +157,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 
 **The shell library** (`helper/web/plutonium-shell.js`): `capture(source, {region, size, cursor, frameRate})`, `screenshot(source, {region})`, `saveScreenshot(blob)`, `takeScreenshot({targets})` (the Print UI: the output frozen under a shade; drag a region, click a target, Enter for all of it), `outputSource()`, `captureSources()`, `captures()`, `stopCapture(id)`, `setCaptureSize(id, size)`, `acknowledgeCapture(id)`, `answerCapture(requestId, answer)`, `setCaptureSettings()`, and events "capturestart", "capturechange", "capturestop", "capturesettingschange", "screenshot". connect() options `capturePicker` and `captureIndicator`: the library's own (a dialog with thumbnails; a strip with Stop buttons), `false` (Ash's), or a function.
 
-**Shells:** niri binds Print (region or window), Ctrl+Print (the screen) and Alt+Print (the focused window), as niri does; plain binds Print. Files go to `~/Pictures/Screenshots` (`POST /v1/screenshots`).
+**Shells:** while the selector is open it has the keyboard: the library blurs the `<native-window>` that has it, and gives it back after. niri binds Print (region or window), Ctrl+Print (the screen) and Alt+Print (the focused window), as niri does; plain binds Print. Files go to `~/Pictures/Screenshots` (`POST /v1/screenshots`).
 
 **The portal backend** (`helper/src/portal.ts`): `org.freedesktop.impl.portal.ScreenCast` (version 5) and `Screenshot` (version 2) as `org.freedesktop.impl.portal.desktop.plutonium`, on `$PLUTONIUM_PORTAL_BUS` or the session bus.
 - The app's pid comes from the request handle (`/…/request/1_42/…` is `:1.42`) and the bus's `GetConnectionUnixProcessID`; its thread from `/proc`, its name from its desktop entry.
@@ -188,6 +188,8 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 | PipeWire: a parked window held at 1920x1080 on a 1600x1000 screen (foot snapped to 1920x1066, letterboxed): 40 live frames through `pipewiresrc`; stopping it lets the window go and removes the node | ✓ |
 | The portal, a window (`types` 2, cursor metadata): node at the window's size; its restore token brings back the same window by app id and title, without a picker | ✓ |
 | The Screenshot portal, interactive: niri's picker, the file's URI back through xdg-desktop-portal | ✓ |
+
+**On DRM** (tty5, a 2560x1600 panel at scale 1.78, build 5876b575e376, input from `tools/uinput.py`, 2026-10-25): `tools/capture-checks.sh` passed (a screenshot of the output, a shell's stream at 2560x1600, a PipeWire node 2560x1600 whose frames show the real screen, with the pointer drawn in); Print (a dragged region), Alt+Print (the focused window) and Ctrl+Print (the screen) with real keys. Found there: the selector didn't take the keyboard from an app window that had it, so Escape went to the app; the library now blurs the focused `<native-window>` while the selector is open and focuses it again after (checked on X11).
 
 Quirks seen only on Xvfb: Alt+Print arrives with an empty `code` (X maps it to SysRq; on evdev it stays PrintScreen); xdotool's instant `click` is sometimes lost on Ash's own widgets, a press and release 150 ms apart isn't.
 

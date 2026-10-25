@@ -1232,10 +1232,21 @@ export class PlutoniumShell extends EventTarget {
     // One at a time: Print again while choosing does nothing.
     if (this._choosingArea) return null;
     this._choosingArea = true;
+    // The keys (Escape, Enter) are the selector's while it's open: an app
+    // window that has the keyboard gives it up, and gets it back after.
+    const blurred = [];
+    for (const element of document.querySelectorAll("native-window")) {
+      const id = Number(element.getAttribute("window"));
+      if (element.windowFocused || this.windows.get(id)?.focused) {
+        element.blurWindow();
+        blurred.push(element);
+      }
+    }
     try {
       return await this._takeScreenshot(targets, save);
     } finally {
       this._choosingArea = false;
+      for (const element of blurred) if (element.isConnected) element.focusWindow();
     }
   }
 

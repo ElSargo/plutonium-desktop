@@ -6,12 +6,13 @@
 # took to logs/capture-checks/ and prints a line per check.
 #
 # Defaults: this checkout's slot's DRM session (DevTools 9224 + 100 × slot,
-# niri on 8875). For an X11 session pass its DevTools port.
+# this slot's niri). For an X11 session pass its DevTools port.
 set -u
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 slot=$(cd "$root" && bin/plutonium worktree info 2>/dev/null | sed -n 's/.*slot \([0-9]*\).*/\1/p' | head -1)
 port=${1:-$((9224 + 100 * ${slot:-0}))}
-shell=${2:-$((8875 + 100 * ${slot:-0}))}
+# The shells' servers have the same ports in a slot's DRM and X11 sessions.
+shell=${2:-$(cd "$root" && bin/plutonium worktree info 2>/dev/null | sed -n 's/.*niri \([0-9]*\).*/\1/p' | head -1)}
 out=$root/logs/capture-checks
 mkdir -p "$out"
 export CDP=localhost:$port
