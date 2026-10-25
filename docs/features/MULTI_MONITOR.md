@@ -1,6 +1,6 @@
 # Several monitors
 
-**Status:** steps 1–3 below are built (displays and a shell per display, one window in one place, dragging windows between shells), and "show on display N" with them; "As built" says how. Linked documents aren't (no shell needs them yet).
+**Status:** steps 1–3 below are built (displays and a shell per display, one window in one place, dragging windows between shells), and "show on display N" with them; "As built" says how, and "Verified" what was checked (on X11 with two host displays; a real second monitor on DRM is still to do). Linked documents aren't (no shell needs them yet).
 
 Each display gets its own shell window, and the user picks a shell for each one. A shell that wants to span monitors (T3 with its sidebar on the second one, say) is built on top of that: it runs on both displays and keeps the two in sync itself.
 
@@ -83,3 +83,40 @@ Plain HTML drag and drop, with `application/x-plutonium-window` and `application
 - **niri:** each display's page is one of niri's outputs, with its own workspaces and its own stored layout. An item is on the output whose `niri:output/<display id>` tag it carries; new items, and those whose display went away, go to the focused display's page, which tags them. A window or tab focused or dropped on a page moves to its output. A tile whose window another page took shows a placeholder, and focusing it brings the window back.
 - **Plain:** the threads are shared; each display has its own current thread and open tabs. A taken window shows "Shown on another display" with "Bring it back". Apps and tabs can be dragged (to another shell or display), the stage takes drops, and "To display N" sends the shown item to another display.
 - **T3:** an app tab whose window another display took shows a placeholder with "Bring it back"; the app header has "To display N". T3's own state is on its server, so a T3 page per display stays in sync without more.
+
+### Verified (2026-10-25, X11: Xvfb 2560×1000, two host displays 1280×800, dev build)
+
+Session: `XVFB_SIZE=2560x1000 BOUNDS="0+0-1280x800,1280+0-1280x800" plutonium run --x11 niri plain --flags --plutonium-test-displays` (and `t3 niri` for T3).
+
+| Check | |
+|---|---|
+| Each display gets every shell's page, fullscreen on that display (`screenX` 0 and 1280); pages on display 2 have `&display=<id>`; niri visible on 1, Plain on 2 | ✓ |
+| `getDisplays()`: two entries, bounds, `primary`, `current` right in every page; `focused` follows the active window | ✓ |
+| `showShell()` from a page shows its shell on its own display; the other display keeps its shell | ✓ |
+| Super+Shift+Right moves the keyboard to display 2; Super+Tab there opens the switcher on display 2, Enter switches only display 2 | ✓ |
+| Switcher: shells' pages say "Visible on another display", "Visible on display 1 / Show on display 2"; a window's page has "Show on display 1 / 2", and clicking one moves the window | ✓ |
+| Super+Ctrl+Shift+Right on foot (niri, display 1): niri on display 2 takes it, retags it `niri:output/<display 2>`, display 1's workspace empties | ✓ |
+| foot on display 2 renders and takes typing | ✓ |
+| Super+F on foot in display 2, then two shell switches on display 1: foot stays fullscreen | ✓ |
+| One window, one place: niri → Plain → niri via `showOnDisplay`, repeated; the loser's element is "taken" (niri's tile shows its placeholder) and comes back on a focus request | ✓ |
+| A hidden shell's element attaching a window a visible shell shows starts out "taken"; showing that shell gives it the window (the other's goes "taken", its fullscreen ends); switching back hands it back | ✓ |
+| Removing the holding element gives the window back to the visible shell it was taken from | ✓ |
+| Tabs: `showTabOnDisplay` moves a tab to display 2's niri; a hidden shell's `<embed>` that lost it doesn't take it back while another display's visible shell shows it, and does once that one lets go | ✓ |
+| Hotplug (`Plutonium.setDisplaysForTesting`): unplugging display 2 closes its pages; its windows and tab show up in display 1's niri; replugging reopens display 2's pages with its last shell, and niri's windows tagged with its output go back there | ✓ |
+| Agents: `list_displays`, `focus_window {display: 2}` and `{display: 1}`, a bad display number refused; `/v1/status` lists each page's display | ✓ |
+| Drop handling: a window dropped on niri (synthetic drop event) joins its output and the old page's element goes "taken"; within one display a real drag (xdotool) reaches the drop target | ✓ |
+| T3: "To display 2" in an app tab's header moves the window to display 2's shell; the tab shows "Shown on another display" and "Bring it back" takes it back | ✓ |
+| No crash or DCHECK in Ash's log through all of the above | ✓ |
+
+Not verified:
+- **Dragging across displays** on X11: the drag is cancelled as the pointer enters the other display's host window. Ash's drag tracker cancels when its capture is lost, and each X11 host window loses its own grab there. On DRM there are no host windows (one cursor, the controller finds the target by screen position), so this needs a real second monitor.
+- **A real second monitor on DRM** (scale, EDID label, hotplug through the kernel).
+
+Fixed along the way: shell windows for display 2 opened on display 1 (app windows reopen at their saved bounds, whatever the display for new windows; now moved with `SetBoundsInScreen` before going fullscreen); `showShell()` used the focused display; a crash at startup (the tab registry asked for the visible shell before Ash's `display::Screen` existed); niri and Plain didn't take a window back on a focus request.
+
+Behaviour worth knowing:
+- A page that loads (a reload, a display coming back) and shows a window it showed before is a new claim and takes it. niri's output tags keep its pages from fighting; a Plain page restoring its open tabs can take a window back from the other display.
+- An `<embed>` whose plugin starts while its page is visible (the page laid it out late, being hidden before) is a new claim too.
+- A hidden shell page reports stale window geometry (`screenX` of where it was opened); it is placed when shown.
+- `windowId` of a taken element is -1 if it never had the window's info and has no `window` attribute.
+- On X11 the displays' labels are synthetic ("Display-…"); on DRM they come from EDID.
