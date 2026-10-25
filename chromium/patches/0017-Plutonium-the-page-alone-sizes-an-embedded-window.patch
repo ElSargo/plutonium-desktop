@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 10:26:51 +1300
-Subject: [PATCH 17/60] Plutonium: the page alone sizes an embedded window
+Subject: [PATCH 17/61] Plutonium: the page alone sizes an embedded window
 
 A parked window's maximize button (xdg_toplevel.set_maximized) went to
 Ash, which resized the window to the work area while its element kept

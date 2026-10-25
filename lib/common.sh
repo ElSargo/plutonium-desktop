@@ -34,6 +34,11 @@ T3_PORT=${T3_PORT:-$(slot_port 3773)}
 (( SLOT )) && T3_TAILSCALE_PORT=${T3_TAILSCALE_PORT:-$(slot_port 8443)}
 T3_TAILSCALE_PORT=${T3_TAILSCALE_PORT:-443}
 RUN_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+# The installed shells, shells.json and their logs (docs/features/SHELL_PACKAGES.md).
+# A worktree's slot has its own, so testing never touches yours.
+if (( SLOT )); then PLUTO_HOME=${PLUTO_HOME:-$DATA_DIR/pluto-s$SLOT}; else PLUTO_HOME=${PLUTO_HOME:-$HOME/.pluto}; fi
+# The helper serves static shells at http://<name>.localhost:<this port>/.
+SHELLS_PORT=${SHELLS_PORT:-$(slot_port 8770)}
 LOGS=${LOGS:-$ROOT/logs}
 
 # The build and run container (rootless podman, Ubuntu 24.04).

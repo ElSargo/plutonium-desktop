@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 01:05:53 +1300
-Subject: [PATCH 58/60] Plutonium: a native window's surface goes at whole
+Subject: [PATCH 58/61] Plutonium: a native window's surface goes at whole
  device pixels on screen
 
 EXO-EMBED: the foreign layer of a <native-window> (or a tab) is moved by

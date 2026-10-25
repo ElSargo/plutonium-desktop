@@ -46,6 +46,7 @@ import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
+import { type BrowserShell, ShellPackages } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -74,6 +75,9 @@ export interface DaemonOptions {
   readonly cdpPort?: number | undefined;
   /** Where the threads' X servers go (tests use their own). */
   readonly xDisplays?: XDisplayOptions;
+  /** The installed shells: the static ones are served on their own port (shells.ts). */
+  readonly shells?: ShellPackages;
+  readonly shellsPort?: number;
 }
 
 const HELPER_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1505,9 +1509,18 @@ export class Daemon {
       if (method === "POST" && path === "/v1/shell/origins") {
         // The browser's shells, from a page that is already a shell: what
         // the shells overlay added or removed.
-        const { origins } = await readJson(request);
+        const { origins, shells } = await readJson(request);
         if (!Array.isArray(origins)) throw new HttpError(400, "origins must be an array.");
         this.reportedOrigins = new Set(origins.filter(isOrigin));
+        // The whole list, in order: shells.json follows the switcher.
+        if (Array.isArray(shells)) {
+          this.options.shells?.browserList(
+            shells.filter(
+              (shell): shell is BrowserShell =>
+                typeof shell?.name === "string" && typeof shell.url === "string" && typeof shell.enabled === "boolean",
+            ),
+          );
+        }
         response.writeHead(204).end();
         return;
       }
@@ -1562,6 +1575,9 @@ export class Daemon {
         direct: (await this.direct()) !== null,
         gpu: await this.gpu(),
       });
+    }
+    if (method === "GET" && path === "/v1/shells") {
+      return sendJson(response, 200, this.options.shells?.status() ?? []);
     }
     if (method === "GET" && path === "/v1/displays") {
       return sendJson(response, 200, await this.displays());
@@ -2034,9 +2050,22 @@ export class Daemon {
     await new Promise<void>((resolve, reject) => {
       this.serve(false).once("error", reject).listen(port, "127.0.0.1", resolve);
     });
+    const { shells, shellsPort } = this.options;
+    if (shells && shellsPort) {
+      // http://<name>.localhost:<port>/: Chromium resolves *.localhost to
+      // loopback itself, both addresses.
+      for (const host of ["127.0.0.1", "::1"]) {
+        const server = createServer((request, response) => shells.serve(request, response));
+        this.servers.push(server);
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", (error) => (host === "::1" ? resolve() : reject(error))).listen(shellsPort, host, resolve);
+        });
+      }
+    }
     console.log(
       `plutoniumd: ${this.options.waylandDisplay}, shells ${this.options.shellOrigins.join(" ")}, ` +
         `socket ${socketPath}, shell API http://127.0.0.1:${port}` +
+        (shells && shellsPort ? `, shells from ${shells.home} on http://<name>.localhost:${shellsPort}` : "") +
         (this.options.cdpPort ? `, server-driven tabs on DevTools ${this.options.cdpPort}` : ""),
     );
     // Ash usually starts after the helper: check the GPU once Exo is up.
