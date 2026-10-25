@@ -126,8 +126,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   16/9 scale isn't a 1/120 step, so buffers are 4 px short and the topmost-plane
   rule (no cursor plane on AMD) rejects the fullscreen strategy. Pick a shell
   scale such as 1.6 or 2, or relax the rule for sub-pixel scale errors. S
-- [ ] **Pixel-snap `<native-window>`.** Elements at fractional device positions
-  can't be promoted to planes (DRM takes whole-pixel rects). S
+- [x] **Pixel-snap `<native-window>`.** Elements at fractional device positions
+  can't be promoted to planes (DRM takes whole-pixel rects). S · Done
+  2026-10-26 (patch 0055, `WINDOW_SIZING.md`): the surface layer goes at whole
+  device pixels on screen; verified on Xvfb (crisp under a fractional
+  `translate()`), planes not yet checked on DRM.
 - [x] **Real input on the TTY** (evdev keyboard/mouse). Verified with virtual
   uinput devices on the panel (`PHASE4_PROGRESS.md`, item 3); not yet pressed
   by hand.
