@@ -49,6 +49,7 @@ import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { NativeError, ShellNative } from "./shellNative.ts";
 import { NotificationsService } from "./services/notifications.ts";
+import { AudioService } from "./services/audio.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -404,6 +405,7 @@ export class Daemon {
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
     this.services.register(new NotificationsService());
+    this.services.register(new AudioService());
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
