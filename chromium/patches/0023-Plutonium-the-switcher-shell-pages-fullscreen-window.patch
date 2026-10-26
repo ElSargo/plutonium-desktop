@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 12:17:07 +1300
-Subject: [PATCH 23/74] Plutonium: the switcher: shell pages, fullscreen
+Subject: [PATCH 23/75] Plutonium: the switcher: shell pages, fullscreen
  windows, backup terminal and browser
 
 The Super+Tab overlay becomes a sidebar (shells over windows and tabs) and a

@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 10:19:57 +1300
+Subject: [PATCH 75/75] Plutonium: unlocking after the window that was active
+ went away doesn't crash
+
+The lock gives focus back to the window that had it, through a WindowTracker.
+If that window was destroyed while the lock was up (its app quit), the
+tracker is empty, and Pop() read past its end (a libc++ hardening abort on
+the live desktop after an idle lock).
+---
+ .../browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc  | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+index c7bc511001..d46cbd460c 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+@@ -337,8 +337,10 @@ void PlutoniumLockImpl::Unlock() {
+   retry_at_ = base::TimeTicks();
+   message_.clear();
+   CloseWidgets();
+-  if (aura::Window* window = previously_active_.Pop()) {
+-    wm::ActivateWindow(window);
++  // The window that was active may have gone while the lock was up (its app
++  // quit): the tracker is empty then, and Pop() mustn't be called.
++  if (!previously_active_.windows().empty()) {
++    wm::ActivateWindow(previously_active_.Pop());
+   }
+   NotifyLockChanged(false);
+ }

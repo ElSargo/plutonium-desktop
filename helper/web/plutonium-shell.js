@@ -368,8 +368,31 @@ export class PlutoniumShell extends EventTarget {
     // detail {phase: "begin" | "update" | "end", fingers, dx, dy, x, y}, dx and
     // dy the fingers' movement since the last one. None on X11, or before
     // Chromium patch 0074.
+    // On DRM the browser's swipe begin and end don't arrive (only updates), so a
+    // swipe begins at its first update (or when the finger count changes) and
+    // ends once updates stop for SWIPE_END_MS.
+    let swipe = null;
+    const sendSwipe = (detail) => this.dispatchEvent(new CustomEvent("touchpadswipe", { detail }));
+    const endSwipe = () => {
+      if (!swipe) return;
+      clearTimeout(swipe.timer);
+      sendSwipe({ phase: "end", fingers: swipe.fingers, dx: 0, dy: 0, x: swipe.x, y: swipe.y });
+      swipe = null;
+    };
     this.broker.addEventListener("touchpadswipe", (event) => {
-      this.dispatchEvent(new CustomEvent("touchpadswipe", { detail: event.detail }));
+      const detail = event.detail ?? {};
+      if (detail.phase === "end") return endSwipe();
+      if (swipe && swipe.fingers !== detail.fingers) endSwipe();
+      if (!swipe) {
+        swipe = { fingers: detail.fingers, x: detail.x, y: detail.y, timer: 0 };
+        sendSwipe({ ...detail, phase: "begin", dx: 0, dy: 0 });
+      }
+      if (detail.phase === "begin") return;
+      swipe.x = detail.x;
+      swipe.y = detail.y;
+      clearTimeout(swipe.timer);
+      swipe.timer = setTimeout(endSwipe, SWIPE_END_MS);
+      sendSwipe(detail);
     });
     // The browser's shells overlay asks this shell to show an item.
     this.broker.addEventListener("windowfocusrequest", async (event) => {
@@ -4308,6 +4331,8 @@ class CaptureIndicator {
 // clicking it runs its default action.
 /** How old a notification a page that has just connected still pops up. */
 const RECENT_NOTIFICATION_MS = 30_000;
+/** A touchpad swipe has ended once no update has come for this long. */
+const SWIPE_END_MS = 150;
 
 class NotificationPopups {
   constructor(shell) {
