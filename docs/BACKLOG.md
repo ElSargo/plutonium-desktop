@@ -713,18 +713,24 @@ shell find it.
   actions). Done 2026-10-26: `helper/src/services.ts`, the `/v1/shell/system`
   routes, `uses` in `shell.json`, `shell.system` in the library
   ([DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md)).
-- [ ] **Audio.** M · Output/input devices, volume and mute per device
+- [x] **Audio.** M · Output/input devices, volume and mute per device
   (PipeWire via `wpctl`, or PulseAudio's D-Bus), per-app streams later.
-  Volume and mute keys work without a shell asking.
-- [ ] **Brightness and power.** S–M · Backlight through logind
+  Volume and mute keys work without a shell asking. Done 2026-10-26:
+  `services/audio.ts` (pw-dump, wpctl), the keys through the helper, niri's
+  bar and plain's tray. Per-app streams still to do.
+- [x] **Brightness and power.** S–M · Backlight through logind
   (`SetBrightness`, no root), brightness keys; battery and AC from UPower;
-  suspend, restart, power off, log out through logind.
+  suspend, restart, power off, log out through logind. Done 2026-10-26:
+  `services/power.ts`; log out is `plutonium stop` for the session. Not yet:
+  the keyboard backlight, the power button, idle and lid actions.
 - [ ] **Network.** M · NetworkManager over D-Bus: state, Wi-Fi list, connect
   (with a password prompt from the shell), turn Wi-Fi off; VPNs later.
 - [ ] **Bluetooth.** M · BlueZ over D-Bus: on/off, devices, pair and
   connect; pairing PINs through the shell.
-- [ ] **Media.** S · MPRIS players (now playing, play/pause, next), and the
-  media keys.
+- [x] **Media.** S · MPRIS players (now playing, play/pause, next), and the
+  media keys. Done 2026-10-26: `services/media.ts`; the browser's own media
+  session through the Plutonium domain (no MPRIS in a ChromeOS build). Not
+  yet: a tab's artwork, seeking.
 - [x] **Notifications.** Done 2026-10-26: the helper as
   `org.freedesktop.Notifications`, `shell.system.notifications`, the
   library's popups in the visible shell. Open: check the popups in a session;

@@ -101,6 +101,133 @@ Each section: its state, its actions, what it uses on the host, and how it was
 tested. (Filled in as each lands; see the backlog, "Desktop services for
 shells".)
 
+### audio
+
+PipeWire's outputs (sinks) and inputs (sources), their volume and mute, and the
+default ones.
+
+- **State:** `{ available, volume, muted, output, input, outputs, inputs }`.
+  `volume` and `muted` are the default output's (up front, for a bar);
+  `output` and `input` are the default devices, `outputs`/`inputs` all of them,
+  each `{ id, node, name, default, volume, muted }`. `volume` is 0–1 as
+  pavucontrol and `wpctl` show it (cubic), above 1 when boosted. `id` is
+  PipeWire's object id, which the actions take; `node` (its node name) is the
+  one that survives a PipeWire restart. `{ available: false, … }` without
+  PipeWire.
+- **Actions** (each returns the new state): `set-volume {device?, volume}` (up
+  to 1.5), `set-mute {device?, muted?}` (no `muted`: toggle), `set-default
+  {device}`, `step {device?, by}` (±, stops at 1; up unmutes: the keys').
+  `device` is an id, or `"output"`/`"input"` for the defaults (the default:
+  the default output).
+- **Host:** `pw-dump` for the state, read again whenever `pw-dump --monitor`
+  reports a node, device or metadata change (not the clients that come and go,
+  `pw-dump` itself among them), so a change in pavucontrol or `wpctl` arrives
+  as a change; `wpctl` for the actions, which sets a device's route volume as
+  pavucontrol does.
+- **Tested:** `helper/test/audio.test.ts` against a fake `wpctl` and `pw-dump`
+  on `PATH` (`test/fixtures/fake-pipewire.ts`): the state, every action, a
+  change made elsewhere, no PipeWire. On this computer's PipeWire: the state, a
+  step, a change by `wpctl` arriving as a change, the volume put back.
+
+### power
+
+The battery and AC, the backlight, and suspend, restart, power off and log out.
+
+- **State:** `{ battery, ac, brightness, can }`. `battery` is `{ percent,
+  charging, state, timeLeft }` (UPower's state: `"charging"`,
+  `"discharging"`, `"full"`, …; `timeLeft` in seconds, to empty or to full, or
+  null), or null without one (a desktop). `ac` is whether it's on mains power.
+  `brightness` is `{ available, value }`, 0–1 (not available on a desktop
+  monitor). `can` is `{ suspend, reboot, powerOff, logOut }`: logind's answer
+  (`"yes"`, `"challenge"`: it would ask for a password, `"no"`, `"na"`), so a
+  menu shows what works.
+- **Actions:** `set-brightness {brightness}`, `step {by}` (both return the new
+  state; never quite 0: a black screen looks broken), `suspend`, `reboot`,
+  `power-off`, `log-out`. **Log out** ends this Plutonium session (as
+  `plutonium stop --drm`, or `--x11` for an X11 one), not the user's login:
+  that's the text console the session was started from, which comes back.
+- **Host:** the system bus. UPower's `DisplayDevice` and `OnBattery`, watched
+  through `PropertiesChanged`; logind's `Session.SetBrightness` on the user's
+  session with a seat (the helper's `XDG_SESSION_ID`, else the user's
+  `Display` session), which needs no root; logind's `Suspend`, `Reboot` and
+  `PowerOff`, not interactive (there's no polkit agent to ask for a password).
+  The backlight is the first of `/sys/class/backlight` (firmware, then
+  platform, then raw), read again every 3 s for changes made elsewhere (sysfs
+  has no change events).
+- **Tested:** `helper/test/power.test.ts` against fake logind and UPower on
+  the fake bus (`test/fixtures/fakeBus.ts`, which serves other services'
+  objects and sends signals now): the state, UPower's signals, brightness
+  through `SetBrightness`, a change made elsewhere, every action (suspend,
+  reboot, power off refused for want of a password, log out) and a desktop
+  without a battery or backlight. On this laptop: the battery and AC read, the
+  brightness set through logind and put back. Suspend, restart and power off
+  were only ever called on the fake bus.
+
+### media
+
+What's playing, and play/pause, next and previous.
+
+- **State:** `{ available, players, active }`. `players`, most recently active
+  first (the one that last started playing, or was last told to), each `{ id,
+  name, status: "playing" | "paused" | "stopped", title, artist, album, artUrl,
+  length, canPlay, canPause, canGoNext, canGoPrevious, tab? }`; `active` is the
+  first one's id, the one the media keys control.
+- **Actions** (each returns the new state): `play-pause`, `play`, `pause`,
+  `stop`, `next`, `previous`, each `{player?}` (default: the active one).
+- **Host:** MPRIS on the session bus (mpv with its mpris script, Spotify,
+  Firefox, VLC, …), watched through `NameOwnerChanged` and
+  `PropertiesChanged`; `playerctld` is left out (it mirrors another player).
+  **The browser's tabs:** Plutonium's Chromium is a ChromeOS build, which has
+  no MPRIS. Its active media session (a tab or a shell page playing) comes
+  through the Plutonium DevTools domain instead (`getMediaSession`,
+  `mediaSessionAction`, the `mediaSessionChanged` event; patch "the hardware
+  keys go to the helper…"), as the player `"browser"`, named after the site,
+  with `tab` the shells' tab playing. No artwork for it yet.
+- **Tested:** `helper/test/media.test.ts` against fake players on the fake
+  bus: the order, the actions, a player coming and going, the browser's
+  session. On this computer: a real `mpv` (with `mpvScripts.mpris`) listed and
+  paused through the service.
+
+### The hardware keys
+
+The volume, mic mute, brightness and media keys work in every shell, whichever
+app or tab has the keyboard. In shell mode Ash keeps only these hardware keys
+(and power) for itself, but its own handlers (CRAS for sound, powerd for the
+backlight) do nothing on Linux, so the patch sends them to the helper instead:
+Ash's accelerator controller calls a handler chrome sets, which posts the key
+to the helper's `POST /v1/system/key` (`{ key }` → `{ handled }`, on its Unix
+socket). The helper runs the service's action (`volume-up` is audio's `step
+{by: 0.05}`, `volume-mute` toggles, `mic-mute` toggles the default input,
+`brightness-up` is power's `step`, `play-pause`/`next`/`previous`/… go to the
+active player), and the shells that use the service get the new state and a
+`systemkey` event on the shell (`{ key, service, state }`), for an on-screen
+level. When the helper did nothing with a key (no player), Ash's own action
+runs, which for the media keys is Chromium's media session controller.
+
+Tested in an X11 session (slot 8, keys sent to Xvfb with `xdotool`): volume
+up and down (wpctl showed each step, niri's OSD the level), mute on and off,
+brightness up and down through logind, play/pause on a real `mpv`, and a
+shell page's own media session (silent audio with `navigator.mediaSession`)
+listed as the `"browser"` player, its `nexttrack` handler run by the Next
+key and paused by Play. Everything was put back. A real keyboard on DRM goes
+through the same accelerators.
+
+### In the shipped shells
+
+niri has a bar now (`bar.js`, as waybar is for niri: now playing, a clock, the
+indicators), and plain a tray at the bottom of its sidebar. Each indicator is
+its own module in the shell's folder, `export default (shell, container)`,
+over the shared `tray.js` (icons, a popover, a confirm, `--tray-*` colours):
+`audio.js` (scroll to change, middle-click to mute, a slider, the outputs and
+the microphone), `brightness.js`, `battery.js` (time left in its tooltip),
+`power.js` (suspend, restart, power off, log out, each after a confirm),
+`media.js` (now playing and its controls) and `osd.js` (the keys' level).
+Indicators hide when their service has nothing (no battery, no backlight, no
+player).
+Tested in the same session: both shells show the real volume, brightness and
+battery, in order; the volume popover and the power menu (its four entries;
+none was run) open.
+
 ### notifications
 
 The helper is the session's notification server (`org.freedesktop.Notifications`

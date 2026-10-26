@@ -10,6 +10,9 @@ The browser handles these in every shell:
 | Super+F | Fullscreen the focused app or tab (it's resized to the screen, not scaled) |
 | Super+Escape | Release an app's pointer lock or confinement |
 | Ctrl+Alt+F1…F12 | On DRM: switch to that VT. Switching back returns to the session as it was ([features/SEAT.md](features/SEAT.md)) |
+| Volume up/down/mute, mic mute | The default output's volume (5% a press, up to 100%) and mute, the default input's mute; the shell shows the level ([features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md)) |
+| Brightness up/down | The backlight, 5% a press |
+| Play/pause, next, previous | The player that last played: an MPRIS app (mpv, Spotify…) or a tab |
 | Ctrl+Alt+Backspace | On DRM: end the session (as `plutonium stop --drm`); the text console comes back |
 
 Each shell adds its own keys, which keep working while an app or tab has the keyboard.

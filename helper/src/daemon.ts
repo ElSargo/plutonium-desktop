@@ -49,6 +49,9 @@ import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { NativeError, ShellNative } from "./shellNative.ts";
 import { NotificationsService } from "./services/notifications.ts";
+import { AudioService } from "./services/audio.ts";
+import { PowerService } from "./services/power.ts";
+import { MediaService } from "./services/media.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -404,6 +407,21 @@ export class Daemon {
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
     this.services.register(new NotificationsService());
+    this.services.register(new AudioService());
+    this.services.register(new PowerService({ logOut: () => this.logOut() }));
+    this.services.register(
+      new MediaService({
+        // The browser's own media session (a tab playing), through the Plutonium domain.
+        browser: {
+          session: async () => (await this.desktop?.mediaSession()) ?? null,
+          action: async (action) => {
+            if (!this.desktop) throw new Error("No browser.");
+            await this.desktop.mediaSessionAction(action);
+          },
+          onChange: (listener) => this.desktop?.mediaListeners.add(listener),
+        },
+      }),
+    );
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -565,6 +583,53 @@ export class Daemon {
       `plutoniumd: ${what}: no tags from the browser; ` +
         (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
     );
+  }
+
+  /**
+   * A hardware key (POST /v1/system/key, from Ash): runs its service's action
+   * and tells the shells (a `systemkey` notice, for an on-screen level).
+   * False if it did nothing (no PipeWire, no backlight, no player), so Ash can
+   * do its own thing.
+   */
+  private async systemKey(key: string): Promise<boolean> {
+    const step = 0.05;
+    const keys: Record<string, [service: string, action: string, args: Record<string, unknown>]> = {
+      "volume-up": ["audio", "step", { by: step }],
+      "volume-down": ["audio", "step", { by: -step }],
+      "volume-mute": ["audio", "set-mute", {}],
+      "mic-mute": ["audio", "set-mute", { device: "input" }],
+      "brightness-up": ["power", "step", { by: step }],
+      "brightness-down": ["power", "step", { by: -step }],
+      "play-pause": ["media", "play-pause", {}],
+      play: ["media", "play", {}],
+      pause: ["media", "pause", {}],
+      stop: ["media", "stop", {}],
+      next: ["media", "next", {}],
+      previous: ["media", "previous", {}],
+    };
+    const entry = keys[key];
+    if (!entry) throw new HttpError(404, `No system key "${key}".`);
+    const [service, action, args] = entry;
+    let state: unknown;
+    try {
+      state = await this.services.call(service, action, args);
+    } catch (error) {
+      if (error instanceof ServiceError) return false;
+      throw error;
+    }
+    this.relay.notifyWhere((origin) => this.mayUse(origin, service), "systemkey", { key, service, state });
+    return true;
+  }
+
+  /**
+   * Log out (the power service): ends this Plutonium session, as `plutonium
+   * stop` does, which stops this helper too, so it runs on its own.
+   */
+  private logOut(): void {
+    const mode = this.options.waylandDisplay.includes("-x11") ? "--x11" : "--drm";
+    const child = spawn(join(HELPER_ROOT, "..", "bin", "plutonium"), ["stop", mode], { detached: true, stdio: "ignore" });
+    child.on("error", (error) => console.error(`plutoniumd: log out: ${error.message}`));
+    child.unref();
   }
 
   /** Whether the shell on `origin` may use desktop service `service` (its "uses"). */
@@ -1832,6 +1897,11 @@ export class Daemon {
         } catch (error) {
           return sendJson(response, 200, { content: [{ type: "text", text: (error as Error).message }], isError: true });
         }
+      }
+      // The hardware keys (volume, brightness, media) Ash hands over in shell mode.
+      if (method === "POST" && path === "/v1/system/key") {
+        const { key } = await readJson(request);
+        return sendJson(response, 200, { handled: await this.systemKey(String(key)) });
       }
       // EXO-TAB-FEATURES: the browser's "open" and "show" for a download.
       if (method === "POST" && path === "/v1/downloads/open") {

@@ -52,6 +52,18 @@
   aside li button { width: 100%; text-align: left; }
   aside li button.current { background: var(--hover); font-weight: 600; }
   aside footer { margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px; }
+  /* The status indicators (tray.js and one module each), over the desktop services. */
+  #tray {
+    margin-top: auto; padding: 6px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 2px;
+    --tray-bg: var(--panel); --tray-fg: var(--text); --tray-muted: var(--muted); --tray-accent: var(--accent);
+    --tray-hover: var(--hover); --tray-border: 1px solid var(--line); --tray-radius: 8px; --tray-danger: var(--danger);
+  }
+  #tray .tray-button { height: 28px; }
+  #tray-media { flex-basis: 100%; display: flex; min-width: 0; }
+  #tray-media .tray-button { max-width: 100%; overflow: hidden; }
+  #tray-media .tray-button span { overflow: hidden; text-overflow: ellipsis; }
+  #tray-media:not(:has(.tray-button:not([hidden]))) { display: none; }
+  #tray + footer { margin-top: 0; }
   button {
     font: inherit; color: inherit; background: none; border: 0; border-radius: 6px;
     padding: 5px 8px; cursor: pointer;
@@ -118,6 +130,7 @@
 <aside>
   <h1>Threads <button id="new-thread" title="New thread">＋</button></h1>
   <ul id="threads"></ul>
+  <div id="tray"><div id="tray-media"></div></div>
   <footer id="footer">connecting…</footer>
 </aside>
 <main>
@@ -261,6 +274,20 @@ try {
       return true;
     },
   });
+  // The status indicators (desktop services, shell.json's "uses"), each its own module.
+  // Each in a slot made now, so they keep this order however they load.
+  const indicator = (file, container = document.body) => {
+    const slot = document.createElement("span");
+    slot.style.display = "contents";
+    container.append(slot);
+    import(file).then((module) => module.default(shell, slot)).catch(console.error);
+  };
+  indicator("./media.js", document.getElementById("tray-media"));
+  indicator("./audio.js", document.getElementById("tray"));
+  indicator("./brightness.js", document.getElementById("tray"));
+  indicator("./battery.js", document.getElementById("tray"));
+  indicator("./power.js", document.getElementById("tray"));
+  indicator("./osd.js");
   shell.addEventListener("change", render);
   shell.ready.then(() => {
     listed = true;

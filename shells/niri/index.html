@@ -228,7 +228,9 @@ const ANIM = (() => {
 })();
 const MIN = 60;
 const W = () => innerWidth;
-const H = () => innerHeight;
+// The bar's height (bar.js): the layout is what's under it.
+let barHeight = 0;
+const H = () => innerHeight - barHeight;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const focusColor = CONFIG.border.on ? CONFIG.border.active : CONFIG.focusRing.active;
 document.documentElement.style.setProperty("--focus", focusColor);
@@ -1363,7 +1365,7 @@ function bindPointer(hit, key) {
 function dropItem(key, px, py) {
   const z = overview ? CONFIG.overviewZoom : 1;
   const wx = (px - W() / 2) / z + W() / 2;
-  const wy = (py - H() / 2) / z + H() / 2;
+  const wy = (py - barHeight - H() / 2) / z + H() / 2;
   const spacing = H() + (overview ? ovGap() : 0);
   const wi = clamp(layout.cur + Math.floor((wy + (overview ? ovGap() / 2 : 0)) / spacing), 0, layout.workspaces.length - 1);
   const target = layout.workspaces[wi];
@@ -1638,6 +1640,27 @@ try {
     onOpenTab: () => TAG,
     onFocusTab: (tab) => takeTab(tab),
   });
+  // The bar, and in it the status indicators over the desktop services
+  // (shell.json's "uses"), each its own module.
+  try {
+    const bar = (await import("./bar.js")).mountBar();
+    barHeight = bar.height;
+    // Each in a slot made now, so they keep this order however they load.
+    const indicator = (file, container = document.body) => {
+      const slot = document.createElement("span");
+      slot.style.display = "contents";
+      container.append(slot);
+      import(file).then((module) => module.default(shell, slot)).catch(console.error);
+    };
+    indicator("./media.js", bar.left);
+    indicator("./audio.js", bar.right);
+    indicator("./brightness.js", bar.right);
+    indicator("./battery.js", bar.right);
+    indicator("./power.js", bar.right);
+    indicator("./osd.js");
+  } catch (error) {
+    console.error(error);
+  }
   // An item dropped here from another shell (or display) joins this output.
   addEventListener("dragover", (e) => {
     if (shell.itemFromDrop(e)) e.preventDefault();

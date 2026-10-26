@@ -8,6 +8,7 @@
 // the shell relay. A browser from before the domain has none of this: then
 // `available()` is false and the daemon asks the shell instead.
 import { type BrowserCdp, type CdpEvent, CdpError } from "./cdp.ts";
+import type { BrowserSession } from "./services/media.ts";
 
 /** A browser tab (Plutonium.Tab). */
 export interface DesktopTab {
@@ -144,6 +145,8 @@ export class Desktop {
   /** A window came (`previous` undefined) or changed. */
   readonly windowListeners = new Set<(window: DesktopWindow, previous: DesktopWindow | undefined) => void>();
   /** EXO-CAPTURE: a capture started, changed or stopped. */
+  /** The browser's active media session as it changes (null when there's none). */
+  readonly mediaListeners = new Set<(session: BrowserSession | null) => void>();
   readonly captureListeners = new Set<(type: "start" | "change" | "stop", capture: DesktopCapture) => void>();
 
   constructor(cdp: BrowserCdp) {
@@ -244,6 +247,11 @@ export class Desktop {
         for (const listener of this.captureListeners) listener(type, capture);
         return;
       }
+      case "Plutonium.mediaSessionChanged": {
+        const session = mediaSessionOf(value.session);
+        for (const listener of this.mediaListeners) listener(session);
+        return;
+      }
       case "Plutonium.windowScreencastStopped": {
         const listeners = this.frameListeners.get(value.id as number);
         this.frameListeners.delete(value.id as number);
@@ -254,6 +262,21 @@ export class Desktop {
         return;
     }
     for (const listener of this.changeListeners) listener();
+  }
+
+  /** The browser's active media session (a tab's, a shell page's), or null: none, or an older browser. */
+  async mediaSession(): Promise<BrowserSession | null> {
+    if (!(await this.available())) return null;
+    try {
+      return mediaSessionOf(((await this.cdp.send("Plutonium.getMediaSession")) as { session?: unknown }).session);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Plays, pauses… the browser's active media session ("play-pause", "next", …). */
+  async mediaSessionAction(action: string): Promise<void> {
+    await this.cdp.send("Plutonium.mediaSessionAction", { action });
   }
 
   /** Every tab, oldest first. Call available() first. */
@@ -467,4 +490,21 @@ function parseDownload(json: unknown): DesktopDownload | undefined {
 function decodeCapture(result: unknown): Capture {
   const { data, width, height } = result as { data: string; width: number; height: number };
   return { data: Buffer.from(data, "base64"), width, height };
+}
+
+/** A media session as the Plutonium domain sends it. */
+function mediaSessionOf(value: unknown): BrowserSession | null {
+  if (!value || typeof value !== "object") return null;
+  const session = value as Record<string, unknown>;
+  if (session.active === false) return null;
+  const text = (key: string) => (typeof session[key] === "string" ? (session[key] as string) : "");
+  return {
+    playing: session.playing === true,
+    title: text("title"),
+    artist: text("artist"),
+    album: text("album"),
+    source: text("source"),
+    actions: Array.isArray(session.actions) ? session.actions.map(String) : [],
+    ...(typeof session.tabId === "number" ? { tab: session.tabId } : {}),
+  };
 }
