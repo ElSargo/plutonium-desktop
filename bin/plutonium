@@ -1440,6 +1440,12 @@ doctor() {
     "plutonium killswitch find, press a spare key, put the two lines it prints in plutonium.env"
   check "plutonium-killswitch running" "[ \$(systemctl --user is-active plutonium-killswitch) = active ]" "plutonium killswitch install"
   echo "Optional:"
+  # The shells (t3/shells): installed into PLUTO_HOME by plutonium shells
+  # install, or by the first run. Not a failure either way.
+  local pluto=${PLUTO_HOME:-$HOME/.pluto}
+  (( SLOT )) && pluto=${PLUTO_HOME:-$DATA_DIR/pluto-s$SLOT}
+  if [[ -f $pluto/shells.json ]]; then ok "shells installed ($pluto/shells)"
+  else echo "  -        shells: not installed yet (plutonium shells install, or the first run does it)"; fi
   check_opt "login screen entry" "[ -f /usr/share/wayland-sessions/plutonium.desktop ]" "plutonium session install"
   check_opt "T3 Code checkout at $T3CODE_DIR" "[ -d $T3CODE_DIR/.git ]" "plutonium t3 fetch"
   check_opt "T3 Code's web app built" "[ -f $T3CODE_DIR/apps/web/dist/index.html ]" "plutonium t3 build"
