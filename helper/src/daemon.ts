@@ -454,7 +454,8 @@ export class Daemon {
         : null,
       checker: checker ? unixChecker(checker) : null,
       settingsFile: join(plutoHome(), "session.json"),
-      sessionBus: process.env.DBUS_SESSION_BUS_ADDRESS || null,
+      // PLUTONIUM_SCREENSAVER=0: leave org.freedesktop.ScreenSaver alone.
+      sessionBus: process.env.PLUTONIUM_SCREENSAVER === "0" ? null : process.env.DBUS_SESSION_BUS_ADDRESS || null,
       // logind's Lock and sleep are the seat's: a DRM session's, not an X11 one's.
       systemBus: options.waylandDisplay.includes("-x11") ? null : "unix:path=/run/dbus/system_bus_socket",
       sessionId: process.env.XDG_SESSION_ID,
