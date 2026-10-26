@@ -449,4 +449,14 @@ off, and the lock itself.
   on a private `dbus-daemon` (an app's inhibitor going with it), and
   `unix_chkpwd`'s interface with a stand-in. The real `unix_chkpwd` only ever
   got a wrong password (`PLUTONIUM_TEST_CHKPWD=1`). `portal.test.ts`:
-  `Inhibit`.
+  `Inhibit`. In an X11 session (slot 10, the stand-in checker through
+  `PLUTONIUM_PASSWORD_CHECKER`, keys from `xdotool`): the lock drawn; while
+  it was up, keys, a click, Super+Tab, Ctrl+T and Super+F reached neither
+  the shell's page (a listener in it saw nothing) nor the switcher, and
+  after unlocking the same ones did; a wrong password's message, five in a
+  row and the 30 s count down; the right one unlocked; Super+L locked; with
+  the screen off after 3 s and the lock after 6, idle went to "screen-off"
+  then locked; a shell's `inhibit` held it off, and after `uninhibit` idle
+  counted from then; the Screen Wake Lock API and a playing `<video>` in
+  the page listed as inhibitors ("A page keeps the screen on", "Playing
+  video"), gone when released.
