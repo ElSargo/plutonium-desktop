@@ -89,6 +89,14 @@ restore_portal() {
 }
 
 start_helper() {
+  # A new session serves this checkout's shell library. A copy pinned with
+  # `plutonium live apply` was for a session that has ended, and would hide
+  # every change since (it hid a week's, 2026-10-19 to 26). PLUTONIUM_LIVE_KEEP=1 keeps it.
+  local lib=$LIVE_DIR/shell-lib/current
+  if [[ -z ${PLUTONIUM_LIVE_KEEP:-} && -L $lib && $(readlink -f "$lib") != "$(readlink -f "$ROOT/helper/web")" ]]; then
+    log "shell library: was pinned to $(readlink "$lib"); serving this checkout's again"
+    ln -sfn "$ROOT/helper/web" "$lib"
+  fi
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
   mkdir -p "$RUN_DIR/plutonium"
   ensure_helper_deps
