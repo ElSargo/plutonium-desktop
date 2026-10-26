@@ -50,6 +50,7 @@ import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { NativeError, ShellNative } from "./shellNative.ts";
 import { NotificationsService } from "./services/notifications.ts";
 import { AudioService } from "./services/audio.ts";
+import { PowerService } from "./services/power.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -406,6 +407,7 @@ export class Daemon {
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
     this.services.register(new NotificationsService());
     this.services.register(new AudioService());
+    this.services.register(new PowerService({ logOut: () => this.logOut() }));
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -567,6 +569,17 @@ export class Daemon {
       `plutoniumd: ${what}: no tags from the browser; ` +
         (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
     );
+  }
+
+  /**
+   * Log out (the power service): ends this Plutonium session, as `plutonium
+   * stop` does, which stops this helper too, so it runs on its own.
+   */
+  private logOut(): void {
+    const mode = this.options.waylandDisplay.includes("-x11") ? "--x11" : "--drm";
+    const child = spawn(join(HELPER_ROOT, "..", "bin", "plutonium"), ["stop", mode], { detached: true, stdio: "ignore" });
+    child.on("error", (error) => console.error(`plutoniumd: log out: ${error.message}`));
+    child.unref();
   }
 
   /** Whether the shell on `origin` may use desktop service `service` (its "uses"). */

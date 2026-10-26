@@ -5,9 +5,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeMessage, encodeMessage, ERROR, METHOD_CALL, METHOD_RETURN, messageLength, type Message } from "../../src/dbus.ts";
+import { decodeMessage, encodeMessage, ERROR, METHOD_CALL, METHOD_RETURN, messageLength, SIGNAL, type Message } from "../../src/dbus.ts";
 
 export type Reply = { signature: string; body: unknown[] } | { error: string; message?: string };
+
+/** Answers a call to a service's object (serve()): "interface.member" and its arguments. */
+export type ObjectHandler = (method: string, body: readonly unknown[], message: Message) => Reply;
 
 const ACCESSIBLE = "org.a11y.atspi.Accessible";
 const PROPERTIES = "org.freedesktop.DBus.Properties";
@@ -88,6 +91,9 @@ export class FakeBus {
   private readonly apps: Placed[] = [];
   private readonly pids = new Map<string, number>();
   private nextName = 1;
+  /** Other services (serve()): their objects by "name path", and their unique names. */
+  private readonly served = new Map<string, ObjectHandler>();
+  private readonly owners = new Map<string, string>();
 
   private constructor(dir: string, server: Server) {
     this.dir = dir;
@@ -126,6 +132,33 @@ export class FakeBus {
     const app = place({ role: "application", name: `app ${pid}`, children: windows }, ROOT_PATH, this.apps.length);
     this.apps.push(app);
     return bus;
+  }
+
+  /**
+   * Puts an object of a service other than AT-SPI on the bus (logind,
+   * UPower, an MPRIS player): `handler` answers its calls. The service gets a
+   * unique name, which its signals come from.
+   */
+  serveObject(name: string, path: string, handler: ObjectHandler): string {
+    if (!this.owners.has(name)) this.owners.set(name, `:1.${200 + this.owners.size}`);
+    this.served.set(`${name} ${path}`, handler);
+    return this.owners.get(name)!;
+  }
+
+  /** Takes a service off the bus, with its NameOwnerChanged. */
+  dropService(name: string): void {
+    const owner = this.owners.get(name);
+    if (!owner) return;
+    this.owners.delete(name);
+    for (const key of [...this.served.keys()]) if (key.startsWith(`${name} `)) this.served.delete(key);
+    this.signal("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameOwnerChanged", "sss", [name, owner, ""]);
+  }
+
+  /** Sends a signal from `name` (a service's, or the bus's) to every connection, matched or not. */
+  signal(name: string, path: string, iface: string, member: string, signature = "", body: unknown[] = []): void {
+    const sender = name === "org.freedesktop.DBus" ? name : (this.owners.get(name) ?? name);
+    const message = encodeMessage({ type: SIGNAL, serial: 1, sender, path, interface: iface, member, signature, body });
+    for (const socket of this.sockets) socket.write(message);
   }
 
   private serve(socket: Socket): void {
@@ -178,11 +211,20 @@ export class FakeBus {
     const { interface: iface, member, body = [] } = message;
     if (message.destination === "org.freedesktop.DBus") {
       if (member === "Hello") return { signature: "s", body: [sender] };
+      if (member === "AddMatch" || member === "RemoveMatch") return { signature: "", body: [] };
+      if (member === "ListNames") return { signature: "as", body: [["org.freedesktop.DBus", ...this.owners.keys()]] };
+      if (member === "GetNameOwner") {
+        const owner = this.owners.get(String(body[0]));
+        return owner ? { signature: "s", body: [owner] } : { error: "org.freedesktop.DBus.Error.NameHasNoOwner" };
+      }
       if (member === "GetConnectionUnixProcessID") {
         const pid = this.pids.get(String(body[0]));
         return pid === undefined ? { error: "org.freedesktop.DBus.Error.NameHasNoOwner" } : { signature: "u", body: [pid] };
       }
     }
+    const destination = [...this.owners].find(([, owner]) => owner === message.destination)?.[0] ?? message.destination;
+    const handler = this.served.get(`${destination} ${message.path}`);
+    if (handler) return handler(`${iface}.${member}`, body, message);
     if (iface === "org.a11y.Bus" && member === "GetAddress") return { signature: "s", body: [this.address] };
     if (message.destination === REGISTRY && message.path === ROOT_PATH) {
       if (member === "GetChildren") return { signature: "a(so)", body: [this.apps.map((app) => [app.bus, app.path])] };
