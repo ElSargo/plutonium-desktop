@@ -1350,7 +1350,11 @@ export class PlutoniumShell extends EventTarget {
     let seen = null;
     service.addEventListener("change", (event) => {
       const { notifications = [], doNotDisturb = false } = event.detail ?? {};
-      const fresh = seen ? notifications.filter((n) => seen.get(n.id) !== n.time) : [];
+      // A page that has just connected (a shell reloaded after its edit was rolled back) pops
+      // up what came in the last moments: it may be the news about it.
+      const fresh = seen
+        ? notifications.filter((n) => seen.get(n.id) !== n.time)
+        : notifications.filter((n) => Date.now() - n.time < RECENT_NOTIFICATION_MS);
       seen = new Map(notifications.map((n) => [n.id, n.time]));
       if (typeof option !== "function") {
         this._notificationPopups ??= new NotificationPopups(this);
@@ -4294,6 +4298,9 @@ class CaptureIndicator {
 // popup goes after a few seconds (a critical one stays) but the notification
 // stays in shell.system.notifications until dismissed; × dismisses it,
 // clicking it runs its default action.
+/** How old a notification a page that has just connected still pops up. */
+const RECENT_NOTIFICATION_MS = 30_000;
+
 class NotificationPopups {
   constructor(shell) {
     ensureNotificationStyle();

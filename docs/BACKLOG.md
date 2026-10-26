@@ -668,7 +668,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   noticed (only "no page connected in time"): watch the shell's contents
   over DevTools (`Inspector.targetCrashed`) and roll back. Both done
   2026-10-27 (`SHELL_PACKAGES.md`): `shellnotice` events and a notification;
-  `Target.targetCrashed` rolls back an edit from the last minute. A crashed
+  `Target.targetCrashed` rolls back an edit from the last five minutes. A crashed
   shell page that showed a tab took the browser down (fixed, patch 0071).
 - [x] **Installed shells: agents.** Decided (2026-10-26): no "ask an agent"
   buttons. The switcher and the shells page copy a prompt that points the

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, get as httpGet, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -275,6 +275,17 @@ describe("edits", () => {
     packages.crashed("http://other.localhost:8970");
     assert.equal(gitLog(dir)[0], head);
     assert.deepEqual(notices.map((notice) => notice.kind), ["rollback", "crash"]);
+    // Saves after a rollback are committed and applied as before, also an editor's that
+    // replace the file (a new inode each time), one after another.
+    writeFileSync(join(dir, "index.html"), "<h1>after</h1>\n");
+    await waitFor(() => gitLog(dir)[0] === "edit: index.html");
+    for (const text of ["<h1>renamed 1</h1>\n", "<h1>renamed 2</h1>\n"]) {
+      const count = gitLog(dir).length;
+      writeFileSync(join(dir, ".index.html.swp"), text);
+      renameSync(join(dir, ".index.html.swp"), join(dir, "index.html"));
+      await waitFor(() => gitLog(dir).length === count + 1);
+    }
+    assert.equal(execFileSync("git", ["-C", dir, "show", "HEAD:index.html"], { encoding: "utf8" }), "<h1>renamed 2</h1>\n");
   });
 
   test("a commit made another way (plutonium shells update) is applied too", async () => {

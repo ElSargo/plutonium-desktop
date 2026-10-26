@@ -60,8 +60,11 @@ import type { TerminalOptions } from "./terminal.ts";
 export const CONNECT_TIMEOUT_MS = 20_000;
 // Saves that come together are one edit.
 const EDIT_DEBOUNCE_MS = 700;
-/** A shell's page that crashes this soon after an edit was applied rolls the edit back. */
-const CRASH_WINDOW_MS = 60_000;
+/**
+ * A shell's page that crashes this soon after an edit was applied rolls the edit back. Generous:
+ * a dev build's renderer takes minutes to die after a fatal error (it symbolizes its stack).
+ */
+const CRASH_WINDOW_MS = 5 * 60_000;
 // A start with no shell connected after this long counts as failed; after two
 // the launcher starts in safe mode.
 const START_TIMEOUT_MS = 60_000;
@@ -161,6 +164,7 @@ export class ShellPackages {
   private readonly previews = new Map<string, AddPreview & { readonly staged?: string }>();
   private startTimer: NodeJS.Timeout | undefined;
   private readonly connectTimeoutMs: number;
+  private stopped = false;
 
   constructor(
     context: ShellContext,
@@ -293,6 +297,7 @@ export class ShellPackages {
   }
 
   stop(): void {
+    this.stopped = true;
     for (const watcher of this.watchers.values()) watcher.close();
     for (const timer of this.editTimers.values()) clearTimeout(timer);
     for (const check of this.checks.values()) clearTimeout(check.timer);
@@ -426,7 +431,19 @@ export class ShellPackages {
           }, EDIT_DEBOUNCE_MS),
         );
       });
-      watcher.on("error", () => this.watchers.delete(name));
+      watcher.on("error", (error) => {
+        // Node's recursive watcher gives up when a directory it watched goes (git's own, in
+        // .git, as a rollback commits): watched again, else saves after it would go unseen.
+        console.warn(`plutoniumd: shell ${name}: watching its folder failed (${error.message}); watching it again`);
+        watcher.close();
+        this.watchers.delete(name);
+        setTimeout(() => {
+          if (this.stopped || !existsSync(dir)) return;
+          this.watchFolder(name);
+          // A save while it wasn't watched.
+          if (!this.isClean(dir)) this.edited(name);
+        }, 500).unref();
+      });
       this.watchers.set(name, watcher);
       const head = this.head(dir);
       if (head) this.heads.set(name, head);
@@ -443,10 +460,25 @@ export class ShellPackages {
     }
   }
 
+  /**
+   * Watches a shell's folder afresh. Node's recursive watcher (Linux) follows
+   * files by inode: a file replaced (an editor's save by rename, git's
+   * read-tree in a rollback or Retry, a merge) would go unseen after.
+   */
+  private rewatch(name: string): void {
+    this.watchers.get(name)?.close();
+    this.watchers.delete(name);
+    // HEAD as last applied stays: watching records the folder's own.
+    const head = this.heads.get(name);
+    this.watchFolder(name);
+    if (head) this.heads.set(name, head);
+  }
+
   /** A save in a shell's folder: commit it, apply it, check it. */
   private edited(name: string): void {
     const dir = shellDir(this.home, name);
     if (!existsSync(join(dir, ".git"))) return;
+    this.rewatch(name);
     // Its next call starts the edited native side.
     this.hooks.stopNative?.(name);
     let commit: string | undefined;
@@ -545,6 +577,7 @@ export class ShellPackages {
     const subject = git(dir, ["log", "-1", "--format=%s", failed]).trim();
     git(dir, ["update-ref", FAILED_REF, failed]);
     git(dir, ["read-tree", "-u", "--reset", good]);
+    this.rewatch(name);
     try {
       git(dir, ["commit", "-q", "--no-verify", "-m", `rollback: ${short(failed)} didn't come up (${reason}); back to ${short(good)}`]);
     } catch {
@@ -655,6 +688,7 @@ export class ShellPackages {
         const failed = this.failedCommit(shell.dir);
         if (!failed) throw new ShellError(`${name} has no failed change.`);
         git(shell.dir, ["read-tree", "-u", "--reset", failed.commit]);
+        this.rewatch(name);
         git(shell.dir, ["commit", "-q", "--no-verify", "--allow-empty", "-m", `retry: ${failed.subject}`]);
         this.notices.delete(name);
         const commit = git(shell.dir, ["rev-parse", "HEAD"]).trim();
