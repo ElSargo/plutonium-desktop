@@ -723,10 +723,16 @@ shell find it.
   suspend, restart, power off, log out through logind. Done 2026-10-26:
   `services/power.ts`; log out is `plutonium stop` for the session. Not yet:
   the keyboard backlight, the power button, idle and lid actions.
-- [ ] **Network.** M · NetworkManager over D-Bus: state, Wi-Fi list, connect
-  (with a password prompt from the shell), turn Wi-Fi off; VPNs later.
-- [ ] **Bluetooth.** M · BlueZ over D-Bus: on/off, devices, pair and
-  connect; pairing PINs through the shell.
+- [x] **Network.** M · NetworkManager over D-Bus: state, Wi-Fi list, connect
+  (with a password prompt from the shell), turn Wi-Fi off; VPNs later. Done
+  2026-10-26: `helper/src/services/network.ts`, a NetworkManager secret
+  agent whose requests the visible shell asks (`systemrequest`), the
+  indicators in niri and plain. Later: a new 802.1X network, hidden
+  networks, VPN secrets.
+- [x] **Bluetooth.** M · BlueZ over D-Bus: on/off, devices, pair and
+  connect; pairing PINs through the shell. Done 2026-10-26:
+  `helper/src/services/bluetooth.ts`, an agent for its own pairings, the
+  indicators in niri and plain.
 - [x] **Media.** S · MPRIS players (now playing, play/pause, next), and the
   media keys. Done 2026-10-26: `services/media.ts`; the browser's own media
   session through the Plutonium domain (no MPRIS in a ChromeOS build). Not

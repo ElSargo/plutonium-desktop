@@ -105,6 +105,8 @@ class FakeShell {
         return this.reply(event.id, { ok: true, value: null });
       case "snapshot":
         return this.send(event.id, "image/png", PNG);
+      case "system_request":
+        return this.reply(event.id, { ok: true, value: event.args.kind === "secret" ? { password: "from the shell" } : null });
       default:
         return this.reply(event.id, { ok: false, error: `Unknown op ${event.op}` });
     }
@@ -483,7 +485,7 @@ describe("helper end to end", () => {
       body: { value: 0.8 },
     });
     assert.equal((await shellJson("POST", "/v1/shell/system/audio/explode", {})).status, 404);
-    assert.equal((await shellJson("GET", "/v1/shell/system/network")).status, 404);
+    assert.equal((await shellJson("GET", "/v1/shell/system/no-such-service")).status, 404);
     for (let i = 0; i < 50 && !shell.notices.some((notice) => notice.op === "system"); i++) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -491,6 +493,29 @@ describe("helper end to end", () => {
       shell.notices.find((notice) => notice.op === "system")?.args,
       { service: "audio", state: { volume: 0.8 } },
     );
+  });
+
+  test("desktop services ask the user through the visible shell", async () => {
+    const ask = (daemon as unknown as {
+      askForService: (service: string, kind: string, detail: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+    }).askForService.bind(daemon);
+    assert.deepEqual(await ask("network", "secret", { title: "Wi-Fi" }), { password: "from the shell" });
+    assert.deepEqual(shell.ops.findLast((entry) => entry.op === "system_request")?.args, {
+      handle: "system-1",
+      service: "network",
+      kind: "secret",
+      detail: { title: "Wi-Fi" },
+    });
+    assert.equal(await ask("bluetooth", "confirm", {}), null);
+    // Taken back: the shell is told.
+    const controller = new AbortController();
+    const asking = ask("bluetooth", "display", { code: "001234" }, controller.signal);
+    controller.abort();
+    await asking;
+    for (let i = 0; i < 50 && !shell.notices.some((notice) => notice.op === "system_request_cancel"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(shell.notices.find((notice) => notice.op === "system_request_cancel")?.args, { handle: "system-3" });
   });
 });
 

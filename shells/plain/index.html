@@ -53,11 +53,12 @@
   aside li button.current { background: var(--hover); font-weight: 600; }
   aside footer { margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px; }
   /* The status indicators (tray.js and one module each), over the desktop services. */
-  #tray {
-    margin-top: auto; padding: 6px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 2px;
+  /* On :root, not #tray: the popovers are the body's. */
+  :root {
     --tray-bg: var(--panel); --tray-fg: var(--text); --tray-muted: var(--muted); --tray-accent: var(--accent);
     --tray-hover: var(--hover); --tray-border: 1px solid var(--line); --tray-radius: 8px; --tray-danger: var(--danger);
   }
+  #tray { margin-top: auto; padding: 6px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 2px; }
   #tray .tray-button { height: 28px; }
   #tray-media { flex-basis: 100%; display: flex; min-width: 0; }
   #tray-media .tray-button { max-width: 100%; overflow: hidden; }
@@ -283,6 +284,8 @@ try {
     import(file).then((module) => module.default(shell, slot)).catch(console.error);
   };
   indicator("./media.js", document.getElementById("tray-media"));
+  indicator("./network.js", document.getElementById("tray"));
+  indicator("./bluetooth.js", document.getElementById("tray"));
   indicator("./audio.js", document.getElementById("tray"));
   indicator("./brightness.js", document.getElementById("tray"));
   indicator("./battery.js", document.getElementById("tray"));

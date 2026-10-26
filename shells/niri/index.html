@@ -1653,6 +1653,8 @@ try {
       import(file).then((module) => module.default(shell, slot)).catch(console.error);
     };
     indicator("./media.js", bar.left);
+    indicator("./network.js", bar.right);
+    indicator("./bluetooth.js", bar.right);
     indicator("./audio.js", bar.right);
     indicator("./brightness.js", bar.right);
     indicator("./battery.js", bar.right);

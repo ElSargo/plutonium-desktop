@@ -52,6 +52,8 @@ import { NotificationsService } from "./services/notifications.ts";
 import { AudioService } from "./services/audio.ts";
 import { PowerService } from "./services/power.ts";
 import { MediaService } from "./services/media.ts";
+import { BluetoothService } from "./services/bluetooth.ts";
+import { NetworkService } from "./services/network.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -364,6 +366,8 @@ export class Daemon {
   readonly pages: ThreadPages | null;
   /** When each window last got input (windowInput). */
   private readonly lastInput = new Map<number, number>();
+  /** The next desktop service request's handle number (askForService). */
+  private systemRequests = 1;
   /**
    * The windows each thread's agent has been told of (by an action's result,
    * list_windows or launch_app): an action names the others as new, so a
@@ -422,6 +426,10 @@ export class Daemon {
         },
       }),
     );
+    // One secret agent per helper: NetworkManager replaces an agent with the same identifier.
+    const agentId = `org.plutonium.helper.${basename(options.socketPath).replace(/[^A-Za-z0-9_-]/g, "_")}`;
+    this.services.register(new NetworkService({ agentId, ask: (kind, detail, signal) => this.askForService("network", kind, detail, signal) }));
+    this.services.register(new BluetoothService({ ask: (kind, detail, signal) => this.askForService("bluetooth", kind, detail, signal) }));
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -630,6 +638,39 @@ export class Daemon {
     const child = spawn(join(HELPER_ROOT, "..", "bin", "plutonium"), ["stop", mode], { detached: true, stdio: "ignore" });
     child.on("error", (error) => console.error(`plutoniumd: log out: ${error.message}`));
     child.unref();
+  }
+
+  /**
+   * A desktop service needs the user (a Wi-Fi password, a pairing code): the
+   * visible shell that may use it asks ("system_request"). The answer's
+   * values, null if the user said no, undefined if no shell could ask.
+   */
+  private async askForService(
+    service: string,
+    kind: string,
+    detail: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown> | null | undefined> {
+    const shells = this.relay.shells().filter((shell) => shell.shellId && this.mayUse(shell.origin, service));
+    const shell = shells.find((candidate) => candidate.visible) ?? shells[0];
+    if (!shell || signal?.aborted) return undefined;
+    const handle = `system-${this.systemRequests++}`;
+    const takeBack = () =>
+      this.relay.notifyWhere((origin) => this.mayUse(origin, service), "system_request_cancel", { handle });
+    signal?.addEventListener("abort", takeBack, { once: true });
+    try {
+      const reply = await this.relay.request("system_request", { handle, service, kind, detail }, 120_000, shell.shellId);
+      return reply.kind === "json" ? ((reply.value as Record<string, unknown> | null) ?? null) : null;
+    } catch (error) {
+      // Not answered in time: the question goes away; refused or gone: no shell asked.
+      if (error instanceof RelayError && error.status === 504) {
+        takeBack();
+        return null;
+      }
+      return undefined;
+    } finally {
+      signal?.removeEventListener("abort", takeBack);
+    }
   }
 
   /** Whether the shell on `origin` may use desktop service `service` (its "uses"). */

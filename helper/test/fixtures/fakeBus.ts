@@ -1,6 +1,8 @@
 // A D-Bus bus in-process, speaking the wire protocol through dbus.ts's own
 // encoder: the session bus (it names itself as the accessibility bus too) and
-// AT-SPI apps on it, for a11y.ts.
+// AT-SPI apps on it, for a11y.ts. Other services' objects are served with
+// serveObject() (or a whole service, answering asynchronously, with own()),
+// and callClient() calls a method on a client (an agent it registered).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,6 +10,9 @@ import { join } from "node:path";
 import { decodeMessage, encodeMessage, ERROR, METHOD_CALL, METHOD_RETURN, messageLength, SIGNAL, type Message } from "../../src/dbus.ts";
 
 export type Reply = { signature: string; body: unknown[] } | { error: string; message?: string };
+
+/** A whole service (own()): answers every call to its name; `sender` is the caller's unique name. */
+export type ServiceHandler = (message: Message, sender: string) => Reply | Promise<Reply>;
 
 /** Answers a call to a service's object (serve()): "interface.member" and its arguments. */
 export type ObjectHandler = (method: string, body: readonly unknown[], message: Message) => Reply;
@@ -94,6 +99,11 @@ export class FakeBus {
   /** Other services (serve()): their objects by "name path", and their unique names. */
   private readonly served = new Map<string, ObjectHandler>();
   private readonly owners = new Map<string, string>();
+  private readonly services = new Map<string, ServiceHandler>();
+  /** Clients' sockets by unique name, and the replies callClient() waits for. */
+  private readonly clients = new Map<string, Socket>();
+  private readonly waiting = new Map<number, (message: Message) => void>();
+  private serial = 1;
 
   private constructor(dir: string, server: Server) {
     this.dir = dir;
@@ -145,11 +155,33 @@ export class FakeBus {
     return this.owners.get(name)!;
   }
 
+  /** Puts a whole service on the bus as `name` (a fake NetworkManager or BlueZ); its unique name. */
+  own(name: string, handler: ServiceHandler): string {
+    if (!this.owners.has(name)) this.owners.set(name, `:1.${200 + this.owners.size}`);
+    this.services.set(name, handler);
+    return this.owners.get(name)!;
+  }
+
+  /** Calls a method on client `name` (its unique name); resolves to the reply (an ERROR message too). */
+  callClient(
+    name: string,
+    call: { path: string; interface: string; member: string; signature?: string; body?: unknown[] },
+  ): Promise<Message> {
+    const socket = this.clients.get(name);
+    if (!socket) return Promise.reject(new Error(`No client ${name}`));
+    const serial = this.serial++;
+    socket.write(
+      encodeMessage({ type: METHOD_CALL, serial, sender: "org.freedesktop.DBus", destination: name, signature: "", body: [], ...call }),
+    );
+    return new Promise((resolve) => this.waiting.set(serial, resolve));
+  }
+
   /** Takes a service off the bus, with its NameOwnerChanged. */
   dropService(name: string): void {
     const owner = this.owners.get(name);
     if (!owner) return;
     this.owners.delete(name);
+    this.services.delete(name);
     for (const key of [...this.served.keys()]) if (key.startsWith(`${name} `)) this.served.delete(key);
     this.signal("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameOwnerChanged", "sss", [name, owner, ""]);
   }
@@ -165,6 +197,8 @@ export class FakeBus {
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
     const name = `:1.${this.nextName++}`;
+    this.clients.set(name, socket);
+    socket.once("close", () => this.clients.delete(name));
     let authenticated = false;
     let input: Buffer = Buffer.alloc(0);
     socket.on("data", (data: Buffer) => {
@@ -183,19 +217,26 @@ export class FakeBus {
         if (length === undefined || input.length < length) return;
         const message = decodeMessage(input.subarray(0, length));
         input = input.subarray(length);
-        if (message.type === METHOD_CALL) this.answer(socket, name, message);
+        if (message.type === METHOD_CALL) void this.answer(socket, name, message);
+        if ((message.type === METHOD_RETURN || message.type === ERROR) && message.replySerial !== undefined) {
+          const resolve = this.waiting.get(message.replySerial);
+          this.waiting.delete(message.replySerial);
+          resolve?.(message);
+        }
       }
     });
   }
 
-  private answer(socket: Socket, sender: string, message: Message): void {
+  private async answer(socket: Socket, sender: string, message: Message): Promise<void> {
     this.calls.push(message);
     const target = this.objects.get(`${message.destination}${message.path}`);
     if (target?.node.crashes) this.pids.delete(target.bus);
     if (target?.node.hangs || target?.node.crashes) return;
     let reply: Reply;
     try {
-      reply = this.dispatch(sender, message);
+      const owner = [...this.owners].find(([, unique]) => unique === message.destination)?.[0] ?? message.destination;
+      const service = owner ? this.services.get(owner) : undefined;
+      reply = service ? await service({ ...message, sender }, sender) : this.dispatch(sender, message);
     } catch (error) {
       reply = { error: "org.freedesktop.DBus.Error.Failed", message: (error as Error).message };
     }
@@ -212,6 +253,7 @@ export class FakeBus {
     if (message.destination === "org.freedesktop.DBus") {
       if (member === "Hello") return { signature: "s", body: [sender] };
       if (member === "AddMatch" || member === "RemoveMatch") return { signature: "", body: [] };
+      if (member === "NameHasOwner") return { signature: "b", body: [this.owners.has(String(body[0]))] };
       if (member === "ListNames") return { signature: "as", body: [["org.freedesktop.DBus", ...this.owners.keys()]] };
       if (member === "GetNameOwner") {
         const owner = this.owners.get(String(body[0]));
