@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 14:14:07 +1300
+Subject: [PATCH 67/67] Plutonium: the switcher copies a prompt for the user's
+ own agent instead of starting one; a New shell entry on its Add page
+
+---
+ .../browser/ui/ash/main_extra_parts/BUILD.gn  |  1 +
+ .../ash/main_extra_parts/plutonium_overlay.cc | 52 +++++++++++++------
+ 2 files changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/chrome/browser/ui/ash/main_extra_parts/BUILD.gn b/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
+index ede0f9e343..18d1095092 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
++++ b/chrome/browser/ui/ash/main_extra_parts/BUILD.gn
+@@ -99,6 +99,7 @@ static_library("main_extra_parts") {
+     "//components/tabs:public",
+     "//components/exo",
+     "//ui/aura",
++    "//ui/base/clipboard",
+     "//ui/display",
+     "//ui/display/manager",
+     "//ui/events",
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
+index c27c961ce6..c09fbca6ab 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
+@@ -35,6 +35,7 @@
+ #include "third_party/skia/include/core/SkBitmap.h"
+ #include "ui/aura/window.h"
+ #include "ui/base/accelerators/accelerator.h"
++#include "ui/base/clipboard/scoped_clipboard_writer.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/base/models/image_model.h"
+@@ -1732,15 +1733,15 @@ class PlutoniumOverlayView : public views::View,
+     const std::string kind = text(package, "kind");
+     auto* customize = AddSection(u"Customize");
+     AddParagraph(customize,
+-                 u"Its files are yours to change. An agent can do it for you, "
+-                 u"in the shell's folder. Every save reloads the shell and is "
+-                 u"committed; a change that breaks it is rolled back to the "
+-                 u"last version that worked.",
++                 u"Its files are yours to change. To have an agent do it, copy "
++                 u"a prompt and paste it into whichever agent you use: it "
++                 u"points the agent at Plutonium's skill. Every save reloads "
++                 u"the shell and is committed; a change that breaks it is "
++                 u"rolled back to the last version that worked.",
+                  kDim);
+     auto* buttons = AddButtons(customize);
+-    AddButton(buttons, u"Ask an agent",
+-              Bind(&PlutoniumOverlayView::PackageAction, name,
+-                   std::string("agent")),
++    AddButton(buttons, u"Copy a prompt for your agent",
++              Bind(&PlutoniumOverlayView::CopyPrompt, text(package, "prompt")),
+               ActionButton::Style::kPrimary);
+     AddButton(buttons, u"Open a terminal",
+               Bind(&PlutoniumOverlayView::PackageAction, name,
+@@ -1776,12 +1777,25 @@ class PlutoniumOverlayView : public views::View,
+               ActionButton::Style::kNormal, !stopped);
+   }
+ 
+-  // POST /v1/shells/<name>/<action>: agent and terminal open a tab of the
+-  // backup terminal in the shell's folder.
++  // The helper's prompt for the user's own agent (read the skill, then
++  // change this shell), on the clipboard.
++  void CopyPrompt(const std::string& prompt) {
++    if (prompt.empty()) {
++      SetStatus(u"The helper gave no prompt for this shell.");
++      return;
++    }
++    ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
++        .WriteText(base::UTF8ToUTF16(prompt));
++    SetStatus(u"Copied. Paste it into your agent (Claude Code, Codex, T3 "
++              u"Code, …).",
++              /*error=*/false);
++  }
++
++  // POST /v1/shells/<name>/<action>: terminal opens a tab of the backup
++  // terminal in the shell's folder.
+   void PackageAction(const std::string& name, const std::string& action) {
+-    SetStatus(action == "agent"      ? u"Starting an agent…"
+-              : action == "terminal" ? u"Opening a terminal…"
+-                                     : u"Asking the helper…",
++    SetStatus(action == "terminal" ? u"Opening a terminal…"
++                                   : u"Asking the helper…",
+               /*error=*/false);
+     plutonium_helper::Post(
+         "/v1/shells/" + name + "/" + action, base::DictValue(),
+@@ -1796,7 +1810,7 @@ class PlutoniumOverlayView : public views::View,
+       SetStatus(base::UTF8ToUTF16(error));
+       return;
+     }
+-    if (action == "agent" || action == "terminal") {
++    if (action == "terminal") {
+       OpenBackup(PlutoniumShells::Backup::kTerminal);
+       return;
+     }
+@@ -1871,6 +1885,15 @@ class PlutoniumOverlayView : public views::View,
+         u"• A shell gets the window broker: it can list, show, start and "
+         u"close every app and tab. Add only pages you trust.");
+ 
++    auto* make = AddSection(u"Make your own");
++    AddParagraph(make,
++                 u"Start from a copy of a shell you have, then change it, "
++                 u"yourself or with an agent: the page has a prompt to paste "
++                 u"into whichever agent you use.");
++    AddButton(AddButtons(make), u"New shell…",
++              Bind(&PlutoniumOverlayView::OpenPackagePage, std::string("new")),
++              ActionButton::Style::kPrimary);
++
+     auto* install = AddSection(u"Install a shell");
+     AddParagraph(
+         install,
+@@ -1879,8 +1902,7 @@ class PlutoniumOverlayView : public views::View,
+         u"the origin that gets shell rights and, if it has a server, the "
+         u"command that starts it.");
+     AddButton(AddButtons(install), u"Install from a folder, git or address…",
+-              Bind(&PlutoniumOverlayView::OpenPackagePage, std::string()),
+-              ActionButton::Style::kPrimary);
++              Bind(&PlutoniumOverlayView::OpenPackagePage, std::string()));
+ 
+     auto* address = AddSection(u"The address");
+     AddParagraph(

@@ -657,8 +657,11 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 - [ ] **Installed shells: a renderer crash** of a shell after an edit isn't
   noticed (only "no page connected in time"): watch the shell's contents
   over DevTools (`Inspector.targetCrashed`) and roll back.
-- [ ] **Installed shells: Ask an agent in T3 Code** (a T3 thread in the
-  shell's folder) when T3 is running, rather than Claude Code in a terminal.
+- [x] **Installed shells: agents.** Decided (2026-10-26): no "ask an agent"
+  buttons. The switcher and the shells page copy a prompt that points the
+  user's own agent at the Plutonium skill (`skill/SKILL.md`, written to
+  `~/.pluto/SKILL.md`). New shell… / `plutonium shells new` make a shell
+  from a copy.
 - [ ] **Installed shells: the T3 checkout as part of the T3 shell.** Its
   manifest runs `plutonium t3 serve` from the checkout Plutonium runs from
   (`T3CODE_DIR`); a T3 install could live in the shell's folder instead.

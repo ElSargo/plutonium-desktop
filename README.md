@@ -69,7 +69,8 @@ The first run installs the shells in `~/.pluto/shells`. From then on, `bin/pluto
 | `bin/plutonium` | The command for setup, builds and sessions (`plutonium help`) |
 | `chromium/` | The Chromium revision, patches and build settings ([README](chromium/README.md)) |
 | `helper/` | `plutoniumd`: threads, app launching, links, the agent bridge ([README](helper/README.md)) |
-| `shells/` | The niri and plain shells |
+| `shells/` | The shells Plutonium ships (installed into `~/.pluto/shells`) |
+| `skill/` | The skill agents read to work on your desktop (written to `~/.pluto/SKILL.md`) |
 | `frontends/t3code/` | Patches that turn T3 Code into a shell |
 | `container/` | The build image and the prebuilt runtime image |
 | `killswitch/`, `tools/` | The kill switch; test tools |

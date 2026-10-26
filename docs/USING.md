@@ -57,9 +57,11 @@ The agent works in the background: your pointer and keyboard stay where they are
 Your shells live in `~/.pluto/shells/<name>/`, one folder each. The first `plutonium run` copies the shipped ones there. `plutonium run` with no shells runs the ones that are on, in the switcher's order, and the switcher's changes are kept (`~/.pluto/shells.json`). `plutonium shells list` shows them all. `plutonium shells update` merges a newer shipped version into yours, keeping your changes.
 
 To change one, open the switcher (Super+Tab), pick the shell, and under **Customize** choose:
-- **Ask an agent**: Claude Code, in the shell's folder;
+- **Copy a prompt for your agent**: paste it into whichever agent you use; it points the agent at Plutonium's skill (`~/.pluto/SKILL.md`) and the shell's folder;
 - **Open a terminal**: your shell, in that folder;
 - **History, log and updates…**.
+
+To make a new shell, open the switcher's **Add a shell…** and pick **New shell…** (or run `plutonium shells new <name>`): a copy of one you have, to change yourself or with an agent.
 
 Every save reloads the shell and is committed. If a change breaks the shell (it doesn't come back within 20 s), it's rolled back and you're told; Retry and the diff are on its page. If no shell comes up at all, `plutonium run --safe` starts the shipped plain shell, and two failed starts in a row do the same by themselves. The details are in [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md).
 

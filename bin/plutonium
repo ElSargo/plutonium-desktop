@@ -1151,6 +1151,9 @@ served at http://<name>.localhost:$SHELLS_PORT/ by the session's helper.
                         merge this checkout's (or another's) version of each shell into
                         yours; your edits are kept, and conflicts are reported, not merged
   list [--json]         the installed shells, in shells.json's order, on or off
+  new <name> [<shell>]  a new shell: a copy of an installed one (default plain), on, in the
+                        switcher; needs a running session (its helper adds it)
+  prompt                a prompt for any agent: read the Plutonium skill, then make a shell
 EOF2
 }
 shells_cmd() {
@@ -1167,6 +1170,27 @@ shells_cmd() {
     install) shells_cli install --shipped "$from/shells" --default "$(shells_default)" "${args[@]}" ;;
     update) shells_cli update --shipped "$from/shells" "${args[@]}" ;;
     list) shells_cli list "${args[@]}" ;;
+    new|prompt)
+      # Through the running session's helper, which installs it and tells the switcher.
+      local sock
+      for sock in "$RUN_DIR/plutonium/wayland-plutonium$SLOT_SUFFIX.sock" "$RUN_DIR/plutonium/wayland-plutonium-x11$SLOT_SUFFIX.sock"; do
+        [[ -S $sock ]] && break
+      done
+      [[ -S $sock ]] || die "no session is running here (plutonium run), so no helper to ask"
+      if [[ $cmd == prompt ]]; then
+        curl -sf --unix-socket "$sock" http://helper/v1/shells/prompt |
+          python3 -c 'import json, sys; print(json.load(sys.stdin)["new"])'
+        return
+      fi
+      [[ ${args[0]:-} =~ ^[a-z][a-z0-9-]*$ ]] || die "usage: plutonium shells new <name> [<shell to copy>] (name: lowercase letters, digits, dashes)"
+      local body answer
+      body=$(printf '{"name":"%s","from":"%s"}' "${args[0]}" "${args[1]:-plain}")
+      answer=$(curl -s --unix-socket "$sock" -H 'Content-Type: application/json' -d "$body" http://helper/v1/shells/new)
+      python3 -c 'import json, sys
+answer = json.loads(sys.argv[1])
+if "error" in answer: sys.exit("plutonium: " + answer["error"])
+print(f"made {answer[\"name\"]} in {answer[\"dir\"]}: on, at {answer.get(\"url\", \"\")}")
+print("Edit its files there: every save is committed and reloads it (rolled back if it stops connecting).")' "$answer" ;;
     *) shells_usage; [[ -z $cmd || $cmd == help || $cmd == -h || $cmd == --help ]] || exit 2 ;;
   esac
 }

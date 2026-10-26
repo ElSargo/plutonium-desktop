@@ -276,6 +276,27 @@ describe("edits", () => {
   });
 });
 
+describe("new shells", () => {
+  test("a copy of an installed shell, without its history, on; prompts name the skill", () => {
+    const home = fresh("home");
+    installShell(home, shipped(), "demo");
+    const packages = new ShellPackages(context(home), { persist: true });
+    after(() => packages.stop());
+    const made = packages.create({ name: "mine", from: "demo" }) as { name: string; add?: boolean; title?: string };
+    assert.equal(made.name, "mine");
+    assert.equal(made.title, "mine");
+    assert.equal(made.add, true);
+    assert.equal(readFileSync(join(shellDir(home, "mine"), "index.html"), "utf8"), "<h1>one</h1>\n");
+    assert.equal(JSON.parse(readFileSync(join(shellDir(home, "mine"), "shell.json"), "utf8")).description, "Made from Demo.");
+    assert.equal(gitLog(shellDir(home, "mine")).length, 1);
+    assert.deepEqual(readList(home)?.at(-1), { name: "mine", enabled: true });
+    assert.throws(() => packages.create({ name: "mine" }), ShellError);
+    assert.throws(() => packages.create({ name: "Not OK" }), ShellError);
+    assert.match(packages.newShellPrompt(), /^Read the Plutonium skill at \/opt\/plutonium\/skill\/SKILL\.md first\. /);
+    assert.match(packages.status().find((shell) => shell.name === "mine")?.prompt ?? "", /shell "mine", in .*\/mine\./);
+  });
+});
+
 describe("servers", () => {
   test("started, healthy, restarted after a crash, stopped", async () => {
     const home = fresh("home");

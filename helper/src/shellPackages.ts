@@ -10,8 +10,19 @@
 // commit, and the shell reloads; the failed commit is kept
 // (refs/plutonium/failed) for Retry and Diff, and the switcher shows a notice.
 import { randomUUID } from "node:crypto";
-import { existsSync, type FSWatcher, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  type FSWatcher,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ShellServer, type ServerStatus } from "./shellServers.ts";
@@ -25,6 +36,7 @@ import {
   entryUrl,
   git,
   installedShells,
+  installSkill,
   logPath,
   readList,
   serveStaticShell,
@@ -90,6 +102,8 @@ export interface ShellStatus {
   /** Added on the shells page; the switcher adds it to the browser's list. */
   readonly add?: boolean;
   readonly error?: string;
+  /** For the user to paste into their agent: read the skill, then change this shell. */
+  readonly prompt?: string;
 }
 
 interface Check {
@@ -118,6 +132,8 @@ export class ShellPackages {
   /** Shells added from the shells page that the browser doesn't list yet: the switcher adds them. */
   private readonly pendingAdd = new Set<string>();
   /** Previews waiting for the user's yes (a git clone is staged). */
+  /** Where the skill was written, once per helper (its checkout doesn't change under it). */
+  private skill: string | undefined;
   private readonly previews = new Map<string, AddPreview & { readonly staged?: string }>();
   private startTimer: NodeJS.Timeout | undefined;
   private readonly connectTimeoutMs: number;
@@ -289,6 +305,7 @@ export class ShellPackages {
           ...(this.notices.has(shell.name) ? { notice: this.notices.get(shell.name) } : {}),
           ...(failed ? { failed } : {}),
           ...(this.checks.has(shell.name) ? { checking: true } : {}),
+          prompt: this.prompt(`help me change my Plutonium shell "${manifest?.title ?? shell.name}", in ${shell.dir}. Ask me what I'd like to change.`),
           ...(this.pendingAdd.has(shell.name) ? { add: true } : {}),
           ...(shell.error ? { error: shell.error } : {}),
         };
@@ -540,7 +557,7 @@ export class ShellPackages {
             title: `${title}: agent`,
             env: setup.terminalEnv,
             // The prompt first: --mcp-config takes every argument after it.
-            argv: [command, this.agentPrompt(shell), "--mcp-config", mcp],
+            argv: [command, this.prompt(`help me change my Plutonium shell "${title}", in this folder (${shell.dir}). Ask me what I'd like to change.`), "--mcp-config", mcp],
           }),
         };
       }
@@ -630,14 +647,61 @@ export class ShellPackages {
     }
   }
 
-  private agentPrompt(shell: InstalledShell): string {
-    const docs = join(this.context.plutonium, "docs", "features", "SHELL_PACKAGES.md");
-    const library = join(this.context.plutonium, "helper", "README.md");
-    return [
-      `You're helping me customize my Plutonium shell "${shell.manifest?.title ?? shell.name}", in this folder (${shell.dir}).`,
-      `It's a git repository; shell.json is its manifest (${docs}). The shell library and the helper's API are in ${library}.`,
-      `Every save here is committed and reloads the shell. If the shell doesn't connect to the helper within ${CONNECT_TIMEOUT_MS / 1000} s, it's rolled back to the last version that worked, and I'm told.`,
-      `Ask me what I'd like to change.`,
-    ].join("\n");
+  /** The skill, written into $PLUTO_HOME for agents to read (its paths filled in). */
+  skillPath(): string {
+    if (!this.skill) {
+      try {
+        this.skill = installSkill(this.home, this.context.plutonium);
+      } catch {
+        // A checkout without it (tests): point at where it would be.
+        this.skill = join(this.context.plutonium, "skill", "SKILL.md");
+      }
+    }
+    return this.skill;
+  }
+
+  /** A prompt for whatever agent the user has: read the skill first, then the task. */
+  prompt(task: string): string {
+    return `Read the Plutonium skill at ${this.skillPath()} first. Then ${task}`;
+  }
+
+  /** The prompt for a new shell, which the agent makes with `plutonium shells new`. */
+  newShellPrompt(): string {
+    return this.prompt(
+      "help me make a new Plutonium shell: ask me what it should do, then create it with `plutonium shells new <name>` (from the shell closest to what I describe) and build it in its folder.",
+    );
+  }
+
+  /**
+   * A new shell: a copy of an installed shell (default plain) without its
+   * history, named and titled anew, installed on, at the end of the list. The
+   * switcher adds it to the browser's list the next time it's open.
+   */
+  create(body: Record<string, unknown>): unknown {
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) {
+      throw new ShellError("A shell's name is lowercase letters, digits and dashes, starting with a letter.");
+    }
+    if (existsSync(shellDir(this.home, name))) throw new ShellError(`There's already a shell called ${name}.`);
+    const from = typeof body.from === "string" && body.from ? body.from : "plain";
+    const source = this.installed(from);
+    if (!source.manifest) throw new ShellError(`${from}'s shell.json doesn't parse.`);
+    const staging = mkdtempSync(join(tmpdir(), "plutonium-new-shell-"));
+    const dir = join(staging, name);
+    try {
+      cpSync(source.dir, dir, { recursive: true, filter: (path) => !path.split("/").includes(".git") });
+      const manifest = JSON.parse(readFileSync(join(dir, "shell.json"), "utf8")) as Record<string, unknown>;
+      manifest.title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : name;
+      manifest.version = "1";
+      manifest.description = `Made from ${source.manifest.title ?? from}.`;
+      writeFileSync(join(dir, "shell.json"), JSON.stringify(manifest, null, 2) + "\n");
+      const preview = previewShell(this.home, dir, this.context);
+      if (preview.name !== name) throw new ShellError(`It would be called ${preview.name}, not ${name}.`);
+      const token = randomUUID();
+      this.previews.set(token, preview);
+      return this.add({ token });
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
   }
 }

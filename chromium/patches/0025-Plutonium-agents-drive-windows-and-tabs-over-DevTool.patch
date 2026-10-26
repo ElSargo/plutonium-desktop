@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 17:59:12 +1300
-Subject: [PATCH 25/66] Plutonium: agents drive windows and tabs over DevTools
+Subject: [PATCH 25/67] Plutonium: agents drive windows and tabs over DevTools
 
 EXO-AGENT: the Plutonium DevTools domain (cros_protocol.pdl) on the browser
 target, for trusted clients only (the session's --remote-debugging-port,

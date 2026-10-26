@@ -105,7 +105,7 @@ The launcher passes every origin that's on to the browser and the helper, as bef
 ## Customizing
 
 On a shell's page in the switcher (Super+Tab, the shell), under **Customize**:
-- **Ask an agent**: Claude Code (`PLUTONIUM_SHELL_AGENT`, default `claude`) in a backup terminal tab, in the shell's folder. It runs in the thread `plutonium:shell/<name>` with the helper's MCP tools. Its first prompt says what the folder is, where the docs are, and that saves are committed and rolled back if they break the shell.
+- **Copy a prompt for your agent**: Plutonium doesn't start an agent itself. This puts a prompt on the clipboard for whichever agent you use (Claude Code, Codex, T3 Code, …): read the Plutonium skill at `$PLUTO_HOME/SKILL.md`, then help change this shell, in its folder. The skill (`skill/SKILL.md` in the checkout, written to `$PLUTO_HOME` with its paths filled in by the helper) says at a glance what Plutonium is, where things are, the rules that matter (edit only `$PLUTO_HOME/shells`, saves are committed and rolled back, don't restart the session), and links to these docs.
 - **Open a terminal**: your shell, in the folder, in a backup terminal tab.
 - **History, log and updates…**: the helper's shells page (`/v1/shells/page/#<name>`), opened in the backup browser.
 
@@ -121,6 +121,14 @@ For a server shell, the switcher's page also shows its state, command and log, w
 - **A change that doesn't come up.** No page connects in time, the server doesn't come up, or the manifest no longer parses. The folder goes back to the last good commit, in a new commit (`rollback: <commit> didn't come up (<why>); back to <good>`), and the shell is applied again. The failed commit is kept (`refs/plutonium/failed`). The switcher's status line and the shell's page show a notice. The shells page has **Retry** (the failed version, again, as a new commit), **Dismiss**, and its **diff** against the good one.
 - **Safe mode.** `plutonium run --safe` runs only the plain shell shipped in this checkout (not your copy), at `http://safe.localhost:<shells port>/`. A start where no shell connects within 60 s counts as failed. After two in a row, `plutonium run` starts in safe mode by itself, says so, and tries your shells again the next time.
 - **The backup terminal** is always in the switcher, whatever the shells do.
+
+## Making a new shell
+
+The switcher's **Add a shell…** has **New shell…**, which opens the shells page (`#new`):
+- **With an agent**: copies a prompt for your agent: read the skill, ask what the shell should do, make it with `plutonium shells new`, and build it.
+- **Yourself**: a name and a shell to copy (default plain). **Make it** installs the copy, on, at the end of the list.
+
+`plutonium shells new <name> [<shell>]` does the same through the running session's helper (`POST /v1/shells/new`, `{name, from}`): the shell's files without its history, `shell.json` retitled (`title` = the name, `version` 1, `description` "Made from …"), a git repository with one commit, on. The switcher adds it to the browser's list the next time it's open. `plutonium shells prompt` prints the new-shell prompt.
 
 ## Adding a shell
 
@@ -140,10 +148,12 @@ Over the helper's socket (the switcher), and from the shells page (on the helper
 | `GET /v1/shells` (also `/v1/shells/list`) | every installed shell: name, title, kind, folder, origin, page URL, version, commit, on or off, server status, notice, failed change |
 | `GET /v1/shells/wait` | the same, once every starting server is up or has failed |
 | `POST /v1/shells/<name>/start\|stop\|restart` | its server |
-| `POST /v1/shells/<name>/agent\|terminal` | a backup terminal session in its folder; `{terminal: <id>}` |
+| `POST /v1/shells/<name>/terminal` | a backup terminal session in its folder; `{terminal: <id>}` (`agent` still starts `PLUTONIUM_SHELL_AGENT` there, for scripts; nothing in the UI uses it) |
 | `POST /v1/shells/<name>/retry\|dismiss\|update\|reload` | |
 | `GET /v1/shells/<name>/log\|history\|diff` | text |
 | `POST /v1/shells/add` | `{source}` → a preview with a `token`; `{token}` → installs it |
+| `POST /v1/shells/new` | `{name, from?, title?}`: a copy of an installed shell (default plain), installed on |
+| `GET /v1/shells/prompt` | `{skill, new}`: where the skill is, and the new-shell prompt. Each shell's entry in `GET /v1/shells` has its own `prompt`. |
 
 ## Verified
 

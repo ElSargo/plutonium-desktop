@@ -2057,6 +2057,10 @@ export class Daemon {
     try {
       if (method === "GET" && path === "/v1/shells/list") return sendJson(response, 200, shells.status());
       if (method === "POST" && path === "/v1/shells/add") return sendJson(response, 200, shells.add(await readJson(request)));
+      if (method === "POST" && path === "/v1/shells/new") return sendJson(response, 200, shells.create(await readJson(request)));
+      if (method === "GET" && path === "/v1/shells/prompt") {
+        return sendJson(response, 200, { skill: shells.skillPath(), new: shells.newShellPrompt() });
+      }
       if (method === "GET" && path === "/v1/shells/wait") {
         await shells.whenServersUp();
         return sendJson(response, 200, shells.status());

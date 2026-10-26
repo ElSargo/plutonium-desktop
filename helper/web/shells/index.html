@@ -73,6 +73,7 @@ function renderNav() {
   $("nav").innerHTML =
     shells.map((shell) => `<a href="#${esc(shell.name)}" class="${shell.name === current ? "selected" : ""}">
       ${esc(shell.title ?? shell.name)}<small>${esc(shell.name)} · ${shell.enabled ? "on" : "off"} · ${esc(kindText(shell))}${shell.notice ? " · ⚠" : ""}</small></a>`).join("") +
+    `<a href="#new" class="${current === "new" ? "selected" : ""}">New shell…<small>yours, from a copy</small></a>` +
     `<a href="#add" class="${current === "add" ? "selected" : ""}">Add a shell…<small>a folder, git or an address</small></a>`;
 }
 
@@ -101,6 +102,7 @@ async function render() {
   renderNav();
   const name = selected();
   if (name === "add") return renderAdd();
+  if (name === "new") return renderNew();
   const shell = shells.find((candidate) => candidate.name === name);
   if (!shell) {
     $("main").innerHTML = `<h1>No shell “${esc(name)}”</h1>`;
@@ -120,8 +122,9 @@ async function render() {
     ${shell.notice ? `<div class="notice">${esc(shell.notice)}</div>` : ""}
     ${shell.error ? `<div class="notice error">${esc(shell.error)}</div>` : ""}
     <h2>Customize</h2>
-    <p class="dim">Its files are yours. Every save is committed and reloads the shell; a change that doesn't come up is rolled back.</p>
-    <button class="primary" data-act="agent">Ask an agent</button>
+    <p class="dim">Its files are yours. Every save is committed and reloads the shell; a change that doesn't come up is rolled back.
+    To have an agent change it, copy a prompt and paste it into whichever agent you use: it points the agent at Plutonium's skill (${esc(skill)}).</p>
+    <button class="primary" id="copy-prompt">Copy a prompt for your agent</button>
     <button data-act="terminal">Open a terminal</button>
     <button data-act="update">Update from what Plutonium ships</button>
     <a href="/v1/terminal/" target="_blank" class="dim">backup terminal</a>
@@ -146,14 +149,56 @@ async function render() {
     const action = button.dataset.act;
     button.onclick = () =>
       act(name, action, (result) =>
-        action === "agent" || action === "terminal"
+        action === "terminal"
           ? `Started in the backup terminal: <a href="/v1/terminal/" target="_blank">open it</a> (or Super+Tab, Backup terminal).`
           : action === "update"
             ? esc(result.status === "conflict" ? `Conflicts in ${result.files.join(", ")}: your copy is as it was.` : result.status)
             : "Done.");
   }
+  $("copy-prompt").onclick = () => copyPrompt(shell.prompt);
   const pre = document.querySelector("#log");
   if (pre) pre.scrollTop = pre.scrollHeight;
+}
+
+async function copyPrompt(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    status = `<span class="ok">Copied.</span> Paste it into your agent (Claude Code, Codex, T3 Code, …).`;
+  } catch {
+    status = `Copy this into your agent:<pre>${esc(text)}</pre>`;
+  }
+  renderStatus();
+}
+
+function renderNew() {
+  $("main").innerHTML = `
+    <h1>A new shell</h1>
+    <p class="dim">A shell is a web page: your desktop, laid out and scripted as you like. Start from a copy of one you have,
+    then change it, yourself or with an agent.</p>
+    <h2>With an agent</h2>
+    <p class="dim">Paste this into whichever agent you use. It reads Plutonium's skill, asks what you want, and makes the shell.</p>
+    <button class="primary" id="copy-new">Copy a prompt for your agent</button>
+    <h2>Yourself</h2>
+    <p><input id="new-name" placeholder="name: lowercase, e.g. my-shell">
+    <select id="new-from">${shells.filter((shell) => shell.kind === "static").map((shell) =>
+      `<option value="${esc(shell.name)}" ${shell.name === "plain" ? "selected" : ""}>a copy of ${esc(shell.title ?? shell.name)}</option>`).join("")}</select></p>
+    <button id="make">Make it</button>
+    <p id="status">${status}</p>`;
+  $("copy-new").onclick = () => copyPrompt(newPrompt);
+  const make = async () => {
+    try {
+      const shell = await api("new", { name: $("new-name").value.trim(), from: $("new-from").value });
+      status = `<span class="ok">Made ${esc(shell.name)} in ${esc(shell.dir)}.</span> Press Super+Tab: the switcher turns it on. Edit its files there.`;
+      await refresh();
+      keepStatus = true;
+      location.hash = shell.name;
+    } catch (error) {
+      status = `<span class="error">${esc(error.message)}</span>`;
+      renderStatus();
+    }
+  };
+  $("make").onclick = make;
+  $("new-name").onkeydown = (event) => event.key === "Enter" && make();
 }
 
 let preview = null;
@@ -219,11 +264,13 @@ window.addEventListener("hashchange", () => {
   keepStatus = false;
   void render();
 });
+let skill = "", newPrompt = "";
+({ skill, new: newPrompt } = await api("prompt"));
 await refresh();
 await render();
 // The server's state and log change by themselves.
 setInterval(async () => {
-  if (selected() === "add" || document.hidden) return;
+  if (selected() === "add" || selected() === "new" || document.hidden) return;
   const before = JSON.stringify(shells);
   await refresh();
   if (JSON.stringify(shells) !== before) await render();

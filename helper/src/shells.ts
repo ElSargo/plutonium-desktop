@@ -631,3 +631,28 @@ export function addShell(home: string, preview: AddPreview & { readonly staged?:
   }
   return preview.name;
 }
+
+// --- The skill ---------------------------------------------------------------
+
+/**
+ * Writes the checkout's skill/SKILL.md into $PLUTO_HOME/SKILL.md with its
+ * paths filled in, when it's missing or changed; returns where it is. Agents
+ * are told to read it (the prompts the switcher and the shells page copy).
+ */
+export function installSkill(home: string, plutonium: string): string {
+  const target = join(home, "SKILL.md");
+  const text = readFileSync(join(plutonium, "skill", "SKILL.md"), "utf8")
+    .replaceAll("{{PLUTONIUM}}", plutonium)
+    .replaceAll("{{PLUTO_HOME}}", home);
+  let current: string | undefined;
+  try {
+    current = readFileSync(target, "utf8");
+  } catch {
+    // Not written yet.
+  }
+  if (current !== text) {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(target, text);
+  }
+  return target;
+}
