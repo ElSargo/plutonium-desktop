@@ -275,7 +275,13 @@ try {
     },
   });
   // The status indicators (desktop services, shell.json's "uses"), each its own module.
-  const indicator = (file, ...args) => import(file).then((module) => module.default(shell, ...args)).catch(console.error);
+  // Each in a slot made now, so they keep this order however they load.
+  const indicator = (file, container = document.body) => {
+    const slot = document.createElement("span");
+    slot.style.display = "contents";
+    container.append(slot);
+    import(file).then((module) => module.default(shell, slot)).catch(console.error);
+  };
   indicator("./media.js", document.getElementById("tray-media"));
   indicator("./audio.js", document.getElementById("tray"));
   indicator("./brightness.js", document.getElementById("tray"));
