@@ -526,7 +526,8 @@ export class ShellPackages {
             cwd: shell.dir,
             title: `${title}: agent`,
             env: setup.terminalEnv,
-            argv: [command, "--mcp-config", mcp, this.agentPrompt(shell)],
+            // The prompt first: --mcp-config takes every argument after it.
+            argv: [command, this.agentPrompt(shell), "--mcp-config", mcp],
           }),
         };
       }

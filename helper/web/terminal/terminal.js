@@ -269,6 +269,8 @@ async function adoptSessions() {
   }
 }
 window.addEventListener("focus", () => void adoptSessions());
+// Being brought to the front doesn't always focus the page: look now and then.
+setInterval(() => document.visibilityState === "visible" && void adoptSessions(), 2000);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void adoptSessions();
 });
