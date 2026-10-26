@@ -40,6 +40,8 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
   - `media`: MPRIS players and the browser's media session, most recent first; `play-pause`, `next`, `previous`, `play`, `pause`, `stop`.
   - The volume, brightness and media keys already work in every shell; listen for the shell's `systemkey` event to draw a level. niri's and plain's indicators (`audio.js`, `power.js`, … in their folders, one module each over `tray.js`) are examples to copy.
   - `network` (Wi-Fi list, connect with a password, on/off, wired and VPN connections) and `bluetooth` (on/off, devices, discover, pair, connect): their state and actions are in DESKTOP_SERVICES.md. When either needs the user (a Wi-Fi password, a pairing code), the shell gets a `systemrequest` event; without `preventDefault()` the library shows its own prompt.
+  - `notifications` lists apps' notifications and the tabs' web notifications (their `app` is the site; `invoke` with `"default"` runs the page's handler and shows its tab). The library pops them up unless `connect({ notificationPopups: false })`.
+  - The shell's `shellnotice` event (`{ shell, title, kind: "rollback" | "crash" | "server", message }`): an installed shell's edit was rolled back, its page crashed or its server failed. It's also a notification, so a shell with popups shows it already (`{{PLUTONIUM}}/docs/features/SHELL_PACKAGES.md`).
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 
 ## shell.json
