@@ -30,11 +30,11 @@ does something) and the lockChanged event.
  .../browser/ui/ash/main_extra_parts/BUILD.gn  |   5 +
  .../chrome_browser_main_extra_parts_ash.cc    |   6 +
  .../chrome_browser_main_extra_parts_ash.h     |   3 +
- .../main_extra_parts/plutonium_lock_impl.cc   | 538 ++++++++++++++++++
+ .../main_extra_parts/plutonium_lock_impl.cc   | 531 ++++++++++++++++++
  .../main_extra_parts/plutonium_lock_impl.h    | 120 ++++
  .../dbus/power/power_policy_controller.cc     |  11 +
  chromeos/dbus/power/power_policy_controller.h |   5 +
- 14 files changed, 895 insertions(+), 1 deletion(-)
+ 14 files changed, 888 insertions(+), 1 deletion(-)
  create mode 100644 chrome/browser/plutonium_lock.cc
  create mode 100644 chrome/browser/plutonium_lock.h
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
@@ -439,10 +439,10 @@ index 28020196a3..935eab6d15 100644
    std::unique_ptr<ImeControllerClientImpl> ime_controller_client_;
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
 new file mode 100644
-index 0000000000..67935da723
+index 0000000000..c24acb50de
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,531 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -586,13 +586,6 @@ index 0000000000..67935da723
 +    }
 +  }
 +
-+  // While a password is checked, or the helper asks to wait.
-+  void SetBusy(bool busy) {
-+    if (password_) {
-+      password_->SetReadOnly(busy);
-+    }
-+  }
-+
 +  void ClearPassword() {
 +    if (password_) {
 +      password_->SetText(u"");
@@ -613,7 +606,10 @@ index 0000000000..67935da723
 +    }
 +    if ((event.flags() & kModifiers) == 0 &&
 +        event.key_code() == ui::VKEY_RETURN) {
-+      if (!sender->GetReadOnly() && !sender->GetText().empty()) {
++      // (Submit() ignores it while one is checked, or the helper asks to
++      // wait. The field stays editable: making a focused textfield read-only
++      // trips its cursor blink timer.)
++      if (!sender->GetText().empty()) {
 +        lock_->Submit(std::u16string(sender->GetText()));
 +      }
 +      return true;
@@ -742,7 +738,6 @@ index 0000000000..67935da723
 +    return;
 +  }
 +  checking_ = true;
-+  view_->SetBusy(true);
 +  view_->SetMessage(u"Checking…", false);
 +  plutonium_helper::Post(
 +      "/v1/session/unlock",
@@ -763,7 +758,6 @@ index 0000000000..67935da723
 +    return;
 +  }
 +  view_->ClearPassword();
-+  view_->SetBusy(false);
 +  view_->FocusPassword();
 +  if (!answer) {
 +    view_->SetMessage(
@@ -804,7 +798,6 @@ index 0000000000..67935da723
 +    return;
 +  }
 +  const base::TimeDelta wait = retry_at_ - base::TimeTicks::Now();
-+  view_->SetBusy(wait.is_positive());
 +  if (wait.is_positive()) {
 +    view_->SetMessage(
 +        base::StrCat({message_, u" Try again in ",
