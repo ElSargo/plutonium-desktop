@@ -204,6 +204,14 @@ active player), and the shells that use the service get the new state and a
 level. When the helper did nothing with a key (no player), Ash's own action
 runs, which for the media keys is Chromium's media session controller.
 
+Tested in an X11 session (slot 8, keys sent to Xvfb with `xdotool`): volume
+up and down (wpctl showed each step, niri's OSD the level), mute on and off,
+brightness up and down through logind, play/pause on a real `mpv`, and a
+shell page's own media session (silent audio with `navigator.mediaSession`)
+listed as the `"browser"` player, its `nexttrack` handler run by the Next
+key and paused by Play. Everything was put back. A real keyboard on DRM goes
+through the same accelerators.
+
 ### In the shipped shells
 
 niri has a bar now (`bar.js`, as waybar is for niri: now playing, a clock, the
@@ -216,6 +224,9 @@ the microphone), `brightness.js`, `battery.js` (time left in its tooltip),
 `media.js` (now playing and its controls) and `osd.js` (the keys' level).
 Indicators hide when their service has nothing (no battery, no backlight, no
 player).
+Tested in the same session: both shells show the real volume, brightness and
+battery, in order; the volume popover and the power menu (its four entries;
+none was run) open.
 
 ### notifications
 
