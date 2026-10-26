@@ -204,6 +204,7 @@ function showPreview() {
       preview = null;
       status = `<span class="ok">Added ${esc(shell.title)} in ${esc(shell.dir)}.</span> Press Super+Tab: the switcher turns it on.`;
       await refresh();
+      keepStatus = true;
       location.hash = shell.name;
     } catch (error) {
       status = `<span class="error">${esc(error.message)}</span>`;
@@ -212,8 +213,10 @@ function showPreview() {
   };
 }
 
+let keepStatus = false;
 window.addEventListener("hashchange", () => {
-  if (selected() !== "add") status = "";
+  if (!keepStatus) status = "";
+  keepStatus = false;
   void render();
 });
 await refresh();

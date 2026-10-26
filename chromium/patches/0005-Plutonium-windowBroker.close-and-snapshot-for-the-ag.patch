@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 10:11:23 +1300
-Subject: [PATCH 05/61] Plutonium: windowBroker.close() and snapshot() for the
+Subject: [PATCH 05/62] Plutonium: windowBroker.close() and snapshot() for the
  agent bridge
 
 EmbeddedWindows::Close asks the toplevel to close as its close button
