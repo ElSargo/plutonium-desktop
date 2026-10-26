@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 25 Oct 2026 18:54:24 +1300
-Subject: [PATCH 52/65] Plutonium: dmabufs for PipeWire consumers that import
+Subject: [PATCH 52/66] Plutonium: dmabufs for PipeWire consumers that import
  them
 
 EXO-CAPTURE: Ash's PipeWire nodes offer XRGB/ARGB8888 dmabufs with the
