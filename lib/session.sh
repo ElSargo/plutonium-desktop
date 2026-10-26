@@ -61,6 +61,7 @@ setup_portal() {
   [[ $MODE == drm ]] || return 0
   local data=${XDG_DATA_HOME:-$HOME/.local/share} config=${XDG_CONFIG_HOME:-$HOME/.config}
   install -Dm644 "$ROOT/helper/portal/plutonium.portal" "$data/xdg-desktop-portal/portals/plutonium.portal"
+  install -Dm644 "$ROOT/helper/portal/plutonium-print.portal" "$data/xdg-desktop-portal/portals/plutonium-print.portal"
   install -Dm644 "$ROOT/helper/portal/plutonium-portals.conf" "$config/xdg-desktop-portal/plutonium-portals.conf"
   [[ ${PORTAL_SESSION:-1} == 1 ]] || return 0
   # What to put back. A session that ended without its teardown (killed)
@@ -258,8 +259,11 @@ if [[ -n ${HOLD_S:-} ]]; then
   stopper=$!
 fi
 wait $ash
-log "Ash exited ($?)"
+rc=$?
+log "Ash exited ($rc)"
 [[ -n ${stopper:-} ]] && kill "$stopper" 2>/dev/null
 # Its children too, before anyone else takes the display.
 stop_ash KILL
-exit 0
+# Ash's status, for plutonium session start: SIGTERM (Ctrl+Alt+Backspace,
+# plutonium stop) is a clean 0.
+exit "$rc"

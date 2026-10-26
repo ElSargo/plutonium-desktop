@@ -23,7 +23,7 @@ case $cmd in
   start)
     [[ -n $portal ]] || { echo "no xdg-desktop-portal" >&2; exit 1; }
     mkdir -p "$dir/share/xdg-desktop-portal/portals" "$dir/config/xdg-desktop-portal"
-    cp "$root/helper/portal/plutonium.portal" "$dir/share/xdg-desktop-portal/portals/"
+    cp "$root/helper/portal/"*.portal "$dir/share/xdg-desktop-portal/portals/"
     cp "$root/helper/portal/plutonium-portals.conf" "$dir/config/xdg-desktop-portal/"
     if ! [[ -S $dir/bus ]]; then
       setsid dbus-daemon --session --nofork "--address=$address" > "$dir/dbus.log" 2>&1 < /dev/null &

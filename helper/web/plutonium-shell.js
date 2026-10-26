@@ -859,6 +859,57 @@ export class PlutoniumShell extends EventTarget {
     return document.querySelector(`embed[data-content-id="${CSS.escape(tab.contentId)}"]`);
   }
 
+  /** The element in this page that shows native window `windowId` now, if any. */
+  shownWindowElement(windowId) {
+    if (windowId === undefined || windowId === null) return null;
+    return document.querySelector(`native-window[window="${CSS.escape(String(windowId))}"]`);
+  }
+
+  // A native app asks for files (the helper's FileChooser portal): a request as a tab's
+  // fileChooser one, with `source` ({appId, pid, windowId, name}) instead of a tab. It
+  // resolves to the answer, {paths, filter?, choices?}, or null.
+  _appFileChooser(args, option) {
+    return this._appDialog(args, "fileChooser", option, (request) => (new FileChooser(this, request).open(), true));
+  }
+
+  // A native app's dialog (the helper's portals): a request as a tab's of `kind`, with
+  // `source` ({appId, pid, windowId, name}) instead of a tab, drawn by `option` (a
+  // function) or `draw`. It resolves to the answer, or null ("cancel" too).
+  _appDialog(args, kind, option, draw) {
+    return new Promise((resolve) => {
+      const controller = new AbortController();
+      this._appRequests ??= new Map();
+      this._appRequests.set(args.handle, controller);
+      const giveBack = this._takeKeyboard();
+      let done = false;
+      const end = (answer) => {
+        if (done) return false;
+        done = true;
+        this._appRequests.delete(args.handle);
+        giveBack();
+        resolve(answer === "cancel" ? null : (answer ?? null));
+        return true;
+      };
+      controller.signal.addEventListener("abort", () => end(null));
+      const request = {
+        requestId: args.handle,
+        kind,
+        detail: args.detail ?? {},
+        source: args.source ?? {},
+        thread: args.thread ?? null,
+        signal: controller.signal,
+        answer: async (answer) => end(answer),
+      };
+      let taken = false;
+      try {
+        taken = typeof option === "function" ? !!option(request) : draw(request);
+      } catch (error) {
+        console.error(`plutonium: drawing an app's ${kind} request`, error);
+      }
+      if (!taken) end(null);
+    });
+  }
+
   /**
    * A short message over tab `tabId`'s element (at its top centre), such as "110%"; a new
    * one for the same tab replaces it. Nothing if this page doesn't show the tab.
@@ -1493,6 +1544,7 @@ export class PlutoniumShell extends EventTarget {
           this._applyShortcuts();
           return;
         }
+        if (op === "file_chooser_cancel" || op === "print_cancel") this._appRequests?.get(args.handle)?.abort();
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
           this.dispatchEvent(new Event("agentwindowschange"));
@@ -1591,6 +1643,20 @@ export class PlutoniumShell extends EventTarget {
         if (option === false) throw new Error("this shell doesn't bind shortcuts");
         if (typeof option === "function") return option(args);
         return new ShortcutBinder(this, args).ask();
+      }
+      case "file_chooser": {
+        // A native app's file picker (the FileChooser portal): the same picker as tabs'
+        // (the "fileChooser" option: false leaves the app without one).
+        const option = this.options.fileChooser;
+        if (option === false) throw new Error("this shell doesn't pick files");
+        return this._appFileChooser(args, option);
+      }
+      case "print_prepare": {
+        // A native app prints (the Print portal): the same dialog as tabs', without a
+        // preview (the "print" option: false leaves the app without one).
+        const option = this.options.print;
+        if (option === false) throw new Error("this shell doesn't print");
+        return this._appDialog(args, "print", option, (request) => (new PrintDialog(this, request), true));
       }
       case "pick_color": {
         // An app asks for a color from the screen (the "colorPicker" option:
@@ -1961,6 +2027,8 @@ const PRINT_STYLE = `@layer plutonium {
     display: grid; grid-template-columns: minmax(0, 1fr) 260px; width: min(900px, calc(100vw - 16px));
     height: min(640px, calc(100vh - 16px)); overflow: hidden;
   }
+  .plutonium-dialog.plutonium-print.app { grid-template-columns: minmax(0, 1fr); width: min(340px, calc(100vw - 16px)); height: auto; }
+  .plutonium-print.app .preview { display: none; }
   .plutonium-print .preview { background: color-mix(in srgb, currentColor 12%, transparent); position: relative; }
   .plutonium-print .preview iframe { border: 0; width: 100%; height: 100%; display: block; }
   .plutonium-print .preview .note { position: absolute; inset: 0; display: grid; place-items: center; opacity: .7; }
@@ -1996,10 +2064,12 @@ class PrintDialog {
     this.url = "";
     this.rendering = null;
     this.opener = document.activeElement;
+    /** An app's (the Print portal): no preview; the answer is the settings, which the app prints with. */
+    this.app = request.tabId === undefined;
     this._build();
     request.signal.addEventListener("abort", () => this.close());
     this._loadPrinters();
-    this._render();
+    if (!this.app) this._render();
   }
 
   _build() {
@@ -2039,6 +2109,16 @@ class PrintDialog {
     this.status = element.querySelector(".status");
     this.form.paper.value = us ? "letter" : "a4";
     this.form.path.value = `~/Downloads/${fileNameOf(this.title)}`;
+    if (this.app) {
+      // The app lays out its pages: only what it asks of the printer, and its paper.
+      element.classList.add("app");
+      for (const name of ["scale", "margins", "headerFooter", "background"]) this.form[name].closest("label").hidden = true;
+      element.querySelector(".pages").textContent = this.request.source?.name ?? "";
+      const detail = this.request.detail ?? {};
+      if (detail.copies) this.form.copies.value = String(detail.copies);
+      if (detail.landscape !== undefined) this.form.layout.value = detail.landscape ? "landscape" : "portrait";
+      if (detail.paper && PAPER_SIZES[detail.paper]) this.form.paper.value = detail.paper;
+    }
     this.form.addEventListener("input", (event) => this._changed(event.target));
     this.form.addEventListener("change", (event) => this._changed(event.target));
     this.form.addEventListener("submit", (event) => {
@@ -2064,7 +2144,9 @@ class PrintDialog {
 
   // Over the tab's element if this page shows it, else in the middle.
   _place() {
-    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect();
+    const box = (
+      this.shell.shownTabElement(this.request.tabId) ?? this.shell.shownWindowElement(this.request.source?.windowId)
+    )?.getBoundingClientRect();
     const width = this.element.offsetWidth;
     const height = this.element.offsetHeight;
     const centreX = box && box.width ? box.left + box.width / 2 : innerWidth / 2;
@@ -2086,7 +2168,8 @@ class PrintDialog {
         if (printer.state === "disabled") option.disabled = true;
         select.append(option);
       }
-      const preferred = printers.find((printer) => printer.isDefault && printer.state !== "disabled");
+      const asked = this.app && printers.find((printer) => printer.name === this.request.detail?.printer);
+      const preferred = asked || printers.find((printer) => printer.isDefault && printer.state !== "disabled");
       if (preferred) select.value = preferred.name;
       if (!available && error) console.info(`plutonium: no printers (${error})`);
       this._showDestination();
@@ -2101,7 +2184,7 @@ class PrintDialog {
     if (target === this.form.pages) {
       this.form.querySelector('[data-for="custom"]').hidden = this.form.pages.value !== "custom";
     }
-    if (["copies", "duplex", "color", "path"].includes(target.name)) return;
+    if (["copies", "duplex", "color", "path"].includes(target.name) || this.app) return;
     clearTimeout(this._timer);
     this._timer = setTimeout(() => this._render(), 300);
   }
@@ -2181,6 +2264,7 @@ class PrintDialog {
     const printer = this.form.destination.value;
     this._error("");
     this.status.textContent = printer ? "Printing…" : "Saving…";
+    if (this.app) return this._answerApp(printer);
     try {
       const pdf = await this._pdfNow();
       let message;
@@ -2208,6 +2292,31 @@ class PrintDialog {
       this.busy = false;
       this.form.go.disabled = false;
     }
+  }
+
+  // An app's dialog answers the settings; the app then sends the document, which the
+  // helper prints or saves.
+  async _answerApp(printer) {
+    const form = this.form;
+    const ranges = form.pages.value === "custom" ? form.ranges.value.trim() : "";
+    if (ranges && !/^\s*\d+(\s*-\s*\d+)?(\s*,\s*\d+(\s*-\s*\d+)?)*\s*$/.test(ranges)) {
+      this._error("Check the page ranges.");
+      this.busy = false;
+      form.go.disabled = false;
+      return;
+    }
+    const copies = Math.floor(Number(form.copies.value));
+    await this.request.answer({
+      printer,
+      path: printer ? undefined : form.path.value.trim(),
+      copies: copies >= 1 ? copies : 1,
+      duplex: form.duplex.value,
+      color: form.color.value === "1",
+      paper: form.paper.value,
+      landscape: form.layout.value === "landscape",
+      pageRanges: ranges,
+    });
+    this.close();
   }
 
   cancel() {
@@ -2408,8 +2517,9 @@ class FileChooser {
     this.acceptButton = $(".accept");
     this.message = $(".message");
     $("header b").textContent = detail.title || titles[this.mode] || titles.open;
-    $(".origin").textContent = detail.origin ?? this.request.tab?.url ?? "";
-    this.acceptButton.textContent = accept[this.mode] ?? "Open";
+    $(".origin").textContent = detail.origin ?? this.request.tab?.url ?? this.request.source?.name ?? "";
+    this.acceptButton.textContent = detail.acceptLabel || (accept[this.mode] ?? "Open");
+    this.addChoices($(".spacer"));
     this.list.setAttribute("aria-multiselectable", String(this.mode === "open-multiple"));
     if (!this.isSave) this.nameInput.hidden = true;
     else this.nameInput.value = detail.currentName ?? "";
@@ -2459,9 +2569,36 @@ class FileChooser {
     this.start(detail.currentFolder);
   }
 
-  // Over the tab's element, else in the middle of the page.
+  // An app's extra choices (the portal's, such as an encoding): a select each, or a
+  // checkbox for one without options; answered as {id: value}.
+  addChoices(before) {
+    this.choices = {};
+    for (const choice of this.request.detail?.choices ?? []) {
+      this.choices[choice.id] = choice.value;
+      const label = document.createElement("label");
+      if (choice.options.length === 0) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = choice.value === "true";
+        box.addEventListener("change", () => (this.choices[choice.id] = String(box.checked)));
+        label.append(box, ` ${choice.label}`);
+      } else {
+        const select = document.createElement("select");
+        for (const option of choice.options) {
+          select.append(new Option(option.label, option.id, false, option.id === choice.value));
+        }
+        select.addEventListener("change", () => (this.choices[choice.id] = select.value));
+        label.append(`${choice.label} `, select);
+      }
+      before.before(label);
+    }
+  }
+
+  // Over the tab's (or the app window's) element, else in the middle of the page.
   place() {
-    const box = this.shell.shownTabElement(this.request.tabId)?.getBoundingClientRect() ?? {
+    const element =
+      this.shell.shownTabElement(this.request.tabId) ?? this.shell.shownWindowElement(this.request.source?.windowId);
+    const box = element?.getBoundingClientRect() ?? {
       left: 0,
       top: 0,
       width: window.innerWidth,
@@ -2793,6 +2930,7 @@ class FileChooser {
     if (this.closed) return;
     if (paths && this.dir) this.shell._lastFileFolder = this.dir;
     const answer = paths ? { paths, ...(this.filter >= 0 && !this.isFolder ? { filter: this.filter } : {}) } : null;
+    if (answer && this.request.detail?.choices?.length) answer.choices = this.choices;
     const ok = await this.request.answer(answer);
     if (!ok && paths) {
       this.setMessage("The page didn't take that.");

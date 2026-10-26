@@ -1,6 +1,6 @@
 # Browser features for tabs
 
-**Status: the common plumbing ("As built: adding a feature"), zoom, find in page, permission prompts with per-thread grants, downloads, file pickers and printing are built; form autofill is not, for now (Decision 9).** The tasks are in `BACKLOG.md`, "Browser features for tabs".
+**Status: the common plumbing ("As built: adding a feature"), zoom, find in page, permission prompts with per-thread grants, downloads, file pickers (for native apps too, through the FileChooser portal) and printing are built; form autofill is not, for now (Decision 9).** The tasks are in `BACKLOG.md`, "Browser features for tabs".
 
 A tab is a `WebContents` the registry owns (`plutonium_tabs.cc`, `TABS.md`). No `Browser` stands behind it, so whatever Chrome reaches through a `Browser` is missing: find-in-page, zoom, printing, permission prompts, downloads UI, file pickers and form autofill. Decided (2026-10-20): attach the tab helpers these features need to the tabs' `WebContents`, rather than hosting tabs in a hidden `Browser`.
 
@@ -226,7 +226,23 @@ filechooserrequest {
 2. The helper sends the same `filechooserrequest` to the focused shell, with `source: {appId, pid, windowId}`. The shell can open the picker over the parent's element (see "Where do dialogs go?" in `BACKLOG.md`).
 3. The answer's paths go back to the portal as URIs. For sandboxed apps, xdg-desktop-portal's frontend exports them through the document portal itself.
 
-So a tab and a native app show one picker with the same places and the same recent files, as capture's picker serves both. When the portal backend doesn't exist yet, only tabs use the picker.
+So a tab and a native app show one picker with the same places and the same recent files, as capture's picker serves both.
+
+**Built** (2026-10-26; `helper/src/fileChooser.ts`, `portal.ts`, the library). These details differ from the design or fill it in:
+- **The request** goes over the shell relay as `file_chooser` to the focused shell, not as a `filechooserrequest` event: `{handle, detail, source: {appId, pid, windowId, name, parent}, thread}`. `detail` is a tab's fileChooser detail: `mode` is `open`, `open-multiple` (`multiple`), `folder` (`directory`, and `SaveFiles`) or `save`, with `title`, `filters`, `currentFilter`, `currentName` and `currentFolder` (from `current_name`, `current_folder` and `current_file`), plus `acceptLabel` (mnemonic underscores dropped) and `choices` (`[{id, label, options: [{id, label}], value}]`; no options is a checkbox, "true"/"false"). The answer is the tab's, `{paths, filter?}`, plus `choices: {id: value}`, or null.
+- **Filters.** Globs are kept, GTK's case-blind spelling (`*.[pP][nN][gG]`) as `*.png`; MIME types become their globs from shared-mime-info (`mime/globs2` in the XDG data dirs; `image/*` is every image type). A filter none of whose types is known shows every file. A `current_filter` not in the list is added to it, as GTK does.
+- **The parent window.** The handle (`x11:<xid>`, `wayland:<xdg-foreign handle>`) names nothing Exo knows, so the helper takes the app's windows by the request's pid (else its app id): the focused one, else the newest. The library's picker opens over that window's `<native-window>` (`shell.shownWindowElement()`), else in the middle of the page, and takes the keyboard from the app while it's open (as the color picker does).
+- **The library.** The `fileChooser` option covers apps too: false refuses them (the app gets an error), a function gets the request with `source` instead of `tabId` and answers through `request.answer()`. The picker's header names the app; the choices are a select or a checkbox each in the footer.
+- **The answer** is file:// URIs (`SaveFiles`: the chosen folder joined with each of the app's names; nothing asks before overwriting those, as with GTK's backend), with the choices, the chosen filter (`current_filter`) and, for `OpenFile`, `writable`. For sandboxed apps, xdg-desktop-portal's frontend puts them in the document portal itself.
+- **Cancelling.** The app going away (or `Request.Close`) closes the picker (`file_chooser_cancel` to every shell); a shell going away cancels the request (response 2). Without a shell there's no picker: response 2.
+- **Verified** on X11 (slot 5, xdg-desktop-portal 1.20.4 on `tools/portal-bus.sh`'s bus; build 113d99ec5ee9's series):
+  - zenity 4.2.2 (GTK 4, `GDK_DEBUG=portals`): `--multiple` with two filters (both files back), `--save` over an existing file (the picker's Replace, then the path), `--directory`; killing zenity while asked closed the picker;
+  - gtk4-print-editor (GTK 4): Open and Save As from its window, the picker over that window, the saved file written;
+  - Firefox (`widget.use-xdg-desktop-portal.file-picker` 1): Ctrl+O, its six filters, the picker over its window, the file opened in a tab;
+  - `tools/portal-filechooser.py`: the accept label, a select and a checkbox (answered `latin1` and `true`), a MIME filter (`text/markdown` listed `.md` files) and the chosen filter back; `save-files x.png y.png` into a chosen folder;
+  - Chromium 147.0.7727.137 (Wayland; it uses the portal by default, as Electron does): Ctrl+O, the picker over its window, the file opened;
+  - a tab's `<input type=file multiple>` still opens the picker over the tab and gets the file.
+  - Not tried: a Flatpak app (the document portal on a private bus would mount over the user's), an Electron app itself, and DRM.
 
 ### Paths in the container
 
@@ -250,7 +266,7 @@ So a tab and a native app show one picker with the same places and the same rece
 - S–M for the container paths;
 - M for the portal interface, on top of the portal backend item.
 
-**Built** (2026-10-23, the patch "Plutonium: file pickers for tabs ask the shell", `plutonium_file_chooser.{h,cc}`; `helper/src/files.ts`; the library's picker; the agent tool `choose_files`). Tabs only: the portal interface isn't built. These details differ from the design or fill it in:
+**Built** (2026-10-23, the patch "Plutonium: file pickers for tabs ask the shell", `plutonium_file_chooser.{h,cc}`; `helper/src/files.ts`; the library's picker; the agent tool `choose_files`). Tabs only at first; native apps since, through the FileChooser portal (above). These details differ from the design or fill it in:
 - The request is the plumbing's tab request, kind `fileChooser`, not a separate `filechooserrequest`. Its detail is `{mode, upload, title, origin, filters: [{name, patterns}], currentFilter, currentName, currentFolder, defaultExtension}`. `mode` is `open`, `open-multiple`, `folder` or `save`, and `upload` is true for `<input webkitdirectory>`. `currentName` is only set for `save`. The answer is `{paths, filter?}`, where `filter` is an index into `filters`, or `null` (or no paths) to cancel. A save answer with no extension gets `defaultExtension`. An answer with several paths for a single-path mode, or with a path that is relative or has `..`, is refused, so the request stays open.
 - `PlutoniumSelectFileDialogFactory` wraps the Files app's factory in shell mode (`chrome_browser_main_extra_parts_ash.cc`). It knows the tab from `ChromeSelectFilePolicy::GetSourceContents()`, a new static getter. It returns null for a policy that isn't a `ChromeSelectFilePolicy`, and the policies are kept in a set because there's no RTTI to tell them apart. Every picker a registry tab opens goes through it: inputs, `showOpenFilePicker`/`showSaveFilePicker`/`showDirectoryPicker`, and a download's Save As. Chrome's own checks still run after the answer, such as "Upload 5 files?" for a folder upload and the File System Access blocklist.
 - `Tab::RunFileChooser()` and `EnumerateDirectory()` call `FileSelectHelper`. In shell mode, `FileSelectHelper` doesn't cancel a registry tab's picker when the tab's window gets too small (`WebContentsBasedCanceller`'s window-size guard), because a shell that reloads drops the tab's embed. A hidden tab's picker is still cancelled before it gets anywhere (`WebContentsImpl::RunFileChooser`), as in Chrome. So an agent's tab has to be shown to open a picker, and agents that drive pages with Playwright intercept the picker anyway. The user is fine with that (2026-10-24).
@@ -347,6 +363,13 @@ The doc's earlier plan had the helper move each file into place after it complet
 
 **The Print portal** (`org.freedesktop.impl.portal.Print`, part of "Our own portal backend for the rest") uses the same dialog for native apps. `PreparePrint` shows the dialog without a preview and returns the settings, and `Print` hands the helper the document, which it sends to CUPS. So tabs and apps get one print dialog, as they get one file picker.
 
+**Built** (2026-10-26; `helper/src/printPortal.ts`, `printportal.py`, the library's `PrintDialog`):
+- **Its own process.** `Print` passes the document as a Unix fd, and Node can't receive fds. So `printportal.py` (plain Python, a small D-Bus client that negotiates fds) serves `org.freedesktop.impl.portal.Print` as `org.freedesktop.impl.portal.desktop.plutonium.print` (`helper/portal/plutonium-print.portal`; `plutonium-portals.conf` picks `plutonium-print` for Print). The helper starts it with the portal backend. Each call goes to the helper as a JSON line on its stdout, with Print's document copied to a file of its own under `$XDG_RUNTIME_DIR/plutonium/`, which the helper reads and removes. The answer comes back on stdin.
+- **PreparePrint** asks the focused shell (`print_prepare` over the shell relay: `{handle, detail: {title, printer, copies, landscape, paper}, source: {appId, pid, windowId, name, parent}, thread}`, the starting values from the app's settings and page setup). The library's dialog has no preview, Scale, Margins, Headers or Background graphics, since the app lays out its own pages. It opens over the app's window (found as the file picker finds it) and takes the keyboard from the app. Its answer, `{printer, path, copies, duplex, color, paper, landscape, pageRanges}` (printer "" for Save as PDF), or null, becomes GTK's settings (`printer` "Print to File" with `output-uri` for a PDF; `n-copies`, `duplex`, `use-color`, `orientation`, `paper-format`, `print-pages` and zero-based `page-ranges`), a page setup (the paper in mm, quarter-inch margins), and a token. The `print` option covers apps too: false refuses them; a function gets the request with `source` and answers through `request.answer()`.
+- **Print** takes the token's choice (or asks, without one): `lp` to the printer with two-sided and colour, but not the copies, since GTK puts them in the document; or the PDF written to the chosen path (`~/` works; an existing file gets " (1)").
+- **Cancelling.** The app's `Request.Close` closes the dialog (`print_cancel`).
+- **Verified** on X11 (slot 5, xdg-desktop-portal 1.20.4 on `tools/portal-bus.sh`'s bus), with gtk4-print-editor (`GDK_DEBUG=portals`): Print showed the dialog without a preview, named the app, and started from the app's own paper the second time; Save as PDF on A4 wrote a one-page A4 PDF with the text; landscape with two copies wrote two landscape A4 pages; Cancel cancelled, and the app carried on. A tab's print dialog is unchanged (preview, all fields). Not verified: a real printer (no CUPS client on this host), Qt apps, Flatpak apps.
+
 **Fallback.**
 - Chrome's print preview, as a dialog over the shell's window. The tab gets a `web_modal::WebContentsModalDialogManager` whose delegate gives the shell's widget as the host (`HasWebContentsModalDialogHost()` in `print_preview_dialog_controller.cc`).
 - If the preview can't offer real printers (above), it still saves PDFs.
@@ -393,7 +416,7 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `cancel_print`: answers it `"cancel"`.
 - T3 Code gives its agents only the native-window tools (`WINDOW_TOOLS`), so its agents don't get these yet.
 
-**Not built.** The Print portal (`BACKLOG.md`). Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
+**Not built.** Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
 
 **Verified** on Xvfb (slot 26, the plain shell, a local test page), 2026-10-23/24, with stand-ins for `lpstat` and `lp` (this machine has no CUPS):
 
@@ -442,7 +465,7 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 4. **Downloads.** M. Files already land; this adds the UI, threads, open and show.
 5. **Find in page.** S–M.
 6. **Printing.** M–L.
-7. **The FileChooser and Print portals** on the same picker and dialog, with "Our own portal backend for the rest".
+7. **The FileChooser and Print portals** on the same picker and dialog, with "Our own portal backend for the rest". Both are built (2026-10-26).
 8. **Form autofill.** Only if it's wanted (below).
 
 ## Not covered here

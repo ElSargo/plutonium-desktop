@@ -23,6 +23,6 @@ Verified 2026-10-26 on Xvfb with the build of the UA patch (0055), in a tab on e
 - **Speech synthesis** has no voices (ChromeOS's come from its TTS extensions; Linux Chromium's from speech-dispatcher).
 - **Media keys and MPRIS**: a tab's media session goes to Ash's media controls; Linux Chromium exposes it on D-Bus (MPRIS), so the desktop's media keys and widgets see it.
 - **Dark mode** follows Ash's setting (dark), not the host's.
-- **IME**: Ash's input-method framework, not IBus/Fcitx (`BACKLOG.md`, text-input-v3).
+- **IME**: Ash's input-method framework, not IBus/Fcitx. Native apps get it over text-input-v1 and v3 (`IME.md`).
 - **Privacy Sandbox APIs** (Protected Audience, Shared Storage, fenced frames) are present in Linux Chromium 147 and not in ours; few sites look.
 - **WebGL** reports ANGLE on Vulkan with the real GPU, like Linux Chromium with Vulkan; Linux Chromium's default is ANGLE on OpenGL, a different but not ChromeOS-specific string.

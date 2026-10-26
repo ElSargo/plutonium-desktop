@@ -89,6 +89,8 @@
 | Find, zoom, printing, permissions, downloads, file pickers for tabs | [features/TAB_FEATURES.md](features/TAB_FEATURES.md) |
 | Several monitors (design) | [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md) |
 | What pages see (Linux, not ChromeOS), and what still differs | [features/LINUX_COMPAT.md](features/LINUX_COMPAT.md) |
+| Input methods for native apps (text-input-v3) | [features/IME.md](features/IME.md) |
+| Wayland protocols added to Exo: activation, cursor shapes | [features/WAYLAND_PROTOCOLS.md](features/WAYLAND_PROTOCOLS.md) |
 | GPU for apps, dmabuf | [features/GPU_X11.md](features/GPU_X11.md), [history/VIABILITY_REPORT.md](history/VIABILITY_REPORT.md) |
 | Shell mode on DRM, display planes | [history/PHASE4_PROGRESS.md](history/PHASE4_PROGRESS.md) |
 | The helper's HTTP API and shell library | [../helper/README.md](../helper/README.md) |

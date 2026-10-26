@@ -89,8 +89,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `--plutonium-shell-url` opens the page as the only, fullscreen window, with
   Ash in kiosk app mode; `plutonium run` boots it on DRM. Verified on
   the panel (tty2, 2026-10-16).
-- [ ] **Autostart at power-on.** Today the session starts from a logged-in VT.
-  Getty autologin plus a unit that runs the launcher. S
+- [x] **Autostart at power-on.** S · A display manager's automatic login
+  with the session entry below, or getty autologin and `plutonium session
+  start` from the login shell (INSTALL.md, "From the login screen"). Not yet
+  tried on the panel.
 - [x] **Hotplugged input devices are ignored in the container.** Done: host
   root shows up in the container as uid 65534, which keep-id mapped, so
   libudev dropped the host's events ("Sender uid=65534, message ignored").
@@ -406,15 +408,21 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   2026-10-20); an automated check in both directions is part of the DRM
   verification pass. The primary selection (middle-click paste) isn't a
   requirement.
-- [ ] **text-input-v3 (IME for GTK 4, Qt, foot).** L · Phase 5
-  Exo only has text-input-v1. With v1, activation and focus handoff to and
-  from the page work (`weston-editor`).
-- [ ] **Test real IME composition.** S · Phase 5
-  No IME engine runs on the Xvfb Ash, so pre-edit/commit was never
-  exercised. Needs a session with a ChromeOS IME available.
-- [ ] **Other missing Wayland protocols** as apps need them: `xdg_activation`,
-  `wp_cursor_shape_v1`, `xdg_toplevel_icon`, explicit sync,
-  `ext_data_control`. M each · Phase 5
+- [x] **text-input-v3 (IME for GTK 4, Qt, foot).** Done (patch 0061,
+  `features/IME.md`). foot and gtk4-demo bind it, get enter/leave and
+  enable, and take pre-edit and commits. Qt 6 is untested.
+- [x] **Test real IME composition.** Done on Xvfb with a test extension IME
+  (`tools/ime-test.sh`). It showed that no IME text had ever reached an
+  embedded window, over v1 or v3 (fixed in 0062), and that keys an IME passes
+  on were dropped (fixed in 0065).
+- [ ] **Choosing an input method.** M · Phase 5
+  Shell mode has no IME menu or language settings, so a user can't pick or
+  install an IME. That needs shell UI over `inputMethodPrivate`, or the
+  settings page (`features/IME.md`, "What's missing").
+- [ ] **Other missing Wayland protocols** as apps need them:
+  `xdg_toplevel_icon`, explicit sync, `ext_data_control`. M each · Phase 5
+  `xdg_activation_v1` and `wp_cursor_shape_v1` are done (0063, 0064,
+  `features/WAYLAND_PROTOCOLS.md`).
 - [x] **X11 apps** via rootless Xwayland as an Exo client. Done
   (xwayland-satellite per thread, now in the helper).
 - [ ] **Our own portal backend for the rest** (`org.freedesktop.impl.portal.*`
@@ -425,11 +433,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   more interfaces. The UI is drawn by the shell rather than GTK or KDE
   dialogs: FileChooser, OpenURI (Flatpak link opening, see
   `features/OPENING_LINKS.md`), Settings (color scheme, accent),
-  Notification, Inhibit, Print, Account, Access and Background. A
-  FileChooser dialog should open over its parent's element (see "Where do
-  dialogs go?") and uses the same picker as tabs' file inputs (`TAB_FEATURES.md`). Needs
-  the parent window handle mapped to Exo windows, which the capture picker
-  needs too.
+  Notification, Inhibit, Print, Account, Access and Background.
+  FileChooser and Print are built (below, "The FileChooser portal on the
+  same picker", "The Print portal on the same dialog"); FileChooser's dialog opens over the app's window, found by the request's
+  pid (the parent window handle, an XID or an xdg-foreign handle, isn't
+  mapped to Exo windows).
 - [ ] **Password manager adapter** (`features/PASSWORDS.md`). L · Phase 5
   One adapter for the user's manager (Bitwarden first, then 1Password,
   KeePassXC, `pass`). Logins are auto-typed into tabs (origin-checked) and
@@ -532,9 +540,18 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
     Chrome flags as dangerous;
   - printing: a real printer through CUPS (two-sided, black and white);
     printing on DRM.
-- [ ] **FileChooser and Print portals on the same picker and dialog.** M ·
-  Part of "Our own portal backend for the rest": the same
-  `filechooserrequest` and print dialog for native apps.
+- [x] **The FileChooser portal on the same picker.** M · Built
+  2026-10-26 (`TAB_FEATURES.md`, "One picker with the FileChooser
+  portal"): OpenFile, SaveFile and SaveFiles on the library's picker, over
+  the app's window. Left: a Flatpak app through the document portal, checked
+  on a real session (the frontend exports the URIs itself; not tried on the
+  private test bus, which would start a second document portal on the
+  user's `$XDG_RUNTIME_DIR/doc`).
+- [x] **The Print portal on the same dialog.** M · Built 2026-10-26
+  (`TAB_FEATURES.md`, "The Print portal"): `printportal.py` serves it,
+  since the document comes as an fd Node can't receive; the library's
+  print dialog without a preview, then CUPS or Save as PDF. Left: a real
+  printer, a Qt app and a Flatpak app, checked on a real session.
 - [ ] **Form autofill in tabs.** S–M to L · Not now (decided 2026-10-23).
   Later: identities and cards through the password adapter.
 
@@ -730,6 +747,13 @@ shells that want to span monitors run on each and sync themselves.
   mount that file pickers and downloads rely on.
 - [ ] **Build and push the image from CI** (GitHub Actions can't build Chromium
   in its time limits on free runners; a self-hosted runner could). M
-- [ ] **Start from a display manager** (a Wayland session entry that runs
-  `plutonium run`), instead of a logged-in text console. M
+- [x] **Start from a display manager.** M · `plutonium session install`
+  writes `/usr/share/wayland-sessions/plutonium.desktop`, which runs
+  `plutonium session start`: the container and the kill switch first, then
+  `plutonium run` in the display manager's logind session, and back to the
+  login screen when it ends, with why in the journal (`journalctl -t
+  plutonium-session`). Checked with dry runs and a session that fails to
+  start; not yet tried with a real display manager (GDM, SDDM).
+- [ ] **A login screen entry for every user.** S · The entry runs one
+  checkout's `bin/plutonium`, so it's for the user who installed it.
 - [x] **A license:** MIT.

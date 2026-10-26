@@ -6,7 +6,7 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 - **`patches/`**: the patch series, in order (`git am`). Together they change 251 files (about 20,900 lines).
 - **`args.gn`**: the build arguments.
 
-`plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [INSTALL.md](../INSTALL.md).
+`plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [docs/BUILDING.md](../docs/BUILDING.md).
 
 ## The patches
 

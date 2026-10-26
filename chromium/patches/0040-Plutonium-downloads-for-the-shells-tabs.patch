@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 09:22:04 +1300
-Subject: [PATCH 40/62] Plutonium: downloads for the shells' tabs
+Subject: [PATCH 40/65] Plutonium: downloads for the shells' tabs
 
 EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "Downloads"): the
 profile's download manager already saves what tabs download, but its UI
