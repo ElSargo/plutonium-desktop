@@ -35,6 +35,10 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
 - **A shell's server misbehaves**: `curl --unix-socket "$PLUTONIUM_HELPER" http://helper/v1/shells` for state; `POST /v1/shells/<name>/restart`; its log is above.
 - **A shell that needs the computer** (files, commands) **or keeps settings**: `"native": "native.js"` in `shell.json` (a module the helper runs; its exported functions are `shell.native.call(name, args)`) and `shell.storage.get/set` (kept in `{{PLUTO_HOME}}/data/<name>/`, survives rollbacks). See `{{PLUTONIUM}}/docs/features/DESKTOP_SERVICES.md`, "A native side and storage". Don't add a server just for this.
 - **Volume, Wi-Fi, Bluetooth, brightness, battery, notifications**: `shell.system.<service>` in the shell library, after naming it in `shell.json`'s `"uses"` (`{{PLUTONIUM}}/docs/features/DESKTOP_SERVICES.md` lists which exist so far, their state and actions). A shell page can't run commands, so don't work around a missing one; tell the user it's coming.
+  - `audio`: outputs and inputs, the default's `volume`/`muted` up front; `set-volume`, `set-mute`, `set-default`, `step`.
+  - `power`: `battery` (null on a desktop), `ac`, `brightness` (`available`, 0–1), `can`; `set-brightness`, `step`, `suspend`, `reboot`, `power-off`, `log-out` (ends the Plutonium session). Always confirm the last four with the user's click in your UI.
+  - `media`: MPRIS players and the browser's media session, most recent first; `play-pause`, `next`, `previous`, `play`, `pause`, `stop`.
+  - The volume, brightness and media keys already work in every shell; listen for the shell's `systemkey` event to draw a level. niri's and plain's indicators (`audio.js`, `power.js`, … in their folders, one module each over `tray.js`) are examples to copy.
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 
 ## shell.json
