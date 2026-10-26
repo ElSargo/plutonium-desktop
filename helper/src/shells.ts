@@ -515,8 +515,13 @@ export function newShellName(home: string, title: string): string {
 }
 
 /** A shell folder (a git repository) for a page the user runs elsewhere. */
-export function addExternalShell(home: string, title: string, url: string, context?: ShellContext): string {
-  const name = newShellName(home, title);
+export function addExternalShell(
+  home: string,
+  title: string,
+  url: string,
+  context?: ShellContext,
+  name = newShellName(home, title),
+): string {
   const dir = shellDir(home, name);
   mkdirSync(dir, { recursive: true });
   // Without the helper's parameter, which the session adds.
@@ -530,4 +535,99 @@ export function addExternalShell(home: string, title: string, url: string, conte
   git(dir, ["init", "-q", "-b", "main"]);
   commitEdits(dir, "added");
   return name;
+}
+
+// --- Adding a shell ----------------------------------------------------------
+
+export interface AddPreview {
+  readonly kind: "folder" | "git" | "address";
+  readonly source: string;
+  readonly name: string;
+  readonly title: string;
+  /** The origin that gets shell rights. */
+  readonly origin: string;
+  /** What starts its server (plutonium), or the page it opens. */
+  readonly command?: string;
+  readonly page: string;
+  readonly description?: string;
+}
+
+const isGitSource = (source: string) =>
+  /^(git@|ssh:\/\/|git:\/\/)/.test(source) || /\.git\/?$/.test(source) || /^https?:\/\/(github\.com|gitlab\.com|codeberg\.org)\/[^/]+\/[^/]+\/?$/.test(source);
+
+/**
+ * Looks at what the user wants to add: a folder with a shell.json, a git
+ * repository (cloned into a scratch folder in $PLUTO_HOME/shells, which
+ * addShell() keeps), or any other http(s) address (an external shell).
+ */
+export function previewShell(home: string, source: string, context: ShellContext): AddPreview & { readonly staged?: string } {
+  source = source.trim().replace(/^~(?=\/)/, homedir());
+  let dir: string;
+  let kind: AddPreview["kind"];
+  let staged: string | undefined;
+  if (source.startsWith("/")) {
+    kind = "folder";
+    dir = source;
+  } else if (isGitSource(source)) {
+    kind = "git";
+    staged = join(shellsDir(home), `.adding-${Date.now().toString(36)}`);
+    mkdirSync(shellsDir(home), { recursive: true });
+    try {
+      execFileSync("git", ["clone", "-q", "--depth", "50", "--", source, staged], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 120_000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+    } catch (error) {
+      throw new ShellError(`couldn't clone ${source}: ${String((error as { stderr?: Buffer }).stderr ?? error).trim()}`);
+    }
+    dir = staged;
+  } else if (/^https?:\/\//.test(source)) {
+    const url = new URL(source);
+    const name = newShellName(home, url.hostname === "localhost" || url.hostname === "127.0.0.1" ? `port-${url.port}` : url.hostname);
+    const manifest = parseManifest(JSON.stringify({ title: url.host, server: { run: "external", url: url.href } }), name);
+    return { kind: "address", source, name, title: url.host, origin: url.origin, page: entryUrl(manifest, context) };
+  } else {
+    throw new ShellError("Give a folder (/path or ~/path), a git URL, or an http(s) address.");
+  }
+  const base = kind === "folder" ? dir.replace(/\/+$/, "").split("/").pop()! : source.replace(/(\.git)?\/*$/, "").split(/[/:]/).pop()!;
+  const name = newShellName(home, base);
+  const manifest = readManifest(dir, name);
+  return {
+    kind,
+    source,
+    name,
+    title: manifest.title,
+    origin: shellOrigin(manifest, context),
+    page: baseUrl(manifest, context),
+    ...(manifest.server?.run === "plutonium"
+      ? { command: manifest.server.argv!.map((arg) => expand(arg, manifest, context)).join(" ") }
+      : {}),
+    ...(manifest.description ? { description: manifest.description } : {}),
+    ...(staged ? { staged } : {}),
+  };
+}
+
+/** Adds what previewShell() looked at, as $PLUTO_HOME/shells/<name> (a git repository). */
+export function addShell(home: string, preview: AddPreview & { readonly staged?: string }): string {
+  const dir = shellDir(home, preview.name);
+  if (existsSync(dir)) throw new ShellError(`${dir} exists`);
+  if (preview.kind === "address") {
+    return addExternalShell(home, preview.title, preview.source, undefined, preview.name);
+  }
+  if (preview.kind === "git") {
+    renameSync(preview.staged!, dir);
+    // The user's edits are commits on main, whatever the repository called its branch.
+    git(dir, ["checkout", "-q", "-B", "main"]);
+    return preview.name;
+  }
+  if (existsSync(join(preview.source, ".git"))) {
+    execFileSync("git", ["clone", "-q", "--", preview.source, dir], { stdio: "pipe" });
+    git(dir, ["checkout", "-q", "-B", "main"]);
+  } else {
+    cpSync(preview.source, dir, { recursive: true });
+    git(dir, ["init", "-q", "-b", "main"]);
+    commitEdits(dir, "added");
+  }
+  return preview.name;
 }

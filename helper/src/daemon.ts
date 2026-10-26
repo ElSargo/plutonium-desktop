@@ -2056,6 +2056,7 @@ export class Daemon {
     if (!shells) throw new HttpError(404, "This session has no installed shells.");
     try {
       if (method === "GET" && path === "/v1/shells/list") return sendJson(response, 200, shells.status());
+      if (method === "POST" && path === "/v1/shells/add") return sendJson(response, 200, shells.add(await readJson(request)));
       if (method === "GET" && path === "/v1/shells/wait") {
         await shells.whenServersUp();
         return sendJson(response, 200, shells.status());

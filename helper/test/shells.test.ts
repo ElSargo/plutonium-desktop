@@ -10,7 +10,9 @@ import { after, describe, test } from "node:test";
 import { ShellPackages } from "../src/shellPackages.ts";
 import { ShellServer } from "../src/shellServers.ts";
 import {
+  addShell,
   effectiveList,
+  previewShell,
   entryUrl,
   installShell,
   parseManifest,
@@ -141,6 +143,33 @@ describe("installing and updating", () => {
     assert.deepEqual(result.status === "conflict" && result.files, ["index.html"]);
     assert.equal(readFileSync(join(dir, "index.html"), "utf8"), "<h1>mine</h1>\n");
     assert.equal(execFileSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8" }), "");
+  });
+});
+
+describe("adding a shell", () => {
+  test("a folder: previewed with its origin and server command, then copied as a git repository", () => {
+    const home = fresh("home");
+    const source = fresh("mine");
+    writeFileSync(
+      join(source, "shell.json"),
+      JSON.stringify({ title: "Mine", server: { run: "plutonium", argv: ["node", "server.js", "{port}"], port: 5000 } }),
+    );
+    const preview = previewShell(home, source, context(home));
+    assert.equal(preview.kind, "folder");
+    assert.equal(preview.origin, "http://127.0.0.1:5200");
+    assert.equal(preview.command, "node server.js 5200");
+    const name = addShell(home, preview);
+    assert.deepEqual(gitLog(shellDir(home, name)), ["added: shell.json"]);
+  });
+
+  test("an address becomes an external shell", () => {
+    const home = fresh("home");
+    const preview = previewShell(home, "http://localhost:5173/app", context(home));
+    assert.equal(preview.kind, "address");
+    assert.equal(preview.origin, "http://localhost:5173");
+    const name = addShell(home, preview);
+    assert.equal(name, "port-5173");
+    assert.throws(() => previewShell(home, "nonsense", context(home)), ShellError);
   });
 });
 

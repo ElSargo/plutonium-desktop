@@ -9,13 +9,17 @@
 // goes back to the last commit that came up (refs/plutonium/good) in a new
 // commit, and the shell reloads; the failed commit is kept
 // (refs/plutonium/failed) for Retry and Diff, and the switcher shows a notice.
-import { existsSync, type FSWatcher, readFileSync, statSync, watch, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, type FSWatcher, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 
 import { ShellServer, type ServerStatus } from "./shellServers.ts";
 import {
   addExternalShell,
+  addShell,
+  previewShell,
+  type AddPreview,
   commitEdits,
   effectiveList,
   entryUrl,
@@ -109,6 +113,10 @@ export class ShellPackages {
   /** Servers the user stopped: the browser's list doesn't start them again. */
   private readonly userStopped = new Set<string>();
   private activeOrigins = new Set<string>();
+  /** Shells added from the shells page that the browser doesn't list yet: the switcher adds them. */
+  private readonly pendingAdd = new Set<string>();
+  /** Previews waiting for the user's yes (a git clone is staged). */
+  private readonly previews = new Map<string, AddPreview & { readonly staged?: string }>();
   private startTimer: NodeJS.Timeout | undefined;
   private readonly connectTimeoutMs: number;
 
@@ -234,6 +242,7 @@ export class ShellPackages {
     for (const timer of this.editTimers.values()) clearTimeout(timer);
     for (const check of this.checks.values()) clearTimeout(check.timer);
     clearTimeout(this.startTimer);
+    for (const preview of this.previews.values()) if (preview.staged) rmSync(preview.staged, { recursive: true, force: true });
     // The servers keep running: the next helper adopts them.
   }
 
@@ -270,6 +279,7 @@ export class ShellPackages {
           ...(this.notices.has(shell.name) ? { notice: this.notices.get(shell.name) } : {}),
           ...(failed ? { failed } : {}),
           ...(this.checks.has(shell.name) ? { checking: true } : {}),
+          ...(this.pendingAdd.has(shell.name) ? { add: true } : {}),
           ...(shell.error ? { error: shell.error } : {}),
         };
       });
@@ -317,6 +327,7 @@ export class ShellPackages {
       }
       if (shellOfHost(url.host) === "safe") continue;
       let name = this.byOrigin(url.origin)?.name;
+      if (name) this.pendingAdd.delete(name);
       if (!name) {
         name = addExternalShell(this.home, shell.name, shell.url, this.context);
         this.watchFolder(name);
@@ -545,6 +556,37 @@ export class ShellPackages {
         void body;
         throw new ShellError(`Unknown action "${action}".`);
     }
+  }
+
+  /**
+   * Adding a shell from the shells page: first a preview (what gets shell
+   * rights, what its server runs), then, with the preview's token, the shell
+   * goes in $PLUTO_HOME/shells, on, at the end of the list. The switcher
+   * adds it to the browser's list the next time it's open.
+   */
+  add(body: Record<string, unknown>): unknown {
+    if (typeof body.token === "string") {
+      const preview = this.previews.get(body.token);
+      if (!preview) throw new ShellError("That preview is gone: look again.");
+      this.previews.delete(body.token);
+      const name = addShell(this.home, preview);
+      const list = effectiveList(this.home).filter((entry) => entry.name !== name);
+      writeList(this.home, [...list, { name, enabled: true }]);
+      this.pendingAdd.add(name);
+      this.watchFolder(name);
+      return this.status().find((shell) => shell.name === name);
+    }
+    if (typeof body.source !== "string" || !body.source.trim()) throw new ShellError("Nothing to add.");
+    const preview = previewShell(this.home, body.source, this.context);
+    const token = randomUUID();
+    this.previews.set(token, preview);
+    setTimeout(() => {
+      if (this.previews.get(token) !== preview) return;
+      this.previews.delete(token);
+      if (preview.staged) rmSync(preview.staged, { recursive: true, force: true });
+    }, 15 * 60_000).unref();
+    const { staged: _staged, ...shown } = preview;
+    return { ...shown, token };
   }
 
   /** Text: the log, the history, the failed change's diff. */

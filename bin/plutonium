@@ -743,6 +743,13 @@ run_cmd() {
   export MODE=$mode SOCKET CDP_PORT HELPER_PORT PROFILE XDISP PRIVATE_XDISP
   shells_ensure
   local key value vars entry entries=() origins=()
+  # Two starts in a row with no shell coming up (the helper counts them).
+  if [[ -z $safe && ${#shells[@]} -eq 0 && $(cat "$PLUTO_HOME/failed-starts" 2> /dev/null || echo 0) -ge 2 ]]; then
+    echo "plutonium: no shell came up in the last two starts: safe mode, with the shipped plain shell." >&2
+    echo "plutonium: fix yours from the switcher (Super+Tab: a shell's page, or the backup terminal); the next start runs them again." >&2
+    echo 0 > "$PLUTO_HOME/failed-starts"
+    safe=1
+  fi
   if [[ -n $safe ]]; then
     vars=$(shells_entries --safe) || exit 1
   elif [[ ${#shells[@]} -eq 0 ]]; then
