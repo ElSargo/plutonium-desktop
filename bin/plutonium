@@ -1309,7 +1309,6 @@ doctor() {
     check "python3 websockets (plutonium cdp)" "on_ash python3 -c 'import websockets'" "plutonium host build"
   elif [[ -z $podman_ok ]]; then
     echo "Container: (checked once podman works)"
-    missing=$((missing + 1))
   else
     echo "Container and Chromium:"
     local remake="make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
