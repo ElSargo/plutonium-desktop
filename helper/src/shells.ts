@@ -16,6 +16,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
 
+import { SERVICE_NAMES } from "./services.ts";
+
 export const MANIFEST = "shell.json";
 /** The branch that holds the versions Plutonium shipped; the user's is main. */
 export const SHIPPED_BRANCH = "shipped";
@@ -50,6 +52,8 @@ export interface ShellManifest {
   readonly server?: ServerSpec;
   /** The query parameter that names the helper (default "helper"). */
   readonly helperParam?: string;
+  /** The desktop services it uses (services.ts): "audio", "network", … */
+  readonly uses?: readonly string[];
 }
 
 export interface ShellListEntry {
@@ -108,12 +112,20 @@ export function parseManifest(text: string, name: string): ShellManifest {
     ...(str("static") ? { static: str("static") } : {}),
     ...(str("helperParam") ? { helperParam: str("helperParam") } : {}),
     ...(value.server ? { server: parseServer(value.server) } : {}),
+    ...(value.uses !== undefined ? { uses: parseUses(value.uses) } : {}),
   };
   if (!manifest.static === !manifest.server) throw new ShellError(`${MANIFEST} needs either "static" or "server"`);
   if (manifest.static && (manifest.static.startsWith("/") || manifest.static.split("/").includes(".."))) {
     throw new ShellError(`"static" must be a path inside the shell's folder`);
   }
   return manifest;
+}
+
+function parseUses(value: unknown): string[] {
+  if (!isStringArray(value)) throw new ShellError(`"uses" is a list of services`);
+  const unknown = value.filter((name) => !(SERVICE_NAMES as readonly string[]).includes(name));
+  if (unknown.length) throw new ShellError(`"uses" names no service ${unknown.join(", ")} (${SERVICE_NAMES.join(", ")})`);
+  return value;
 }
 
 function parseServer(value: unknown): ServerSpec {

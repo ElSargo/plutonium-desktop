@@ -46,6 +46,7 @@ import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
+import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -344,6 +345,10 @@ export class Daemon {
   readonly options: DaemonOptions;
   readonly threads: Threads;
   readonly relay = new ShellRelay();
+  /** Desktop services (services.ts): their changes go to the shells that may use them. */
+  readonly services = new DesktopServices((service, state) =>
+    this.relay.notifyWhere((origin) => this.mayUse(origin, service), "system", { service, state }),
+  );
   readonly apps = new DesktopApps();
   readonly terminals: Terminals;
   readonly serverTabs: ServerTabs | null;
@@ -548,6 +553,12 @@ export class Daemon {
       `plutoniumd: ${what}: no tags from the browser; ` +
         (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
     );
+  }
+
+  /** Whether the shell on `origin` may use desktop service `service` (its "uses"). */
+  private mayUse(origin: string, service: string): boolean {
+    const shell = this.options.shells?.byOrigin(origin);
+    return mayUse(shell?.manifest?.uses, shell !== undefined, service);
   }
 
   private isShellOrigin(origin: string): boolean {
@@ -1523,6 +1534,29 @@ export class Daemon {
         response.writeHead(known ? 204 : 404).end();
         return;
       }
+      // Desktop services (services.ts): what there is, a service's state, an action.
+      if (method === "GET" && path === "/v1/shell/system") {
+        return sendJson(response, 200, {
+          services: this.services.names().map((name) => ({ name, allowed: this.mayUse(origin, name) })),
+        });
+      }
+      const system = path.match(/^\/v1\/shell\/system\/([a-z]+)(?:\/([\w-]+))?$/);
+      if (system) {
+        const [, name, action] = system as unknown as [string, string, string | undefined];
+        if (!this.mayUse(origin, name)) {
+          throw new HttpError(403, `This shell doesn't use "${name}": add it to "uses" in its shell.json.`);
+        }
+        try {
+          if (method === "GET" && !action) return sendJson(response, 200, await this.services.state(name));
+          if (method === "POST" && action) {
+            const args = (await readJson(request)) as Record<string, unknown>;
+            return sendJson(response, 200, { value: (await this.services.call(name, action, args ?? {})) ?? null });
+          }
+        } catch (error) {
+          if (error instanceof ServiceError) throw new HttpError(error.status, error.message);
+          throw error;
+        }
+      }
       if (method === "POST" && path === "/v1/shell/origins") {
         // The browser's shells, from a page that is already a shell: what
         // the shells overlay added or removed.
@@ -2178,6 +2212,7 @@ export class Daemon {
 
   stop(): void {
     this.options.shells?.stop();
+    this.services.stop();
     this.portal?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();

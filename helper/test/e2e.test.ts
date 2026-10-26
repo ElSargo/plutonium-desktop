@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { helperJson, helperRequest } from "../src/client.ts";
 import { Daemon } from "../src/daemon.ts";
 import type { NativeWindowEntry } from "../src/relay.ts";
+import { ServiceError } from "../src/services.ts";
 import { FakeBus, STATE } from "./fixtures/fakeBus.ts";
 
 const CLI = fileURLToPath(new URL("../plutonium.ts", import.meta.url));
@@ -47,6 +48,8 @@ function windowEntry(id: number, title: string, pid: number, tags?: string[]): N
 /** A shell page: answers the helper's requests over its EventSource stream. */
 class FakeShell {
   readonly ops: { op: string; args: Record<string, unknown> }[] = [];
+  /** What the helper told it without asking (no id). */
+  readonly notices: { op: string; args: Record<string, unknown> }[] = [];
   windows: NativeWindowEntry[] = [];
   private stream: IncomingMessage | undefined;
   private readonly port: number;
@@ -83,7 +86,10 @@ class FakeShell {
   }
 
   private async onEvent(event: { id?: string; op: string; args: Record<string, unknown> }): Promise<void> {
-    if (event.id === undefined) return;
+    if (event.id === undefined) {
+      this.notices.push({ op: event.op, args: event.args });
+      return;
+    }
     this.ops.push({ op: event.op, args: event.args });
     switch (event.op) {
       case "windows":
@@ -450,4 +456,62 @@ describe("helper end to end", () => {
     const missing = await helperRequest(socketPath, "GET", "/v1/thread-setup");
     assert.equal(missing.status, 400);
   });
+
+  test("desktop services: state, actions and changes for the shell", async () => {
+    const port = (daemon as unknown as { options: { port: number } }).options.port;
+    const shellJson = (method: string, path: string, body?: unknown) => shellRequest(port, method, path, body);
+    let volume = 0.5;
+    let changed: ((state: unknown) => void) | undefined;
+    daemon.services.register({
+      name: "audio",
+      start: async (onChange) => {
+        changed = onChange;
+      },
+      state: async () => ({ volume }),
+      call: async (action, args) => {
+        if (action !== "set-volume") throw new ServiceError(404, `no action ${action}`);
+        volume = args.volume as number;
+        changed?.({ volume });
+        return volume;
+      },
+    });
+    assert.deepEqual(await shellJson("GET", "/v1/shell/system"), { status: 200, body: { services: [{ name: "audio", allowed: true }] } });
+    assert.deepEqual(await shellJson("GET", "/v1/shell/system/audio"), { status: 200, body: { volume: 0.5 } });
+    assert.deepEqual(await shellJson("POST", "/v1/shell/system/audio/set-volume", { volume: 0.8 }), {
+      status: 200,
+      body: { value: 0.8 },
+    });
+    assert.equal((await shellJson("POST", "/v1/shell/system/audio/explode", {})).status, 404);
+    assert.equal((await shellJson("GET", "/v1/shell/system/network")).status, 404);
+    for (let i = 0; i < 50 && !shell.notices.some((notice) => notice.op === "system"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(
+      shell.notices.find((notice) => notice.op === "system")?.args,
+      { service: "audio", state: { volume: 0.8 } },
+    );
+  });
 });
+
+/** A request from the shell's page (its origin) to the helper's port. */
+function shellRequest(port: number, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+  const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        method,
+        path,
+        headers: { Origin: SHELL_ORIGIN, ...(data ? { "Content-Type": "application/json", "Content-Length": data.length } : {}) },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => resolve({ status: response.statusCode ?? 0, body: JSON.parse(Buffer.concat(chunks).toString() || "null") }));
+      },
+    );
+    req.once("error", reject);
+    req.end(data);
+  });
+}

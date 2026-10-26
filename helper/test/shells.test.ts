@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { mayUse } from "../src/services.ts";
 
 import { ShellPackages } from "../src/shellPackages.ts";
 import { ShellServer } from "../src/shellServers.ts";
@@ -332,3 +333,20 @@ async function waitFor(condition: () => boolean, ms = 3_000): Promise<void> {
     await sleep(50);
   }
 }
+
+describe("a shell's uses", () => {
+  test("names known desktop services only", () => {
+    const base = { title: "Mine", static: "index.html" };
+    assert.deepEqual(parseManifest(JSON.stringify({ ...base, uses: ["audio", "network"] }), "mine").uses, ["audio", "network"]);
+    assert.equal(parseManifest(JSON.stringify(base), "mine").uses, undefined);
+    assert.throws(() => parseManifest(JSON.stringify({ ...base, uses: ["telepathy"] }), "mine"), /telepathy/);
+    assert.throws(() => parseManifest(JSON.stringify({ ...base, uses: "audio" }), "mine"), /list/);
+  });
+
+  test("an installed shell gets what it names; another page all", () => {
+    assert.equal(mayUse(["audio"], true, "audio"), true);
+    assert.equal(mayUse(["audio"], true, "network"), false);
+    assert.equal(mayUse(undefined, true, "audio"), false);
+    assert.equal(mayUse(undefined, false, "audio"), true);
+  });
+});

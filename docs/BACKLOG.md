@@ -709,9 +709,10 @@ a shell gets only what it names. Each one lands with its section in the
 skill (`skill/SKILL.md`) and a page in `docs/features/`, so agents building a
 shell find it.
 
-- [ ] **The services API** (`shell.system.<service>`: state, `change` events,
-  actions). M · One pattern for all below; a stub service and the `uses`
-  check.
+- [x] **The services API** (`shell.system.<service>`: state, `change` events,
+  actions). Done 2026-10-26: `helper/src/services.ts`, the `/v1/shell/system`
+  routes, `uses` in `shell.json`, `shell.system` in the library
+  ([DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md)).
 - [ ] **Audio.** M · Output/input devices, volume and mute per device
   (PipeWire via `wpctl`, or PulseAudio's D-Bus), per-app streams later.
   Volume and mute keys work without a shell asking.

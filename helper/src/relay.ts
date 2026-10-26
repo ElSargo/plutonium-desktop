@@ -182,6 +182,11 @@ export class ShellRelay {
     for (const key of this.connections.keys()) this.notify(key, op, args);
   }
 
+  /** Tells the pages of the origins `wanted` accepts something they don't answer. */
+  notifyWhere(wanted: (origin: string) => boolean, op: string, args: Record<string, unknown>): void {
+    for (const [key, connection] of this.connections) if (wanted(connection.origin)) this.notify(key, op, args);
+  }
+
   /** Tells page `key` something it doesn't answer (no id). */
   notify(key: string, op: string, args: Record<string, unknown>): void {
     this.connections.get(key)?.response.write(`data: ${JSON.stringify({ op, args })}\n\n`);

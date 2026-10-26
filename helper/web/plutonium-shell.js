@@ -259,6 +259,12 @@ export class PlutoniumShell extends EventTarget {
     this._appIcons = new Map();
     /** This page's id with the helper (its request stream's). */
     this._pageId = crypto.randomUUID();
+    /**
+     * Desktop services (DESKTOP_SERVICES.md): `shell.system.audio`, … each
+     * with its `state`, a "change" event and `call(action, args)`.
+     * @type {SystemServices & Record<string, SystemService>}
+     */
+    this.system = systemServices();
     /** @type {Map<string, { threadId: string, tabId: string, browserTabId: number, targetId: string }>} */
     this._serverTabs = new Map();
     /** Whether this Chromium has the capture API (screenshots, streams, capture requests). */
@@ -1539,6 +1545,7 @@ export class PlutoniumShell extends EventTarget {
       if (id === undefined) {
         // A notice: nothing to answer.
         if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
+        if (op === "system") this.system._changed(args.service, args.state);
         if (op === "global_shortcuts") {
           this.globalShortcuts = args.shortcuts ?? [];
           this._applyShortcuts();
@@ -2436,6 +2443,81 @@ function fileSize(bytes) {
 
 function joinPath(dir, name) {
   return name.startsWith("/") ? name : `${dir.replace(/\/$/, "")}/${name}`;
+}
+
+// Desktop services (DESKTOP_SERVICES.md). `shell.system.audio` is the audio
+// service: `await service.ready` (or `refresh()`) for its first state, then
+// its "change" events keep `state` current; `call(action, args)` runs an
+// action. A shell gets the services its shell.json names in "uses";
+// `shell.system.available()` lists them.
+
+class SystemService extends EventTarget {
+  constructor(name) {
+    super();
+    this.name = name;
+    /** The service's state (null until the first answer). */
+    this.state = null;
+    /** Why it isn't available (not in "uses", not on this computer), once asked. */
+    this.error = null;
+    /** Its first state (or the error). */
+    this.ready = this.refresh();
+  }
+
+  async refresh() {
+    try {
+      this._set(await helperFiles(`/v1/shell/system/${this.name}`));
+      this.error = null;
+    } catch (error) {
+      this.error = String(error?.message ?? error);
+      throw error;
+    }
+    return this.state;
+  }
+
+  async call(action, args = {}) {
+    const { value } = await helperFiles(`/v1/shell/system/${this.name}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    return value;
+  }
+
+  _set(state) {
+    this.state = state;
+    this.dispatchEvent(new CustomEvent("change", { detail: state }));
+  }
+}
+
+/** @typedef {{ available(): Promise<{ name: string, allowed: boolean }[]>, get(name: string): SystemService, _changed(name: string, state: unknown): void }} SystemServices */
+
+/** @returns {SystemServices & Record<string, SystemService>} */
+function systemServices() {
+  /** @type {Map<string, SystemService>} */
+  const services = new Map();
+  const get = (name) => {
+    let service = services.get(name);
+    if (!service) {
+      service = new SystemService(name);
+      service.ready.catch(() => {});
+      services.set(name, service);
+    }
+    return service;
+  };
+  const methods = {
+    async available() {
+      return (await helperFiles("/v1/shell/system")).services;
+    },
+    get,
+    _changed(name, state) {
+      services.get(name)?._set(state);
+    },
+  };
+  return /** @type {any} */ (
+    new Proxy(methods, {
+      get: (target, key) => (typeof key !== "string" || key in target ? target[key] : get(key)),
+    })
+  );
 }
 
 async function helperFiles(path, init) {
