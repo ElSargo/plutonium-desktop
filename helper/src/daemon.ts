@@ -453,7 +453,8 @@ export class Daemon {
           }
         : null,
       checker: checker ? unixChecker(checker) : null,
-      settingsFile: join(plutoHome(), "session.json"),
+      // The session's own home: a test slot's, not ~/.pluto (--pluto-home, not $PLUTO_HOME).
+      settingsFile: join(options.shells?.home ?? plutoHome(), "session.json"),
       // org.freedesktop.ScreenSaver: only the user's own session (slot 0) by default; a test
       // session in another slot would take the host desktop's apps' inhibitors
       // (PLUTONIUM_SCREENSAVER=1 serves it anyway, 0 never).

@@ -213,7 +213,13 @@ export class SessionService implements DesktopService {
     this.session = this.system = null;
   }
 
+  /** The state now: idle and the browser's wake locks looked at again first. */
   async state(): Promise<SessionState> {
+    if (!this.stopped) await this.tick();
+    return this.snapshot();
+  }
+
+  private snapshot(): SessionState {
     const problem = this.problem();
     return {
       locked: this.locked,
@@ -440,12 +446,11 @@ export class SessionService implements DesktopService {
   }
 
   private emit(): void {
-    void this.state().then((state) => {
-      const text = JSON.stringify(state);
-      if (text === this.text) return;
-      this.text = text;
-      this.changed(state);
-    });
+    const state = this.snapshot();
+    const text = JSON.stringify(state);
+    if (text === this.text) return;
+    this.text = text;
+    this.changed(state);
   }
 
   // org.freedesktop.ScreenSaver, for apps (mpv, Firefox, Electron, SDL games…).

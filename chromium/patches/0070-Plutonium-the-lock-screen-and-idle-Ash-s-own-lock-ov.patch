@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 18:02:28 +1300
-Subject: [PATCH 69/69] Plutonium: the lock screen and idle: Ash's own lock
+Subject: [PATCH 70/70] Plutonium: the lock screen and idle: Ash's own lock
  over every display, Super+L, the idle time, the wake locks and the displays'
  power in the Plutonium domain
 
@@ -30,11 +30,11 @@ does something) and the lockChanged event.
  .../browser/ui/ash/main_extra_parts/BUILD.gn  |   5 +
  .../chrome_browser_main_extra_parts_ash.cc    |   6 +
  .../chrome_browser_main_extra_parts_ash.h     |   3 +
- .../main_extra_parts/plutonium_lock_impl.cc   | 531 ++++++++++++++++++
- .../main_extra_parts/plutonium_lock_impl.h    | 120 ++++
+ .../main_extra_parts/plutonium_lock_impl.cc   | 533 ++++++++++++++++++
+ .../main_extra_parts/plutonium_lock_impl.h    | 122 ++++
  .../dbus/power/power_policy_controller.cc     |  11 +
  chromeos/dbus/power/power_policy_controller.h |   5 +
- 14 files changed, 888 insertions(+), 1 deletion(-)
+ 14 files changed, 892 insertions(+), 1 deletion(-)
  create mode 100644 chrome/browser/plutonium_lock.cc
  create mode 100644 chrome/browser/plutonium_lock.h
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
@@ -439,10 +439,10 @@ index 28020196a3..935eab6d15 100644
    std::unique_ptr<ImeControllerClientImpl> ime_controller_client_;
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
 new file mode 100644
-index 0000000000..c24acb50de
+index 0000000000..c7bc511001
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,533 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -667,6 +667,7 @@ index 0000000000..c24acb50de
 +    user_ = user;
 +  }
 +  message_ = message;
++  message_error_ = false;
 +  if (locked_) {
 +    if (view_) {
 +      view_->SetUser(user_);
@@ -768,6 +769,7 @@ index 0000000000..c24acb50de
 +  }
 +  const std::string* reason = answer->FindString("error");
 +  message_ = base::UTF8ToUTF16(reason ? *reason : "That's not the password.");
++  message_error_ = true;
 +  const int wait = answer->FindInt("retryAfter").value_or(0);
 +  retry_at_ = base::TimeTicks::Now() + base::Seconds(wait);
 +  Tick();
@@ -804,7 +806,7 @@ index 0000000000..c24acb50de
 +                      base::NumberToString16((wait.InMilliseconds() + 999) / 1000), u" s."}),
 +        true);
 +  } else {
-+    view_->SetMessage(message_, false);
++    view_->SetMessage(message_, message_error_);
 +  }
 +}
 +
@@ -836,7 +838,7 @@ index 0000000000..c24acb50de
 +    if (is_primary) {
 +      view_ = view;
 +      view_->SetUser(user_);
-+      view_->SetMessage(message_, false);
++      view_->SetMessage(message_, message_error_);
 +      widget->Activate();
 +      view_->FocusPassword();
 +    }
@@ -976,10 +978,10 @@ index 0000000000..c24acb50de
 +}
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
 new file mode 100644
-index 0000000000..4d469c1172
+index 0000000000..fad10e3bbf
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,122 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1088,6 +1090,8 @@ index 0000000000..4d469c1172
 +  bool checking_ = false;
 +  std::u16string user_;
 +  std::u16string message_;
++  // |message_| says what went wrong (a wrong password): in the error color.
++  bool message_error_ = false;
 +  // Until then, the field takes no password (the helper's rate limit).
 +  base::TimeTicks retry_at_;
 +  const base::TimeTicks started_ = base::TimeTicks::Now();
