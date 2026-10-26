@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 18:07:11 +1300
-Subject: [PATCH 69/72] Plutonium: tabs' web notifications and the host's color
+Subject: [PATCH 69/71] Plutonium: tabs' web notifications and the host's color
  scheme in the Plutonium domain
 
 Web notifications (new Notification(), a service worker's showNotification())
@@ -23,9 +23,9 @@ prefers-color-scheme in shells and tabs is the desktop's.
  chrome/browser/devtools/cros_protocol.pdl     |  43 +++++
  .../devtools/protocol/plutonium_handler.cc    |  67 ++++++++
  .../devtools/protocol/plutonium_handler.h     |   9 ++
- .../protocol/plutonium_notifications.cc       | 150 ++++++++++++++++++
+ .../protocol/plutonium_notifications.cc       | 153 ++++++++++++++++++
  .../protocol/plutonium_notifications.h        |  77 +++++++++
- 6 files changed, 349 insertions(+)
+ 6 files changed, 352 insertions(+)
  create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.cc
  create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.h
 
@@ -246,10 +246,10 @@ index cf550b5ad4..e34e0d1ea4 100644
  
 diff --git a/chrome/browser/devtools/protocol/plutonium_notifications.cc b/chrome/browser/devtools/protocol/plutonium_notifications.cc
 new file mode 100644
-index 0000000000..928c54d666
+index 0000000000..aed0bbbde9
 --- /dev/null
 +++ b/chrome/browser/devtools/protocol/plutonium_notifications.cc
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,153 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -259,11 +259,13 @@ index 0000000000..928c54d666
 +#include <utility>
 +
 +#include "base/base64.h"
++#include "base/memory/scoped_refptr.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
 +#include "ui/base/models/image_model.h"
 +#include "ui/gfx/codec/png_codec.h"
 +#include "ui/gfx/image/image.h"
 +#include "ui/message_center/public/cpp/notification.h"
++#include "ui/message_center/public/cpp/notification_delegate.h"
 +#include "ui/message_center/public/cpp/notifier_id.h"
 +#include "url/origin.h"
 +
@@ -356,21 +358,22 @@ index 0000000000..928c54d666
 +  if (!notification) {
 +    return false;
 +  }
-+  MessageCenter* center = MessageCenter::Get();
 +  if (action == "click") {
-+    if (button) {
-+      if (*button < 0 ||
-+          static_cast<size_t>(*button) >= notification->buttons().size()) {
-+        return false;
-+      }
-+      center->ClickOnNotificationButton(id, *button);
-+    } else {
-+      center->ClickOnNotification(id);
++    if (button && (*button < 0 || static_cast<size_t>(*button) >=
++                                      notification->buttons().size())) {
++      return false;
++    }
++    // Its delegate, as the message center's click does: that click ignores
++    // notifications its blockers hide, which in shell mode is all of them.
++    scoped_refptr<message_center::NotificationDelegate> delegate =
++        notification->delegate();
++    if (delegate) {
++      delegate->Click(button, std::nullopt);
 +    }
 +    return true;
 +  }
 +  if (action == "close") {
-+    center->RemoveNotification(id, /*by_user=*/true);
++    MessageCenter::Get()->RemoveNotification(id, /*by_user=*/true);
 +    return true;
 +  }
 +  return false;
