@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 23 Oct 2026 09:13:18 +1300
-Subject: [PATCH 41/65] Plutonium: file pickers for tabs ask the shell
+Subject: [PATCH 41/66] Plutonium: file pickers for tabs ask the shell
 
 EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "File pickers"): every
 picker a registry tab opens goes to the shell, as a "fileChooser" tab

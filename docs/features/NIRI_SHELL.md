@@ -7,7 +7,7 @@ plutonium run niri plain          # DRM, niri at startup, the plain shell second
 plutonium run --x11 niri          # a private Xvfb (:99)
 ```
 
-The page is served on `127.0.0.1:8775` .
+It's an installed shell (`~/.pluto/shells/niri`, [SHELL_PACKAGES.md](SHELL_PACKAGES.md)), served at `http://niri.localhost:8770/`.
 
 ## What it does
 

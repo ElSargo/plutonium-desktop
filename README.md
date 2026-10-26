@@ -15,8 +15,7 @@ Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (
 
 ## Status
 
-A public beta: usable day to day by its developer, new to everyone else. Working: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), the file picker and printing for native apps, input methods (text-input-v3), global shortcuts, H.264 video in tabs, and a login screen entry. Not there yet:
-- installing and editing shells as packages (in progress);
+A public beta: usable day to day by its developer, new to everyone else. Working: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), the file picker and printing for native apps, input methods (text-input-v3), global shortcuts, H.264 video in tabs, and a login screen entry. Shells are installed packages in `~/.pluto/shells`, which you or an agent edit safely ([SHELL_PACKAGES.md](docs/features/SHELL_PACKAGES.md)). Not there yet:
 - a settings page to choose an input method;
 - the other desktop portals (notifications, settings, OpenURI).
 
@@ -55,9 +54,11 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
    bin/plutonium killswitch install
    ```
 
-5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run niri plain`; or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
+5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
 
 In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
+
+The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Ask an agent** or **Open a terminal**. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
 
 **If it hangs,** press the kill switch: Ash is killed and you're back where you were. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
 

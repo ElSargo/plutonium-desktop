@@ -8,6 +8,8 @@
 #   SHELL_URL    the first shell's page, opened as the desktop
 #   SHELLS       more shells, "<name>=<url>|<name>=<url>" (Super+Tab switches)
 #   ORIGINS      every shell's origin, comma-separated (for the helper)
+#   PERSIST_SHELLS  the shells are shells.json's: the switcher's changes go back to it
+#   SAFE_MODE    the shipped plain shell only (plutonium run --safe)
 #   SOCKET       Exo's Wayland socket name; CDP_PORT, HELPER_PORT, PROFILE
 #   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
 #         seconds), NO_KILLSWITCH
@@ -97,8 +99,19 @@ start_helper() {
   setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') \
     PLUTONIUM_SHELL_LIBRARY="$(live_current shell-lib "$ROOT/helper/web")/plutonium-shell.js" \
     node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
-    --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" > "$HELPER_LOG" 2>&1 < /dev/null &
+    --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" \
+    --shells-port "$SHELLS_PORT" --slot "$SLOT" --pluto-home "$PLUTO_HOME" ${PERSIST_SHELLS:+--persist-shells} \
+    > "$HELPER_LOG" 2>&1 < /dev/null &
   echo $! > "$pidfile"
+}
+
+# The servers of the session's installed shells (T3 Code's) start with the
+# helper: wait for them before the browser opens their pages.
+wait_shell_servers() {
+  local sock=$RUN_DIR/plutonium/$SOCKET.sock
+  for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+  curl -s -m 120 --unix-socket "$sock" http://helper/v1/shells/wait | grep -o '"detail":"[^"]*"' | cut -d'"' -f4 |
+    grep -v '^Stopped' | sed 's/^/shell server: /' | while read -r line; do log "$line"; done
 }
 
 report_gpu() {
@@ -122,7 +135,9 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
        "--plutonium-helper-url=http://127.0.0.1:$HELPER_PORT"
        "--plutonium-helper-socket=$RUN_DIR/plutonium/$SOCKET.sock"
        --enable-logging=stderr --v=0 "--vmodule=$VMODULE")
-[[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS")
+# The whole list, in order ("!" before shells that are off): the browser's
+# list becomes it.
+[[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS" --plutonium-shells-exact)
 # Pages see the host's timezone and language, which the container doesn't
 # have (it says UTC): a zone name the container's tzdata knows.
 HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
@@ -163,6 +178,7 @@ if [[ $MODE == x11 ]]; then
     XAUTHORITY=$RUN_DIR/plutonium/xauthority
   fi
   start_helper
+  wait_shell_servers
   if [[ -n ${HOST:-} ]]; then
     setsid env DISPLAY="$XDISP" "TZ=${HOST_TZ:-UTC}" "LANG=${LANG:-C.UTF-8}" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
   else
@@ -225,6 +241,7 @@ fi
   log "session $SID ($(session_prop TTY)) is not in front; Ash comes up when it is (Ctrl+Alt+F$(session_prop VTNr))"
 
 start_helper
+wait_shell_servers
 echo "Starting Ash on DRM in session $SID ($(session_prop TTY)). Ctrl+Alt+F1…F12 switch VTs, Ctrl+Alt+Backspace ends it."
 FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
         "--plutonium-logind-session=$SID"

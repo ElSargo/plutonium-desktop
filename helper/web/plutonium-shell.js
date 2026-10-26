@@ -337,7 +337,12 @@ export class PlutoniumShell extends EventTarget {
         fetch(`${HELPER}/v1/shell/origins`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ origins }),
+          // And the whole list, in order, which the helper saves as the
+          // session's shells.json.
+          body: JSON.stringify({
+            origins,
+            shells: this.shells.map(({ name, url, enabled }) => ({ name, url, enabled })),
+          }),
         }).catch(() => {});
         this._changed();
       });

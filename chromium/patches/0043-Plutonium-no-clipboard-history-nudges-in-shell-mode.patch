@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 09:57:57 +1300
-Subject: [PATCH 43/65] Plutonium: no clipboard history nudges in shell mode
+Subject: [PATCH 43/66] Plutonium: no clipboard history nudges in shell mode
 
 Ash's clipboard nudges ("Press Search+V to see your clipboard") showed
 after copying and pasting between apps and tabs. In shell mode the web

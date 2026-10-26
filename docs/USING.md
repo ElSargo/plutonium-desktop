@@ -16,6 +16,8 @@ Each shell adds its own keys, which keep working while an app or tab has the key
 
 ## The shells
 
+These three are shipped, and installed in `~/.pluto/shells` (below).
+
 **niri** (`plutonium run niri`) is a clone of the [niri](https://github.com/YaLTeR/niri) compositor, with niri's default binds:
 - **Super+T** opens a terminal (foot), **Super+D** the launcher, **Super+Q** closes the focused window, and **Super+O** opens the overview.
 - **Super+arrows** move focus.
@@ -50,15 +52,36 @@ An agent running in a thread gets the helper's MCP tools for that thread:
 
 The agent works in the background: your pointer and keyboard stay where they are, and what it drives needn't be on screen. It can only reach windows and tabs tagged with its own thread. In T3 Code every provider's agents get the window tools, and drive tabs with T3's own browser tools ([features/AGENT_CONTROL.md](features/AGENT_CONTROL.md)). INSTALL.md §8 shows how to start one.
 
+## Your shells
+
+Your shells live in `~/.pluto/shells/<name>/`, one folder each. The first `plutonium run` copies the shipped ones there. `plutonium run` with no shells runs the ones that are on, in the switcher's order, and the switcher's changes are kept (`~/.pluto/shells.json`). `plutonium shells list` shows them all. `plutonium shells update` merges a newer shipped version into yours, keeping your changes.
+
+To change one, open the switcher (Super+Tab), pick the shell, and under **Customize** choose:
+- **Ask an agent**: Claude Code, in the shell's folder;
+- **Open a terminal**: your shell, in that folder;
+- **History, log and updates…**.
+
+Every save reloads the shell and is committed. If a change breaks the shell (it doesn't come back within 20 s), it's rolled back and you're told; Retry and the diff are on its page. If no shell comes up at all, `plutonium run --safe` starts the shipped plain shell, and two failed starts in a row do the same by themselves. The details are in [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md).
+
 ## Writing a shell
 
-A shell is any web page served over http(s) on an origin you pass to `plutonium run <name>=<url>`. Its document gets `navigator.windowBroker`, `<native-window>` and the tab API. It loads the helper's library for threads, launching and the agent bridge:
+A shell is a folder with a `shell.json` and a web page:
+
+```
+my-shell/
+  shell.json     {"title": "Mine", "version": "1", "static": "index.html"}
+  index.html
+```
+
+Add it from the switcher: **Add a shell…**, then **Install from a folder, git or address…**, then give it `~/my-shell` or a git URL. It's copied into `~/.pluto/shells/my-shell`, served at `http://my-shell.localhost:8770/`, and that origin gets shell rights. If your shell needs its own server, the manifest says how to run it, and Plutonium supervises it (`"server"`, [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)). A page you serve yourself can be added by its address.
+
+The page gets `navigator.windowBroker`, `<native-window>` and the tab API, and `?helper=` naming the session's helper. It loads the helper's library for threads, launching and the agent bridge:
 
 ```html
 <script type="module">
-const helper = new URLSearchParams(location.search).get("helper");   // plutonium run passes ?helper=
+const helper = new URLSearchParams(location.search).get("helper");   // the session adds ?helper=
 const { connect } = await import(`${helper}/v1/shell.js`);
-const shell = connect({
+const shell = connect({                               // connecting tells Plutonium the shell came up
   onFocus: (w) => { show(w.id); return true; },       // an agent asked to show a window
   onFocusTab: (t) => { showTab(t.id); return true; }, // ... or a tab
   onOpenTab: () => "mine:thread/1",                    // a link this page opened: which thread
@@ -77,4 +100,4 @@ await shell.launch("mine:thread/1", ["foot"]);
 </script>
 ```
 
-`shells/plain/index.html` (about 550 lines) is a complete example. `helper/README.md` documents the library and the helper's API.
+`shells/plain/index.html` (about 700 lines) is a complete example. `helper/README.md` documents the library and the helper's API.

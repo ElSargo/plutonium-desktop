@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shells</title>
+<!--
+  The helper's page for installed shells (~/.pluto/shells): each one's
+  server, history, log and updates, a change that was rolled back, and
+  adding one. The switcher opens it in the backup browser
+  (/v1/shells/page/#<name>, or #add). It talks to the helper on its own
+  origin, as the backup terminal does (src/shellPackages.ts).
+-->
+<style>
+  :root { color-scheme: dark; --bg: #1b1d21; --panel: #24272c; --line: #33373e; --text: #e6e6e6; --dim: #9aa0a8;
+          --accent: #8ab4f8; --ok: #81c995; --warn: #fdd663; --error: #f28b82; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; display: flex; height: 100vh; }
+  nav { width: 240px; border-right: 1px solid var(--line); padding: 12px 8px; overflow: auto; flex: none; }
+  nav a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--text); text-decoration: none; }
+  nav a.selected, nav a:hover { background: var(--panel); }
+  nav a small { color: var(--dim); display: block; }
+  main { flex: 1; overflow: auto; padding: 20px 28px; max-width: 1000px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 22px 0 8px; }
+  .dim { color: var(--dim); }
+  .notice { background: #3a3320; border: 1px solid #6b5a22; color: var(--warn); padding: 10px 12px; border-radius: 6px; margin: 12px 0; }
+  .error { color: var(--error); }
+  .ok { color: var(--ok); }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; margin: 0 6px 6px 0; }
+  button.primary { background: #2b4a7a; border-color: #3d63a0; }
+  button:disabled { opacity: .5; cursor: default; }
+  pre { background: #121417; border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; max-height: 360px; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+  dl { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; margin: 0; }
+  dt { color: var(--dim); }
+  dd { margin: 0; word-break: break-all; }
+  input { width: 100%; background: #121417; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
+</style>
+</head>
+<body>
+<nav id="nav"></nav>
+<main id="main"></main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function api(path, body) {
+  const response = await fetch(`/v1/shells/${path}`, body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const type = response.headers.get("content-type") ?? "";
+  const value = type.includes("json") ? await response.json() : await response.text();
+  if (!response.ok) throw new Error(value?.error ?? value ?? response.statusText);
+  return value;
+}
+
+let shells = [];
+let status = "";
+const selected = () => decodeURIComponent(location.hash.slice(1)) || (shells[0]?.name ?? "add");
+
+async function refresh() {
+  try {
+    shells = await api("list");
+  } catch (error) {
+    status = `The helper didn't answer: ${error.message}`;
+  }
+  renderNav();
+}
+
+function renderNav() {
+  const current = selected();
+  $("nav").innerHTML =
+    shells.map((shell) => `<a href="#${esc(shell.name)}" class="${shell.name === current ? "selected" : ""}">
+      ${esc(shell.title ?? shell.name)}<small>${esc(shell.name)} · ${shell.enabled ? "on" : "off"} · ${esc(kindText(shell))}${shell.notice ? " · ⚠" : ""}</small></a>`).join("") +
+    `<a href="#add" class="${current === "add" ? "selected" : ""}">Add a shell…<small>a folder, git or an address</small></a>`;
+}
+
+const kindText = (shell) =>
+  ({ static: "a page", plutonium: "a server Plutonium runs", external: "an address", broken: "broken" })[shell.kind] ?? shell.kind;
+
+async function act(name, action, done) {
+  status = "…";
+  renderStatus();
+  try {
+    const result = await api(`${name}/${action}`, {});
+    status = done ? done(result) : "Done.";
+  } catch (error) {
+    status = `<span class="error">${esc(error.message)}</span>`;
+  }
+  await refresh();
+  await render();
+}
+
+function renderStatus() {
+  const element = document.querySelector("#status");
+  if (element) element.innerHTML = status;
+}
+
+async function render() {
+  renderNav();
+  const name = selected();
+  if (name === "add") return renderAdd();
+  const shell = shells.find((candidate) => candidate.name === name);
+  if (!shell) {
+    $("main").innerHTML = `<h1>No shell “${esc(name)}”</h1>`;
+    return;
+  }
+  const [history, log, diff] = await Promise.all([
+    api(`${name}/history`).catch(() => ""),
+    shell.server ? api(`${name}/log`).catch(() => "") : "",
+    shell.failed ? api(`${name}/diff`).catch(() => "") : "",
+  ]);
+  const server = shell.server;
+  const stopped = !server || server.state === "stopped" || server.state === "failed";
+  $("main").innerHTML = `
+    <h1>${esc(shell.title ?? shell.name)}</h1>
+    <div class="dim">${esc(kindText(shell))}, version ${esc(shell.version ?? "?")} (${esc(shell.commit ?? "")}), ${shell.enabled ? "on" : "off"}</div>
+    <p id="status">${status}</p>
+    ${shell.notice ? `<div class="notice">${esc(shell.notice)}</div>` : ""}
+    ${shell.error ? `<div class="notice error">${esc(shell.error)}</div>` : ""}
+    <h2>Customize</h2>
+    <p class="dim">Its files are yours. Every save is committed and reloads the shell; a change that doesn't come up is rolled back.</p>
+    <button class="primary" data-act="agent">Ask an agent</button>
+    <button data-act="terminal">Open a terminal</button>
+    <button data-act="update">Update from what Plutonium ships</button>
+    <a href="/v1/terminal/" target="_blank" class="dim">backup terminal</a>
+    ${shell.failed ? `<h2>The change that didn't come up</h2>
+      <p>${esc(shell.failed.commit)} ${esc(shell.failed.subject)}</p>
+      <button class="primary" data-act="retry">Retry it</button> <button data-act="dismiss">Dismiss</button>
+      <pre>${esc(diff) || "(no difference)"}</pre>` : ""}
+    <h2>Details</h2>
+    <dl>
+      <dt>Folder</dt><dd>${esc(shell.dir)}</dd>
+      <dt>Shell rights for</dt><dd>${esc(shell.origin ?? "—")}</dd>
+      <dt>Page</dt><dd>${esc(shell.url ?? "—")}</dd>
+    </dl>
+    ${server ? `<h2>Its server</h2>
+      <dl><dt>State</dt><dd>${esc(server.detail)}</dd><dt>Command</dt><dd>${esc(server.command)}</dd><dt>Log</dt><dd>${esc(server.log)}</dd></dl>
+      <p><button data-act="${stopped ? "start" : "restart"}">${stopped ? "Start" : "Restart"}</button>
+      <button data-act="stop" ${stopped ? "disabled" : ""}>Stop</button></p>
+      <pre id="log">${esc(log) || "(empty)"}</pre>` : ""}
+    <h2>History</h2>
+    <pre>${esc(history)}</pre>`;
+  for (const button of document.querySelectorAll("[data-act]")) {
+    const action = button.dataset.act;
+    button.onclick = () =>
+      act(name, action, (result) =>
+        action === "agent" || action === "terminal"
+          ? `Started in the backup terminal: <a href="/v1/terminal/" target="_blank">open it</a> (or Super+Tab, Backup terminal).`
+          : action === "update"
+            ? esc(result.status === "conflict" ? `Conflicts in ${result.files.join(", ")}: your copy is as it was.` : result.status)
+            : "Done.");
+  }
+  const pre = document.querySelector("#log");
+  if (pre) pre.scrollTop = pre.scrollHeight;
+}
+
+let preview = null;
+function renderAdd() {
+  $("main").innerHTML = `
+    <h1>Add a shell</h1>
+    <p class="dim">A folder with a shell.json, a git repository (cloned into ~/.pluto/shells), or any http(s) address.
+    A shell can list, show, start and close every app and tab: add only what you trust.</p>
+    <p><input id="source" placeholder="~/my-shell, https://github.com/me/my-shell.git, http://localhost:5173/" value="${esc(preview?.source ?? "")}"></p>
+    <button class="primary" id="look">Look at it</button>
+    <p id="status">${status}</p>
+    <div id="preview"></div>`;
+  $("look").onclick = look;
+  $("source").onkeydown = (event) => event.key === "Enter" && look();
+  if (preview) showPreview();
+}
+
+async function look() {
+  status = "Looking…";
+  renderStatus();
+  try {
+    preview = await api("add", { source: $("source").value });
+    status = "";
+    showPreview();
+  } catch (error) {
+    preview = null;
+    status = `<span class="error">${esc(error.message)}</span>`;
+    $("preview").innerHTML = "";
+  }
+  renderStatus();
+}
+
+function showPreview() {
+  $("preview").innerHTML = `
+    <h2>What you'd add</h2>
+    <dl>
+      <dt>Name</dt><dd>${esc(preview.title)} (${esc(preview.name)})</dd>
+      ${preview.description ? `<dt>About</dt><dd>${esc(preview.description)}</dd>` : ""}
+      <dt>From</dt><dd>${esc(preview.kind)}: ${esc(preview.source)}</dd>
+      <dt>Gets shell rights</dt><dd><b>${esc(preview.origin)}</b></dd>
+      <dt>Page</dt><dd>${esc(preview.page)}</dd>
+      <dt>Its server runs</dt><dd>${preview.command ? `<b>${esc(preview.command)}</b>` : "nothing (no server Plutonium runs)"}</dd>
+    </dl>
+    <p><button class="primary" id="add">Add it and turn it on</button></p>`;
+  $("add").onclick = async () => {
+    try {
+      const shell = await api("add", { token: preview.token });
+      preview = null;
+      status = `<span class="ok">Added ${esc(shell.title)} in ${esc(shell.dir)}.</span> Press Super+Tab: the switcher turns it on.`;
+      await refresh();
+      keepStatus = true;
+      location.hash = shell.name;
+    } catch (error) {
+      status = `<span class="error">${esc(error.message)}</span>`;
+      renderStatus();
+    }
+  };
+}
+
+let keepStatus = false;
+window.addEventListener("hashchange", () => {
+  if (!keepStatus) status = "";
+  keepStatus = false;
+  void render();
+});
+await refresh();
+await render();
+// The server's state and log change by themselves.
+setInterval(async () => {
+  if (selected() === "add" || document.hidden) return;
+  const before = JSON.stringify(shells);
+  await refresh();
+  if (JSON.stringify(shells) !== before) await render();
+}, 3000);
+</script>
+</body>
+</html>

@@ -25,7 +25,7 @@ node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3773[,<origin>â€
 
 A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
 
-`plutonium run` starts it with Ash (DRM sessions on port 3782, X11 ones on 3781). X11 apps need `xwayland-satellite` on `PATH` or in `PLUTONIUM_XWAYLAND_SATELLITE`, plus `systemd-socket-activate`.
+It also serves the installed static shells at `http://<name>.localhost:<shells port>/`, runs the server shells, and looks after edits to them (`docs/features/SHELL_PACKAGES.md`, which lists the `/v1/shells` API). `plutonium run` starts it with Ash (DRM sessions on port 3782, X11 ones on 3781). X11 apps need `xwayland-satellite` on `PATH` or in `PLUTONIUM_XWAYLAND_SATELLITE`, plus `systemd-socket-activate`.
 
 Tests: `npm test` here (`docs/DEVELOPING.md`, "Helper tests").
 

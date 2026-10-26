@@ -102,6 +102,8 @@ class Tab {
     try {
       this.fit.fit();
       this.id = id || (await api(API, { rows: this.term.rows, cols: this.term.cols })).id;
+      // One started elsewhere has a default size.
+      if (id) api(`${API}/${id}/resize`, { rows: this.term.rows, cols: this.term.cols }).catch(() => {});
     } catch (error) {
       this.term.write(`\r\nCouldn't start a terminal: ${error.message}\r\n`);
       this.exited = true;
@@ -183,8 +185,9 @@ function render() {
   document.title = active ? `${active.title} — Backup terminal` : "Backup terminal";
 }
 
-function newTab(id) {
+function newTab(id, title) {
   const tab = new Tab();
+  if (title) tab.title = title;
   tabs.push(tab);
   activate(tab);
   tab.connect(id);
@@ -242,12 +245,32 @@ document.addEventListener("keydown", (event) => {
 });
 new ResizeObserver(() => active?.fit.fit()).observe(panes);
 
+const liveSessions = () =>
+  api(API)
+    .then((sessions) => sessions.filter((session) => session.alive).sort((a, b) => a.createdAt - b.createdAt))
+    .catch(() => []);
+// A session started from elsewhere in the last few seconds (the switcher's
+// "Open a terminal" or "Ask an agent" for a shell) is the one to show.
+const fresh = (session) => Date.now() - session.createdAt < 15_000;
+
 // Pick up the sessions from before a reload, else start one.
-api(API)
-  .then((sessions) => sessions.filter((session) => session.alive).sort((a, b) => a.createdAt - b.createdAt))
-  .catch(() => [])
-  .then((sessions) => {
-    if (sessions.length === 0) newTab();
-    for (const session of sessions) newTab(session.id);
-    if (tabs.length > 0) activate(tabs[0]);
-  });
+liveSessions().then((sessions) => {
+  if (sessions.length === 0) newTab();
+  for (const session of sessions) newTab(session.id, session.title);
+  const newest = sessions.at(-1);
+  if (tabs.length > 0) activate(newest && fresh(newest) ? tabs.at(-1) : tabs[0]);
+});
+// Sessions started elsewhere while the page was open.
+async function adoptSessions() {
+  // Not while a new tab waits for its session, which would be adopted too.
+  if (tabs.some((tab) => !tab.id && !tab.exited)) return;
+  for (const session of await liveSessions()) {
+    if (!tabs.some((tab) => tab.id === session.id)) newTab(session.id, session.title);
+  }
+}
+window.addEventListener("focus", () => void adoptSessions());
+// Being brought to the front doesn't always focus the page: look now and then.
+setInterval(() => document.visibilityState === "visible" && void adoptSessions(), 2000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void adoptSessions();
+});

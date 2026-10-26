@@ -29,11 +29,13 @@ Setup (INSTALL.md walks through these in order):
                              that starts Plutonium: plutonium session start
 
 Sessions:
-  run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
-                             The first is the desktop, Super+Tab switches. Default: t3.
+  run [options] [shell...]   start a session with installed shells (niri, plain, t3, ...) or
+                             <name>=<url>. The first is the desktop, Super+Tab switches.
+                             Default: the shells that are on in $PLUTO_HOME/shells.json
+  shells <command>           the installed shells in $PLUTO_HOME/shells: plutonium shells help
   stop [--drm|--x11]         stop a session's Ash (both if neither is given)
-  t3 server [--x11]          (re)start the T3 Code server for a session ('run t3' starts it)
-  t3 stop                    stop the T3 Code server
+  t3 server [--x11]          restart the T3 Code server of a session (its helper runs it)
+  t3 stop [--x11]            stop it
   t3 <command>               T3 Code's own CLI on the same data: t3 pair, t3 connect link, ...
   status                     what is running
   live apply|revert|status   swap what a running session's shells serve (niri, plain, shell.js,
@@ -61,9 +63,11 @@ run_usage() {
   cat <<EOF
 Usage: plutonium run [options] [shell...]
 
-Shells: niri (scrollable tiling), plain (the minimal shell), t3 (T3 Code, on
-the host's T3 Code data; started and paired as needed), or <name>=<url> for
-any page. The first one is the desktop; the others run behind it (Super+Tab).
+Shells: the names of installed shells ($PLUTO_HOME/shells: niri, plain, t3,
+and any you added), or <name>=<url> for any page. The first one is the
+desktop; the others run behind it (Super+Tab). With none, the shells that are
+on in $PLUTO_HOME/shells.json run, in its order, and the switcher's changes
+are saved there. The first run installs the shipped shells.
 
 Where:
   --x11 [display]   Ash in a window on an X11 display (default: a private Xvfb, :99
@@ -77,6 +81,7 @@ Where:
   --hold SECONDS    DRM: stop Ash after SECONDS (unattended tests)
   --no-killswitch   DRM without the kill switch (see INSTALL.md before using it)
   --flags "..."     more Chromium flags
+  --safe            safe mode: only the shipped plain shell, from this checkout
 EOF
 }
 
@@ -541,48 +546,42 @@ t3_fingerprint() {
   (cd "$1" && git ls-files -co --exclude-standard -z -- apps/server/src packages/contracts/src ':!:*.test.ts' |
     sort -z | xargs -0 sha256sum 2> /dev/null || true) | sha256sum | cut -c1-12
 }
-# Start the server for a session's socket: "restart" restarts ours, otherwise
-# ours is reused if it serves that socket.
-t3_start() {
-  local socket=$1 restart=${2:-} port=$T3_PORT satellite pid pidfile=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid
+# The T3 shell's server, in the foreground: the session's helper starts and
+# supervises it (shells/t3/shell.json; its log is $PLUTO_HOME/logs/t3.log),
+# and a helper of the same session adopts it after a restart.
+t3_serve() {
+  local port=$1 socket=$2 satellite
   local tailscale=()
   [[ -n ${T3_TAILSCALE:-} ]] && tailscale=(--tailscale-serve --tailscale-serve-port "$T3_TAILSCALE_PORT")
   [[ -f $T3CODE_DIR/apps/web/dist/index.html ]] || die "T3 Code isn't built (plutonium t3 build)"
   t3_refuse_others
-  pid=$(cat "$pidfile" 2>/dev/null || true)
-  if [[ -n $pid ]] && t3_ours "$pid"; then
-    if [[ -z $restart ]]; then
-      tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF "PLUTONIUM_WAYLAND_DISPLAY=$socket" && return
-      local flag=; [[ $socket == *-x11* ]] && flag=" --x11"
-      die "the T3 Code server is serving the other session; restart it for this one (plutonium t3 server$flag)"
-    fi
-    t3_stop
-  fi
   curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
   t3_check_db
   satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
   mkdir -p "$T3_HOME" "$RUN_DIR/plutonium"
-  (
-    cd "$T3CODE_DIR"
-    # T3 Connect (remote devices through T3's relay): its public settings.
-    [[ -f .env ]] && { set -a; . ./.env; set +a; }
-    # Under a supervisor that picks the host: Settings, Connections, Network
-    # access in the shell switches it (lib/t3-server.sh).
-    # Its own session's helper, not the one of a session this was started
-    # from (a terminal or an agent in a thread has a thread's variables).
-    setsid env -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
-      PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
-      PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" \
-      PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
-      ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
-      bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser \
-      > "$LOGS/t3-server.log" 2>&1 < /dev/null &
-    echo $! > "$pidfile"
-  )
   # What its clients talk to, for `live apply t3` (t3_fingerprint).
   t3_fingerprint "$T3CODE_DIR" > "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint"
-  for _ in $(seq 1 30); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 1; done
-  die "the T3 Code server didn't start (logs/t3-server.log)"
+  cd "$T3CODE_DIR"
+  # T3 Connect (remote devices through T3's relay): its public settings.
+  [[ -f .env ]] && { set -a; . ./.env; set +a; }
+  # Under a supervisor that picks the host: Settings, Connections, Network
+  # access in the shell switches it (lib/t3-server.sh). Its own session's
+  # helper, not the one of a session this was started from.
+  exec env -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
+    PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+    PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" \
+    PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
+    ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
+    bash "$ROOT/lib/t3-server.sh" "$T3CODE_DIR/apps/server/src/bin.ts" --port "$port" "${tailscale[@]}" --no-browser < /dev/null
+}
+# Asks a session's helper to start, stop or restart an installed shell's server.
+shell_server() {   # <mode> <name> <start|stop|restart>
+  session_vars "$1"
+  local sock=$RUN_DIR/plutonium/$SOCKET.sock reply
+  [[ -S $sock ]] || die "no $1 session is running (its helper's socket $sock)"
+  reply=$(curl -s -m 120 --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://helper/v1/shells/$2/$3") || die "the helper didn't answer"
+  grep -o '"detail":"[^"]*"\|"error":"[^"]*"' <<< "$reply" | cut -d'"' -f4
 }
 # T3 Code's own CLI, on the same data and settings as the server.
 t3_cli() {
@@ -590,22 +589,13 @@ t3_cli() {
   [[ -f .env ]] && { set -a; . ./.env; set +a; }
   T3CODE_HOME="$T3_HOME" exec node apps/server/src/bin.ts "$@"
 }
-# Stops ours (a server this checkout started), and waits for it to let go of
-# the database.
-t3_stop() {
-  local pid
-  pid=$(cat "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid" 2>/dev/null) && t3_ours "$pid" || return 1
-  kill "$pid"
-  for _ in $(seq 1 50); do [[ -z $(t3_pids) ]] && break; sleep 0.2; done
-  rm -f "$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.pid"
-}
 # A one-time pairing token for the shell's profile, good for 5 minutes, offered
 # as #plutoniumPair: the page uses it only if the profile isn't paired yet, or
 # its session lacks some of the token's scopes. The shell is the machine's own
 # desktop app, so it gets what T3 Code's desktop app gets: every scope,
 # including pairing other devices (access:write).
 t3_pair_url() {
-  local port=$T3_PORT token scopes
+  local port=${1:-$T3_PORT} token scopes
   scopes=$(cd "$T3CODE_DIR" && node --input-type=module -e '
     const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
     console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
@@ -668,11 +658,28 @@ t3_cmd() {
     server)
       local mode=drm
       [[ ${2:-} == --x11 ]] && mode=x11
-      session_vars "$mode"
-      t3_start "$SOCKET" restart
-      echo "T3 Code server on http://127.0.0.1:$T3_PORT for $SOCKET, data in $T3_HOME (log logs/t3-server.log)" ;;
+      shell_server "$mode" t3 restart
+      echo "T3 Code server on http://127.0.0.1:$T3_PORT, data in $T3_HOME (log $PLUTO_HOME/logs/t3.log)" ;;
     stop)
-      t3_stop || echo "no T3 Code server from this checkout is running" ;;
+      local mode=drm
+      [[ ${2:-} == --x11 ]] && mode=x11
+      shell_server "$mode" t3 stop ;;
+    serve)
+      # shells/t3/shell.json: the helper runs this.
+      local port=$T3_PORT socket=${PLUTONIUM_WAYLAND_DISPLAY:-}
+      shift
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --port) port=$2; shift ;;
+          --wayland-display) socket=$2; shift ;;
+        esac
+        shift
+      done
+      [[ -n $socket ]] || die "t3 serve needs --wayland-display"
+      t3_serve "$port" "$socket" ;;
+    pair-url)
+      # The page to open, with a one-time pairing token (shells/t3/shell.json).
+      t3_pair_url "${3:-$T3_PORT}" ;;
     export)
       [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "commit your changes in $T3CODE_DIR first"
       rm -f "$ROOT"/frontends/t3code/patches/*.patch
@@ -684,42 +691,47 @@ t3_cmd() {
 }
 
 # --- Sessions ----------------------------------------------------------------
-# Serve a shell directory on a local port, unless something already answers.
-serve_shell() {
-  local dir=$1 port=$2 pidfile=$RUN_DIR/plutonium/serve-$2.pid
-  mkdir -p "$RUN_DIR/plutonium"
-  if curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/"; then
-    # Ours (this checkout's directory), or something else on the port.
-    [[ -f $pidfile ]] && grep -qF -- "$dir" "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null && return
-    die "port $port is taken by another server; stop it (e.g. an older checkout's shell server) and retry"
-  fi
-  setsid python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" > /dev/null 2>&1 < /dev/null &
-  echo $! > "$pidfile"
-  for _ in $(seq 1 20); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && return; sleep 0.2; done
+# The installed shells (helper/src/shells.ts, docs/features/SHELL_PACKAGES.md).
+shells_cli() { local command=$1; shift; node "$ROOT/helper/plutonium.ts" shells "$command" --home "$PLUTO_HOME" "$@"; }
+# The shells a first run turns on: T3 Code if it's built, and the plain shell.
+shells_default() {
+  if [[ -f $T3CODE_DIR/apps/web/dist/index.html ]]; then echo t3,plain; else echo plain; fi
 }
-# A shell name → "<label>=<url>", the page told where the helper is.
+# Installs the shipped shells the first time (and any shipped since).
+shells_ensure() {
+  local name
+  for name in $(ls "$ROOT/shells"); do
+    [[ -f $PLUTO_HOME/shells/$name/shell.json || ! -f $ROOT/shells/$name/shell.json ]] && continue
+    shells_cli install --default "$(shells_default)" | sed 's/^/plutonium: /'
+    [[ ${PIPESTATUS[0]} == 0 ]] || die "couldn't install the shells in $PLUTO_HOME"
+    return
+  done
+}
+# What a session opens, as SHELL_URL, SHELLS and ORIGINS: the installed shells
+# named (default: shells.json's, in order), or --safe.
+shells_entries() {
+  shells_cli entries --slot "$SLOT" --shells-port "$SHELLS_PORT" --helper-url "http://127.0.0.1:$HELPER_PORT" \
+    --helper-socket "$RUN_DIR/plutonium/$SOCKET.sock" --wayland-display "$SOCKET" "$@"
+}
+# A shell given as <name>=<url> → "<label>=<url>", the page told where the helper is.
 shell_entry() {
   local helper=http://127.0.0.1:$HELPER_PORT
   case "$1" in
-    niri) serve_shell "$(live_current niri "$ROOT/shells/niri")" "$(slot_port 8775)"; echo "niri=http://127.0.0.1:$(slot_port 8775)/?helper=$helper" ;;
-    plain) serve_shell "$(live_current plain "$ROOT/shells/plain")" "$(slot_port 8770)"; echo "Plain=http://127.0.0.1:$(slot_port 8770)/?helper=$helper" ;;
-    t3|t3=*)
-      local url=${1#t3}; url=${url#=}
-      if [[ -z $url ]]; then t3_start "$SOCKET"; url=$(t3_pair_url)
-      else curl -s -m 5 -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url"; fi
+    t3=*)
+      local url=${1#t3=}
+      curl -s -m 5 -o /dev/null "${url%%[?#]*}" || die "no T3 Code server at $url"
       local base=${url%%#*} fragment=
       [[ $url == *#* ]] && fragment="#${url#*#}"
       [[ $base == *\?* ]] && base+="&" || base+="?"
       echo "T3=${base}plutoniumHelper=$helper$fragment" ;;
     *=*) echo "$1" ;;
-    *) die "unknown shell '$1' (niri, plain, t3 or <name>=<url>)" ;;
   esac
 }
 origin_of() { sed -E 's#^(https?://[^/?\#]+).*#\1#' <<< "$1"; }
 
 run_cmd() {
-  local mode=drm shells=()
-  export VT= HOLD_S= NO_KILLSWITCH= XDISP= EXTRA_FLAGS=
+  local mode=drm shells=() safe=
+  export VT= HOLD_S= NO_KILLSWITCH= XDISP= EXTRA_FLAGS= PERSIST_SHELLS=
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --x11) mode=x11; if [[ ${2:-} == :* ]]; then XDISP=$2; shift; fi ;;
@@ -728,26 +740,52 @@ run_cmd() {
       --hold) HOLD_S=$2; shift ;;
       --no-killswitch) NO_KILLSWITCH=1 ;;
       --flags) EXTRA_FLAGS=$2; shift ;;
+      --safe) safe=1 ;;
       -h|--help) run_usage; exit 0 ;;
       -*) run_usage; exit 2 ;;
       *) shells+=("$1") ;;
     esac
     shift
   done
-  [[ ${#shells[@]} -gt 0 ]] || shells=(t3)
   [[ -d $RUN_DIR ]] || die "no $RUN_DIR: this shell has no systemd user session; log in normally (a text console, ssh, a display manager), not through su or sudo"
   need_ash_runtime
   # DRM and X11 sessions have their own socket and ports, so both can run.
   session_vars "$mode"
   [[ $mode == x11 ]] && XDISP=${XDISP:-$PRIVATE_XDISP}
   export MODE=$mode SOCKET CDP_PORT HELPER_PORT PROFILE XDISP PRIVATE_XDISP
-  local entries=() entry origins=() rest=()
-  for entry in "${shells[@]}"; do entries+=("$(shell_entry "$entry")"); done
-  for entry in "${entries[@]}"; do origins+=("$(origin_of "${entry#*=}")"); done
-  export SHELL_URL=${entries[0]#*=}
-  export ORIGINS=$(IFS=,; echo "${origins[*]}")
-  rest=("${entries[@]:1}")
-  export SHELLS=$(IFS='|'; echo "${rest[*]}")
+  shells_ensure
+  local key value vars entry entries=() origins=()
+  # Two starts in a row with no shell coming up (the helper counts them).
+  if [[ -z $safe && ${#shells[@]} -eq 0 && $(cat "$PLUTO_HOME/failed-starts" 2> /dev/null || echo 0) -ge 2 ]]; then
+    echo "plutonium: no shell came up in the last two starts: safe mode, with the shipped plain shell." >&2
+    echo "plutonium: fix yours from the switcher (Super+Tab: a shell's page, or the backup terminal); the next start runs them again." >&2
+    echo 0 > "$PLUTO_HOME/failed-starts"
+    safe=1
+  fi
+  if [[ -n $safe ]]; then
+    vars=$(shells_entries --safe) || exit 1
+  elif [[ ${#shells[@]} -eq 0 ]]; then
+    # shells.json's list, which the switcher's changes go back to.
+    vars=$(shells_entries) || exit 1
+    PERSIST_SHELLS=1
+  else
+    # Installed shells by name, pages by <name>=<url>, in the order given.
+    for entry in "${shells[@]}"; do
+      if [[ $entry == *=* ]]; then entries+=("$(shell_entry "$entry")")
+      else
+        vars=$(shells_entries "$entry") || exit 1
+        entries+=("$(sed -n 's/^SHELLS=//p' <<< "$vars")")
+      fi
+    done
+    for entry in "${entries[@]}"; do origins+=("$(origin_of "${entry#*=}")"); done
+    vars="SHELL_URL=${entries[0]#*=}
+SHELLS=$(IFS='|'; echo "${entries[*]}")
+ORIGINS=$(printf '%s\n' "${origins[@]}" | awk '!seen[$0]++' | paste -sd,)"
+  fi
+  while IFS='=' read -r key value; do
+    case $key in SHELL_URL|SHELLS|ORIGINS) export "$key=$value" ;; esac
+  done <<< "$vars"
+  export SAFE_MODE=$safe
   # Started from a thread of another session: none of its variables apply here.
   unset PLUTONIUM_HELPER PLUTONIUM_THREAD_ID PLUTONIUM_OPENERS PLUTONIUM_SHOW PLUTONIUM_WAYLAND_DISPLAY \
     PLUTONIUM_T3 PLUTONIUM_T3_SUPERVISED PLUTONIUM_T3_HOST_PINNED
@@ -808,14 +846,16 @@ status_cmd() {
 # reloading the page changes a shell without restarting anything, and the page
 # stays on the origin that Ash gave shell rights to when it started.
 LIVE_KEEP=${LIVE_KEEP:-5}
-LIVE_ALL=(niri plain shell-lib t3)
+LIVE_ALL=(shell-lib t3)
 live_usage() {
   cat <<EOF2
 Usage: plutonium live <command>
 
 Changes what this slot's running sessions use as their shells, with no restart.
-Parts: niri, plain, shell-lib (the helper's /v1/shell.js), t3 (T3 Code's web
-app); "shells" means niri, plain and shell-lib.
+Parts: shell-lib (the helper's /v1/shell.js), t3 (T3 Code's web app).
+niri, plain and the other installed shells are served from \$PLUTO_HOME/shells,
+read on every request: edit them there, or merge a checkout's version with
+plutonium shells update <name> --from <checkout>.
 
   apply <part>... [--from <dir|commit>] [--follow] [--no-reload] [--force]
         Copy the part from a checkout's files as they are now (default: this
@@ -836,17 +876,16 @@ live_root() {
   if [[ $1 == t3 ]]; then echo "$DATA_DIR/live/t3-$(realpath -m "$T3CODE_DIR" | sha256sum | cut -c1-8)"
   else echo "$LIVE_DIR/$1"; fi
 }
-live_subdir() { case $1 in niri|plain) echo "shells/$1" ;; shell-lib) echo helper/web ;; esac; }
+live_subdir() { case $1 in shell-lib) echo helper/web ;; esac; }
 # The URL prefixes of the pages that load a part.
 live_pages() {
   case $1 in
-    niri) echo "http://127.0.0.1:$(slot_port 8775)/" ;;
-    plain) echo "http://127.0.0.1:$(slot_port 8770)/" ;;
     t3) echo "http://127.0.0.1:$T3_PORT/" ;;
-    shell-lib) live_pages niri; live_pages plain; live_pages t3 ;;
+    # Every installed shell's page (static ones are on <name>.localhost).
+    shell-lib) echo "http://127.0.0.1:$T3_PORT/"; shells_cli list --json | grep -o '"name": "[^"]*"' | cut -d'"' -f4 |
+      sed "s|.*|http://&.localhost:$SHELLS_PORT/|" ;;
   esac
 }
-live_port() { case $1 in niri) slot_port 8775 ;; plain) slot_port 8770 ;; esac; }
 # Repoint a link with one rename, so no request finds it missing.
 live_link() { ln -sfn "$2" "$1.tmp" && mv -T "$1.tmp" "$1"; }
 # Make a target the part's current one; what was current becomes previous.
@@ -899,7 +938,7 @@ live_take() {   # <part> <source> <follow>
 }
 
 # Whether a T3 checkout's server and contracts are what the running server was
-# started from (t3_start records it; before that, T3CODE_DIR as it is now).
+# started from (t3_serve records it; before that, T3CODE_DIR as it is now).
 live_t3_compatible() {
   local file=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint want
   if [[ -f $file ]]; then want=$(cat "$file"); else want=$(t3_fingerprint "$T3CODE_DIR"); fi
@@ -951,27 +990,6 @@ live_t3_adopt() {
   rm -rf "$dist.before-live"
 }
 
-# A shell server Plutonium started on other files (a session from another
-# checkout, or from before live) is restarted on the live link.
-live_rehome() {   # <part>
-  local port dir pidfile pid cmd
-  port=$(live_port "$1") || true
-  [[ -n $port ]] || return 0
-  dir=$LIVE_DIR/$1/current pidfile=$RUN_DIR/plutonium/serve-$port.pid
-  pid=$(cat "$pidfile" 2> /dev/null || true)
-  cmd=$([[ -n $pid ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null || true)
-  if [[ $cmd != *"http.server $port "* ]]; then
-    curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" &&
-      echo "warning: port $port is served by something Plutonium didn't start; $1 isn't live there" >&2
-    return 0
-  fi
-  [[ $cmd == *" --directory $dir "* || $cmd == *" --directory $dir" ]] && return 0
-  kill "$pid"
-  for _ in $(seq 1 25); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$port/" || break; sleep 0.2; done
-  serve_shell "$dir" "$port"
-  cmd=${cmd##*--directory }
-  echo "$1: the server on $port serves the live link now (it served ${cmd% })" >&2
-}
 # The running helpers of this slot that serve shell.js from elsewhere.
 live_helper_check() {
   local mode pid want=$LIVE_DIR/shell-lib/current/plutonium-shell.js
@@ -1012,9 +1030,10 @@ live_parts() {   # the arguments' parts, or die
   local arg
   for arg; do
     case $arg in
-      shells) echo niri plain shell-lib ;;
-      niri|plain|shell-lib|t3) echo "$arg" ;;
-      *) die "unknown part '$arg' (niri, plain, shell-lib, t3, shells)" ;;
+      shells|shell-lib) echo shell-lib ;;
+      t3) echo "$arg" ;;
+      niri|plain) die "$arg is an installed shell now, served from $PLUTO_HOME/shells/$arg as it is: edit it there, or merge a checkout's version (plutonium shells update $arg --from <checkout>)" ;;
+      *) die "unknown part '$arg' (shell-lib, t3)" ;;
     esac
   done
 }
@@ -1062,7 +1081,6 @@ live_cmd() {
         fi
         live_switch "$root" "$target"
         echo "$part: $(live_describe "$root" current)"
-        live_rehome "$part"
         live_prune "$root"
       done
       [[ " ${parts[*]} " == *" shell-lib "* ]] && live_helper_check
@@ -1080,14 +1098,13 @@ live_cmd() {
         [[ $part == t3 ]] && live_t3_adopt
         live_switch "$root" "$target"
         echo "$part: $(live_describe "$root" current)"
-        live_rehome "$part"
       done
       live_reload "${parts[@]}" ;;
     reload)
       [[ $# -gt 0 ]] || { live_usage; exit 2; }
       live_reload $(live_parts "$@") ;;
     status)
-      local dist=$T3CODE_DIR/apps/web/dist port pid cmd
+      local dist=$T3CODE_DIR/apps/web/dist
       for part in "${LIVE_ALL[@]}"; do
         root=$(live_root "$part")
         if [[ ! -L $root/current ]]; then
@@ -1098,12 +1115,6 @@ live_cmd() {
         echo "$part: $(live_describe "$root" current)"
         [[ -L $root/previous ]] && echo "  previous: $(live_describe "$root" previous)"
         case $part in
-          niri|plain)
-            port=$(live_port "$part") pid=$(cat "$RUN_DIR/plutonium/serve-$port.pid" 2> /dev/null || true)
-            cmd=$([[ -n $pid ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null || true)
-            if [[ $cmd != *"http.server $port "* ]]; then echo "  no server on $port"
-            elif [[ $cmd == *"$root/current"* ]]; then echo "  served on $port"
-            else cmd=${cmd##*--directory }; echo "  but the server on $port serves ${cmd% } (live apply $part moves it)"; fi ;;
           shell-lib) live_helper_check 2>&1 | sed 's/^warning: /  /' ;;
           t3)
             if [[ -L $dist && $(readlink "$dist") == "$root/current" ]]; then echo "  served by $T3CODE_DIR's server"
@@ -1123,6 +1134,40 @@ live_cmd() {
       [[ $prev == /* ]] && echo "< $prev (followed)"
       true ;;
     *) live_usage; [[ -z $cmd || $cmd == -h || $cmd == --help ]] || exit 2 ;;
+  esac
+}
+
+# --- Installed shells --------------------------------------------------------
+shells_usage() {
+  cat <<EOF2
+Usage: plutonium shells <command>
+
+The shells sessions run are installed in $PLUTO_HOME/shells/<name>, each a git
+repository with a shell.json (docs/features/SHELL_PACKAGES.md). Static ones are
+served at http://<name>.localhost:$SHELLS_PORT/ by the session's helper.
+
+  install [name...]     copy this checkout's shells (shells/) that aren't installed
+  update [name...] [--from <checkout>]
+                        merge this checkout's (or another's) version of each shell into
+                        yours; your edits are kept, and conflicts are reported, not merged
+  list [--json]         the installed shells, in shells.json's order, on or off
+EOF2
+}
+shells_cmd() {
+  local cmd=${1:-} from=$ROOT args=()
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --from) from=$(realpath "${2:?--from needs a checkout}"); shift ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  case $cmd in
+    install) shells_cli install --shipped "$from/shells" --default "$(shells_default)" "${args[@]}" ;;
+    update) shells_cli update --shipped "$from/shells" "${args[@]}" ;;
+    list) shells_cli list "${args[@]}" ;;
+    *) shells_usage; [[ -z $cmd || $cmd == help || $cmd == -h || $cmd == --help ]] || exit 2 ;;
   esac
 }
 
@@ -1197,7 +1242,7 @@ worktree_cmd() {
       echo "  X11 sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT, Xvfb $PRIVATE_XDISP"
       session_vars drm
       echo "  DRM sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT"
-      echo "  shells: niri $(slot_port 8775), plain $(slot_port 8770), T3 Code $T3_PORT"
+      echo "  shells: http://<name>.localhost:$SHELLS_PORT, T3 Code $T3_PORT; installed in $PLUTO_HOME"
       echo "  Chromium: $CHROME_BIN" ;;
     list)
       local dir
@@ -1441,10 +1486,9 @@ doctor() {
     "plutonium killswitch find, press a spare key, put the two lines it prints in plutonium.env"
   check "plutonium-killswitch running" "[ \$(systemctl --user is-active plutonium-killswitch) = active ]" "plutonium killswitch install"
   echo "Optional:"
-  # The shells (t3/shells): installed into PLUTO_HOME by plutonium shells
-  # install, or by the first run. Not a failure either way.
-  local pluto=${PLUTO_HOME:-$HOME/.pluto}
-  (( SLOT )) && pluto=${PLUTO_HOME:-$DATA_DIR/pluto-s$SLOT}
+  # The shells: installed into PLUTO_HOME by plutonium shells install, or by
+  # the first run. Not a failure either way.
+  local pluto=$PLUTO_HOME
   if [[ -f $pluto/shells.json ]]; then ok "shells installed ($pluto/shells)"
   else echo "  -        shells: not installed yet (plutonium shells install, or the first run does it)"; fi
   check_opt "login screen entry" "[ -f /usr/share/wayland-sessions/plutonium.desktop ]" "plutonium session install"
@@ -1469,6 +1513,7 @@ case "$cmd" in
   killswitch) killswitch_cmd "$@" ;;
   session) session_cmd "$@" ;;
   live) live_cmd "$@" ;;
+  shells) shells_cmd "$@" ;;
   worktree) worktree_cmd "$@" ;;
   helper)
     session_vars drm

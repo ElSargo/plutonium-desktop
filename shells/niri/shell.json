@@ -1,0 +1,6 @@
+{
+  "title": "niri",
+  "version": "1",
+  "description": "A clone of the niri compositor: scrollable tiling, with niri's default binds.",
+  "static": "index.html"
+}

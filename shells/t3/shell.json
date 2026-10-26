@@ -1,0 +1,14 @@
+{
+  "title": "T3",
+  "version": "1",
+  "description": "T3 Code: coding agents' chat threads, each with its apps, terminals and browser tabs.",
+  "helperParam": "plutoniumHelper",
+  "server": {
+    "run": "plutonium",
+    "argv": ["{plutonium}/bin/plutonium", "t3", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],
+    "port": 3773,
+    "health": "http://127.0.0.1:{port}/",
+    "restart": "on-failure",
+    "entryCommand": ["{plutonium}/bin/plutonium", "t3", "pair-url", "--port", "{port}"]
+  }
+}

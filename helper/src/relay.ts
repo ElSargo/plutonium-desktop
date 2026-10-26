@@ -167,6 +167,11 @@ export class ShellRelay {
     if (!replaced) this.onDisconnect(key);
   }
 
+  /** The origin of page `key`, if it is connected. */
+  originOf(key: string): string | undefined {
+    return this.connections.get(key)?.origin;
+  }
+
   /** Whether page `key` is connected. */
   has(key: string): boolean {
     return this.connections.has(key);
