@@ -722,7 +722,8 @@ shell find it.
   (`SetBrightness`, no root), brightness keys; battery and AC from UPower;
   suspend, restart, power off, log out through logind. Done 2026-10-26:
   `services/power.ts`; log out is `plutonium stop` for the session. Not yet:
-  the keyboard backlight, the power button, idle and lid actions.
+  the keyboard backlight, the power button, lid actions (idle: the session
+  service below).
 - [x] **Network.** M · NetworkManager over D-Bus: state, Wi-Fi list, connect
   (with a password prompt from the shell), turn Wi-Fi off; VPNs later. Done
   2026-10-26: `helper/src/services/network.ts`, a NetworkManager secret
@@ -741,8 +742,15 @@ shell find it.
   `org.freedesktop.Notifications`, `shell.system.notifications`, the
   library's popups in the visible shell. Open: check the popups in a session;
   tabs' web notifications (the item above) to go the same way.
-- [ ] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
-  (Ash's own, or a locked page), inhibit while video plays.
+- [x] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
+  (Ash's own, or a locked page), inhibit while video plays. Done 2026-10-26:
+  Ash's lock over every display (Super+L), the password through
+  `unix_chkpwd`, `services/session.ts` (idle screen off and lock, inhibitors
+  from apps, the portal, the browser's wake locks and shells; logind's Lock
+  and the lock before sleep), Lock in niri's and plain's power menu
+  ([DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md#session)). Not yet:
+  dimming before the screen goes off, a lock on the lid closing (logind
+  suspends, which locks first), other accounts than `/etc/shadow`'s.
 - [x] **A native side and storage for shells.** Done 2026-10-26:
   `"native"` in `shell.json` (a module the helper runs, `shell.native.call`,
   its events), `shell.storage` in `~/.pluto/data/<name>/`

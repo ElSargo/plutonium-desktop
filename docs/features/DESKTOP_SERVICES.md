@@ -366,3 +366,84 @@ BlueZ on the system bus: its objects (`GetManagedObjects`), kept current by
   it). On the real computer, read-only: the state, discovery, both shells'
   menus. Not run for real: power off, pairing, connecting, disconnecting,
   forgetting (the user's keyboard and mouse are paired).
+
+### session
+
+The lock screen and idle: when the screen goes off and locks, what holds it
+off, and the lock itself.
+
+- **The lock is Ash's**, not a shell's: a full-screen view (the switcher's
+  style: the clock and date, the user's name, a password field) on every
+  display, in Ash's overlay container above every shell, tab and app. While
+  it's up, an event handler ahead of everything else (Ash's system priority)
+  drops every event that isn't for it, so no key, click or touch reaches a
+  shell, a tab or an app, and the Plutonium keys (Super+Tab, Super+F, the
+  backup terminal) are off. The hardware keys (volume, brightness) still
+  work, and so do VT switching, Ctrl+Alt+Backspace and the kill switch,
+  which are taken before Ash. A window that comes up meanwhile doesn't get
+  the keyboard: the lock takes it back and stays in front. Only the
+  password typed on it takes it down: Ash hands it to the helper (`POST
+  /v1/session/unlock` on its Unix socket), and nothing else unlocks (there's
+  no unlock in the DevTools domain or the service). Agents driving tabs over
+  DevTools keep working behind it.
+- **State:** `{ locked, idleSeconds, idleAction, lockAfter, screenOffAfter,
+  inhibitors: [{ who, why }], canLock, problem }`. `idleSeconds` is as idle
+  counts it: since the last key, click or touch, and 0 while something
+  inhibits (then from when the last inhibitor went). `idleAction` is what
+  idle has done now: `"none"`, `"screen-off"` (on X11 only reported: the
+  displays are the host's) or `"lock"`. `lockAfter` and `screenOffAfter` are
+  seconds, 0 for never. `canLock` is false, with `problem` saying why, when
+  there's no way to check a password or no browser to draw the lock.
+- **Actions** (each returns the new state): `lock {message?}` (409 when it
+  can't), `set-idle {lockAfter?, screenOffAfter?}` (kept in
+  `$PLUTO_HOME/session.json`; defaults: the screen off after 5 minutes, the
+  lock after 10), `inhibit {why}` and `uninhibit` (one per shell; it goes
+  with the shell's last page, so a shell that crashed doesn't keep the
+  computer awake).
+- **What locks:** the action; **Super+L**, a default key in Ash that shells
+  can't take (Ash asks the helper, `POST /v1/session/lock`); idle; apps
+  (`org.freedesktop.ScreenSaver.Lock`, `xdg-screensaver lock`); and on DRM,
+  logind: its `Lock` signal for this session (`loginctl lock-session`; its
+  `Unlock` isn't followed, only the password unlocks), and **before sleep**:
+  the helper holds a delay inhibitor (`systemd-inhibit --what=sleep
+  --mode=delay`), and on `PrepareForSleep` puts the lock up, then lets go,
+  so the lock is what shows on waking. An X11 session doesn't follow logind
+  (the seat's session is the host's).
+- **Idle:** Ash knows when the user last did anything
+  (`ui::UserActivityDetector`); the helper asks (`Plutonium.getIdle`) when
+  the next step is due, not on a fixed tick. Screen off on DRM is Ash's
+  `DisplayConfigurator` turning the displays off, until the next key or
+  pointer move, which Ash turns them on for itself.
+- **Inhibitors:** apps through `org.freedesktop.ScreenSaver.Inhibit` (the
+  helper serves it on the session bus if nothing else has it; an app's
+  inhibitors go when it leaves the bus) and the portal's `Inhibit` with the
+  idle flag (the helper's portal backend, until its request closes); the
+  browser's screen wake locks (`PowerPolicyController`, which there's no
+  powerd to send to): a tab or shell page playing video, the Screen Wake
+  Lock API, and Wayland apps' `zwp_idle_inhibit` (Exo makes those wake locks
+  too); and shells' `inhibit`. The browser's own tab captures (the
+  switcher's thumbnails, agents' screencasts) don't count.
+- **The password check:** PAM's own helper, `unix_chkpwd`, which every Linux
+  with PAM has: setuid root, it checks the calling user's password, read on
+  stdin, and answers with its exit status (0 yes, 7 no). Found at
+  `/run/wrappers/bin` (NixOS), `/usr/sbin`, `/sbin`, `/usr/bin` or
+  `/usr/libexec`; no PAM library or other dependency. It checks
+  `/etc/shadow` accounts only (not LDAP, SSSD or systemd-homed). Without it
+  the service refuses to lock, with a notification, rather than lock with no
+  way back; `plutonium doctor` says so. A wrong password answers after a
+  second; from the fifth in a row, each makes the next wait (30 s, doubling,
+  up to 5 minutes), which the lock counts down. `PLUTONIUM_PASSWORD_CHECKER`
+  names a program with `unix_chkpwd`'s interface to use instead (for tests).
+- **Code:** `helper/src/services/session.ts`, `helper/src/password.ts`; in
+  Chromium, `chrome/browser/plutonium_lock.h` and
+  `chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc`, the
+  Plutonium domain's `lock`, `getIdle`, `setDisplaysOff` and `lockChanged`.
+- **Tested:** `helper/test/session.test.ts` with a fake browser and a stand-in
+  checker: lock and unlock, wrong passwords and the wait, refusing without a
+  checker, idle (screen off, then the lock; X11's report), inhibitors (a
+  shell's, the browser's wake locks, the portal's, a gone shell's), logind's
+  `Lock` and `PrepareForSleep` on the fake bus, `org.freedesktop.ScreenSaver`
+  on a private `dbus-daemon` (an app's inhibitor going with it), and
+  `unix_chkpwd`'s interface with a stand-in. The real `unix_chkpwd` only ever
+  got a wrong password (`PLUTONIUM_TEST_CHKPWD=1`). `portal.test.ts`:
+  `Inhibit`.

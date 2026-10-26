@@ -13,9 +13,12 @@ The browser handles these in every shell:
 | Volume up/down/mute, mic mute | The default output's volume (5% a press, up to 100%) and mute, the default input's mute; the shell shows the level ([features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md)) |
 | Brightness up/down | The backlight, 5% a press |
 | Play/pause, next, previous | The player that last played: an MPRIS app (mpv, Spotify…) or a tab |
+| Super+L | Lock the screen: Ash's own lock, over every display, which only your password takes down ([features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md#session)) |
 | Ctrl+Alt+Backspace | On DRM: end the session (as `plutonium stop --drm`); the text console comes back |
 
 Each shell adds its own keys, which keep working while an app or tab has the keyboard.
+
+**Idle and the lock.** After 5 minutes without a key, a click or a touch the displays go off (on DRM; a key brings them back), and after 10 the screen locks. Video playing in a tab, an app that asks (mpv, Firefox, games: through `org.freedesktop.ScreenSaver`, the portal or Wayland's idle inhibitor) or a shell holds both off. The lock also comes up before the computer sleeps, and with `loginctl lock-session`. Change the times from a shell (`shell.system.session`, `set-idle`) or in `~/.pluto/session.json` (`{"lockAfter": 600, "screenOffAfter": 300}`, seconds, 0 for never). The password is checked with PAM's `unix_chkpwd`, which needs your account in `/etc/shadow` (not LDAP or systemd-homed): without it Plutonium won't lock, and says so (`plutonium doctor` too). On the lock, Ctrl+Alt+Backspace still ends the session, and Ctrl+Alt+F1…F12 still switch VTs.
 
 ## The shells
 
