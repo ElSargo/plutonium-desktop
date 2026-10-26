@@ -17,6 +17,10 @@
 #         (--ash-host-window-bounds: several, comma-separated, for several
 #         displays), XVFB_SIZE (the private Xvfb's screen, default 1600x1000)
 #   EXTRA_FLAGS  more Chromium flags, VMODULE
+# The whole script is one compound command: bash reads it all before running
+# any, so changing this file under a running session can't break it (it did:
+# an edit while Ash ran made its exit path a syntax error, 2026-10-26).
+{
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -275,3 +279,4 @@ stop_ash KILL
 # Ash's status, for plutonium session start: SIGTERM (Ctrl+Alt+Backspace,
 # plutonium stop) is a clean 0.
 exit "$rc"
+}
