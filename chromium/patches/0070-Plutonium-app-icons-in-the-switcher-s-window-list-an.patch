@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 18:07:12 +1300
-Subject: [PATCH 70/70] Plutonium: app icons in the switcher's window list and
+Subject: [PATCH 70/72] Plutonium: app icons in the switcher's window list and
  launcher
 
 PlutoniumAppIcons gets an app's icon from the helper (GET /v1/apps/<id>/icon,
@@ -17,8 +17,8 @@ dot.
  .../main_extra_parts/plutonium_app_icons.h    |  83 ++++++++
  .../plutonium_helper_client.cc                |  25 +++
  .../plutonium_helper_client.h                 |   6 +
- .../ash/main_extra_parts/plutonium_overlay.cc |  35 +++-
- 6 files changed, 329 insertions(+), 1 deletion(-)
+ .../ash/main_extra_parts/plutonium_overlay.cc |  41 +++-
+ 6 files changed, 335 insertions(+), 1 deletion(-)
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_app_icons.cc
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_app_icons.h
 
@@ -361,7 +361,7 @@ index 3354202040..bb0b13eeec 100644
  
  #endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_HELPER_CLIENT_H_
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
-index c09fbca6ab..6fbaf60d38 100644
+index c09fbca6ab..d956d75070 100644
 --- a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
 @@ -29,6 +29,7 @@
@@ -372,16 +372,18 @@ index c09fbca6ab..6fbaf60d38 100644
  #include "chrome/browser/ui/ash/main_extra_parts/plutonium_helper_client.h"
  #include "components/exo/embedded_windows.h"
  #include "content/public/browser/web_contents.h"
-@@ -107,6 +108,8 @@ struct Row {
+@@ -107,6 +108,10 @@ struct Row {
    // The state dot's color, or 0 for none.
    SkColor dot = 0;
    bool dim = false;
-+  // The app's icon, if it has one (PlutoniumAppIcons).
++  // The app's icon, if it has one (PlutoniumAppIcons); with |icon_column|, its
++  // place is kept without one.
 +  gfx::ImageSkia icon;
++  bool icon_column = false;
  
    bool selectable() const { return kind != Kind::kHeader; }
    // What a selection is remembered by across rebuilds.
-@@ -261,6 +264,11 @@ class RowView : public views::View {
+@@ -261,6 +266,15 @@ class RowView : public views::View {
        if (row.dot) {
          dot->SetBackground(views::CreateRoundedRectBackground(row.dot, 4));
        }
@@ -389,11 +391,15 @@ index c09fbca6ab..6fbaf60d38 100644
 +        auto* icon = AddChildView(std::make_unique<views::ImageView>());
 +        icon->SetImage(ui::ImageModel::FromImageSkia(row.icon));
 +        icon->SetImageSize(gfx::Size(20, 20));
++      } else if (row.icon_column) {
++        // The launcher's names line up, with an icon or without.
++        AddChildView(std::make_unique<views::View>())
++            ->SetPreferredSize(gfx::Size(20, 20));
 +      }
      }
      auto* text = AddChildView(std::make_unique<views::View>());
      text->SetLayoutManager(std::make_unique<views::BoxLayout>(
-@@ -368,6 +376,10 @@ class PlutoniumOverlayView : public views::View,
+@@ -368,6 +382,10 @@ class PlutoniumOverlayView : public views::View,
                         PlutoniumOverlay* overlay,
                         int step)
        : shells_(shells), overlay_(overlay) {
@@ -404,7 +410,7 @@ index c09fbca6ab..6fbaf60d38 100644
      auto* layout = SetLayoutManager(std::make_unique<views::BoxLayout>(
          views::BoxLayout::Orientation::kHorizontal));
      layout->set_cross_axis_alignment(
-@@ -550,6 +562,23 @@ class PlutoniumOverlayView : public views::View,
+@@ -550,6 +568,23 @@ class PlutoniumOverlayView : public views::View,
   private:
    // Lists.
  
@@ -428,7 +434,7 @@ index c09fbca6ab..6fbaf60d38 100644
    void RebuildSoon() {
      if (rebuild_pending_) {
        return;
-@@ -846,6 +875,7 @@ class PlutoniumOverlayView : public views::View,
+@@ -846,6 +881,7 @@ class PlutoniumOverlayView : public views::View,
          row.dot = place == u"fullscreen" ? kAccent
                    : place == u"not shown" ? kDim
                                            : kOk;
@@ -436,17 +442,17 @@ index c09fbca6ab..6fbaf60d38 100644
          const std::string group = GroupTagOf(window.tags);
          if (!Matches(query, {row.title, row.detail, JoinTags(window.tags),
                               TagLabel(group)})) {
-@@ -2158,7 +2188,8 @@ class PlutoniumOverlayView : public views::View,
+@@ -2158,7 +2194,8 @@ class PlutoniumOverlayView : public views::View,
            row.title = app->name;
            row.detail = app->detail.empty() ? base::UTF8ToUTF16(app->id)
                                             : app->detail;
 -          row.dot = kAccent;
 +          row.icon = PlutoniumAppIcons::Get()->GetIcon(app->id);
-+          row.dot = row.icon.isNull() ? kAccent : 0;
++          row.icon_column = true;
            app_list_->AddChildView(std::make_unique<RowView>(
                row, false,
                base::BindRepeating(&PlutoniumOverlayView::Launch,
-@@ -2549,6 +2580,8 @@ class PlutoniumOverlayView : public views::View,
+@@ -2549,6 +2586,8 @@ class PlutoniumOverlayView : public views::View,
    int selected_ = -1;
    std::string selected_key_;
    bool rebuild_pending_ = false;

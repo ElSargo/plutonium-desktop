@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { Appearance, isDark } from "../src/appearance.ts";
+import { Appearance, isDark, isDarkDconf } from "../src/appearance.ts";
 import { DBusConnection } from "../src/dbus.ts";
 
 describe("appearance", () => {
@@ -11,6 +14,34 @@ describe("appearance", () => {
     assert.equal(isDark(0), false);
     assert.equal(isDark(2), false);
     assert.equal(isDark(undefined), false);
+  });
+
+  test("without a portal, GNOME's dconf key (a fake dconf)", async () => {
+    assert.equal(isDarkDconf("'prefer-dark'\n"), true);
+    assert.equal(isDarkDconf("'default'"), false);
+    const dir = mkdtempSync(join(tmpdir(), "appearance-"));
+    const dconf = join(dir, "dconf");
+    writeFileSync(dconf, `#!/bin/sh
+if [ "$1" = read ]; then echo "'prefer-light'"; exit 0; fi
+echo /org/gnome/desktop/interface/color-scheme; echo "  'prefer-dark'"; echo; sleep 5
+`);
+    chmodSync(dconf, 0o755);
+    const saved = process.env.PLUTONIUM_DCONF;
+    process.env.PLUTONIUM_DCONF = dconf;
+    // A bus with no portal on it.
+    const appearance = new Appearance("unix:path=/nonexistent");
+    const seen: boolean[] = [];
+    appearance.onChange((dark) => seen.push(dark));
+    try {
+      await appearance.start();
+      for (let i = 0; i < 50 && seen.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.deepEqual(seen, [false, true]);
+    } finally {
+      appearance.stop();
+      if (saved === undefined) delete process.env.PLUTONIUM_DCONF;
+      else process.env.PLUTONIUM_DCONF = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("follows a settings portal (a fake one on a private bus)", async (t) => {

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 14:14:07 +1300
-Subject: [PATCH 67/70] Plutonium: the switcher copies a prompt for the user's
+Subject: [PATCH 67/72] Plutonium: the switcher copies a prompt for the user's
  own agent instead of starting one; a New shell entry on its Add page
 
 ---
