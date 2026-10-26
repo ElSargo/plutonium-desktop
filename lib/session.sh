@@ -241,8 +241,11 @@ if [[ -n ${HOLD_S:-} ]]; then
   stopper=$!
 fi
 wait $ash
-log "Ash exited ($?)"
+rc=$?
+log "Ash exited ($rc)"
 [[ -n ${stopper:-} ]] && kill "$stopper" 2>/dev/null
 # Its children too, before anyone else takes the display.
 stop_ash KILL
-exit 0
+# Ash's status, for plutonium session start: SIGTERM (Ctrl+Alt+Backspace,
+# plutonium stop) is a clean 0.
+exit "$rc"

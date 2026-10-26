@@ -25,6 +25,8 @@ Setup (INSTALL.md walks through these in order):
                              session uses (nix/host-tools.nix): no container to run it
   killswitch find            show the key codes of buttons as you press them
   killswitch install         a user service that kills Ash on a button press (DRM safety)
+  session install [--dry-run] a login screen entry (/usr/share/wayland-sessions, with sudo)
+                             that starts Plutonium: plutonium session start
 
 Sessions:
   run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
@@ -1206,6 +1208,94 @@ worktree_cmd() {
   esac
 }
 
+# --- Login screen ------------------------------------------------------------
+# A Wayland session entry, so a display manager (GDM, SDDM, LightDM) starts
+# Plutonium for whoever logs in. The display manager runs `plutonium session
+# start` in a logind session on a VT of its own, which `plutonium run` (DRM)
+# takes as it would a text console's. When it exits, for whatever reason, the
+# display manager's login screen comes back.
+SESSION_ENTRY=/usr/share/wayland-sessions/plutonium.desktop
+session_entry() {
+  cat <<EOF2
+[Desktop Entry]
+Name=Plutonium
+Comment=A web-based desktop (from $ROOT)
+Exec=$ROOT/bin/plutonium session start
+TryExec=$ROOT/bin/plutonium
+Type=Application
+DesktopNames=Plutonium
+EOF2
+}
+# Messages a display manager's user sees nowhere else: the journal, tagged
+# plutonium-session (journalctl -t plutonium-session), and the session log.
+session_log() {   # <priority> <message>
+  logger -t plutonium-session -p "user.$1" -- "$2" 2>/dev/null || true
+  echo "$(date +%T) $2" >> "$LOGS/login-session.log"
+  echo "$2" >&2
+}
+session_start() {
+  local dry= shells=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in --dry-run) dry=1 ;; *) shells+=("$1") ;; esac
+    shift
+  done
+  # shellcheck disable=SC2206
+  [[ ${#shells[@]} -gt 0 ]] || shells=(${SESSION_SHELLS:-niri plain})
+  local sid=${XDG_SESSION_ID:-} problem=
+  session_log info "starting for $(id -un) in logind session ${sid:-(none)}${sid:+ ($(loginctl show-session "$sid" -p TTY --value 2>/dev/null))}: plutonium run ${shells[*]}"
+  if [[ -z ${HOST:-} ]] && ! container_running; then
+    if [[ -n $dry ]]; then session_log info "would start the container $CONTAINER (plutonium container start)"
+    else container_cmd start > /dev/null 2>&1 || problem="the container $CONTAINER doesn't start (plutonium doctor)"; fi
+  fi
+  # The kill switch is a user service, started with the user's manager at
+  # login, so it may still be opening its device.
+  local i
+  for i in $(seq 1 10); do
+    [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
+      journalctl --user -u plutonium-killswitch -o cat --no-pager -n 50 |
+        grep -E 'killswitch starting|listening on|lost |device not found' | tail -1 | grep -q 'listening on' && break
+    [[ $i == 10 ]] && problem=${problem:-"the kill switch isn't listening (plutonium killswitch install; plutonium doctor)"}
+    [[ -n $dry ]] && break
+    sleep 1
+  done
+  if [[ -n $problem ]]; then
+    session_log err "not starting: $problem"
+    [[ -n $dry ]] || exit 1
+  fi
+  if [[ -n $dry ]]; then
+    session_log info "would run: plutonium run ${shells[*]} (in session ${sid:-none}); back to the login screen when it exits"
+    return
+  fi
+  local started=$SECONDS rc=0
+  "$ROOT/bin/plutonium" run "${shells[@]}" || rc=$?
+  session_vars drm
+  if (( rc != 0 && SECONDS - started < 30 )); then
+    session_log err "Plutonium didn't start (exit $rc after $((SECONDS - started)) s); back to the login screen. Logs: $LOGS/session-$SOCKET.log, $LOGS/ash-$SOCKET.log"
+    tail -n 15 "$LOGS/session-$SOCKET.log" 2>/dev/null | logger -t plutonium-session -p user.err 2>/dev/null || true
+  elif (( rc != 0 )); then
+    session_log err "Ash exited ($rc) after $((SECONDS - started)) s; back to the login screen. Log: $LOGS/ash-$SOCKET.log"
+  else
+    session_log info "the session ended; back to the login screen"
+  fi
+  exit "$rc"
+}
+session_cmd() {
+  case "${1:-}" in
+    start) shift; session_start "$@" ;;
+    install)
+      if [[ ${2:-} == --dry-run ]]; then echo "would write $SESSION_ENTRY (with sudo):"; session_entry; return; fi
+      local tmp
+      tmp=$(mktemp)
+      session_entry > "$tmp"
+      echo "writing $SESSION_ENTRY (sudo)"
+      sudo install -Dm644 "$tmp" "$SESSION_ENTRY"
+      rm -f "$tmp"
+      echo "Log out: the login screen lists Plutonium among the sessions." ;;
+    uninstall) sudo rm -f "$SESSION_ENTRY" && echo "removed $SESSION_ENTRY" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
 # --- Doctor ------------------------------------------------------------------
 # The first-run guide: every check that fails says what's wrong and the command
 # that fixes it, for this distribution. It exits 1 while something required
@@ -1370,6 +1460,7 @@ case "$cmd" in
   stop) stop_cmd "$@" ;;
   status) status_cmd ;;
   killswitch) killswitch_cmd "$@" ;;
+  session) session_cmd "$@" ;;
   live) live_cmd "$@" ;;
   worktree) worktree_cmd "$@" ;;
   helper)

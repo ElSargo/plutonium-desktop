@@ -102,11 +102,14 @@ def graphical_session():
         if len(fields) < 3 or fields[1] != str(os.getuid()):
             continue
         try:
-            kind = subprocess.run(["loginctl", "show-session", fields[0], "-p", "Type", "--value"],
-                                  capture_output=True, text=True, timeout=5).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
+            kind, desktop = subprocess.run(
+                ["loginctl", "show-session", fields[0], "-p", "Type", "-p", "Desktop", "--value"],
+                capture_output=True, text=True, timeout=5).stdout.split("\n")[:2]
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             continue
-        if kind in ("wayland", "x11"):
+        # Not Plutonium's own login screen session (plutonium session
+        # install): it ends with Ash, and the login screen comes back.
+        if kind.strip() in ("wayland", "x11") and desktop.strip().lower() != "plutonium":
             return fields[0]
     return None
 

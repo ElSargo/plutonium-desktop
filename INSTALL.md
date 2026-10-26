@@ -164,6 +164,36 @@ plutonium run --vt tty2 niri
 plutonium run --vt tty2 --hold 120 niri    # unattended: stops after 120 s
 ```
 
+**From the login screen.** With a display manager (GDM, SDDM, LightDM), Plutonium can be a session you pick when you log in:
+
+```
+plutonium session install --dry-run   # shows the entry it would write
+plutonium session install             # /usr/share/wayland-sessions/plutonium.desktop, with sudo
+```
+
+Log out, pick Plutonium at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
+- it starts the container if it isn't running, and waits up to 10 s for the kill switch, which starts with your login;
+- it runs `plutonium run niri plain` on the display manager's VT. Set `SESSION_SHELLS="t3 niri"` in `plutonium.env` for other shells;
+- when the session ends (Ctrl+Alt+Backspace, the kill switch, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
+
+The display manager's own automatic login, with the Plutonium session, starts it at power-on. `plutonium session uninstall` removes the entry.
+
+**Without a display manager.** Log in on tty1 automatically, and start Plutonium from the login shell. For getty autologin, run `sudo systemctl edit getty@tty1` and add (NixOS: `services.getty.autologinUser = "<you>";`):
+
+```
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin <you> %I $TERM
+```
+
+Then, at the end of `~/.bash_profile` (or your shell's login file):
+
+```
+if [ "$(tty)" = /dev/tty1 ]; then ~/plutonium/bin/plutonium session start; fi
+```
+
+Not `exec`: when the session ends, or doesn't start, you're at tty1's prompt, rather than logged in again into the same failure.
+
 **Choosing shells.** List them in order; the first one is the desktop:
 - `niri`, `plain` or `t3`;
 - `<name>=<url>` for any web app you've written against the shell API (see `docs/USING.md`).

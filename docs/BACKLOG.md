@@ -89,8 +89,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `--plutonium-shell-url` opens the page as the only, fullscreen window, with
   Ash in kiosk app mode; `plutonium run` boots it on DRM. Verified on
   the panel (tty2, 2026-10-16).
-- [ ] **Autostart at power-on.** Today the session starts from a logged-in VT.
-  Getty autologin plus a unit that runs the launcher. S
+- [x] **Autostart at power-on.** S · A display manager's automatic login
+  with the session entry below, or getty autologin and `plutonium session
+  start` from the login shell (INSTALL.md, "From the login screen"). Not yet
+  tried on the panel.
 - [x] **Hotplugged input devices are ignored in the container.** Done: host
   root shows up in the container as uid 65534, which keep-id mapped, so
   libudev dropped the host's events ("Sender uid=65534, message ignored").
@@ -727,6 +729,13 @@ shells that want to span monitors run on each and sync themselves.
   mount that file pickers and downloads rely on.
 - [ ] **Build and push the image from CI** (GitHub Actions can't build Chromium
   in its time limits on free runners; a self-hosted runner could). M
-- [ ] **Start from a display manager** (a Wayland session entry that runs
-  `plutonium run`), instead of a logged-in text console. M
+- [x] **Start from a display manager.** M · `plutonium session install`
+  writes `/usr/share/wayland-sessions/plutonium.desktop`, which runs
+  `plutonium session start`: the container and the kill switch first, then
+  `plutonium run` in the display manager's logind session, and back to the
+  login screen when it ends, with why in the journal (`journalctl -t
+  plutonium-session`). Checked with dry runs and a session that fails to
+  start; not yet tried with a real display manager (GDM, SDDM).
+- [ ] **A login screen entry for every user.** S · The entry runs one
+  checkout's `bin/plutonium`, so it's for the user who installed it.
 - [x] **A license:** MIT.
