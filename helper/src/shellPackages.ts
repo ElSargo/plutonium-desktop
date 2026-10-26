@@ -200,7 +200,8 @@ export class ShellPackages {
           const origin = this.originOf(shell)!;
           const started = this.server(shell.manifest);
           void started.start().then((healthy) => {
-            if (healthy && !started.adopted) void this.hooks.reloadPages?.(origin);
+            // The browser may not be up yet (a session's first start): nothing to reload then.
+            if (healthy && !started.adopted) void this.hooks.reloadPages?.(origin).catch(() => 0);
           });
         }
       } else if (!on && server && server.state !== "stopped" && server.state !== "failed") {

@@ -63,6 +63,9 @@ function usage(): never {
 
 switch (command) {
   case "daemon": {
+    // A stray rejected promise (the browser not up yet, say) is logged, not
+    // fatal: every app launch and the launcher go through this process.
+    process.on("unhandledRejection", (error) => console.error("plutoniumd: unhandled rejection:", error));
     // Comma-separated: a session can have several shells.
     const shellOrigins = (values["shell-origin"] ?? process.env.PLUTONIUM_SHELL_ORIGIN ?? "")
       .split(",")
