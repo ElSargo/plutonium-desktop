@@ -1189,7 +1189,7 @@ shells_cmd() {
       python3 -c 'import json, sys
 answer = json.loads(sys.argv[1])
 if "error" in answer: sys.exit("plutonium: " + answer["error"])
-print(f"made {answer[\"name\"]} in {answer[\"dir\"]}: on, at {answer.get(\"url\", \"\")}")
+print("made", answer["name"], "in", answer["dir"] + ": on, at", answer.get("url", ""))
 print("Edit its files there: every save is committed and reloads it (rolled back if it stops connecting).")' "$answer" ;;
     *) shells_usage; [[ -z $cmd || $cmd == help || $cmd == -h || $cmd == --help ]] || exit 2 ;;
   esac
