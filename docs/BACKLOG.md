@@ -729,14 +729,11 @@ shell find it.
   handed to the visible shell (with the tab notifications item above).
 - [ ] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
   (Ash's own, or a locked page), inhibit while video plays.
-- [ ] **A native side and storage for shells.** M · Today a shell is a static
-  page or a whole server. In between: `"native": "native.js"` in
-  `shell.json`, a module the helper runs for the shell (Node, the shell's
-  rights only), called from the page with `shell.native.call(name, …)` and
-  sending it events; and `shell.storage`, data kept in
-  `~/.pluto/data/<name>/` (outside the shell's git repository, so an edit's
-  rollback doesn't lose it, and the same in every slot, unlike
-  `localStorage` on a per-slot origin). `plutonium shells new` offers it.
+- [x] **A native side and storage for shells.** Done 2026-10-26:
+  `"native"` in `shell.json` (a module the helper runs, `shell.native.call`,
+  its events), `shell.storage` in `~/.pluto/data/<name>/`
+  ([DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md#a-native-side-and-storage)).
+  Later: `plutonium shells new --native` to start one from a template.
 
 ## Design questions
 

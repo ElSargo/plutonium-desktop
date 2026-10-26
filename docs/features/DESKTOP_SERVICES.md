@@ -50,6 +50,51 @@ The routes (shell origins only, like the rest of `/v1/shell/`):
 
 Errors: 403 (not in `uses`), 404 (no such service or action), 400 (bad args).
 
+## A native side and storage
+
+Between a static page and a whole server, for a shell that needs the computer
+(read files, run a command, keep a database) or keeps settings.
+
+**Storage**, every installed shell's: JSON values by key, kept in
+`~/.pluto/data/<name>/storage/<key>.json`: outside the shell's git repository,
+so rolling back an edit doesn't lose them, and the same in every slot (unlike
+`localStorage`, whose origin has the slot's port).
+
+```js
+await shell.storage.set("prefs", { dock: "left" });
+await shell.storage.get("prefs");          // undefined when there's none
+await shell.storage.keys(); await shell.storage.delete("prefs");
+```
+
+**The native side**: `"native": "native.js"` in `shell.json`. The helper runs
+the module in its own Node process (as the user: like a server shell, it can
+do anything you can, and Add a shell says it runs it), starts it on the
+page's first call, stops it when the shell is edited or turned off (the next
+call starts the new version), and starts it again after a crash. Its output
+goes to `~/.pluto/logs/<name>.log`.
+
+```js
+// native.js: each exported function is something the page can call.
+import { readdir } from "node:fs/promises";
+export function start(context) { /* optional, once: watch something, context.emit("changed", …) */ }
+export async function listNotes({ folder }, context) { return readdir(folder); }
+// context: { shell, dataDir (~/.pluto/data/<name>), emit(event, detail) }
+```
+
+```js
+// The page.
+const notes = await shell.native.call("listNotes", { folder: "/home/me/notes" });
+shell.native.addEventListener("changed", (event) => show(event.detail));
+```
+
+A call takes up to 60 s; a function that throws rejects the page's call with
+its message. Routes: `POST /v1/shell/native/<function>` (JSON args →
+`{ value }`), `GET /v1/shell/storage` (`{ keys }`), `GET|PUT|DELETE
+/v1/shell/storage/<key>` (`{ value }`); for installed shells only (403
+otherwise). Code: `helper/src/shellNative.ts`, `nativeHost.ts`; tests
+`helper/test/shellNative.test.ts`, and checked against a scratch helper (a
+call, storage, CORS, another origin refused).
+
 ## The services
 
 Each section: its state, its actions, what it uses on the host, and how it was

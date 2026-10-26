@@ -39,6 +39,8 @@ A shell's name is its folder's name: `a-z`, `0-9` and `-`, because it's also a h
 | `static` | the page, relative to the folder: a **static shell** |
 | `server` | a **server shell** (below). A manifest has either `static` or `server`. |
 | `helperParam` | the query parameter that names the helper: `helper` (default), or T3's `plutoniumHelper` |
+| `native` | a module the helper runs for the shell, its native side; and every installed shell has storage ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md#a-native-side-and-storage)) |
+| `uses` | the desktop services it uses: `["audio", "network", …]` ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md)) |
 
 Every page a session opens gets `?<helperParam>=http://127.0.0.1:<helper port>`. You don't write it in the manifest.
 

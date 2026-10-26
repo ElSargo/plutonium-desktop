@@ -52,6 +52,8 @@ export interface ShellManifest {
   readonly server?: ServerSpec;
   /** The query parameter that names the helper (default "helper"). */
   readonly helperParam?: string;
+  /** Its native side (shellNative.ts): a module inside the folder. */
+  readonly native?: string;
   /** The desktop services it uses (services.ts): "audio", "network", … */
   readonly uses?: readonly string[];
 }
@@ -113,10 +115,14 @@ export function parseManifest(text: string, name: string): ShellManifest {
     ...(str("helperParam") ? { helperParam: str("helperParam") } : {}),
     ...(value.server ? { server: parseServer(value.server) } : {}),
     ...(value.uses !== undefined ? { uses: parseUses(value.uses) } : {}),
+    ...(str("native") ? { native: str("native") } : {}),
   };
   if (!manifest.static === !manifest.server) throw new ShellError(`${MANIFEST} needs either "static" or "server"`);
   if (manifest.static && (manifest.static.startsWith("/") || manifest.static.split("/").includes(".."))) {
     throw new ShellError(`"static" must be a path inside the shell's folder`);
+  }
+  if (manifest.native && (manifest.native.startsWith("/") || manifest.native.split("/").includes(".."))) {
+    throw new ShellError(`"native" must be a path inside the shell's folder`);
   }
   return manifest;
 }
@@ -612,12 +618,19 @@ export function previewShell(home: string, source: string, context: ShellContext
     title: manifest.title,
     origin: shellOrigin(manifest, context),
     page: baseUrl(manifest, context),
-    ...(manifest.server?.run === "plutonium"
-      ? { command: manifest.server.argv!.map((arg) => expand(arg, manifest, context)).join(" ") }
-      : {}),
+    ...(previewCommand(manifest, context) ? { command: previewCommand(manifest, context) } : {}),
     ...(manifest.description ? { description: manifest.description } : {}),
     ...(staged ? { staged } : {}),
   };
+}
+
+/** What the shell runs on the computer, as the user: its server, its native side. */
+function previewCommand(manifest: ShellManifest, context: ShellContext): string | undefined {
+  const parts = [
+    ...(manifest.server?.run === "plutonium" ? [manifest.server.argv!.map((arg) => expand(arg, manifest, context)).join(" ")] : []),
+    ...(manifest.native ? [`node ${manifest.native} (its native side)`] : []),
+  ];
+  return parts.length ? parts.join("; ") : undefined;
 }
 
 /** Adds what previewShell() looked at, as $PLUTO_HOME/shells/<name> (a git repository). */

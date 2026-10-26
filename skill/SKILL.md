@@ -33,6 +33,7 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
 - **Make a new shell**: `plutonium shells new <name> [<installed shell>]` copies a shell (default: `plain`, a small complete example) into `{{PLUTO_HOME}}/shells/<name>`, turns it on and puts it in the switcher. Then edit it. A shell with a server: set `server` in `shell.json` (below).
 - **Install someone else's shell**: the switcher's "Add a shell…", or `plutonium shells` (folder, git URL or address).
 - **A shell's server misbehaves**: `curl --unix-socket "$PLUTONIUM_HELPER" http://helper/v1/shells` for state; `POST /v1/shells/<name>/restart`; its log is above.
+- **A shell that needs the computer** (files, commands) **or keeps settings**: `"native": "native.js"` in `shell.json` (a module the helper runs; its exported functions are `shell.native.call(name, args)`) and `shell.storage.get/set` (kept in `{{PLUTO_HOME}}/data/<name>/`, survives rollbacks). See `{{PLUTONIUM}}/docs/features/DESKTOP_SERVICES.md`, "A native side and storage". Don't add a server just for this.
 - **Volume, Wi-Fi, Bluetooth, brightness, battery, notifications**: `shell.system.<service>` in the shell library, after naming it in `shell.json`'s `"uses"` (`{{PLUTONIUM}}/docs/features/DESKTOP_SERVICES.md` lists which exist so far, their state and actions). A shell page can't run commands, so don't work around a missing one; tell the user it's coming.
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 

@@ -47,6 +47,7 @@ import { callTool, mcpTools } from "./mcp.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
+import { NativeError, ShellNative } from "./shellNative.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -346,6 +347,8 @@ export class Daemon {
   readonly threads: Threads;
   readonly relay = new ShellRelay();
   /** Desktop services (services.ts): their changes go to the shells that may use them. */
+  /** Installed shells' storage and native sides (none without installed shells). */
+  readonly native: ShellNative | null;
   readonly services = new DesktopServices((service, state) =>
     this.relay.notifyWhere((origin) => this.mayUse(origin, service), "system", { service, state }),
   );
@@ -399,9 +402,16 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
+    const shells = options.shells;
+    this.native = shells
+      ? new ShellNative(shells.home, (name, event, detail) =>
+          this.relay.notifyWhere((origin) => shells.byOrigin(origin)?.name === name, "native", { event, detail }),
+        )
+      : null;
     if (options.shells) {
       options.shells.hooks = {
         reloadPages: async (origin) => (cdp ? reloadPages(cdp, origin) : 0),
+        stopNative: (name) => this.native?.stop(name),
         openTerminal: (terminal) => this.terminals.create(24, 80, terminal).id,
         threadSetup: (thread) => this.threadSetup(thread),
       };
@@ -1497,7 +1507,7 @@ export class Daemon {
       response.setHeader("Vary", "Origin");
       if (method === "OPTIONS") {
         response.writeHead(204, {
-          "Access-Control-Allow-Methods": "GET, POST",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
           "Access-Control-Allow-Headers": "Content-Type",
           "Access-Control-Max-Age": "600",
         });
@@ -1554,6 +1564,35 @@ export class Daemon {
           }
         } catch (error) {
           if (error instanceof ServiceError) throw new HttpError(error.status, error.message);
+          throw error;
+        }
+      }
+      // An installed shell's storage and native side (shellNative.ts).
+      const own = path.match(/^\/v1\/shell\/(storage|native)(?:\/([\w.$-]+))?$/);
+      if (own) {
+        const [, kind, key] = own as unknown as [string, string, string | undefined];
+        const shell = this.options.shells?.byOrigin(origin);
+        if (!shell || !this.native) throw new HttpError(403, "Only an installed shell has storage and a native side.");
+        try {
+          if (kind === "native" && key && method === "POST") {
+            return sendJson(response, 200, { value: (await this.native.call(shell, key, await readJson(request))) ?? null });
+          }
+          if (kind === "storage" && !key && method === "GET") return sendJson(response, 200, { keys: this.native.keys(shell.name) });
+          if (kind === "storage" && key && method === "GET") {
+            const value = this.native.get(shell.name, key);
+            if (value === undefined) throw new HttpError(404, `Nothing stored at "${key}".`);
+            return sendJson(response, 200, { value });
+          }
+          if (kind === "storage" && key && method === "PUT") {
+            this.native.set(shell.name, key, (await readJson(request)).value);
+            return void response.writeHead(204).end();
+          }
+          if (kind === "storage" && key && method === "DELETE") {
+            this.native.delete(shell.name, key);
+            return void response.writeHead(204).end();
+          }
+        } catch (error) {
+          if (error instanceof NativeError) throw new HttpError(error.status, error.message);
           throw error;
         }
       }
@@ -2213,6 +2252,7 @@ export class Daemon {
   stop(): void {
     this.options.shells?.stop();
     this.services.stop();
+    this.native?.stopAll();
     this.portal?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();

@@ -73,6 +73,8 @@ export interface BrowserShell {
 export interface ShellHooks {
   /** Reloads the browser's pages on an origin, bypassing the cache. */
   reloadPages?(origin: string): Promise<number>;
+  /** Stops a shell's native side: it was edited, or turned off. */
+  stopNative?(name: string): void;
   /** Opens a backup terminal session; returns its id. */
   openTerminal?(options: TerminalOptions): string;
   /** A thread's environment for what the user types, and the agent bridge. */
@@ -207,6 +209,7 @@ export class ShellPackages {
   sync(origins: Iterable<string>): void {
     this.activeOrigins = new Set(origins);
     for (const shell of installedShells(this.home)) {
+      if (shell.manifest?.native && !this.activeOrigins.has(this.originOf(shell)!)) this.hooks.stopNative?.(shell.name);
       if (shell.manifest?.server?.run !== "plutonium") continue;
       const on = this.activeOrigins.has(this.originOf(shell)!);
       const server = this.servers.get(shell.name);
@@ -407,6 +410,8 @@ export class ShellPackages {
   private edited(name: string): void {
     const dir = shellDir(this.home, name);
     if (!existsSync(join(dir, ".git"))) return;
+    // Its next call starts the edited native side.
+    this.hooks.stopNative?.(name);
     let commit: string | undefined;
     try {
       commit = commitEdits(dir);

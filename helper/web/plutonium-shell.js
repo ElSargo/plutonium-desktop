@@ -265,6 +265,10 @@ export class PlutoniumShell extends EventTarget {
      * @type {SystemServices & Record<string, SystemService>}
      */
     this.system = systemServices();
+    /** An installed shell's native side ("native" in its shell.json): `call(name, args)`, and its events. */
+    this.native = new ShellNativeSide();
+    /** An installed shell's storage: JSON values by key, kept outside its folder. */
+    this.storage = shellStorage;
     /** @type {Map<string, { threadId: string, tabId: string, browserTabId: number, targetId: string }>} */
     this._serverTabs = new Map();
     /** Whether this Chromium has the capture API (screenshots, streams, capture requests). */
@@ -1546,6 +1550,7 @@ export class PlutoniumShell extends EventTarget {
         // A notice: nothing to answer.
         if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
         if (op === "system") this.system._changed(args.service, args.state);
+        if (op === "native") this.native.dispatchEvent(new CustomEvent(args.event, { detail: args.detail }));
         if (op === "global_shortcuts") {
           this.globalShortcuts = args.shortcuts ?? [];
           this._applyShortcuts();
@@ -2519,6 +2524,47 @@ function systemServices() {
     })
   );
 }
+
+// An installed shell's own side (DESKTOP_SERVICES.md, "A native side and
+// storage"). `shell.native.call("listNotes", { folder })` runs the function
+// its native module exports; what the module emits arrives as events on
+// `shell.native` (addEventListener(name, (event) => event.detail)).
+class ShellNativeSide extends EventTarget {
+  async call(name, args = {}) {
+    const { value } = await helperFiles(`/v1/shell/native/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    return value;
+  }
+}
+
+const storagePath = (key) => `/v1/shell/storage/${encodeURIComponent(key)}`;
+
+const shellStorage = {
+  /** The value at `key` (undefined: none). */
+  async get(key) {
+    const response = await fetch(`${HELPER}${storagePath(key)}`);
+    if (response.status === 404) return undefined;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `${response.status}`);
+    return body.value;
+  },
+  async set(key, value) {
+    await helperFiles(storagePath(key), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  },
+  async delete(key) {
+    await helperFiles(storagePath(key), { method: "DELETE" });
+  },
+  async keys() {
+    return (await helperFiles("/v1/shell/storage")).keys;
+  },
+};
 
 async function helperFiles(path, init) {
   const response = await fetch(`${HELPER}${path}`, init);
