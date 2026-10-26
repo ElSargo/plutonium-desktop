@@ -1579,6 +1579,11 @@ export class PlutoniumShell extends EventTarget {
         // A notice: nothing to answer.
         if (op === "pointer") this.dispatchEvent(new CustomEvent("agentpointer", { detail: args }));
         if (op === "system") this.system._changed(args.service, args.state);
+        // A hardware key (volume, brightness, media) the helper acted on: for an on-screen level.
+        if (op === "systemkey") {
+          this.system._changed(args.service, args.state);
+          this.dispatchEvent(new CustomEvent("systemkey", { detail: args }));
+        }
         if (op === "native") this.native.dispatchEvent(new CustomEvent(args.event, { detail: args.detail }));
         if (op === "global_shortcuts") {
           this.globalShortcuts = args.shortcuts ?? [];
