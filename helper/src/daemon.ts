@@ -44,6 +44,7 @@ import { comboKeys, commitRuns, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
+import { Appearance } from "./appearance.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
@@ -382,6 +383,7 @@ export class Daemon {
   readonly a11y = new Accessibility();
   /** EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend (portal.ts). */
   private portal: Portal | null = null;
+  private appearance: Appearance | null = null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -410,7 +412,17 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
-    this.services.register(new NotificationsService());
+    this.services.register(
+      new NotificationsService(undefined, {
+        // EXO-SERVICES: the tabs' web notifications, through the Plutonium domain.
+        onChange: (listener) => this.desktop?.notificationListeners.add(listener),
+        action: async (id, action, button) => {
+          if (!this.desktop) throw new Error("No browser.");
+          await this.desktop.notificationAction(id, action, button);
+        },
+        showSite: (origin) => this.showSite(origin),
+      }, notificationsOnBus(options)),
+    );
     this.services.register(new AudioService());
     this.services.register(new PowerService({ logOut: () => this.logOut() }));
     this.services.register(
@@ -1130,6 +1142,24 @@ export class Daemon {
     else await this.ask(threadId, "answer_dialog", { tabId, accept, text });
     await sleep(150);
     return threadTab(await this.ownedTab(threadId, tabId));
+  }
+
+  /** Shows a tab of `origin` in its thread's shell (a web notification was clicked): the focused one, else the newest. */
+  private async showSite(origin: string): Promise<void> {
+    const desktop = await this.direct();
+    if (!desktop) return;
+    const originOf = (url: string) => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return "";
+      }
+    };
+    const tabs = desktop.tabs().filter((tab) => originOf(tab.url) === origin);
+    const tab = tabs.find((candidate) => candidate.focused) ?? tabs.at(-1);
+    const threadId = tab?.tags[0];
+    if (!tab || !threadId) return;
+    await this.ask(threadId, "focus_tab", { tabId: tab.id });
   }
 
   async focusTab(threadId: string, tabId: number, display?: number): Promise<{ how: string }> {
@@ -2342,15 +2372,33 @@ export class Daemon {
     }, 2000);
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
-    // Apps' notifications reach the shells from the start, whether or not one shows them yet.
-    // Only the user's own session (slot 0) by default: a test session in another slot would
-    // take the host desktop's notifications (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
-    const slot = this.options.shells?.context.slot ?? 0;
-    const notifications = process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0");
-    if (this.options.cdpPort && notifications !== "0") {
+    // Apps' and tabs' notifications reach the shells from the start, whether or not one shows
+    // them yet (on the bus only in the user's own session: notificationsOnBus).
+    if (this.options.cdpPort && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
       this.services
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
+    }
+    if (this.desktop) {
+      const desktop = this.desktop;
+      // Connected whenever the browser is up, so its events (tabs' notifications) arrive
+      // without waiting for something to ask it.
+      setInterval(() => void desktop.available(true), 5000).unref();
+      // EXO-SERVICES: Ash's dark mode follows the host's color scheme.
+      const appearance = new Appearance();
+      this.appearance = appearance;
+      const apply = (retry = true) => {
+        const dark = appearance.current;
+        if (dark === null) return;
+        void desktop.setColorScheme(dark).then((done) => {
+          // Before the user session is up: once more, a little later.
+          if (!done && retry) setTimeout(() => apply(false), 3000).unref();
+        });
+      };
+      appearance.onChange(() => apply());
+      desktop.enableListeners.add(() => apply());
+      void appearance.start();
+      void desktop.available(true);
     }
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
@@ -2377,6 +2425,7 @@ export class Daemon {
     this.services.stop();
     this.native?.stopAll();
     this.portal?.stop();
+    this.appearance?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();
     for (const server of this.servers) server.close();
@@ -2387,6 +2436,16 @@ export class Daemon {
       // Gone.
     }
   }
+}
+
+/**
+ * Whether the helper is the session bus's notification server: only in the user's own session
+ * (slot 0) by default, since a test session in another slot would take the host desktop's
+ * notifications (PLUTONIUM_NOTIFICATIONS=1 serves them anyway, =0 turns the service off).
+ */
+function notificationsOnBus(options: DaemonOptions): boolean {
+  const slot = options.shells?.context.slot ?? 0;
+  return (process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0")) !== "0";
 }
 
 /** Reloads the browser's pages on `origin`, bypassing the cache; returns how many. */

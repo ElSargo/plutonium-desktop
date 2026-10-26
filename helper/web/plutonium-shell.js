@@ -4327,6 +4327,14 @@ class NotificationPopups {
       event.stopPropagation();
       service.call("dismiss", { id: notification.id }).catch(() => {});
     };
+    // A tab's web notification brings its picture (a data URL); apps' icons are theme names.
+    if (notification.icon?.startsWith("data:image/")) {
+      const icon = document.createElement("img");
+      icon.className = "icon";
+      icon.alt = "";
+      icon.src = notification.icon;
+      head.append(icon);
+    }
     head.append(app, close);
     const summary = document.createElement("div");
     summary.className = "summary";
@@ -4382,6 +4390,7 @@ const NOTIFICATION_STYLE = `@layer plutonium {
   .plutonium-notifications .card { position: static; margin: 0; padding: 8px 10px; display: grid; gap: 2px; cursor: default; }
   .plutonium-notifications .card.critical { border-left: 3px solid var(--plutonium-notification-critical, #e5484d); }
   .plutonium-notifications .head { display: flex; align-items: center; gap: 8px; font-size: .8em; opacity: .7; }
+  .plutonium-notifications .icon { width: 16px; height: 16px; object-fit: contain; border-radius: 3px; }
   .plutonium-notifications .app { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .plutonium-notifications .close { all: unset; padding: 0 4px; font-size: 1.2em; line-height: 1; opacity: .8; }
   .plutonium-notifications .summary { font-weight: 600; overflow-wrap: anywhere; }

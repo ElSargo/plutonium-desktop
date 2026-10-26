@@ -3,7 +3,15 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, test } from "node:test";
 
-import { CLOSED, NotificationsService, parseNotify, type NotificationsState } from "../src/services/notifications.ts";
+import type { WebNotification } from "../src/desktop.ts";
+import {
+  type BrowserNotifications,
+  CLOSED,
+  fromWeb,
+  NotificationsService,
+  parseNotify,
+  type NotificationsState,
+} from "../src/services/notifications.ts";
 
 const run = promisify(execFile);
 const notifyArgs = (summary: string, extra: { actions?: string[]; hints?: Map<string, unknown>; timeout?: number; replaces?: number } = {}) => [
@@ -55,6 +63,52 @@ describe("notifications", () => {
     assert.equal(await service.call("set-do-not-disturb", { on: true }), true);
     assert.equal(states.at(-1)?.doNotDisturb, true);
     await assert.rejects(service.call("explode", {}), /no action/);
+    service.stop();
+  });
+
+  test("tabs' web notifications: the site as the app, click, buttons, dismiss, closed by the page", async () => {
+    const web = (id: string, title: string): WebNotification => ({
+      id, origin: "https://chat.example:8443", title, body: "a message", icon: "data:image/png;base64,AA==",
+      buttons: ["Reply"], requireInteraction: false, silent: false,
+    });
+    assert.deepEqual(fromWeb(3, web("w", "Hi"), 5), {
+      id: 3, app: "chat.example:8443", icon: "data:image/png;base64,AA==", summary: "Hi", body: "a message",
+      actions: [{ key: "default", label: "Open" }, { key: "button-0", label: "Reply" }],
+      urgency: "normal", transient: false, time: 5, site: "https://chat.example:8443",
+    });
+    const calls: unknown[][] = [];
+    let listener: Parameters<BrowserNotifications["onChange"]>[0] = () => {};
+    const browser: BrowserNotifications = {
+      onChange: (l) => (listener = l),
+      action: async (...args) => void calls.push(["action", ...args]),
+      showSite: async (origin) => void calls.push(["show", origin]),
+    };
+    // serveBus false: a test session's, which leaves the bus alone.
+    const service = new NotificationsService("unix:path=/nonexistent", browser, false);
+    await service.start(() => {});
+    listener({ shown: web("w1", "First") });
+    listener({ shown: web("w2", "Second") });
+    listener({ shown: web("w1", "First, updated") });
+    const [first, second] = (await service.state()).notifications;
+    assert.deepEqual([first?.summary, second?.summary], ["First, updated", "Second"]);
+    // Its button, then itself: the page's handlers, and the tab shows for a click on it.
+    await service.call("invoke", { id: first!.id, action: "button-0" });
+    assert.deepEqual(calls.splice(0), [["action", "w1", "click", 0], ["action", "w1", "close"]]);
+    await service.call("invoke", { id: second!.id, action: "default" });
+    assert.deepEqual(calls.splice(0), [
+      ["action", "w2", "click", undefined],
+      ["show", "https://chat.example:8443"],
+      ["action", "w2", "close"],
+    ]);
+    // Dismissed here: closed there; closed there (the page): gone here, nothing sent back.
+    const third = service.notifyWeb(web("w3", "Third"));
+    await service.call("dismiss", { id: third });
+    assert.deepEqual(calls.splice(0), [["action", "w3", "close"]]);
+    service.notifyWeb(web("w4", "Fourth"));
+    listener({ closed: "w4" });
+    listener({ closed: "unknown" });
+    assert.equal((await service.state()).notifications.length, 0);
+    assert.deepEqual(calls, []);
     service.stop();
   });
 

@@ -33,6 +33,21 @@ export interface DesktopTab {
   readonly stateJson?: string;
 }
 
+/** EXO-SERVICES: a tab's web notification (Plutonium.WebNotification). */
+export interface WebNotification {
+  readonly id: string;
+  /** The site's origin. */
+  readonly origin: string;
+  readonly title: string;
+  readonly body: string;
+  /** A PNG data URL, or "". */
+  readonly icon: string;
+  /** Its action buttons' labels. */
+  readonly buttons: readonly string[];
+  readonly requireInteraction: boolean;
+  readonly silent: boolean;
+}
+
 /** A native window (Plutonium.Window). */
 export interface DesktopWindow {
   readonly id: number;
@@ -148,6 +163,10 @@ export class Desktop {
   /** The browser's active media session as it changes (null when there's none). */
   readonly mediaListeners = new Set<(session: BrowserSession | null) => void>();
   readonly captureListeners = new Set<(type: "start" | "change" | "stop", capture: DesktopCapture) => void>();
+  /** The Plutonium domain was enabled: the browser came up, or came back. */
+  readonly enableListeners = new Set<() => void>();
+  /** EXO-SERVICES: tabs' web notifications came or changed (`notification`), or went (an id). */
+  readonly notificationListeners = new Set<(event: { shown: WebNotification } | { closed: string }) => void>();
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -165,14 +184,17 @@ export class Desktop {
   /**
    * Whether the browser has the Plutonium domain (and is up). Connects on
    * first use, and again after the browser restarts. A failed attempt is
-   * retried on the next call.
+   * retried on the next call. `quiet`: no warning when it fails.
    */
-  available(): Promise<boolean> {
+  available(quiet = false): Promise<boolean> {
     if (!this.enabling) {
       const enabling = this.cdp.send("Plutonium.enable").then(
-        () => true,
+        () => {
+          for (const listener of this.enableListeners) listener();
+          return true;
+        },
         (error: unknown) => {
-          if (!(error instanceof CdpError) || !/wasn't found|not found/i.test(error.message)) {
+          if (!quiet && (!(error instanceof CdpError) || !/wasn't found|not found/i.test(error.message))) {
             console.warn(`plutoniumd: no Plutonium DevTools domain: ${(error as Error).message}`);
           }
           // Try again next time: the browser may not be up yet.
@@ -252,6 +274,12 @@ export class Desktop {
         for (const listener of this.mediaListeners) listener(session);
         return;
       }
+      case "Plutonium.notificationShown":
+        for (const listener of this.notificationListeners) listener({ shown: value.notification as WebNotification });
+        return;
+      case "Plutonium.notificationClosed":
+        for (const listener of this.notificationListeners) listener({ closed: value.id as string });
+        return;
       case "Plutonium.windowScreencastStopped": {
         const listeners = this.frameListeners.get(value.id as number);
         this.frameListeners.delete(value.id as number);
@@ -277,6 +305,22 @@ export class Desktop {
   /** Plays, pauses… the browser's active media session ("play-pause", "next", …). */
   async mediaSessionAction(action: string): Promise<void> {
     await this.cdp.send("Plutonium.mediaSessionAction", { action });
+  }
+
+  /** Clicks a web notification (or one of its buttons), or closes it as the user would. */
+  async notificationAction(id: string, action: "click" | "close", button?: number): Promise<void> {
+    await this.cdp.send("Plutonium.notificationAction", { id, action, ...(button !== undefined ? { button } : {}) });
+  }
+
+  /** EXO-SERVICES: Ash's dark mode, from the host's color scheme. False if the browser can't. */
+  async setColorScheme(dark: boolean): Promise<boolean> {
+    if (!(await this.available())) return false;
+    try {
+      await this.cdp.send("Plutonium.setColorScheme", { dark });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Every tab, oldest first. Call available() first. */

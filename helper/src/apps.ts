@@ -34,6 +34,8 @@ interface Entry extends DesktopApp {
   readonly workingDirectory: string;
   /** The data directory it's in ($XDG_DATA_HOME or one of $XDG_DATA_DIRS). */
   readonly dataDir: string;
+  /** StartupWMClass: the app id (Wayland) or WM_CLASS (X11) its windows have, if it said. */
+  readonly wmClass?: string;
 }
 
 /** Where an installed app comes from. */
@@ -378,6 +380,7 @@ export class DesktopApps {
           path,
           workingDirectory: unescapeValue(values.get("Path") ?? ""),
           dataDir: dir,
+          ...(values.get("StartupWMClass") ? { wmClass: values.get("StartupWMClass") } : {}),
         };
         if (first) entries.set(id, entry);
         else others.push(entry);
@@ -409,11 +412,33 @@ export class DesktopApps {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** The icon file for app `id`: its bytes and content type. */
+  /**
+   * The desktop entry whose windows have app id (or X11 WM_CLASS) `appId`: its
+   * StartupWMClass, or its file's name (org.gnome.Nautilus.desktop), ignoring case.
+   */
+  forWindow(appId: string): DesktopApp | undefined {
+    this.load();
+    const lower = appId.toLowerCase();
+    if (!lower) return undefined;
+    const entries = [...this.entries.values()];
+    return (
+      entries.find((entry) => entry.wmClass?.toLowerCase() === lower) ??
+      entries.find((entry) => entry.id.toLowerCase() === `${lower}.desktop`) ??
+      // A reverse-DNS file for a short app id, or the other way round (org.mozilla.firefox, firefox).
+      entries.find((entry) => entry.id.toLowerCase().endsWith(`.${lower}.desktop`)) ??
+      entries.find((entry) => lower.endsWith(`.${entry.id.toLowerCase().replace(/\.desktop$/, "")}`))
+    );
+  }
+
+  /**
+   * The icon file for app `id`: its bytes and content type. An id that isn't a
+   * desktop entry's is taken as a window's app id (forWindow), then as an icon name.
+   */
   icon(id: string): { data: Buffer; contentType: string } | undefined {
     this.load();
-    const entry = this.entries.get(id);
-    const path = entry && this.icons?.find(entry.icon);
+    const entry = this.entries.get(id) ?? this.entries.get(this.forWindow(id)?.id ?? "");
+    const byName = isAbsolute(id) ? undefined : (this.icons?.find(id) ?? this.icons?.find(id.toLowerCase()));
+    const path = entry ? this.icons?.find(entry.icon) : byName;
     if (!path) return undefined;
     return { data: readFileSync(path), contentType: ICON_CONTENT_TYPES[extname(path)] ?? "application/octet-stream" };
   }
