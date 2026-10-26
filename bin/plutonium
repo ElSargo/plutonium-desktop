@@ -1230,7 +1230,7 @@ install_hint() {
   local family=$DISTRO pkgs=() p
   for p in "$@"; do
     case $family:$p in
-      fedora:node) pkgs+=(nodejs24-bin nodejs24-npm-bin) ;;
+      fedora:node) echo "sudo dnf install --allowerasing nodejs24-bin nodejs24-npm-bin (node is Node 22 on Fedora)"; return ;;
       debian:node) echo "Node 24 from NodeSource: curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh && sudo bash /tmp/nodesource.sh && sudo apt install nodejs"; return ;;
       arch:node) pkgs+=(nodejs npm) ;;
       suse:node) pkgs+=(nodejs24 npm24) ;;
