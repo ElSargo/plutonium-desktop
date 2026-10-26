@@ -248,6 +248,7 @@ describe("edits", () => {
     const home = fresh("home");
     installShell(home, shipped(), "demo");
     const packages = new ShellPackages(context(home), { persist: true });
+    after(() => packages.stop());
     packages.browserList([
       { name: "Elsewhere", url: "http://localhost:5173/?helper=http://127.0.0.1:3981", enabled: true },
       { name: "Demo", url: "http://demo.localhost:8970/?helper=x", enabled: false },
@@ -258,6 +259,20 @@ describe("edits", () => {
     ]);
     const manifest = JSON.parse(readFileSync(join(shellDir(home, "elsewhere"), "shell.json"), "utf8"));
     assert.deepEqual(manifest.server, { run: "external", url: "http://localhost:5173/" });
+
+    // Added on the shells page: on, even before the browser lists it.
+    const source = fresh("added");
+    writeFileSync(join(source, "shell.json"), '{"static":"index.html"}');
+    const { token } = packages.add({ source }) as { token: string };
+    const added = packages.add({ token }) as { name: string; add?: boolean };
+    assert.equal(added.add, true);
+    packages.browserList([{ name: "Demo", url: "http://demo.localhost:8970/", enabled: true }]);
+    assert.deepEqual(readList(home)?.find((entry) => entry.name === added.name), { name: added.name, enabled: true });
+    packages.browserList([
+      { name: "Demo", url: "http://demo.localhost:8970/", enabled: true },
+      { name: "Added", url: `http://${added.name}.localhost:8970/`, enabled: true },
+    ]);
+    assert.equal(packages.status().find((shell) => shell.name === added.name)?.add, undefined);
   });
 });
 

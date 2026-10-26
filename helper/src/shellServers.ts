@@ -68,6 +68,8 @@ export class ShellServer {
   private readonly onChange: () => void;
   state: ServerState = "stopped";
   pid: number | undefined;
+  /** Its server was running already: a previous helper started it. */
+  adopted = false;
   private child: ChildProcess | undefined;
   private wanted = false;
   private startedAt = 0;
@@ -153,6 +155,7 @@ export class ShellServer {
     if (!pid || !alive(pid) || !environOf(pid).includes(`${MARKER_VARIABLE}=${this.marker}`)) return false;
     this.wanted = true;
     this.pid = pid;
+    this.adopted = true;
     this.startedAt = Date.now();
     this.set("starting");
     this.watch();
@@ -201,6 +204,7 @@ export class ShellServer {
     }
     child.unref();
     this.child = child;
+    this.adopted = false;
     this.startedAt = Date.now();
     this.healthyAt = 0;
     this.pid = child.pid;

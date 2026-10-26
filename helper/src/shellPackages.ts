@@ -87,6 +87,8 @@ export interface ShellStatus {
   /** A change that didn't come up: Retry, Diff. */
   readonly failed?: { readonly commit: string; readonly subject: string };
   readonly checking?: boolean;
+  /** Added on the shells page; the switcher adds it to the browser's list. */
+  readonly add?: boolean;
   readonly error?: string;
 }
 
@@ -193,7 +195,14 @@ export class ShellPackages {
       const on = this.activeOrigins.has(this.originOf(shell)!);
       const server = this.servers.get(shell.name);
       if (on && !this.userStopped.has(shell.name)) {
-        if (!server || server.state === "stopped") void this.server(shell.manifest).start();
+        if (!server || server.state === "stopped") {
+          // Turned on in the switcher: its page opened before the server was up.
+          const origin = this.originOf(shell)!;
+          const started = this.server(shell.manifest);
+          void started.start().then((healthy) => {
+            if (healthy && !started.adopted) void this.hooks.reloadPages?.(origin);
+          });
+        }
       } else if (!on && server && server.state !== "stopped" && server.state !== "failed") {
         void server.stop();
       }
@@ -334,9 +343,12 @@ export class ShellPackages {
       }
       if (!list.some((entry) => entry.name === name)) list.push({ name, enabled: shell.enabled });
     }
-    // Installed shells the browser doesn't have (removed in the switcher) stay installed, off.
+    // Installed shells the browser doesn't have (removed in the switcher) stay
+    // installed, off; one just added stays on until the switcher adds it.
     for (const entry of effectiveList(this.home)) {
-      if (!list.some((other) => other.name === entry.name)) list.push({ name: entry.name, enabled: false });
+      if (!list.some((other) => other.name === entry.name)) {
+        list.push({ name: entry.name, enabled: this.pendingAdd.has(entry.name) });
+      }
     }
     if (JSON.stringify(list) !== JSON.stringify(readList(this.home))) writeList(this.home, list);
   }
