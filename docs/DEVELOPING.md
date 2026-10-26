@@ -141,5 +141,6 @@ The tools agents drive apps and tabs with are tested by an agent doing a real ta
 - **`docs/history/`**: the project's reports in the order they happened, from the viability study to Phase 4. They describe the code as it was then.
 - **`docs/agent-tests/`**: the agent tool tests' scenarios, review brief and reports.
 - **`docs/BACKLOG.md`**: everything not done.
+- **`skill/SKILL.md`**: what the user's own agent reads before working on their desktop (written to `~/.pluto/SKILL.md` with real paths). It's the at-a-glance version; the docs above are the detail.
 
-When you change behaviour, update the feature doc and the backlog.
+When you change behaviour, update the feature doc and the backlog. When you add something a shell can use (a library call, a `shell.json` field, a service, a `plutonium` command), add it to the skill too: a line or two and a link to its doc.

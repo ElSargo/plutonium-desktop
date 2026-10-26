@@ -698,6 +698,45 @@ shells that want to span monitors run on each and sync themselves.
 - [ ] **Linked documents** (a shell's second display as a same-origin child
   document). Only if a shell needs shared in-page state; T3 shouldn't.
 
+## Desktop services for shells
+
+What users expect of any desktop, for every shell to use. The helper does the
+work over the host's usual services (D-Bus, PipeWire) and the shell library
+exposes it, so a shell is only UI. ChromeOS's own system tray needs ChromeOS
+daemons (cras, shill) that aren't there. A shell names what it uses in
+`shell.json` (`"uses": ["audio", "network", …]`); the switcher shows it, and
+a shell gets only what it names. Each one lands with its section in the
+skill (`skill/SKILL.md`) and a page in `docs/features/`, so agents building a
+shell find it.
+
+- [ ] **The services API** (`shell.system.<service>`: state, `change` events,
+  actions). M · One pattern for all below; a stub service and the `uses`
+  check.
+- [ ] **Audio.** M · Output/input devices, volume and mute per device
+  (PipeWire via `wpctl`, or PulseAudio's D-Bus), per-app streams later.
+  Volume and mute keys work without a shell asking.
+- [ ] **Brightness and power.** S–M · Backlight through logind
+  (`SetBrightness`, no root), brightness keys; battery and AC from UPower;
+  suspend, restart, power off, log out through logind.
+- [ ] **Network.** M · NetworkManager over D-Bus: state, Wi-Fi list, connect
+  (with a password prompt from the shell), turn Wi-Fi off; VPNs later.
+- [ ] **Bluetooth.** M · BlueZ over D-Bus: on/off, devices, pair and
+  connect; pairing PINs through the shell.
+- [ ] **Media.** S · MPRIS players (now playing, play/pause, next), and the
+  media keys.
+- [ ] **Notifications.** M · The helper as `org.freedesktop.Notifications`,
+  handed to the visible shell (with the tab notifications item above).
+- [ ] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
+  (Ash's own, or a locked page), inhibit while video plays.
+- [ ] **A native side and storage for shells.** M · Today a shell is a static
+  page or a whole server. In between: `"native": "native.js"` in
+  `shell.json`, a module the helper runs for the shell (Node, the shell's
+  rights only), called from the page with `shell.native.call(name, …)` and
+  sending it events; and `shell.storage`, data kept in
+  `~/.pluto/data/<name>/` (outside the shell's git repository, so an edit's
+  rollback doesn't lose it, and the same in every slot, unlike
+  `localStorage` on a per-slot origin). `plutonium shells new` offers it.
+
 ## Design questions
 
 - [ ] **Where do dialogs go?** Today a dialog (e.g. GTK About) becomes its own

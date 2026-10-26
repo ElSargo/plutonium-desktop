@@ -33,6 +33,7 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
 - **Make a new shell**: `plutonium shells new <name> [<installed shell>]` copies a shell (default: `plain`, a small complete example) into `{{PLUTO_HOME}}/shells/<name>`, turns it on and puts it in the switcher. Then edit it. A shell with a server: set `server` in `shell.json` (below).
 - **Install someone else's shell**: the switcher's "Add a shell…", or `plutonium shells` (folder, git URL or address).
 - **A shell's server misbehaves**: `curl --unix-socket "$PLUTONIUM_HELPER" http://helper/v1/shells` for state; `POST /v1/shells/<name>/restart`; its log is above.
+- **Volume, Wi-Fi, Bluetooth, brightness, battery, notifications**: not in the shell library yet (planned). A shell page can't run commands, so don't build these controls by working around that; tell the user they're coming.
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 
 ## shell.json
