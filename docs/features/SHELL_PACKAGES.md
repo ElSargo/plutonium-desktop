@@ -163,4 +163,20 @@ By hand, on 2026-10-26, with a helper in slot 6 and a scratch `T3_HOME`:
 - stop and start work through the API, and the log is in `logs/t3.log`;
 - an edit to the plain shell with no page connected is rolled back after 20 s, with a notice, the failed commit and its diff.
 
-Not yet checked in a session: the switcher's parts (they need the build), an agent's edit end to end, and safe mode's automatic start.
+In an X11 session (slot 6, Xvfb, dev build with patches 0061–0062), on 2026-10-26:
+
+| Check | |
+|---|---|
+| `plutonium run --x11` with no shells runs shells.json's list (T3 at startup, Plain, niri off). The browser drops its older entries and lists `!niri` as off | ✓ |
+| Plain loads from `plain.localhost:9370` and connects. T3 pairs itself with the entry command's token | ✓ |
+| A good edit to Plain: committed, reloaded, "came up". A breaking one (it throws before `connect()`): rolled back after 20 s, reloaded at the good version | ✓ |
+| The switcher's shell page: Customize, the rollback notice (also in its status line), folder and version; T3's server state, command and log | ✓ |
+| The switcher's Restart: T3's server restarts and its page reconnects. Turning T3 off stops its server; turning it on starts it and reloads its page | ✓ |
+| Open a terminal: a backup terminal tab in the shell's folder. Ask an agent: Claude Code in a tab there, in `plutonium:shell/plain`, with the helper's socket | ✓ |
+| History, log and updates…: the shells page in the backup browser, with the notice, Retry/Dismiss, the diff and the history | ✓ |
+| Move down in the switcher: shells.json's order follows | ✓ |
+| Add from a folder on the shells page: the preview names the origin and that there's no server. Once it's added, the next time the switcher opens it lists the shell, which loads and connects; shells.json has it on | ✓ |
+| A helper restart (and a session restart) adopts T3's running server: same pid | ✓ |
+| `failed-starts` at 2: `plutonium run` starts in safe mode (`safe.localhost`, the checkout's plain), says so, resets the count, and leaves shells.json alone | ✓ |
+
+Not checked: an agent's edit end to end (an agent's save takes the same path as any other save), a git URL, and DRM.

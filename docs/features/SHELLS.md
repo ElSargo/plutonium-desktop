@@ -25,7 +25,7 @@ plutonium run --x11 plain t3
 
 **Super+Tab** shows the next shell and **Super+Shift+Tab** the previous one. These are stand-ins until the overlay (step 3) exists.
 
-`SHELLS` is `<name>=<url>|<name>=<url>`. The launchers pass it to the browser as `--plutonium-shells`. They also add its origins to the helper's `--shell-origin`, which now takes a comma-separated list. Each URL has to name the session's helper: `?helper=` for the plain shell, `?plutoniumHelper=` for T3.
+`SHELLS` is `<name>=<url>|<name>=<url>`. The launchers pass it to the browser as `--plutonium-shells`, now with `--plutonium-shells-exact`: the list is the whole list, `!` before shells that are off ([SHELL_PACKAGES.md](SHELL_PACKAGES.md)). They also add its origins to the helper's `--shell-origin`, which now takes a comma-separated list. Each URL has to name the session's helper: `?helper=` for the plain shell, `?plutoniumHelper=` for T3.
 
 ### How it works
 

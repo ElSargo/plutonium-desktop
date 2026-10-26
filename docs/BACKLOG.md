@@ -630,9 +630,10 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   the switcher; `plutonium shells install|update|list`; Customize (an agent
   or a terminal in the folder), edits committed and rolled back when the
   shell doesn't come up; safe mode; adding from a folder, git or an address.
-- [ ] **Installed shells: check the switcher's parts in a session** (Customize,
-  server controls, a rolled back change's notice, Add a shell turning one on)
-  and an agent's edit end to end; then on DRM.
+- [x] **Installed shells: check the switcher's parts in a session** (Customize,
+  server controls, a rolled back change's notice, Add a shell turning one on).
+  Done 2026-10-26 on Xvfb (`SHELL_PACKAGES.md`).
+- [ ] **Installed shells on DRM**, and an agent's edit end to end.
 - [ ] **Installed shells: notices outside the switcher.** A rollback shows in
   the switcher's status line and the shell's page; the visible shell isn't
   told (a `shellnotice` event in the library for shells to show).
