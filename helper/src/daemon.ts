@@ -44,6 +44,7 @@ import { comboKeys, commitRuns, textKeys } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
+import { Appearance } from "./appearance.ts";
 import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
@@ -386,6 +387,7 @@ export class Daemon {
   readonly a11y = new Accessibility();
   /** EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend (portal.ts). */
   private portal: Portal | null = null;
+  private appearance: Appearance | null = null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -414,12 +416,19 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
-    // Only the user's own session (slot 0) is the bus's notification server by default:
-    // a test session in another slot would take the host desktop's notifications
-    // (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
-    const notificationSlot = options.shells?.context.slot ?? 0;
-    const serveNotifications = (process.env.PLUTONIUM_NOTIFICATIONS ?? (notificationSlot === 0 ? "1" : "0")) !== "0";
-    const notifications = new NotificationsService(undefined, serveNotifications);
+    const notifications = new NotificationsService(
+      undefined,
+      {
+        // EXO-SERVICES: the tabs' web notifications, through the Plutonium domain.
+        onChange: (listener) => this.desktop?.notificationListeners.add(listener),
+        action: async (id, action, button) => {
+          if (!this.desktop) throw new Error("No browser.");
+          await this.desktop.notificationAction(id, action, button);
+        },
+        showSite: (origin) => this.showSite(origin),
+      },
+      notificationsOnBus(options),
+    );
     this.services.register(notifications);
     this.services.register(new AudioService());
     this.services.register(new PowerService({ logOut: () => this.logOut() }));
@@ -483,11 +492,24 @@ export class Daemon {
         stopNative: (name) => this.native?.stop(name),
         openTerminal: (terminal) => this.terminals.create(24, 80, terminal).id,
         threadSetup: (thread) => this.threadSetup(thread),
+        // A rollback, a crash, a failed server: the shells' shellnotice, and a notification
+        // (which the shells using the notifications service pop up).
+        notice: (notice) => {
+          this.relay.notifyAll("shellnotice", { ...notice });
+          const summary =
+            notice.kind === "rollback"
+              ? `${notice.title}: a change was rolled back`
+              : notice.kind === "crash"
+                ? `${notice.title} crashed`
+                : `${notice.title}'s server failed`;
+          notifications.notify(["Plutonium", 0, "", summary, notice.message, [], new Map([["urgency", 2]]), -1]);
+        },
       };
     }
     this.serverTabs = cdp ? new ServerTabs(cdp) : null;
     this.desktop = cdp ? new Desktop(cdp) : null;
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
+    if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
       this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
@@ -1184,6 +1206,54 @@ export class Daemon {
     else await this.ask(threadId, "answer_dialog", { tabId, accept, text });
     await sleep(150);
     return threadTab(await this.ownedTab(threadId, tabId));
+  }
+
+  /**
+   * Installed shells' pages that crash (Target.targetCrashed, with target
+   * discovery on): an edit that just went in is rolled back, else the shells
+   * are told (ShellPackages.crashed).
+   */
+  private watchCrashes(cdp: BrowserCdp, desktop: Desktop, shells: ShellPackages): void {
+    const urls = new Map<string, string>();
+    cdp.addEventListener(({ method, params, sessionId }) => {
+      if (sessionId) return;
+      const value = params as { targetInfo?: { targetId: string; type: string; url: string }; targetId?: string };
+      if (method === "Target.targetCreated" || method === "Target.targetInfoChanged") {
+        if (value.targetInfo?.type === "page") urls.set(value.targetInfo.targetId, value.targetInfo.url);
+      } else if (method === "Target.targetDestroyed") {
+        urls.delete(value.targetId ?? "");
+      } else if (method === "Target.targetCrashed") {
+        const url = urls.get(value.targetId ?? "");
+        if (!url) return;
+        try {
+          shells.crashed(new URL(url).origin);
+        } catch {
+          // Not a URL with an origin.
+        }
+      }
+    });
+    desktop.enableListeners.add(() => {
+      urls.clear();
+      void cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
+    });
+  }
+
+  /** Shows a tab of `origin` in its thread's shell (a web notification was clicked): the focused one, else the newest. */
+  private async showSite(origin: string): Promise<void> {
+    const desktop = await this.direct();
+    if (!desktop) return;
+    const originOf = (url: string) => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return "";
+      }
+    };
+    const tabs = desktop.tabs().filter((tab) => originOf(tab.url) === origin);
+    const tab = tabs.find((candidate) => candidate.focused) ?? tabs.at(-1);
+    const threadId = tab?.tags[0];
+    if (!tab || !threadId) return;
+    await this.ask(threadId, "focus_tab", { tabId: tab.id });
   }
 
   async focusTab(threadId: string, tabId: number, display?: number): Promise<{ how: string }> {
@@ -2413,10 +2483,9 @@ export class Daemon {
     }, 2000);
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
-    // Apps' notifications reach the shells from the start, whether or not one shows them yet
-    // (the service decides whether it's on the bus: see its registration).
-    const slot = this.options.shells?.context.slot ?? 0;
-    if (this.options.cdpPort && (process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0")) !== "0") {
+    // Apps' and tabs' notifications reach the shells from the start, whether or not one shows
+    // them yet (on the bus only in the user's own session: notificationsOnBus).
+    if (this.options.cdpPort && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
       this.services
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
@@ -2424,6 +2493,27 @@ export class Daemon {
     // EXO-LOCK: idle, logind and apps' inhibitors from the start.
     if (this.options.cdpPort) {
       this.services.state("session").catch((error: unknown) => console.warn(`plutoniumd: no session: ${(error as Error).message}`));
+    }
+    if (this.desktop) {
+      const desktop = this.desktop;
+      // Connected whenever the browser is up, so its events (tabs' notifications) arrive
+      // without waiting for something to ask it.
+      setInterval(() => void desktop.available(true), 5000).unref();
+      // EXO-SERVICES: Ash's dark mode follows the host's color scheme.
+      const appearance = new Appearance();
+      this.appearance = appearance;
+      const apply = (retry = true) => {
+        const dark = appearance.current;
+        if (dark === null) return;
+        void desktop.setColorScheme(dark).then((done) => {
+          // Before the user session is up: once more, a little later.
+          if (!done && retry) setTimeout(() => apply(false), 3000).unref();
+        });
+      };
+      appearance.onChange(() => apply());
+      desktop.enableListeners.add(() => apply());
+      void appearance.start();
+      void desktop.available(true);
     }
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
@@ -2452,6 +2542,7 @@ export class Daemon {
     this.services.stop();
     this.native?.stopAll();
     this.portal?.stop();
+    this.appearance?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();
     for (const server of this.servers) server.close();
@@ -2462,6 +2553,16 @@ export class Daemon {
       // Gone.
     }
   }
+}
+
+/**
+ * Whether the helper is the session bus's notification server: only in the user's own session
+ * (slot 0) by default, since a test session in another slot would take the host desktop's
+ * notifications (PLUTONIUM_NOTIFICATIONS=1 serves them anyway, =0 turns the service off).
+ */
+function notificationsOnBus(options: DaemonOptions): boolean {
+  const slot = options.shells?.context.slot ?? 0;
+  return (process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0")) !== "0";
 }
 
 /** Reloads the browser's pages on `origin`, bypassing the cache; returns how many. */

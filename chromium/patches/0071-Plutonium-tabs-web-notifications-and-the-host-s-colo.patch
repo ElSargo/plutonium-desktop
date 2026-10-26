@@ -1,0 +1,488 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 26 Oct 2026 18:07:11 +1300
+Subject: [PATCH 71/73] Plutonium: tabs' web notifications and the host's color
+ scheme in the Plutonium domain
+
+Web notifications (new Notification(), a service worker's showNotification())
+go to Ash's message center, which shell mode never shows. The Plutonium
+DevTools domain now lists the web pages' ones there (PlutoniumWebNotifications,
+a message center observer): notificationShown (each there is on enable, then
+new and updated ones; the site's origin, title, body, a PNG data URL icon,
+button labels) and notificationClosed. notificationAction clicks one or one of
+its buttons, or closes it, through the message center, so Chrome's own
+handling runs: the page's onclick, the worker's notificationclick. The
+helper's notifications service shows them.
+
+setColorScheme sets Ash's dark mode (the user's ash.dark_mode.enabled pref),
+which the color palette controller carries to the web's native theme: the
+helper follows the host's color scheme (the settings portal) with it, so
+prefers-color-scheme in shells and tabs is the desktop's.
+---
+ chrome/browser/devtools/BUILD.gn              |   3 +
+ chrome/browser/devtools/cros_protocol.pdl     |  43 +++++
+ .../devtools/protocol/plutonium_handler.cc    |  67 ++++++++
+ .../devtools/protocol/plutonium_handler.h     |   9 ++
+ .../protocol/plutonium_notifications.cc       | 153 ++++++++++++++++++
+ .../protocol/plutonium_notifications.h        |  77 +++++++++
+ 6 files changed, 352 insertions(+)
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.cc
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.h
+
+diff --git a/chrome/browser/devtools/BUILD.gn b/chrome/browser/devtools/BUILD.gn
+index 5edce69a9d..d988b5e7f2 100644
+--- a/chrome/browser/devtools/BUILD.gn
++++ b/chrome/browser/devtools/BUILD.gn
+@@ -512,12 +512,15 @@ static_library("devtools") {
+         "//services/media_session/public/cpp",
+         "//services/media_session/public/cpp:base_cpp",
+         "//services/media_session/public/mojom",
++        "//ui/message_center",
+       ]
+       sources += [
+         "protocol/plutonium_handler.cc",
+         "protocol/plutonium_handler.h",
+         "protocol/plutonium_media.cc",
+         "protocol/plutonium_media.h",
++        "protocol/plutonium_notifications.cc",
++        "protocol/plutonium_notifications.h",
+         "protocol/window_manager_handler.cc",
+         "protocol/window_manager_handler.h",
+       ]
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index 6d530a0914..ab392b29c6 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -449,3 +449,46 @@ experimental domain Plutonium
+   event lockChanged
+     parameters
+       boolean locked
++
++  # EXO-SERVICES: a tab's web notification (new Notification(), a service
++  # worker's showNotification()), for the helper's notifications service.
++  # Ash's message center has them, and shell mode never shows it.
++  type WebNotification extends object
++    properties
++      string id
++      # The site's origin.
++      string origin
++      string title
++      string body
++      # A PNG data URL, or empty.
++      string icon
++      # Its action buttons' labels.
++      array of string buttons
++      boolean requireInteraction
++      boolean silent
++
++  # A new or updated one; on enable, each there is.
++  event notificationShown
++    parameters
++      WebNotification notification
++
++  # It went: the page closed it, or it was acted on.
++  event notificationClosed
++    parameters
++      string id
++
++  # click (the notification, or with button one of its buttons: the page's
++  # onclick, the worker's notificationclick), or close (dismissed by the
++  # user).
++  command notificationAction
++    parameters
++      string id
++      string action
++      optional integer button
++
++  # EXO-SERVICES: the host's color scheme (the settings portal's
++  # org.freedesktop.appearance color-scheme), which Ash's dark mode then
++  # follows: prefers-color-scheme in shells and tabs, and Ash's own views.
++  command setColorScheme
++    parameters
++      boolean dark
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+index 67c9776560..358bce4d95 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.cc
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -7,6 +7,9 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "ash/constants/ash_pref_names.h"
++#include "ash/session/session_controller_impl.h"
++#include "ash/shell.h"
+ #include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -14,6 +17,7 @@
+ #include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/plutonium_tab_requests.h"
+ #include "components/exo/embedded_windows.h"
++#include "components/prefs/pref_service.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/skia/include/core/SkBitmap.h"
+@@ -212,6 +216,16 @@ Response PlutoniumHandler::Enable() {
+   if (PlutoniumLock* lock = PlutoniumLock::Get()) {
+     lock_observation_.Observe(lock);
+   }
++  // EXO-SERVICES: the web notifications there are, then the new ones.
++  notifications_ = std::make_unique<PlutoniumWebNotifications>(
++      base::BindRepeating(&PlutoniumHandler::OnNotificationShown,
++                          base::Unretained(this)),
++      base::BindRepeating(&PlutoniumHandler::OnNotificationClosed,
++                          base::Unretained(this)));
++  for (const PlutoniumWebNotifications::Info& info :
++       notifications_->GetNotifications()) {
++    OnNotificationShown(info);
++  }
+   return Response::Success();
+ }
+ 
+@@ -223,6 +237,7 @@ Response PlutoniumHandler::Disable() {
+   capture_observation_.Reset();
+   lock_observation_.Reset();
+   media_session_.reset();
++  notifications_.reset();
+   screencasts_.clear();
+   awake_tabs_.clear();
+   awake_windows_.clear();
+@@ -917,3 +932,55 @@ Response PlutoniumHandler::SetDisplaysOff(bool off, bool* applied) {
+ void PlutoniumHandler::OnLockChanged(bool locked) {
+   frontend_->LockChanged(locked);
+ }
++
++void PlutoniumHandler::OnNotificationShown(
++    const PlutoniumWebNotifications::Info& info) {
++  auto buttons = std::make_unique<protocol::Array<std::string>>();
++  for (const std::u16string& button : info.buttons) {
++    buttons->push_back(base::UTF16ToUTF8(button));
++  }
++  frontend_->NotificationShown(Plutonium::WebNotification::Create()
++                                   .SetId(info.id)
++                                   .SetOrigin(info.origin)
++                                   .SetTitle(base::UTF16ToUTF8(info.title))
++                                   .SetBody(base::UTF16ToUTF8(info.body))
++                                   .SetIcon(info.icon)
++                                   .SetButtons(std::move(buttons))
++                                   .SetRequireInteraction(
++                                       info.require_interaction)
++                                   .SetSilent(info.silent)
++                                   .Build());
++}
++
++void PlutoniumHandler::OnNotificationClosed(const std::string& id) {
++  frontend_->NotificationClosed(id);
++}
++
++Response PlutoniumHandler::NotificationAction(const std::string& id,
++                                              const std::string& action,
++                                              std::optional<int> button) {
++  if (!notifications_) {
++    return Response::ServerError("Plutonium.enable first.");
++  }
++  if (action != "click" && action != "close") {
++    return Response::InvalidParams("action is click or close.");
++  }
++  if (!notifications_->Perform(id, action, button)) {
++    return Response::InvalidParams("No such notification or button.");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetColorScheme(bool dark) {
++  // Ash's dark mode is the user's pref: its controller, then the color
++  // palette controller, carry it to the web's and Ash's native themes.
++  PrefService* prefs =
++      ash::Shell::HasInstance()
++          ? ash::Shell::Get()->session_controller()->GetActivePrefService()
++          : nullptr;
++  if (!prefs) {
++    return Response::ServerError("There's no user session yet.");
++  }
++  prefs->SetBoolean(ash::prefs::kDarkModeEnabled, dark);
++  return Response::Success();
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+index 52623c6d68..75518bc1d7 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.h
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -15,6 +15,7 @@
+ #include "base/scoped_observation.h"
+ #include "chrome/browser/devtools/protocol/plutonium.h"
+ #include "chrome/browser/devtools/protocol/plutonium_media.h"
++#include "chrome/browser/devtools/protocol/plutonium_notifications.h"
+ #include "chrome/browser/exo_window_broker.h"
+ #include "chrome/browser/plutonium_capture.h"
+ #include "chrome/browser/plutonium_downloads.h"
+@@ -132,6 +133,10 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       bool* displays_off,
+       std::unique_ptr<protocol::Array<std::string>>* wake_locks) override;
+   protocol::Response SetDisplaysOff(bool off, bool* applied) override;
++  protocol::Response NotificationAction(const std::string& id,
++                                        const std::string& action,
++                                        std::optional<int> button) override;
++  protocol::Response SetColorScheme(bool dark) override;
+ 
+   // PlutoniumLock::Observer:
+   void OnLockChanged(bool locked) override;
+@@ -175,6 +180,8 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+   void OnScreencastFrame(int32_t window_id, const SkBitmap& frame);
+   void SendScreencastFrame(int32_t window_id, const SkBitmap& frame);
+   void OnMediaSessionChanged();
++  void OnNotificationShown(const PlutoniumWebNotifications::Info& info);
++  void OnNotificationClosed(const std::string& id);
+ 
+   std::unique_ptr<protocol::Plutonium::Frontend> frontend_;
+   bool enabled_ = false;
+@@ -198,6 +205,8 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+   int next_session_id_ = 1;
+   // EXO-SERVICES: the browser's active media session, while enabled.
+   std::unique_ptr<PlutoniumMediaSession> media_session_;
++  // EXO-SERVICES: the tabs' web notifications, while enabled.
++  std::unique_ptr<PlutoniumWebNotifications> notifications_;
+   base::WeakPtrFactory<PlutoniumHandler> weak_factory_{this};
+ };
+ 
+diff --git a/chrome/browser/devtools/protocol/plutonium_notifications.cc b/chrome/browser/devtools/protocol/plutonium_notifications.cc
+new file mode 100644
+index 0000000000..aed0bbbde9
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_notifications.cc
+@@ -0,0 +1,153 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/devtools/protocol/plutonium_notifications.h"
++
++#include <utility>
++
++#include "base/base64.h"
++#include "base/memory/scoped_refptr.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/base/models/image_model.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image.h"
++#include "ui/message_center/public/cpp/notification.h"
++#include "ui/message_center/public/cpp/notification_delegate.h"
++#include "ui/message_center/public/cpp/notifier_id.h"
++#include "url/origin.h"
++
++namespace {
++
++using message_center::MessageCenter;
++using message_center::Notification;
++
++// A web page's (a tab's, a service worker's): the rest are Ash's own.
++const Notification* FindWebNotification(const std::string& id) {
++  MessageCenter* center = MessageCenter::Get();
++  const Notification* notification =
++      center ? center->FindNotificationById(id) : nullptr;
++  if (!notification || notification->notifier_id().type !=
++                           message_center::NotifierType::WEB_PAGE) {
++    return nullptr;
++  }
++  return notification;
++}
++
++std::string PngDataUrl(const ui::ImageModel& model) {
++  if (!model.IsImage()) {
++    return std::string();
++  }
++  const gfx::Image image = model.GetImage();
++  const SkBitmap* bitmap = image.ToSkBitmap();
++  if (!bitmap || bitmap->drawsNothing()) {
++    return std::string();
++  }
++  std::optional<std::vector<uint8_t>> png =
++      gfx::PNGCodec::EncodeBGRASkBitmap(*bitmap, /*discard_transparency=*/false);
++  if (!png) {
++    return std::string();
++  }
++  return "data:image/png;base64," + base::Base64Encode(*png);
++}
++
++PlutoniumWebNotifications::Info ToInfo(const Notification& notification) {
++  PlutoniumWebNotifications::Info info;
++  info.id = notification.id();
++  info.origin = url::Origin::Create(notification.origin_url()).Serialize();
++  info.title = notification.title();
++  info.body = notification.message();
++  info.icon = PngDataUrl(notification.icon());
++  for (const message_center::ButtonInfo& button : notification.buttons()) {
++    info.buttons.push_back(button.title);
++  }
++  info.require_interaction = notification.never_timeout();
++  info.silent = notification.silent();
++  return info;
++}
++
++}  // namespace
++
++PlutoniumWebNotifications::Info::Info() = default;
++PlutoniumWebNotifications::Info::Info(const Info&) = default;
++PlutoniumWebNotifications::Info::~Info() = default;
++
++PlutoniumWebNotifications::PlutoniumWebNotifications(
++    base::RepeatingCallback<void(const Info&)> shown,
++    base::RepeatingCallback<void(const std::string& id)> closed)
++    : shown_(std::move(shown)), closed_(std::move(closed)) {
++  if (MessageCenter* center = MessageCenter::Get()) {
++    observation_.Observe(center);
++  }
++}
++
++PlutoniumWebNotifications::~PlutoniumWebNotifications() = default;
++
++std::vector<PlutoniumWebNotifications::Info>
++PlutoniumWebNotifications::GetNotifications() const {
++  std::vector<Info> result;
++  MessageCenter* center = MessageCenter::Get();
++  if (!center) {
++    return result;
++  }
++  for (const Notification* notification : center->GetNotifications()) {
++    if (notification->notifier_id().type ==
++        message_center::NotifierType::WEB_PAGE) {
++      result.push_back(ToInfo(*notification));
++    }
++  }
++  return result;
++}
++
++bool PlutoniumWebNotifications::Perform(const std::string& id,
++                                        const std::string& action,
++                                        std::optional<int> button) {
++  const Notification* notification = FindWebNotification(id);
++  if (!notification) {
++    return false;
++  }
++  if (action == "click") {
++    if (button && (*button < 0 || static_cast<size_t>(*button) >=
++                                      notification->buttons().size())) {
++      return false;
++    }
++    // Its delegate, as the message center's click does: that click ignores
++    // notifications its blockers hide, which in shell mode is all of them.
++    scoped_refptr<message_center::NotificationDelegate> delegate =
++        notification->delegate();
++    if (delegate) {
++      delegate->Click(button, std::nullopt);
++    }
++    return true;
++  }
++  if (action == "close") {
++    MessageCenter::Get()->RemoveNotification(id, /*by_user=*/true);
++    return true;
++  }
++  return false;
++}
++
++void PlutoniumWebNotifications::OnNotificationAdded(
++    const std::string& notification_id) {
++  Shown(notification_id);
++}
++
++void PlutoniumWebNotifications::OnNotificationUpdated(
++    const std::string& notification_id) {
++  Shown(notification_id);
++}
++
++void PlutoniumWebNotifications::OnNotificationRemoved(
++    const std::string& notification_id,
++    bool by_user) {
++  // Gone from the center, so its type isn't known: the helper ignores ids
++  // it never had.
++  closed_.Run(notification_id);
++}
++
++void PlutoniumWebNotifications::Shown(const std::string& notification_id) {
++  if (const Notification* notification =
++          FindWebNotification(notification_id)) {
++    shown_.Run(ToInfo(*notification));
++  }
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_notifications.h b/chrome/browser/devtools/protocol/plutonium_notifications.h
+new file mode 100644
+index 0000000000..f498bf702c
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_notifications.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_
++#define CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/scoped_observation.h"
++#include "ui/message_center/message_center.h"
++#include "ui/message_center/message_center_observer.h"
++
++// PLUTONIUM (EXO-SERVICES): the tabs' web notifications (new Notification(),
++// a service worker's showNotification()), for the helper's notifications
++// service. Chrome puts them in Ash's message center, which shell mode never
++// shows: this watches it for web pages' notifications and acts on them as
++// its popups would (click, a button, close), so Chrome's own handling (the
++// page's onclick, the worker's notificationclick) runs.
++class PlutoniumWebNotifications
++    : public message_center::MessageCenterObserver {
++ public:
++  struct Info {
++    Info();
++    Info(const Info&);
++    ~Info();
++    std::string id;
++    // The site's origin.
++    std::string origin;
++    std::u16string title;
++    std::u16string body;
++    // A PNG data URL, or empty.
++    std::string icon;
++    std::vector<std::u16string> buttons;
++    bool require_interaction = false;
++    bool silent = false;
++  };
++
++  // |shown| runs for a new or updated notification, |closed| when one goes
++  // (the page closed it, or it was acted on).
++  PlutoniumWebNotifications(
++      base::RepeatingCallback<void(const Info&)> shown,
++      base::RepeatingCallback<void(const std::string& id)> closed);
++  PlutoniumWebNotifications(const PlutoniumWebNotifications&) = delete;
++  PlutoniumWebNotifications& operator=(const PlutoniumWebNotifications&) =
++      delete;
++  ~PlutoniumWebNotifications() override;
++
++  // The web notifications there are, in the message center's order.
++  std::vector<Info> GetNotifications() const;
++
++  // "click" (the notification, or with |button| one of its buttons) or
++  // "close" (dismissed by the user); false if there's no such notification.
++  bool Perform(const std::string& id,
++               const std::string& action,
++               std::optional<int> button);
++
++  // message_center::MessageCenterObserver:
++  void OnNotificationAdded(const std::string& notification_id) override;
++  void OnNotificationUpdated(const std::string& notification_id) override;
++  void OnNotificationRemoved(const std::string& notification_id,
++                             bool by_user) override;
++
++ private:
++  void Shown(const std::string& notification_id);
++
++  base::RepeatingCallback<void(const Info&)> shown_;
++  base::RepeatingCallback<void(const std::string& id)> closed_;
++  base::ScopedObservation<message_center::MessageCenter,
++                          message_center::MessageCenterObserver>
++      observation_{this};
++};
++
++#endif  // CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_

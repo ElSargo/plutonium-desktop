@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, get as httpGet, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { mayUse } from "../src/services.ts";
 
-import { ShellPackages } from "../src/shellPackages.ts";
+import { type ShellNotice, ShellPackages } from "../src/shellPackages.ts";
 import { ShellServer } from "../src/shellServers.ts";
 import {
   addShell,
@@ -243,6 +243,49 @@ describe("edits", () => {
     await sleep(800);
     assert.equal(gitLog(dir)[0], "retry: edit: index.html");
     assert.equal(packages.status().find((shell) => shell.name === "demo")!.failed, undefined);
+  });
+
+  test("a page that crashes after an edit (even once connected) rolls it back; later, a notice", async () => {
+    const home = fresh("home");
+    installShell(home, shipped(), "demo");
+    const notices: ShellNotice[] = [];
+    const packages = new ShellPackages(context(home), {
+      connectTimeoutMs: 600,
+      hooks: { reloadPages: async () => 1, notice: (notice) => notices.push(notice) },
+    });
+    const origin = "http://demo.localhost:8970";
+    packages.start([origin]);
+    after(() => packages.stop());
+    const dir = shellDir(home, "demo");
+    packages.connected(origin);
+    writeFileSync(join(dir, "index.html"), "<h1>good</h1>\n");
+    await waitFor(() => gitLog(dir)[0] === "edit: index.html");
+    packages.connected(origin);
+    await sleep(100);
+    // Connected, then its renderer crashed (the edit's script, a moment later).
+    packages.crashed(origin);
+    await waitFor(() => gitLog(dir)[0]!.startsWith("rollback: "), 5_000);
+    assert.match(gitLog(dir)[0]!, /its page crashed/);
+    assert.notEqual(readFileSync(join(dir, "index.html"), "utf8"), "<h1>good</h1>\n");
+    assert.deepEqual(notices.map((notice) => [notice.shell, notice.kind]), [["demo", "rollback"]]);
+    assert.match(notices[0]!.message, /rolled back/);
+    // No edit of its own to undo: told, nothing changes.
+    const head = gitLog(dir)[0];
+    packages.crashed(origin);
+    packages.crashed("http://other.localhost:8970");
+    assert.equal(gitLog(dir)[0], head);
+    assert.deepEqual(notices.map((notice) => notice.kind), ["rollback", "crash"]);
+    // Saves after a rollback are committed and applied as before, also an editor's that
+    // replace the file (a new inode each time), one after another.
+    writeFileSync(join(dir, "index.html"), "<h1>after</h1>\n");
+    await waitFor(() => gitLog(dir)[0] === "edit: index.html");
+    for (const text of ["<h1>renamed 1</h1>\n", "<h1>renamed 2</h1>\n"]) {
+      const count = gitLog(dir).length;
+      writeFileSync(join(dir, ".index.html.swp"), text);
+      renameSync(join(dir, ".index.html.swp"), join(dir, "index.html"));
+      await waitFor(() => gitLog(dir).length === count + 1);
+    }
+    assert.equal(execFileSync("git", ["-C", dir, "show", "HEAD:index.html"], { encoding: "utf8" }), "<h1>renamed 2</h1>\n");
   });
 
   test("a commit made another way (plutonium shells update) is applied too", async () => {

@@ -79,7 +79,7 @@ A group is a tag that a shell has described: `{tag, label, shellId}`.
 
 ## Step 3: the overlay (the switcher)
 
-**Super+Tab** opens the switcher over whatever is in front, with the next shell selected. On the left is a sidebar, split in two, each half scrolling on its own: the shells at the top, every window and tab below. On the right, the main area shows the selected item's page. The search box filters both halves.
+**Super+Tab** opens the switcher over whatever is in front, with the next shell selected. On the left is a sidebar, split in two, each half scrolling on its own: the shells at the top, every window and tab below. On the right, the main area shows the selected item's page. The search box filters both halves. Windows and the launcher's apps show their app's icon (the helper's `/v1/apps/<id>/icon`, a window by its app id; PNG or SVG, decoded in a background `about:blank` WebContents as Chrome's Almanac icon loader does, since an SVG needs a renderer; `PlutoniumAppIcons`).
 
 - **Left click** acts: a shell is shown, a window or tab opens fullscreen.
 - **Right click** only selects, so the item's page opens in the main area.
@@ -138,6 +138,7 @@ Shells that the overlay adds aren't on the helper's command line. Each shell pag
 | Backup terminal: tabs of login shells in `plutonium:terminal` at the window's size; Ctrl+Shift+T opens one tab; after a reload both tabs come back with their scrollback | ✓ |
 | Backup browser: Chrome's tabbed window with its new tab page | ✓ |
 | Launch an app: the helper's apps, filtered; Foot starts in `plutonium:switcher` and opens fullscreen, listed under "Started from the switcher" | ✓ |
+| App icons (2026-10-27, Xvfb): foot's SVG icon on its window's row; the launcher's apps with their PNG and SVG icons | ✓ |
 | A tab's page: snapshot, details, group toggles | ✓ |
 | No DCHECKs in Ash's log | ✓ |
 | (patch 0024) Left click on a tab: the page itself fullscreen; a click in it navigates it | ✓ |
@@ -188,7 +189,7 @@ Fixed along the way: the browser couldn't read app environments from inside the 
 
 ### Not done in steps 2–4
 
-- The switcher shows no app icons, and only on the display where new windows open.
+- The switcher shows only on the display where new windows open.
 
 ### Not done in step 1
 

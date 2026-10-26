@@ -16,13 +16,16 @@ Verified 2026-10-26 on Xvfb with the build of the UA patch (0055), in a tab on e
 
 `navigator`, `window` globals, `userAgentData` (with the high-entropy values), codecs (`canPlayType`), media capabilities and devices, fonts, WebGL strings, `window.chrome`, timezone and languages, read by one script in a Plutonium tab and in Linux Chromium (nixpkgs, 147, `--headless=new`) on a localhost page. Differences that come from the versions (158 against 147: `HTMLCameraElement`, `cpuPerformance`, `globalPrivacyControl`, …) or from headless (no WebGL) aren't listed.
 
+## Fixed since
+
+- **Fonts** (2026-10-27): pages and shells render with the host's fonts and fontconfig, as Linux Chromium does there. `plutonium container create` mounts the host's `/etc/fonts` and the font directories it names (`/usr/share/fonts`, `/usr/local/share/fonts`, and on NixOS `/nix/store`) read-only, over the image's; each session's `FONTCONFIG_FILE` (`$DATA_DIR/fonts-<socket>.conf`) includes that and adds your own fonts (`~/.local/share/fonts`, `~/.fonts`) and `~/.config/fontconfig`, which the container's `$HOME` doesn't have. A container made before this keeps the image's fonts (135, DejaVu Sans), and the session log says to make it again (`podman rm -f <container>`, then `plutonium container create`). Checked on Xvfb in a new container: a host-only font (JetBrains Mono from the Nix store) and a user font (`~/.local/share/fonts`) are there; `sans-serif` is Liberation Sans (Chrome's Arial, through the host's aliases) and `system-ui` Noto Sans, as in Linux Chromium on this host.
+- **Dark mode** (2026-10-27): `prefers-color-scheme` in shells and tabs is the host's. The helper reads the settings portal's `org.freedesktop.appearance` `color-scheme` (GNOME, KDE and others set it) and watches `SettingChanged`; without a working portal, GNOME's dconf key (`/org/gnome/desktop/interface/color-scheme`, `dconf watch`). It sets Ash's dark mode (`Plutonium.setColorScheme`, the user's `ash.dark_mode.enabled`), which Ash carries to the web's native theme, on each change and each time the browser (re)connects. With neither, Ash keeps its own (dark). `PLUTONIUM_APPEARANCE_BUS` and `PLUTONIUM_DCONF` point it at a test's fake portal or dconf. Checked on Xvfb with a scratch dconf: the shell's `matchMedia("(prefers-color-scheme: dark)")` went from false to true as the value changed.
+- **Web notifications from tabs** (2026-10-27): through the helper's notifications service, which the shells show ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md), notifications).
+
 ## Still different (backlog)
 
-- **Fonts**: pages render with the container's fonts (135, DejaVu Sans as sans-serif), not the host's (1201 here, Noto Sans). Until Ash runs on the host, the container could see the host's fonts and fontconfig.
-- **Web notifications from tabs** go to Ash's message center, which shell mode blocks: a granted `new Notification()` shows nothing. Linux Chromium shows them through the desktop's notification daemon. They could go to the shell (as tab requests), or through the helper to `org.freedesktop.Notifications`.
 - **Speech synthesis** has no voices (ChromeOS's come from its TTS extensions; Linux Chromium's from speech-dispatcher).
 - **Media keys and MPRIS**: a tab's media session goes to Ash's media controls; Linux Chromium exposes it on D-Bus (MPRIS), so the desktop's media keys and widgets see it.
-- **Dark mode** follows Ash's setting (dark), not the host's.
 - **IME**: Ash's input-method framework, not IBus/Fcitx. Native apps get it over text-input-v1 and v3 (`IME.md`).
 - **Privacy Sandbox APIs** (Protected Audience, Shared Storage, fenced frames) are present in Linux Chromium 147 and not in ours; few sites look.
 - **WebGL** reports ANGLE on Vulkan with the real GPU, like Linux Chromium with Vulkan; Linux Chromium's default is ANGLE on OpenGL, a different but not ChromeOS-specific string.

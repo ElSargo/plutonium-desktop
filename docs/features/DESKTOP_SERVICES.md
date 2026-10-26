@@ -272,8 +272,24 @@ on the session bus: `notify-send`, GTK, Qt, Electron and Chromium-based apps).
 Only the session in slot 0 (your desktop) serves it by default, taking it over
 from a helper that has it (a notification daemon you run that doesn't allow
 that keeps it); a test session in another slot doesn't, unless
-`PLUTONIUM_NOTIFICATIONS=1`. It serves from the helper's start, so apps'
-notifications are kept while no shell shows them.
+`PLUTONIUM_NOTIFICATIONS=1` (it still lists tabs' notifications; `=0` turns
+the service off). It serves from the helper's start, so apps' notifications
+are kept while no shell shows them.
+
+**Tabs' web notifications** (`new Notification()`, a service worker's
+`showNotification()`) join the list. Chrome puts them in Ash's message center,
+which shell mode never shows; the browser's Plutonium domain lists the web
+pages' ones there (`notificationShown`, `notificationClosed`). Their `app` is
+the site's host, `icon` a PNG data URL, `site` the origin, and each button an
+action `button-<n>`. `invoke` runs the page's own handler (`onclick`, the
+worker's `notificationclick`; `notificationAction` calls the notification's
+delegate, since the message center ignores clicks on notifications it hides)
+and, for a click on the notification itself, shows the site's tab in its
+thread's shell (`focus_tab`: the focused tab of that origin, else the newest).
+`dismiss`, and the click, close it in the browser too (the page's `onclose`),
+as a desktop's notification server does; the page closing it removes it. The
+helper keeps the Plutonium domain connected (every 5 s while the browser is
+down), so these arrive whether or not anything else asked the browser.
 
 - **State:** `{ notifications: [{ id, app, icon, summary, body, actions: [{ key,
   label }], urgency: "low" | "normal" | "critical", desktopEntry?, transient,
@@ -289,10 +305,15 @@ notifications are kept while no shell shows them.
   shells use it (`"uses": ["notifications"]`).
 - **Tested:** `helper/test/notifications.test.ts`: parsing, the list
   (replace, dismiss, invoke, clear, expiry, do not disturb), and a real
-  `notify-send` and `gdbus` against the service on a private `dbus-daemon`.
-  The popups: in a session (with the other services' check).
-- Not yet: tabs' web notifications (Chromium's own, see the backlog), images
-  sent as data (`image-data`), sounds.
+  `notify-send` and `gdbus` against the service on a private `dbus-daemon`;
+  web notifications with a fake browser (the site as app, buttons, a click
+  showing the tab, dismiss, closed by the page). The popups: in a session
+  (with the other services' check). Tabs' notifications on Xvfb (slot 11,
+  2026-10-27): a granted `new Notification()` in a tab popped up in the plain
+  shell with the site and its icon; a click on it brought the tab's thread
+  back and closed it in the page.
+- Not yet: images sent as data (`image-data`), sounds; a later update of a web
+  notification (its icon arriving) doesn't redraw a popup already shown.
 
 ### network
 

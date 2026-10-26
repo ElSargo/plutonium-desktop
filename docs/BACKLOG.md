@@ -325,22 +325,31 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `chromium/args.gn` (and the release args), as nixpkgs' Chromium.
   Done 2026-10-26 (`LINUX_COMPAT.md`): verified on Xvfb, an H.264/AAC mp4
   plays in a tab.
-- [ ] **Pages use the host's fonts.** S–M · Ash in the container renders
+- [x] **Pages use the host's fonts.** S–M · Ash in the container renders
   with its 135 fonts (DejaVu Sans), not the host's (Noto Sans and the
   user's). Mount the host's font directories and fontconfig into the
-  container, or wait for Ash on the host.
-- [ ] **Web notifications from tabs.** M · A granted `new Notification()`
+  container, or wait for Ash on the host. Done 2026-10-27 (`LINUX_COMPAT.md`):
+  the host's `/etc/fonts` and font dirs mounted by `container create`, the
+  user's fonts through the session's `FONTCONFIG_FILE`; existing containers
+  need making again.
+- [x] **Web notifications from tabs.** M · A granted `new Notification()`
   goes to Ash's message center, which shell mode blocks, so nothing shows.
   Hand them to the shell (a tab request kind) or to the desktop's
   `org.freedesktop.Notifications` through the helper, as Linux Chromium.
+  Done 2026-10-27 (`DESKTOP_SERVICES.md`): the Plutonium domain lists the
+  message center's web notifications; the helper's notifications service
+  shows them (the site as app), a click runs the page's handler and shows its
+  tab.
 - [ ] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
   page's media session on D-Bus for media keys and desktop widgets; ours go
   to Ash's media controls.
 - [ ] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
   empty (ChromeOS's voices are TTS extensions); Linux Chromium uses
   speech-dispatcher.
-- [ ] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
-  setting, not the desktop's (the portal's `color-scheme`).
+- [x] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
+  setting, not the desktop's (the portal's `color-scheme`). Done 2026-10-27
+  (`LINUX_COMPAT.md`): the portal's setting, else GNOME's dconf key, watched
+  and set as Ash's dark mode.
 - [x] **Port the real shell web app** onto `<native-window>` and the broker.
   Done twice: T3 Code (`T3_SHELL_TEST.md`) and the plain shell (`shells/plain/`).
 - [x] **Browser tabs as elements.** Real pages as SurfaceEmbed `<embed>`s,
@@ -633,8 +642,9 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   shells, fullscreen (EXO-PRESENT), snapshot and details. An add-shell guide,
   a backup terminal (the helper's page) and browser (Chrome's), and launching
   an app fullscreen.
-- [ ] **Switcher: app icons** in the window list and the launcher (the helper
-  serves them; SVG needs decoding in the browser process).
+- [x] **Switcher: app icons** in the window list and the launcher (the helper
+  serves them; SVG needs decoding in the browser process). Done 2026-10-27
+  (`SHELLS.md`): decoded in a background WebContents; windows by app id.
 - [x] **Switcher on DRM**: verify it there (only Xvfb so far). Done 2026-10-26
   (`SHELLS.md`): works; its text field colour, hover and the backup window's
   stacking fixed after it.
@@ -651,12 +661,15 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   server controls, a rolled back change's notice, Add a shell turning one on).
   Done 2026-10-26 on Xvfb (`SHELL_PACKAGES.md`).
 - [ ] **Installed shells on DRM**, and an agent's edit end to end.
-- [ ] **Installed shells: notices outside the switcher.** A rollback shows in
+- [x] **Installed shells: notices outside the switcher.** A rollback shows in
   the switcher's status line and the shell's page; the visible shell isn't
   told (a `shellnotice` event in the library for shells to show).
-- [ ] **Installed shells: a renderer crash** of a shell after an edit isn't
+- [x] **Installed shells: a renderer crash** of a shell after an edit isn't
   noticed (only "no page connected in time"): watch the shell's contents
-  over DevTools (`Inspector.targetCrashed`) and roll back.
+  over DevTools (`Inspector.targetCrashed`) and roll back. Both done
+  2026-10-27 (`SHELL_PACKAGES.md`): `shellnotice` events and a notification;
+  `Target.targetCrashed` rolls back an edit from the last five minutes. A crashed
+  shell page that showed a tab took the browser down (fixed, patch 0073).
 - [x] **Installed shells: agents.** Decided (2026-10-26): no "ask an agent"
   buttons. The switcher and the shells page copy a prompt that points the
   user's own agent at the Plutonium skill (`skill/SKILL.md`, written to

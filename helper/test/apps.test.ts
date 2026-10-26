@@ -104,7 +104,19 @@ describe("find", () => {
       GenericName: "Spreadsheet",
       Exec: "/nix/store/abc-libreoffice/bin/libreoffice --calc %U",
     });
-    desktop("usr/share", "org.gnome.Calculator.desktop", { Name: "Calculator", Exec: "gnome-calculator" });
+    desktop("usr/share", "org.gnome.Calculator.desktop", {
+      Name: "Calculator",
+      Exec: "gnome-calculator",
+      Icon: "org.gnome.Calculator",
+    });
+    for (const [dir, file, body] of [
+      ["usr/share/icons/hicolor/scalable/apps", "org.gnome.Calculator.svg", "<svg/>"],
+      ["usr/share/icons/hicolor/48x48/apps", "standalone.png", "png"],
+      ["home/.local/share/icons/hicolor/48x48/apps", "mytool.png", "png"],
+    ]) {
+      mkdirSync(join(root, dir!), { recursive: true });
+      writeFileSync(join(root, dir!, file!), body!);
+    }
     // The same id in a Nix profile and the system.
     desktop("home/.nix-profile/share", "org.inkscape.Inkscape.desktop", {
       Name: "Inkscape",
@@ -112,7 +124,13 @@ describe("find", () => {
     });
     desktop("usr/share", "org.inkscape.Inkscape.desktop", { Name: "Inkscape", Exec: "inkscape %F" });
     desktop("usr/share", "hidden.desktop", { Name: "Hidden Calc", Exec: "hidden", NoDisplay: "true" });
-    desktop("home/.local/share", "mine.desktop", { Name: "My Tool", Exec: "mytool %f", Path: "/srv" });
+    desktop("home/.local/share", "mine.desktop", {
+      Name: "My Tool",
+      Exec: "mytool %f",
+      Path: "/srv",
+      Icon: "mytool",
+      StartupWMClass: "MyToolWindow",
+    });
     program("bin", "libreoffice-calc-helper");
     program("bin", "calcurse");
     program("bin2", "calcurse");
@@ -180,6 +198,20 @@ describe("find", () => {
     assert.equal(found.onPath, undefined);
     const mine = found.apps.find((app) => app.id === "mine.desktop")!;
     assert.deepEqual([mine.source, mine.argv, mine.cwd], ["user", ["mytool"], "/srv"]);
+  });
+
+  test("a window's app id finds its app and icon", () => {
+    const apps = new DesktopApps();
+    assert.equal(apps.forWindow("mytoolwindow")?.id, "mine.desktop");
+    assert.equal(apps.forWindow("org.gnome.Calculator")?.id, "org.gnome.Calculator.desktop");
+    assert.equal(apps.forWindow("inkscape")?.id, "org.inkscape.Inkscape.desktop");
+    assert.equal(apps.forWindow("nothing"), undefined);
+    assert.equal(apps.icon("org.gnome.Calculator.desktop")?.contentType, "image/svg+xml");
+    assert.equal(apps.icon("org.gnome.Calculator")?.contentType, "image/svg+xml");
+    assert.equal(apps.icon("MyToolWindow")?.data.toString(), "png");
+    // No app: an icon of that name.
+    assert.equal(apps.icon("standalone")?.contentType, "image/png");
+    assert.equal(apps.icon(join(root, "usr/share/icons/hicolor/48x48/apps/standalone.png")), undefined);
   });
 
   test("PATH programs are capped", () => {

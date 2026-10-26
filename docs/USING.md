@@ -48,6 +48,9 @@ Everything it starts is in the thread `niri:desktop`. The full list of binds is 
 - **Links in pages:** Ctrl+click, middle click, `target=_blank` and `window.open` in a shell page or a tab open a tab in the same thread, never a separate browser window.
 - **Apps started elsewhere:** an app started outside any thread (for example, from your normal desktop pointed at Plutonium's socket) arrives untagged. niri adopts such windows; in T3 they're under "Other windows", and in the plain shell under "Elsewhere".
 
+- **Notifications:** apps' notifications and websites' (a tab's `new Notification()`, once you allow it) pop up in the shell you're in. Clicking a website's runs what the site does on a click and brings its tab to front.
+- **Like the rest of your desktop:** pages and shells follow your desktop's light or dark setting (the settings portal, or GNOME's), and use its fonts. For the fonts, the container has to be made after this change: `podman rm -f plutonium-prebuilt`, then `plutonium container create` (the session's log says when).
+
 **Already-running processes** keep the environment they started with. A terminal opened before a change to the helper won't have its new link openers.
 
 ## Agents
@@ -69,7 +72,7 @@ To change one, open the switcher (Super+Tab), pick the shell, and under **Custom
 
 To make a new shell, open the switcher's **Add a shell…** and pick **New shell…** (or run `plutonium shells new <name>`): a copy of one you have, to change yourself or with an agent.
 
-Every save reloads the shell and is committed. If a change breaks the shell (it doesn't come back within 20 s), it's rolled back and you're told; Retry and the diff are on its page. If no shell comes up at all, `plutonium run --safe` starts the shipped plain shell, and two failed starts in a row do the same by themselves. The details are in [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md).
+Every save reloads the shell and is committed. If a change breaks the shell (it doesn't come back within 20 s, or its page crashes), it's rolled back and you're told, in whichever shell you're in (a notification); Retry and the diff are on its page. If no shell comes up at all, `plutonium run --safe` starts the shipped plain shell, and two failed starts in a row do the same by themselves. The details are in [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md).
 
 ## Writing a shell
 

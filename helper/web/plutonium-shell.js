@@ -1350,7 +1350,11 @@ export class PlutoniumShell extends EventTarget {
     let seen = null;
     service.addEventListener("change", (event) => {
       const { notifications = [], doNotDisturb = false } = event.detail ?? {};
-      const fresh = seen ? notifications.filter((n) => seen.get(n.id) !== n.time) : [];
+      // A page that has just connected (a shell reloaded after its edit was rolled back) pops
+      // up what came in the last moments: it may be the news about it.
+      const fresh = seen
+        ? notifications.filter((n) => seen.get(n.id) !== n.time)
+        : notifications.filter((n) => Date.now() - n.time < RECENT_NOTIFICATION_MS);
       seen = new Map(notifications.map((n) => [n.id, n.time]));
       if (typeof option !== "function") {
         this._notificationPopups ??= new NotificationPopups(this);
@@ -1584,6 +1588,9 @@ export class PlutoniumShell extends EventTarget {
           this.system._changed(args.service, args.state);
           this.dispatchEvent(new CustomEvent("systemkey", { detail: args }));
         }
+        // An installed shell's change was rolled back, its page crashed or its server failed
+        // ({ shell, title, kind, message }); the notifications service has it too.
+        if (op === "shellnotice") this.dispatchEvent(new CustomEvent("shellnotice", { detail: args }));
         if (op === "native") this.native.dispatchEvent(new CustomEvent(args.event, { detail: args.detail }));
         if (op === "global_shortcuts") {
           this.globalShortcuts = args.shortcuts ?? [];
@@ -4291,6 +4298,9 @@ class CaptureIndicator {
 // popup goes after a few seconds (a critical one stays) but the notification
 // stays in shell.system.notifications until dismissed; × dismisses it,
 // clicking it runs its default action.
+/** How old a notification a page that has just connected still pops up. */
+const RECENT_NOTIFICATION_MS = 30_000;
+
 class NotificationPopups {
   constructor(shell) {
     ensureNotificationStyle();
@@ -4327,6 +4337,14 @@ class NotificationPopups {
       event.stopPropagation();
       service.call("dismiss", { id: notification.id }).catch(() => {});
     };
+    // A tab's web notification brings its picture (a data URL); apps' icons are theme names.
+    if (notification.icon?.startsWith("data:image/")) {
+      const icon = document.createElement("img");
+      icon.className = "icon";
+      icon.alt = "";
+      icon.src = notification.icon;
+      head.append(icon);
+    }
     head.append(app, close);
     const summary = document.createElement("div");
     summary.className = "summary";
@@ -4382,6 +4400,7 @@ const NOTIFICATION_STYLE = `@layer plutonium {
   .plutonium-notifications .card { position: static; margin: 0; padding: 8px 10px; display: grid; gap: 2px; cursor: default; }
   .plutonium-notifications .card.critical { border-left: 3px solid var(--plutonium-notification-critical, #e5484d); }
   .plutonium-notifications .head { display: flex; align-items: center; gap: 8px; font-size: .8em; opacity: .7; }
+  .plutonium-notifications .icon { width: 16px; height: 16px; object-fit: contain; border-radius: 3px; }
   .plutonium-notifications .app { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .plutonium-notifications .close { all: unset; padding: 0 4px; font-size: 1.2em; line-height: 1; opacity: .8; }
   .plutonium-notifications .summary { font-weight: 600; overflow-wrap: anywhere; }

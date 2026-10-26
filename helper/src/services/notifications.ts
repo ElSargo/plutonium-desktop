@@ -1,7 +1,9 @@
 // The notifications service (DESKTOP_SERVICES.md, "notifications"): the
 // helper is the session's notification server (org.freedesktop.Notifications,
 // what notify-send, GTK, Qt and Electron apps send to), and the shell draws
-// them: popups, a list, do not disturb.
+// them: popups, a list, do not disturb. The tabs' web notifications join them
+// (the browser's Plutonium domain): their app is the site.
+import type { WebNotification } from "../desktop.ts";
 import { DBusConnection, DBusError, type Message, type Reply } from "../dbus.ts";
 import { type DesktopService, ServiceError } from "../services.ts";
 
@@ -45,6 +47,39 @@ export interface Notification {
   /** Whether the shell should keep it out of its list once its popup is gone. */
   readonly transient: boolean;
   readonly time: number;
+  /** A tab's web notification: the site's origin (its app is the site's host). */
+  readonly site?: string;
+}
+
+/** The browser's side (desktop.ts): the tabs' web notifications, and acting on them. */
+export interface BrowserNotifications {
+  /** Calls `listener` as they come, change (`shown`) and go (`closed`, the browser's id). */
+  onChange(listener: (event: { shown: WebNotification } | { closed: string }) => void): void;
+  /** Clicks one (or its button), or closes it as the user would: the page's own handlers run. */
+  action(id: string, action: "click" | "close", button?: number): Promise<void>;
+  /** Shows the site's tab (a click on its notification). */
+  showSite(origin: string): Promise<void>;
+}
+
+/** The notification a web notification is, with `id` as ours. */
+export function fromWeb(id: number, web: WebNotification, now = Date.now()): Notification {
+  let app = web.origin;
+  try {
+    app = new URL(web.origin).host || web.origin;
+  } catch {}
+  return {
+    id,
+    app,
+    icon: web.icon,
+    summary: web.title,
+    body: web.body,
+    // "default" is the notification itself, as on the bus; the buttons by index.
+    actions: [{ key: "default", label: "Open" }, ...web.buttons.map((label, index) => ({ key: `button-${index}`, label }))],
+    urgency: web.requireInteraction ? "critical" : "normal",
+    transient: false,
+    time: now,
+    site: web.origin,
+  };
 }
 
 export interface NotificationsState {
@@ -81,27 +116,37 @@ export function parseNotify(id: number, body: readonly unknown[], now = Date.now
 export class NotificationsService implements DesktopService {
   readonly name = "notifications";
   private readonly address: string | undefined;
-  private readonly serve: boolean;
   private bus: DBusConnection | null = null;
   private list: Notification[] = [];
   private readonly timers = new Map<number, NodeJS.Timeout>();
   private nextId = 1;
   private doNotDisturb = false;
   private changed: (state: unknown) => void = () => {};
+  private readonly browser: BrowserNotifications | undefined;
+  /** Web notifications: the browser's id → ours, and back. */
+  private readonly webIds = new Map<string, number>();
+  private readonly webOf = new Map<number, string>();
+
+  private readonly serveBus: boolean;
 
   /**
-   * `address`: the session bus (default $DBUS_SESSION_BUS_ADDRESS). `serve`
-   * false: not on the bus at all (a test session's helper, which would take the
-   * host desktop's notifications); the shell's and tabs' own still work.
+   * `address`: the session bus (default $DBUS_SESSION_BUS_ADDRESS); `browser`:
+   * the tabs' notifications; `serveBus`: false leaves the bus's name alone
+   * (a test session's helper: only the tabs' then).
    */
-  constructor(address?: string, serve = true) {
+  constructor(address?: string, browser?: BrowserNotifications, serveBus = true) {
     this.address = address;
-    this.serve = serve;
+    this.browser = browser;
+    this.serveBus = serveBus;
   }
 
   async start(changed: (state: unknown) => void): Promise<void> {
     this.changed = changed;
-    if (!this.serve) return;
+    this.browser?.onChange((event) => ("shown" in event ? this.notifyWeb(event.shown) : this.closeWeb(event.closed)));
+    if (!this.serveBus) {
+      console.log(`plutoniumd: notifications from tabs only (not serving ${NAME})`);
+      return;
+    }
     const address = this.address ?? process.env.DBUS_SESSION_BUS_ADDRESS;
     if (!address) throw new ServiceError(503, "There's no session bus (DBUS_SESSION_BUS_ADDRESS).");
     const bus = await DBusConnection.connect(address);
@@ -142,6 +187,15 @@ export class NotificationsService implements DesktopService {
         const notification = this.list.find((n) => n.id === id);
         const key = String(args.action ?? "default");
         if (!notification) throw new ServiceError(404, `There's no notification ${args.id}.`);
+        const web = this.webOf.get(id);
+        if (web !== undefined) {
+          // The page's onclick (or the worker's notificationclick) runs, and its tab shows.
+          const button = /^button-(\d+)$/.exec(key);
+          await this.browser?.action(web, "click", button ? Number(button[1]) : undefined);
+          if (!button && notification.site) await this.browser?.showSite(notification.site).catch(() => {});
+          this.close(id, CLOSED.dismissed);
+          return null;
+        }
         this.bus?.emit(PATH, NAME, "ActionInvoked", "us", [id, key]);
         // Clicked: it has done its job (apps that want it to stay send it again).
         this.close(id, CLOSED.dismissed);
@@ -179,11 +233,41 @@ export class NotificationsService implements DesktopService {
     return id;
   }
 
+  /** A tab's web notification came or changed (public for tests). */
+  notifyWeb(web: WebNotification): number {
+    const known = this.webIds.get(web.id);
+    const id = known !== undefined && this.list.some((n) => n.id === known) ? known : this.nextId++;
+    this.webIds.set(web.id, id);
+    this.webOf.set(id, web.id);
+    this.list = [fromWeb(id, web), ...this.list.filter((n) => n.id !== id)].slice(0, LIMIT);
+    this.changed({ notifications: this.list, doNotDisturb: this.doNotDisturb });
+    return id;
+  }
+
+  /** The browser closed one (the page did, or it was acted on). */
+  private closeWeb(webId: string): void {
+    const id = this.webIds.get(webId);
+    if (id === undefined) return;
+    this.webIds.delete(webId);
+    this.webOf.delete(id);
+    this.close(id, CLOSED.byApp);
+  }
+
   private close(id: number, reason: number, announce = true): void {
     if (!this.list.some((n) => n.id === id)) return;
     this.list = this.list.filter((n) => n.id !== id);
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
+    const web = this.webOf.get(id);
+    if (web !== undefined) {
+      this.webOf.delete(id);
+      this.webIds.delete(web);
+      // Dismissed or clicked here: closed in the browser too, as a desktop's
+      // notification server does (the page's onclose runs).
+      if (reason === CLOSED.dismissed) void this.browser?.action(web, "close").catch(() => {});
+      if (announce) this.changed({ notifications: this.list, doNotDisturb: this.doNotDisturb });
+      return;
+    }
     this.bus?.emit(PATH, NAME, "NotificationClosed", "uu", [id, reason]);
     if (announce) this.changed({ notifications: this.list, doNotDisturb: this.doNotDisturb });
   }
