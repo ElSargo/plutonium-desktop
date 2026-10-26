@@ -82,8 +82,10 @@ export interface SessionOptions {
   readonly sessionBus?: string | null;
   /** The system bus, for logind (Lock, PrepareForSleep); null: don't listen (an X11 session). */
   readonly systemBus?: string | null;
-  /** Our logind session (XDG_SESSION_ID), whose Lock signal locks. */
+  /** Our logind session (the one Ash runs in), whose Lock signal locks. */
   readonly sessionId?: string;
+  /** Its TTY ("tty5"): a session on another one isn't followed. */
+  readonly sessionTty?: string;
   /** Takes logind's delay inhibitor for sleep (default: systemd-inhibit). */
   readonly inhibitSleep?: () => Held | null;
   /** The name shown on the lock (default: the account's full name). */
@@ -561,7 +563,21 @@ export class SessionService implements DesktopService {
       });
     let sessionPath: string | null = null;
     if (this.options.sessionId) {
-      [sessionPath] = (await call(LOGIN_PATH, `${LOGIN}.Manager`, "GetSession", "s", [this.options.sessionId])) as [string];
+      const [path] = (await call(LOGIN_PATH, `${LOGIN}.Manager`, "GetSession", "s", [this.options.sessionId])) as [string];
+      // (Variants arrive unwrapped.)
+      const [tty] = (await call(path, "org.freedesktop.DBus.Properties", "Get", "ss", [`${LOGIN}.Session`, "TTY"])) as [string];
+      if (!this.options.sessionTty || tty !== this.options.sessionTty) {
+        // Not the session this one runs on (the user's own, inherited): don't
+        // follow logind at all, its Lock nor its sleep.
+        console.warn(
+          `session: not following logind session ${this.options.sessionId} ` +
+            `(${tty || "no TTY"}; this session is on ${this.options.sessionTty || "an unknown TTY"})`,
+        );
+        bus.close();
+        this.system = null;
+        return;
+      }
+      sessionPath = path;
       await match(`type='signal',sender='${LOGIN}',path='${sessionPath}',interface='${LOGIN}.Session',member='Lock'`);
     }
     await match(`type='signal',sender='${LOGIN}',path='${LOGIN_PATH}',interface='${LOGIN}.Manager',member='PrepareForSleep'`);

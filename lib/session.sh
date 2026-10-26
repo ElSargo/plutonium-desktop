@@ -106,9 +106,14 @@ start_helper() {
   ensure_helper_deps
   setup_portal
   [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && sleep 1
+  # On DRM, the logind session Ash runs in, not the one this was started from
+  # (`run --vt tty5` from tty4): the helper follows its Lock signal, sets its
+  # backlight, and apps it launches are in it.
+  local logind=()
+  [[ -n ${SID:-} ]] && logind=(XDG_SESSION_ID="$SID" PLUTONIUM_LOGIND_SESSION="$SID" PLUTONIUM_LOGIND_TTY="$(session_prop TTY)")
   # Apps the helper launches inherit its environment: leave out an agent
   # session's own variables when this runs from one (Claude Code).
-  setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') \
+  setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') "${logind[@]}" \
     PLUTONIUM_SHELL_LIBRARY="$(live_current shell-lib "$ROOT/helper/web")/plutonium-shell.js" \
     node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
     --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" \

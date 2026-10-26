@@ -462,9 +462,12 @@ export class Daemon {
         (process.env.PLUTONIUM_SCREENSAVER ?? ((options.shells?.context.slot ?? 0) === 0 ? "1" : "0")) === "0"
           ? null
           : process.env.DBUS_SESSION_BUS_ADDRESS || null,
-      // logind's Lock and sleep are the seat's: a DRM session's, not an X11 one's.
-      systemBus: options.waylandDisplay.includes("-x11") ? null : "unix:path=/run/dbus/system_bus_socket",
-      sessionId: process.env.XDG_SESSION_ID,
+      // logind's Lock and sleep: only for the session a DRM launch named
+      // (lib/session.sh), never one inherited from the shell that started it
+      // (a test session's helper would follow the user's own).
+      systemBus: process.env.PLUTONIUM_LOGIND_SESSION ? "unix:path=/run/dbus/system_bus_socket" : null,
+      sessionId: process.env.PLUTONIUM_LOGIND_SESSION,
+      sessionTty: process.env.PLUTONIUM_LOGIND_TTY,
       notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
     });
     this.services.register(this.session);

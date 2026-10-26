@@ -209,11 +209,27 @@ describe("session service", () => {
         ? { signature: "o", body: [SESSION] }
         : { error: "org.freedesktop.login1.NoSuchSession" },
     );
+    bus.serveObject(LOGIN, SESSION, (method, body) =>
+      method === "org.freedesktop.DBus.Properties.Get" && body[1] === "TTY"
+        ? { signature: "v", body: [["s", "tty5"]] }
+        : { error: "org.freedesktop.DBus.Error.UnknownMethod" },
+    );
+    // Another session's helper (started from tty4, its own on tty5): it doesn't follow this one.
+    const stranger = new FakeBrowser();
+    const strangerHeld: string[] = [];
+    const notOurs = make(stranger, {
+      systemBus: bus.address,
+      sessionId: "3",
+      sessionTty: "tty4",
+      inhibitSleep: () => (strangerHeld.push("take"), { release: () => {} }),
+    });
+    await notOurs.start(() => {});
     const browser = new FakeBrowser();
     const held: string[] = [];
     const session = make(browser, {
       systemBus: bus.address,
       sessionId: "3",
+      sessionTty: "tty5",
       inhibitSleep: () => (held.push("take"), { release: () => held.push("release") }),
     });
     await session.start(() => {});
@@ -226,6 +242,8 @@ describe("session service", () => {
     bus.signal(LOGIN, SESSION, `${LOGIN}.Session`, "Lock");
     await wait();
     assert.equal(browser.locks.length, 1);
+    assert.equal(stranger.locks.length, 0, "a session on another TTY isn't followed");
+    assert.deepEqual(strangerHeld, [], "nor does it hold sleep");
     // Unlock isn't followed: only the password takes it down.
     bus.signal(LOGIN, SESSION, `${LOGIN}.Session`, "Unlock");
     await wait();
@@ -238,6 +256,8 @@ describe("session service", () => {
     bus.signal(LOGIN, "/org/freedesktop/login1", `${LOGIN}.Manager`, "PrepareForSleep", "b", [false]);
     await wait();
     assert.deepEqual(held, ["take", "release", "take"], "held again after waking");
+    assert.equal(stranger.locks.length, 0);
+    notOurs.stop();
     session.stop();
     await bus.stop();
   });

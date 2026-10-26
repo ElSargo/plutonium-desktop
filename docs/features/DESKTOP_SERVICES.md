@@ -407,8 +407,13 @@ off, and the lock itself.
   `Unlock` isn't followed, only the password unlocks), and **before sleep**:
   the helper holds a delay inhibitor (`systemd-inhibit --what=sleep
   --mode=delay`), and on `PrepareForSleep` puts the lock up, then lets go,
-  so the lock is what shows on waking. An X11 session doesn't follow logind
-  (the seat's session is the host's).
+  so the lock is what shows on waking. Only the logind session Ash runs in
+  is followed: a DRM launch (`lib/session.sh`) names it to the helper
+  (`PLUTONIUM_LOGIND_SESSION`, its TTY in `PLUTONIUM_LOGIND_TTY`, and
+  `XDG_SESSION_ID` for the rest), and the helper checks logind's TTY for it
+  before following; it never goes by an `XDG_SESSION_ID` inherited from the
+  shell that started it (`run --vt tty5` from tty4 would follow tty4's). An
+  X11 session doesn't follow logind.
 - **Idle:** Ash knows when the user last did anything
   (`ui::UserActivityDetector`); the helper asks (`Plutonium.getIdle`) when
   the next step is due, not on a fixed tick. Screen off on DRM is Ash's
@@ -459,4 +464,11 @@ off, and the lock itself.
   then locked; a shell's `inhibit` held it off, and after `uninhibit` idle
   counted from then; the Screen Wake Lock API and a playing `<video>` in
   the page listed as inhibitors ("A page keeps the screen on", "Playing
-  video"), gone when released.
+  video"), gone when released. On DRM (tty5, the orchestrator's session):
+  the displays off after the idle time (every plane's framebuffer gone) and
+  on again at a pointer move; the idle lock; input blocked (Super+Tab,
+  Super+F, a click); the wrong password's message; unlocking; Super+L;
+  the delay inhibitor listed by `systemd-inhibit --list`; Ctrl+Alt+Backspace
+  ending the session while locked. That run found the helper following the
+  launching shell's logind session (tty4's) instead of tty5's, fixed as
+  above; the machine wasn't suspended.
