@@ -17,7 +17,20 @@
     workspace at the bottom, and empty ones disappear once you leave them.
   - The overview (Super+O, or the top-left hot corner: the desktop's, with
     several displays) zooms out to every workspace. Click a window to go to
-    it, drag one to another workspace.
+    it, drag one to another workspace, into a column or onto a tab, or
+    between two workspaces for a new one.
+  - Super+drag (or the app's own title bar) moves a window: it leaves the
+    layout and goes where it's dropped, shown by niri's insert hint: a new
+    column (the sides of a column, or the gap), into a column (the top or
+    bottom of a window), or a tab (the middle of a window; any of a tabbed
+    column). Near a screen edge the view scrolls along.
+  - niri's touchpad swipes follow the fingers and snap at the end: three
+    fingers (the shell library's touchpadswipe, Chromium patch 0074), or a
+    two-finger scroll with Super held (any in the overview) where the
+    browser doesn't pass swipes on. Four fingers open and close the overview. Super+middle-drag, and a
+    drag on a workspace in the overview, drag the view the same way.
+  - The bar's minimap (minimap.js) shows the workspaces and the focused
+    one's columns, with app icons.
   - Super+Shift+/ lists the binds (also shown at startup).
 
   Windows and tabs are the shell's when tagged niri:desktop: everything
@@ -127,10 +140,25 @@
     position: absolute; left: 0; top: 0; display: flex; flex-direction: column; gap: 4px; z-index: 1;
     transition: transform var(--anim);
   }
-  .tabind span { flex: 1; border-radius: 2px; background: #505050; }
+  /* Clickable, as niri's: a wider hit area than the bar it draws. */
+  .tabind span { flex: 1; border-radius: 5px; background: #505050; background-clip: content-box; padding: 0 3px; cursor: pointer; }
   .tabind span.active { background: var(--focus); }
 
-  #hot-corner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 50; }
+  .hot-corner { position: fixed; width: 2px; height: 2px; z-index: 50; }
+  .hot-corner[data-corner^="top"] { top: 0; } .hot-corner[data-corner^="bottom"] { bottom: 0; }
+  .hot-corner[data-corner$="Left"] { left: 0; } .hot-corner[data-corner$="Right"] { right: 0; }
+
+  /* Where a moved window goes (niri's insert hint). */
+  #insert-hint {
+    position: absolute; left: 0; top: 0; z-index: 2; border-radius: 8px; pointer-events: none;
+    background: var(--hint); opacity: 0; transition: opacity 150ms;
+  }
+  #insert-hint.shown { opacity: 1; transition: opacity 150ms, transform 150ms, width 150ms, height 150ms; }
+  #insert-hint.tab { background: transparent; outline: 4px solid var(--hint); outline-offset: -4px; }
+  #insert-hint.tab::after {
+    content: "Tab"; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    padding: 4px 12px; border-radius: 8px; background: var(--hint); color: #fff; font-weight: 600;
+  }
 
   /* Popups: launcher, hotkey overlay, notices. */
   .modal {
@@ -180,9 +208,12 @@
 <body class="noanim">
 <div id="wallpaper"></div>
 <div id="backdrop"></div>
-<div id="world"></div>
+<div id="world"><div id="insert-hint"></div></div>
 <div id="empty-hint" hidden></div>
-<div id="hot-corner"></div>
+<div class="hot-corner" data-corner="topLeft"></div>
+<div class="hot-corner" data-corner="topRight"></div>
+<div class="hot-corner" data-corner="bottomLeft"></div>
+<div class="hot-corner" data-corner="bottomRight"></div>
 <div id="launcher" class="modal" hidden>
   <input id="launcher-input" spellcheck="false" placeholder="Run an app, a command, or open a web address">
   <ul id="launcher-list"></ul>
@@ -206,7 +237,13 @@ const CONFIG = {
   // "on-overflow": center it when it and the previous one don't both fit.
   centerFocusedColumn: "never",
   overviewZoom: 0.5,
-  hotCorner: true,
+  // gestures { hot-corners { … } }: which corners of the desktop open the overview.
+  hotCorners: { topLeft: true, topRight: false, bottomLeft: false, bottomRight: false },
+  // gestures { dnd-edge-view-scroll } and { dnd-edge-workspace-switch } (the latter in the
+  // overview): while moving a window or dragging something, near an edge.
+  dndEdgeViewScroll: { triggerWidth: 30, delayMs: 100, maxSpeed: 1500 },
+  dndEdgeWorkspaceSwitch: { triggerHeight: 50, delayMs: 100, maxSpeed: 1500 },
+  insertHint: { on: true, color: "#7fc8ff80" },
   hotkeyOverlayAtStartup: true,
   terminal: ["foot"],
 };
@@ -230,10 +267,13 @@ const MIN = 60;
 const W = () => innerWidth;
 // The bar's height (bar.js): the layout is what's under it.
 let barHeight = 0;
+// The bar's minimap (minimap.js): { update() }, once it's there.
+let minimap = null;
 const H = () => innerHeight - barHeight;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const focusColor = CONFIG.border.on ? CONFIG.border.active : CONFIG.focusRing.active;
 document.documentElement.style.setProperty("--focus", focusColor);
+document.documentElement.style.setProperty("--hint", CONFIG.insertHint.color);
 
 // ---------------------------------------------------------------- layout model
 // Items are "w:<window id>" or "t:<tab id>".
@@ -318,7 +358,10 @@ function itemHeights(col) {
   return fixed.map((h) => Math.round(h ?? auto));
 }
 const ovGap = () => H() * 0.2;
-const wsTop = (wi) => (wi - layout.cur) * (H() + (overview ? ovGap() : 0));
+const wsSpacing = () => H() + (overview ? ovGap() : 0);
+// A vertical swipe's offset of the workspaces, while it lasts (see gestures).
+let gestureY = 0;
+const wsTop = (wi) => (wi - layout.cur) * wsSpacing() + gestureY;
 
 // Scrolls `ws` so its focused column is on screen (niri's center-focused-column).
 function ensureVisible(ws = curWs(), prev = null) {
@@ -487,7 +530,8 @@ function reconcile() {
     ws.columns = ws.columns.filter((c) => c.items.length);
     ws.floating = ws.floating.filter((f) => keys.has(f.key) || tiles.has(f.key));
   }
-  for (const key of keys) if (!find(key)) addItem(key);
+  // (Not a window being moved: it's out of the layout until it's dropped.)
+  for (const key of keys) if (!find(key) && !(drag?.held && drag.key === key)) addItem(key);
   normalize();
 }
 
@@ -635,6 +679,7 @@ function applyPlacements() {
 const snap = (v) => Math.round(v * devicePixelRatio) / devicePixelRatio;
 
 function applyPlacement({ tile, x, y, w, h }) {
+  tile.at = { x, y, w, h };
   tile.el.style.transform = `translate3d(${snap(x)}px, ${snap(y)}px, 0)`;
   tile.el.style.width = `${w}px`;
   tile.el.style.height = `${h}px`;
@@ -668,9 +713,14 @@ function render() {
       card = document.createElement("div");
       card.className = "wscard";
       card.dataset.ws = ws.id;
-      card.onclick = () => {
-        const i = layout.workspaces.findIndex((w) => w.id === ws.id);
-        if (i >= 0) { layout.cur = i; overview = false; commit(); }
+      // A click goes to the workspace; a drag drags the view (see gestures).
+      card.onpointerdown = (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        startPan(e, () => {
+          const i = layout.workspaces.findIndex((w) => w.id === ws.id);
+          if (i >= 0) { layout.cur = i; overview = false; updateShortcuts(); commit(); }
+        });
       };
       world.prepend(card);
     }
@@ -702,11 +752,16 @@ function render() {
         });
         const ind = indicators[nextIndicator++] ?? world.appendChild(Object.assign(document.createElement("div"), { className: "tabind" }));
         const len = (H() - 2 * g) * 0.5;
-        ind.style.width = "4px";
+        ind.style.width = "10px";
         ind.style.height = `${len}px`;
-        ind.style.transform = `translate3d(${Math.round(sx - 9)}px, ${Math.round(top + g + (H() - 2 * g - len) / 2)}px, 0)`;
-        ind.replaceChildren(...col.items.map((_, ii) =>
-          Object.assign(document.createElement("span"), { className: ii === col.active ? "active" : "" })));
+        ind.style.transform = `translate3d(${Math.round(sx - 12)}px, ${Math.round(top + g + (H() - 2 * g - len) / 2)}px, 0)`;
+        // A click on a tab's bar goes to that tab.
+        ind.replaceChildren(...col.items.map((key, ii) => {
+          const span = Object.assign(document.createElement("span"), { className: ii === col.active ? "active" : "" });
+          span.onpointerdown = (e) => { e.preventDefault(); e.stopPropagation(); };
+          span.onclick = () => { focusItem(key); refocus(); commit(); };
+          return span;
+        }));
       } else {
         const hs = itemHeights(col);
         let y = g;
@@ -732,6 +787,7 @@ function render() {
   });
   for (const ind of indicators.slice(nextIndicator)) ind.remove();
   placeTiles();
+  renderHint();
 
   for (const key of openAnimation) {
     const tile = tiles.get(key);
@@ -751,6 +807,7 @@ function render() {
     : `Workspace ${layout.cur + 1} · Super+T terminal · Super+D run · Super+Shift+/ hotkeys`;
   syncKeyboard();
   save();
+  minimap?.update();
 }
 
 // A tab's page dialog (alert, confirm, prompt), drawn over its tile.
@@ -1113,6 +1170,45 @@ const actions = {
   launcher() { openLauncher(); },
   hotkeys() { showHotkeys(); },
   // niri's screenshot UI: a region or a window, saved to ~/Pictures/Screenshots.
+  // Several displays: niri's outputs are the browser's displays.
+  focusMonitor(dir) {
+    const display = displayToward(dir);
+    if (display) shell.focusDisplay(display.id).catch(() => {});
+  },
+  // The column's windows go to that display's niri, each a column there, the
+  // focused one last (so it has the focus).
+  moveColumnToMonitor(dir) {
+    const display = displayToward(dir);
+    const key = focusedKey();
+    if (!display || !key) return;
+    const col = tiledCol();
+    const keys = col ? [...col.items.filter((k) => k !== key), key] : [key];
+    for (const k of keys) {
+      const [kind, raw] = k.split(":");
+      const move = kind === "w" ? shell.showOnDisplay(Number(raw), display.id) : shell.showTabOnDisplay(Number(raw), display.id);
+      move.catch(() => {});
+    }
+  },
+  // niri's quit, after its "Are you sure you want to exit niri?": ends the session.
+  async quit() {
+    if (quitting) return;
+    quitting = true;
+    for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
+    try {
+      const { confirm } = await import("./tray.js");
+      if (await confirm("Are you sure you want to exit niri? This ends the Plutonium session and closes its apps.", "Exit")) {
+        await shell.system.power.call("log-out");
+      }
+    } catch (e) {
+      notice(`exit: ${e.message ?? e}`);
+    } finally {
+      quitting = false;
+      refocus();
+    }
+  },
+  lock() {
+    shell.system.session.call("lock").catch((e) => notice(`lock: ${e.message ?? e}`));
+  },
   async screenshot() {
     if (!shell?.captureAvailable) return notice("no screenshots in this browser");
     const targets = [];
@@ -1143,6 +1239,28 @@ const actions = {
   },
 };
 
+let quitting = false;
+
+// The display to the `dir` ("left", "right", "up", "down") of this page's, nearest first.
+function displayToward(dir) {
+  const own = shell?.display;
+  if (!own || shell.displays.length < 2) return null;
+  const cx = own.x + own.width / 2;
+  const cy = own.y + own.height / 2;
+  let best = null;
+  let bestScore = Infinity;
+  for (const d of shell.displays) {
+    if (d.id === own.id) continue;
+    const dx = d.x + d.width / 2 - cx;
+    const dy = d.y + d.height / 2 - cy;
+    const along = { left: -dx, right: dx, up: -dy, down: dy }[dir];
+    if (along <= 0) continue;
+    const score = along + 2 * (dir === "left" || dir === "right" ? Math.abs(dy) : Math.abs(dx));
+    if (score < bestScore) { best = d; bestScore = score; }
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------- binds
 // niri's default binds (its default config.kdl), with Mod = Super.
 const binds = [];
@@ -1168,6 +1286,14 @@ bind("Super+Ctrl+Home", "Move Column to First", () => actions.moveColumnEdge(fal
 bind("Super+Ctrl+End", "Move Column to Last", () => actions.moveColumnEdge(true));
 bind(["Super+PageDown", "Super+KeyU"], "Switch Workspace Down", () => actions.focusWorkspaceDelta(1), { hotkey: true });
 bind(["Super+PageUp", "Super+KeyI"], "Switch Workspace Up", () => actions.focusWorkspaceDelta(-1), { hotkey: true });
+bind(["Super+Shift+ArrowLeft", "Super+Shift+KeyH"], "Focus Monitor to the Left", () => actions.focusMonitor("left"));
+bind(["Super+Shift+ArrowRight", "Super+Shift+KeyL"], "Focus Monitor to the Right", () => actions.focusMonitor("right"));
+bind(["Super+Shift+ArrowDown", "Super+Shift+KeyJ"], "Focus Monitor Down", () => actions.focusMonitor("down"));
+bind(["Super+Shift+ArrowUp", "Super+Shift+KeyK"], "Focus Monitor Up", () => actions.focusMonitor("up"));
+bind(["Super+Ctrl+Shift+ArrowLeft", "Super+Ctrl+Shift+KeyH"], "Move Column to Monitor Left", () => actions.moveColumnToMonitor("left"));
+bind(["Super+Ctrl+Shift+ArrowRight", "Super+Ctrl+Shift+KeyL"], "Move Column to Monitor Right", () => actions.moveColumnToMonitor("right"));
+bind(["Super+Ctrl+Shift+ArrowDown", "Super+Ctrl+Shift+KeyJ"], "Move Column to Monitor Down", () => actions.moveColumnToMonitor("down"));
+bind(["Super+Ctrl+Shift+ArrowUp", "Super+Ctrl+Shift+KeyK"], "Move Column to Monitor Up", () => actions.moveColumnToMonitor("up"));
 bind(["Super+Ctrl+PageDown", "Super+Ctrl+KeyU"], "Move Column to Workspace Down", () => actions.moveColumnToWorkspaceDelta(1), { hotkey: true });
 bind(["Super+Ctrl+PageUp", "Super+Ctrl+KeyI"], "Move Column to Workspace Up", () => actions.moveColumnToWorkspaceDelta(-1), { hotkey: true });
 bind(["Super+Shift+PageDown", "Super+Shift+KeyU"], "Move Workspace Down", () => actions.moveWorkspace(1));
@@ -1195,6 +1321,8 @@ bind("Super+Shift+Equal", "Increase Window Height", () => actions.setWindowHeigh
 bind("Super+KeyV", "Move Window Between Floating and Tiling", () => actions.toggleFloating(), { repeat: false, hotkey: true });
 bind("Super+Shift+KeyV", "Switch Focus Between Floating and Tiling", () => actions.switchFocusFloatingTiling(), { repeat: false, hotkey: true });
 bind("Super+KeyW", "Toggle Column Tabbed Display", () => actions.toggleTabbed(), { repeat: false, hotkey: true });
+bind("Super+Alt+KeyL", "Lock the Screen", () => actions.lock(), { repeat: false });
+bind(["Super+Shift+KeyE", "Ctrl+Alt+Delete"], "Exit niri", () => actions.quit(), { repeat: false, hotkey: true });
 bind(["PrintScreen", "Super+Shift+KeyS"], "Take a Screenshot", () => actions.screenshot(), { repeat: false, hotkey: true });
 bind(["Ctrl+PrintScreen", "Super+Ctrl+Shift+KeyS"], "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
 bind(["Alt+PrintScreen", "Super+Alt+Shift+KeyS"], "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
@@ -1246,68 +1374,284 @@ addEventListener("blur", () => setMod(false));
 
 // ---------------------------------------------------------------- pointer
 // Super held: the windows' hit layers take the pointer, for Super+drag
-// (move) and Super+right-drag (resize). A missed release is noticed on the
-// next pointer event without Super.
+// (move), Super+right-drag (resize) and Super+middle-drag (the view). A
+// missed release is noticed on the next pointer event without Super.
 function setMod(on) { document.body.classList.toggle("mod", on); }
-addEventListener("pointermove", (e) => { if (!e.metaKey && !drag) setMod(false); }, true);
+addEventListener("pointermove", (e) => { if (!e.metaKey && !drag && !pan) setMod(false); }, true);
+
+// Page coordinates to the world's (the layout's, before the overview's zoom).
+function toWorld(px, py) {
+  const z = overview ? CONFIG.overviewZoom : 1;
+  return { x: (px - W() / 2) / z + W() / 2, y: (py - barHeight - H() / 2) / z + H() / 2 };
+}
 
 let drag = null;
-// A move (or with |resize|, a resize from |edge|: "right", "bottom-left"…;
-// "" is Super+right-drag's, from the bottom right) of |key| from (x, y).
-function beginDrag(key, x, y, resize, edge = "") {
+// A move (or with |resize|, a resize from |edge|: "right", "bottom-left"…) of |key| from (x, y).
+function beginDrag(key, x, y, resize, edge = "bottom-right") {
   const at = find(key);
-  if (!at) return null;
-  const ws = layout.workspaces[at.wi];
   const tile = tiles.get(key);
+  if (!at || !tile) return null;
+  const ws = layout.workspaces[at.wi];
+  const col = at.fi === undefined ? ws.columns[at.ci] : null;
+  const float = at.fi !== undefined ? ws.floating[at.fi] : null;
   drag = {
-    key, resize, edge, startX: x, startY: y, moved: false, tile,
-    base: tile.el.style.transform,
-    col: at.fi === undefined ? ws.columns[at.ci] : null,
-    float: at.fi !== undefined ? ws.floating[at.fi] : null,
-    startW: at.fi === undefined ? colWidth(ws.columns[at.ci]) : ws.floating[at.fi].w,
-    startH: at.fi !== undefined ? ws.floating[at.fi].h : 0,
-    startFX: at.fi !== undefined ? ws.floating[at.fi].x : 0,
-    startFY: at.fi !== undefined ? ws.floating[at.fi].y : 0,
+    key, resize, edge, startX: x, startY: y, lastX: x, lastY: y, moved: false, tile, col, float,
+    startW: col ? colWidth(col) : float.w,
+    startH: col ? (col.tabbed ? H() - 2 * g : itemHeights(col)[at.ii]) : float.h,
+    startFX: float?.x ?? 0, startFY: float?.y ?? 0,
+    // While moved: where it came from (it's out of the layout), and where it would go.
+    held: null, target: null,
   };
   return drag;
 }
 
 function moveDrag(x, y) {
-  const dx = x - drag.startX;
-  const dy = y - drag.startY;
-  if (!drag.moved && Math.hypot(dx, dy) < 6) return;
-  drag.moved = true;
-  const z = overview ? CONFIG.overviewZoom : 1;
-  if (drag.resize) {
+  const d = drag;
+  const dx = x - d.startX;
+  const dy = y - d.startY;
+  d.lastX = x;
+  d.lastY = y;
+  if (!d.moved && Math.hypot(dx, dy) < 6) return;
+  d.moved = true;
+  if (d.resize) {
     // Live, as niri resizes interactively: no transitions, no transactions.
     // From the left or top edge, a drag that way grows it.
-    const sx = drag.edge.includes("left") ? -dx : dx;
-    const sy = drag.edge.includes("top") ? -dy : dy;
+    const sx = d.edge.includes("left") ? -dx : dx;
+    const sy = d.edge.includes("top") ? -dy : dy;
+    const sideways = /left|right/.test(d.edge);
+    const upDown = /top|bottom/.test(d.edge);
     document.body.classList.add("noanim");
-    if (drag.float) { drag.float.w = clamp(drag.startW + sx, MIN, W()); drag.float.h = clamp(drag.startH + sy, MIN, H()); }
-    else if (drag.edge !== "top" && drag.edge !== "bottom") { drag.col.full = false; drag.col.width = { px: clamp(drag.startW + sx, MIN, W() - 2 * g) }; }
+    if (d.float) {
+      if (sideways) d.float.w = clamp(d.startW + sx, MIN, W());
+      if (upDown) d.float.h = clamp(d.startH + sy, MIN, H());
+      // The opposite edge stays put.
+      if (d.edge.includes("left")) d.float.x = d.startFX + d.startW - d.float.w;
+      if (d.edge.includes("top")) d.float.y = d.startFY + d.startH - d.float.h;
+    } else {
+      if (sideways) { d.col.full = false; d.col.width = { px: clamp(d.startW + sx, MIN, W() - 2 * g) }; }
+      if (upDown && d.col.items.length > 1 && !d.col.tabbed) {
+        d.col.heights[d.key] = clamp((d.startH + sy + g) / (H() - g), 0.05, 1);
+      }
+    }
     render();
     return;
   }
-  if (drag.float && !overview) {
-    drag.float.x = drag.startFX + dx;
-    drag.float.y = drag.startFY + dy;
+  if (d.float && !overview) {
+    d.float.x = d.startFX + dx;
+    d.float.y = d.startFY + dy;
     render();
     return;
   }
-  drag.tile.el.classList.add("dragging");
-  drag.tile.el.style.transform = `${drag.base} translate3d(${dx / z}px, ${dy / z}px, 0)`;
+  if (!d.held) lift(d);
+  followPointer(d);
+  watchEdges(x, y);
+  retarget();
 }
 
-// Ends the drag; a move drops the column where (x, y) is. The drag, or null.
+// A moved window leaves the layout (the others close up) until it's dropped.
+function lift(d) {
+  const at = find(d.key);
+  const ws = layout.workspaces[at.wi];
+  const pos = d.tile.at ?? { x: 0, y: 0 };
+  const start = toWorld(d.startX, d.startY);
+  d.grab = { x: start.x - pos.x, y: start.y - pos.y };
+  d.width = d.col ? { ...d.col.width } : { p: CONFIG.defaultColumnWidth };
+  d.held = d.float
+    ? { ws, wi: at.wi, fi: at.fi, float: d.float }
+    : { ws, wi: at.wi, ci: at.ci, ii: at.ii, col: d.col, height: d.col.heights[d.key] };
+  detach(d.key);
+  // The view doesn't stay past the columns that are left.
+  ws.viewX = clamp(ws.viewX, -g, Math.max(-g, colX(ws, ws.columns.length) - W()));
+  d.tile.el.classList.add("dragging");
+  d.tile.el.classList.remove("hidden");
+  render();
+}
+
+function followPointer(d) {
+  const p = toWorld(d.lastX, d.lastY);
+  d.tile.el.style.transform = `translate3d(${p.x - d.grab.x}px, ${p.y - d.grab.y}px, 0)`;
+}
+
+function retarget() {
+  const d = drag;
+  const target = dropTarget(d.lastX, d.lastY);
+  const id = (t) => t && [t.kind, t.ws?.id, t.at, t.dot, t.before && t.ws.columns.indexOf(t.before),
+    t.col && t.ws.columns.indexOf(t.col), t.beforeKey, t.afterKey].join();
+  if (id(target) === id(d.target)) return;
+  d.target = target;
+  renderHint();
+}
+
+// Ends the drag; a move goes where (x, y) is. The drag, or null.
 function endDrag(x, y) {
   const d = drag;
   drag = null;
   if (!d) return null;
+  stopEdges();
   d.tile.el.classList.remove("dragging");
   if (d.resize) document.body.classList.remove("noanim");
-  if (d.moved && !d.resize && !(d.float && !overview)) dropItem(d.key, x, y);
+  // (Its window may have closed meanwhile.)
+  if (d.held && tiles.has(d.key)) place(d.key, dropTarget(x, y), { width: d.width, held: d.held });
+  renderHint();
   return d;
+}
+
+// Where a moved window would go if dropped at (px, py), or null for nowhere:
+//   { kind: "column", ws, before }   a new column before column `before` (null: last);
+//   { kind: "into", ws, col, beforeKey }   into a column, before that window (null: last);
+//   { kind: "tab", ws, col, afterKey }   a tab of that column (which becomes tabbed);
+//   { kind: "workspace", at }   a new workspace there (between two in the overview).
+// A column's sides make a new column, a window's top and bottom put it into the
+// column, its middle (or anywhere on a tabbed column) makes it a tab.
+function dropTarget(px, py) {
+  // The bar's minimap: onto that workspace, as its last column.
+  const dot = document.elementFromPoint(px, py)?.closest?.("[data-niri-ws]");
+  if (dot) {
+    const ws = layout.workspaces.find((w) => w.id === dot.dataset.niriWs);
+    return ws ? { kind: "column", ws, before: null, dot: ws.id } : null;
+  }
+  if (py < barHeight) return null;
+  const p = toWorld(px, py);
+  let wi = layout.cur;
+  if (overview) {
+    const s = wsSpacing();
+    const rel = p.y - gestureY;
+    const i = Math.floor(rel / s);
+    if (rel - i * s > H()) return { kind: "workspace", at: clamp(layout.cur + i + 1, 0, layout.workspaces.length) };
+    if (layout.cur + i < 0) return { kind: "workspace", at: 0 };
+    wi = clamp(layout.cur + i, 0, layout.workspaces.length - 1);
+  }
+  const ws = layout.workspaces[wi];
+  const y = p.y - wsTop(wi);
+  const sx = p.x + ws.viewX;
+  for (const [ci, col] of ws.columns.entries()) {
+    const cx = colX(ws, ci);
+    const w = colWidth(col);
+    if (sx < cx - g / 2) return { kind: "column", ws, before: col };
+    if (sx > cx + w + g / 2) continue;
+    const fx = (sx - cx) / w;
+    if (fx < 0.2) return { kind: "column", ws, before: col };
+    if (fx > 0.8) return { kind: "column", ws, before: ws.columns[ci + 1] ?? null };
+    if (col.tabbed) return { kind: "tab", ws, col, afterKey: col.items[col.active] };
+    const hs = itemHeights(col);
+    let top = g;
+    for (const [ii, key] of col.items.entries()) {
+      if (y < top + hs[ii] + g / 2 || ii === col.items.length - 1) {
+        const fy = (y - top) / hs[ii];
+        if (fy < 0.3) return { kind: "into", ws, col, beforeKey: key };
+        if (fy > 0.7) return { kind: "into", ws, col, beforeKey: col.items[ii + 1] ?? null };
+        return { kind: "tab", ws, col, afterKey: key };
+      }
+      top += hs[ii] + g;
+    }
+  }
+  return { kind: "column", ws, before: null };
+}
+
+// Puts `key` (out of the layout) where `target` says, and focuses it. With no target,
+// back where it was (`held`, from lift()). False if it went nowhere.
+function place(key, target, { width = { p: CONFIG.defaultColumnWidth }, held = null } = {}) {
+  const back = () => (held ? putBack(key, held) : false);
+  if (!target) return back();
+  if (target.kind === "workspace") {
+    const ws = newWorkspace();
+    ws.columns.push({ ...newColumn(key), width });
+    layout.workspaces.splice(target.at, 0, ws);
+    layout.cur = target.at;
+    ensureVisible(ws);
+    return true;
+  }
+  const ws = target.ws;
+  const wi = layout.workspaces.indexOf(ws);
+  if (wi < 0) return back();
+  let ci;
+  if (target.kind === "column") {
+    ci = target.before ? ws.columns.indexOf(target.before) : -1;
+    if (ci < 0) ci = ws.columns.length;
+    ws.columns.splice(ci, 0, { ...newColumn(key), width });
+  } else {
+    const col = target.col;
+    ci = ws.columns.indexOf(col);
+    if (ci < 0) return back();
+    let ii;
+    if (target.kind === "tab") {
+      col.tabbed = true;
+      ii = col.items.indexOf(target.afterKey) + 1 || col.items.length;
+    } else {
+      ii = target.beforeKey ? col.items.indexOf(target.beforeKey) : -1;
+      if (ii < 0) ii = col.items.length;
+    }
+    col.items.splice(ii, 0, key);
+    col.active = ii;
+  }
+  const prev = ws.active;
+  ws.active = ci;
+  ws.focusFloating = false;
+  layout.cur = wi;
+  ensureVisible(ws, prev);
+  return true;
+}
+
+function putBack(key, held) {
+  let wi = layout.workspaces.indexOf(held.ws);
+  if (wi < 0) {
+    // Its workspace emptied and went away meanwhile.
+    wi = clamp(held.wi, 0, layout.workspaces.length);
+    layout.workspaces.splice(wi, 0, held.ws);
+  }
+  if (held.float) held.ws.floating.splice(Math.min(held.fi, held.ws.floating.length), 0, held.float);
+  else {
+    if (!held.ws.columns.includes(held.col)) held.ws.columns.splice(Math.min(held.ci, held.ws.columns.length), 0, held.col);
+    held.col.items.splice(Math.min(held.ii, held.col.items.length), 0, key);
+    if (held.height !== undefined) held.col.heights[key] = held.height;
+  }
+  focusItem(key);
+  return true;
+}
+
+// niri's insert hint: where the moved window goes, in the world (so the overview zooms it).
+function hintRect(t) {
+  const thick = Math.max(6, g / 2);
+  if (t.kind === "workspace") {
+    return { x: W() * 0.1, y: wsTop(t.at) - ovGap() / 2 - thick, w: W() * 0.8, h: 2 * thick };
+  }
+  const ws = t.ws;
+  const wi = layout.workspaces.indexOf(ws);
+  if (wi < 0 || t.dot) return null;
+  const top = wsTop(wi);
+  if (t.kind === "column") {
+    if (!ws.columns.length) {
+      return { x: -ws.viewX, y: top + g, w: colWidth({ width: drag?.width ?? { p: CONFIG.defaultColumnWidth } }), h: H() - 2 * g };
+    }
+    const ci = t.before ? ws.columns.indexOf(t.before) : ws.columns.length;
+    const x = colX(ws, ci) - ws.viewX - g / 2;
+    return { x: x - thick / 2, y: top + g, w: thick, h: H() - 2 * g };
+  }
+  const ci = ws.columns.indexOf(t.col);
+  if (ci < 0) return null;
+  const x = colX(ws, ci) - ws.viewX;
+  const w = colWidth(t.col);
+  if (t.kind === "tab") return { x, y: top + g, w, h: H() - 2 * g };
+  const hs = itemHeights(t.col);
+  const ii = t.beforeKey ? t.col.items.indexOf(t.beforeKey) : t.col.items.length;
+  const gy = g / 2 + hs.slice(0, ii).reduce((s, h) => s + h + g, 0);
+  return { x, y: top + gy - thick / 2, w, h: thick };
+}
+
+function renderHint() {
+  const el = $("insert-hint");
+  const t = drag?.held ? drag.target : null;
+  const r = t && CONFIG.insertHint.on ? hintRect(t) : null;
+  for (const dot of document.querySelectorAll("[data-niri-ws]")) dot.classList.toggle("drop", !!t?.dot && dot.dataset.niriWs === t.dot);
+  if (!r) { el.classList.remove("shown"); return; }
+  const fresh = !el.classList.contains("shown");
+  el.classList.toggle("tab", t.kind === "tab");
+  el.style.transform = `translate3d(${Math.round(r.x)}px, ${Math.round(r.y)}px, 0)`;
+  el.style.width = `${Math.round(r.w)}px`;
+  el.style.height = `${Math.round(r.h)}px`;
+  // Shown where it is, then moving from there.
+  if (fresh) void el.offsetWidth;
+  el.classList.add("shown");
 }
 
 // An app's own title-bar drag or edge resize (its windowrequest): niri's
@@ -1321,7 +1665,7 @@ function startAppDrag(key, resize, edge) {
 addEventListener("pointermove", (e) => {
   if (!appDrag) return;
   if (!(e.buttons & 1)) { finishAppDrag(e); return; }
-  if (!drag) beginDrag(appDrag.key, e.clientX, e.clientY, appDrag.resize, appDrag.edge ?? "");
+  if (!drag) beginDrag(appDrag.key, e.clientX, e.clientY, appDrag.resize, appDrag.edge || "bottom-right");
   if (drag) moveDrag(e.clientX, e.clientY);
 }, true);
 function finishAppDrag(e) {
@@ -1333,11 +1677,23 @@ addEventListener("pointerup", (e) => { if (appDrag) finishAppDrag(e); }, true);
 
 function bindPointer(hit, key) {
   hit.addEventListener("contextmenu", (e) => e.preventDefault());
+  let resizeClickAt = 0;
   hit.addEventListener("pointerdown", (e) => {
     if (!overview && !e.metaKey) return;
+    if (e.button === 1) return; // the view drag, below
     e.preventDefault();
     hit.setPointerCapture(e.pointerId);
-    beginDrag(key, e.clientX, e.clientY, e.button === 2 && !overview);
+    const resize = e.button === 2 && !overview;
+    let edge = "bottom-right";
+    if (resize) {
+      // From the edge or corner nearest the pointer, as niri.
+      const r = hit.getBoundingClientRect();
+      const fx = (e.clientX - r.left) / r.width;
+      const fy = (e.clientY - r.top) / r.height;
+      edge = [fy < 1 / 3 ? "top" : fy > 2 / 3 ? "bottom" : "", fx < 1 / 3 ? "left" : fx > 2 / 3 ? "right" : ""]
+        .filter(Boolean).join("-") || (fx < 0.5 ? "left" : "right");
+    }
+    beginDrag(key, e.clientX, e.clientY, resize, edge);
   });
   hit.addEventListener("pointermove", (e) => {
     if (!drag || drag.key !== key || appDrag) return;
@@ -1346,6 +1702,19 @@ function bindPointer(hit, key) {
   const end = (e) => {
     if (!drag || drag.key !== key || appDrag) return;
     const d = endDrag(e.clientX, e.clientY);
+    if (!d.moved && d.resize) {
+      // A double click where it resizes from: back to the default (niri's
+      // toggle of a full width, and its reset of a window's height).
+      const now = performance.now();
+      if (now - resizeClickAt > 400) { resizeClickAt = now; return; }
+      resizeClickAt = 0;
+      if (d.col && /left|right/.test(d.edge)) d.col.full = !d.col.full;
+      if (d.col && /top|bottom/.test(d.edge)) delete d.col.heights[key];
+      focusItem(key);
+      ensureVisible();
+      commit();
+      return;
+    }
     if (!d.moved) {
       // A click: go to the window.
       overview = false;
@@ -1361,69 +1730,282 @@ function bindPointer(hit, key) {
   hit.addEventListener("pointercancel", end);
 }
 
-// Drops a dragged item as a new column where the pointer is (any workspace in the overview).
-function dropItem(key, px, py) {
-  const z = overview ? CONFIG.overviewZoom : 1;
-  const wx = (px - W() / 2) / z + W() / 2;
-  const wy = (py - barHeight - H() / 2) / z + H() / 2;
-  const spacing = H() + (overview ? ovGap() : 0);
-  const wi = clamp(layout.cur + Math.floor((wy + (overview ? ovGap() / 2 : 0)) / spacing), 0, layout.workspaces.length - 1);
-  const target = layout.workspaces[wi];
-  const from = find(key);
-  const old = from ? layout.workspaces[from.wi].columns[from.ci] : null;
-  const width = old ? { ...old.width } : { p: CONFIG.defaultColumnWidth };
-  detach(key);
-  const stripX = wx + target.viewX;
-  let at = target.columns.length;
-  for (let ci = 0; ci < target.columns.length; ci++) {
-    if (stripX < colX(target, ci) + colWidth(target.columns[ci]) / 2) { at = ci; break; }
+// ---------------------------------------------------------------- gestures
+// niri's touchpad swipes: three fingers sideways scroll the view, up and down
+// switch workspaces, following the fingers; at the end the view snaps to a
+// column (or a workspace), carried on by the swipe's speed. Chromium gives the
+// page no swipe gestures, only two-finger scrolling as wheel events, so here a
+// two-finger scroll with Super held (any in the overview) is the swipe.
+// Super+middle-drag, and a left drag on a workspace in the overview, drag the
+// view the same way (niri's view drag).
+let gesture = null;
+let gestureTimer = 0;
+function gestureBegin() {
+  gesture = { axis: null, sumX: 0, sumY: 0, rawY: 0, samples: [], ws: curWs() };
+}
+// The view moves by (dx, dy) layout pixels (positive: right, down).
+function gestureUpdate(dx, dy) {
+  const gs = gesture;
+  if (!gs) return;
+  if (!gs.axis) {
+    // niri locks a swipe to the axis it starts along.
+    gs.sumX += dx;
+    gs.sumY += dy;
+    if (Math.hypot(gs.sumX, gs.sumY) < 8) return;
+    gs.axis = Math.abs(gs.sumX) >= Math.abs(gs.sumY) ? "x" : "y";
+    [dx, dy] = [gs.sumX, gs.sumY];
+    document.body.classList.add("noanim");
   }
-  target.columns.splice(at, 0, { ...newColumn(key), width });
-  target.active = at;
-  target.focusFloating = false;
-  layout.cur = wi;
-  ensureVisible(target);
+  const d = gs.axis === "x" ? dx : dy;
+  const now = performance.now();
+  gs.samples.push([now, d]);
+  while (now - gs.samples[0][0] > 100) gs.samples.shift();
+  if (gs.axis === "x") gs.ws.viewX += d;
+  else {
+    gs.rawY -= d;
+    const s = wsSpacing();
+    const max = layout.cur * s;
+    const min = -(layout.workspaces.length - 1 - layout.cur) * s;
+    // Past the first or the last workspace it gives, less and less.
+    const over = gs.rawY > max ? gs.rawY - max : gs.rawY < min ? gs.rawY - min : 0;
+    gestureY = clamp(gs.rawY, min, max) + over / (1 + Math.abs(over) / 100);
+  }
+  render();
+}
+// Ends the swipe (or drag): snaps. False if it never moved (a click).
+function gestureEnd() {
+  const gs = gesture;
+  gesture = null;
+  clearTimeout(gestureTimer);
+  if (!gs?.axis) return false;
+  // Its speed over the last 100 ms, in layout pixels a millisecond.
+  const span = gs.samples.length > 1 ? gs.samples.at(-1)[0] - gs.samples[0][0] : 0;
+  const v = span > 0 ? gs.samples.slice(1).reduce((s, [, d]) => s + d, 0) / span : 0;
+  document.body.classList.remove("noanim");
+  if (gs.axis === "x") snapView(gs.ws, gs.ws.viewX + v * 150);
+  else {
+    const n = Math.round(-(gestureY - v * 150) / wsSpacing());
+    layout.cur = clamp(layout.cur + n, 0, layout.workspaces.length - 1);
+    gestureY = 0;
+  }
+  commit();
+  return true;
 }
 
-// Super+wheel: workspaces up and down; with Shift, or sideways, columns;
-// with Ctrl, take the column along. In the overview, no Super needed.
+// The view nearest `target` that starts or ends at a column's edge (centers a
+// column, with center-focused-column "always"); the focus stays if its column is
+// in view, else goes to that column.
+function snapView(ws, target) {
+  if (!ws.columns.length) { ws.viewX = -g; return; }
+  const centered = CONFIG.centerFocusedColumn === "always";
+  const lo = -g;
+  const hi = Math.max(-g, colX(ws, ws.columns.length) - W());
+  const points = ws.columns.flatMap((col, ci) => {
+    const x = colX(ws, ci);
+    const w = colWidth(col);
+    if (centered) return [{ x: x + w / 2 - W() / 2, ci }];
+    return [{ x: clamp(x - g, lo, hi), ci }, { x: clamp(x + w + g - W(), lo, hi), ci }];
+  });
+  const best = points.reduce((a, b) => (Math.abs(b.x - target) < Math.abs(a.x - target) ? b : a));
+  ws.viewX = best.x;
+  const inView = (ci) => {
+    const x = colX(ws, ci) - ws.viewX;
+    return x >= 0 && x + colWidth(ws.columns[ci]) <= W();
+  };
+  if (!ws.focusFloating && !inView(ws.active)) ws.active = best.ci;
+}
+
+let pan = null;
+function startPan(e, onClick = null) {
+  e.target.setPointerCapture?.(e.pointerId);
+  pan = { x: e.clientX, y: e.clientY, onClick };
+  gestureBegin();
+}
+addEventListener("pointerdown", (e) => {
+  if (e.button !== 1 || !(e.metaKey || document.body.classList.contains("mod"))) return;
+  e.preventDefault();
+  e.stopPropagation();
+  startPan(e);
+}, true);
+addEventListener("pointermove", (e) => {
+  if (!pan) return;
+  const z = overview ? CONFIG.overviewZoom : 1;
+  const dx = e.clientX - pan.x;
+  const dy = e.clientY - pan.y;
+  pan.x = e.clientX;
+  pan.y = e.clientY;
+  // The content follows the pointer: the view goes the other way.
+  gestureUpdate(-dx / z, -dy / z);
+}, true);
+const endPan = () => {
+  if (!pan) return;
+  const p = pan;
+  pan = null;
+  if (!gestureEnd()) p.onClick?.();
+};
+addEventListener("pointerup", endPan, true);
+addEventListener("pointercancel", endPan, true);
+
+// The wheel with Super (in the overview, without): a mouse wheel's notch is
+// niri's wheel binds (with a cooldown), a touchpad's scroll is the swipe.
+//   vertical: workspace; +Ctrl: move the column there; +Shift: column; +Ctrl+Shift: move the column
+//   sideways: column; +Ctrl: move the column
+// Chromium's notch is 120 (53 in some builds); a touchpad's scroll comes in small,
+// fractional steps.
+const isNotch = (e) => e.deltaMode !== 0 || [e.deltaX, e.deltaY].some((d) => {
+  const a = Math.abs(d);
+  return a >= 50 && [120, 100, 53].some((n) => Math.abs(a / n - Math.round(a / n)) < 0.01);
+});
 let wheelAt = 0;
+let touchpadUntil = 0;
 addEventListener("wheel", (e) => {
   if (!(e.metaKey || overview || document.body.classList.contains("mod"))) return;
   e.preventDefault();
   const now = performance.now();
+  const notch = isNotch(e);
+  // A pinch comes as Ctrl+wheel.
+  if (e.ctrlKey && !notch) return;
+  if (now < touchpadUntil || !notch) {
+    touchpadUntil = now + 150;
+    const z = overview ? CONFIG.overviewZoom : 1;
+    if (!gesture) gestureBegin();
+    gestureUpdate(e.deltaX / z, e.deltaY / z);
+    clearTimeout(gestureTimer);
+    gestureTimer = setTimeout(gestureEnd, 120);
+    return;
+  }
   if (now - wheelAt < 150) return;
-  const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
-  const delta = sideways ? (e.shiftKey ? e.deltaY || e.deltaX : e.deltaX) : e.deltaY;
+  const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+  const delta = sideways ? e.deltaX : e.deltaY;
   if (Math.abs(delta) < 1) return;
   wheelAt = now;
   const d = Math.sign(delta);
-  if (sideways) actions.focusColumn(d);
-  else if (e.ctrlKey) actions.moveColumnToWorkspaceDelta(d);
+  if (sideways || e.shiftKey) {
+    if (e.ctrlKey) actions.moveColumn(d);
+    else actions.focusColumn(d);
+  } else if (e.ctrlKey) actions.moveColumnToWorkspaceDelta(d);
   else actions.focusWorkspaceDelta(d);
   commit();
 }, { passive: false, capture: true });
 
-// The hot corner opens (and closes) the overview.
-let cornerArmed = true;
-// Several displays: only a corner of the whole desktop is hot, not the top
-// left of a display with another one to its left or above it, which the
-// pointer crosses on its way from one to the other (it opened the overview,
-// and the overview's keys took Enter and O from the focused window).
-function cornerIsHot() {
+// ---------------------------------------------------------------- edges and corners
+// Near a screen edge while moving a window, or dragging anything over the page:
+// the view scrolls (niri's dnd-edge-view-scroll); in the overview, near the top or
+// bottom, the workspaces switch (dnd-edge-workspace-switch). Hot corners work too.
+let edge = null;
+function watchEdges(px, py) {
+  if (!edge) edge = { since: 0, last: performance.now(), frame: 0, switchedAt: 0 };
+  edge.px = px;
+  edge.py = py;
+  checkCorner(px, py);
+  if (!edge.frame) edge.frame = requestAnimationFrame(edgeStep);
+}
+function stopEdges() {
+  if (edge?.frame) cancelAnimationFrame(edge.frame);
+  if (edge?.scrolling) document.body.classList.remove("noanim");
+  edge = null;
+  cornerArmed.drag = true;
+}
+function edgeStep(now) {
+  edge.frame = 0;
+  const dt = Math.min(0.05, (now - edge.last) / 1000);
+  edge.last = now;
+  const cfg = overview ? CONFIG.dndEdgeWorkspaceSwitch : CONFIG.dndEdgeViewScroll;
+  const t = overview ? cfg.triggerHeight : cfg.triggerWidth;
+  const pos = overview ? edge.py - barHeight : edge.px;
+  const size = overview ? H() : W();
+  const v = pos < t ? -(1 - Math.max(0, pos) / t) : pos > size - t ? 1 - Math.max(0, size - pos) / t : 0;
+  const was = edge.scrolling;
+  edge.scrolling = false;
+  if (!v) edge.since = 0;
+  else {
+    edge.since ||= now;
+    if (now - edge.since >= cfg.delayMs) {
+      if (overview) {
+        // A workspace at a time, sooner the nearer the edge.
+        if (now - edge.switchedAt > 700 - 400 * Math.abs(v)) {
+          edge.switchedAt = now;
+          actions.focusWorkspaceDelta(Math.sign(v));
+          render();
+        }
+      } else {
+        const ws = curWs();
+        const hi = Math.max(-g, colX(ws, ws.columns.length) - W());
+        const next = clamp(ws.viewX + v * cfg.maxSpeed * dt, -g, hi);
+        if (next !== ws.viewX) {
+          ws.viewX = next;
+          edge.scrolling = true;
+          document.body.classList.add("noanim");
+          render();
+        }
+      }
+      if (drag?.held) { followPointer(drag); retarget(); }
+    }
+  }
+  if (was && !edge.scrolling && !gesture) document.body.classList.remove("noanim");
+  edge.frame = requestAnimationFrame(edgeStep);
+}
+
+// The hot corners open (and close) the overview, also while dragging.
+const cornerArmed = { drag: true };
+// Several displays: only a corner of the whole desktop is hot, not one with
+// another display just past it, which the pointer crosses on its way from one
+// to the other (the top left one opened the overview, and the overview's keys
+// took Enter and O from the focused window).
+function cornerIsHot(corner) {
   const own = shell?.display;
   if (!own) return true;
+  const top = corner.startsWith("top");
+  const left = corner.endsWith("Left");
+  const px = left ? own.x : own.x + own.width - 1;
+  const py = top ? own.y : own.y + own.height - 1;
   return !shell.displays.some((d) => d.id !== own.id && (
-    (d.x + d.width === own.x && d.y <= own.y && own.y < d.y + d.height) ||
-    (d.y + d.height === own.y && d.x <= own.x && own.x < d.x + d.width)));
+    ((left ? d.x + d.width === own.x : d.x === own.x + own.width) && d.y <= py && py < d.y + d.height) ||
+    ((top ? d.y + d.height === own.y : d.y === own.y + own.height) && d.x <= px && px < d.x + d.width)));
 }
-$("hot-corner").addEventListener("pointerenter", () => {
-  if (!CONFIG.hotCorner || !cornerArmed || !cornerIsHot()) return;
-  cornerArmed = false;
+function triggerCorner(corner) {
+  if (!CONFIG.hotCorners[corner] || !cornerIsHot(corner)) return;
   actions.toggleOverview();
   commit();
-});
-$("hot-corner").addEventListener("pointerleave", () => { cornerArmed = true; });
+  if (drag?.held) { followPointer(drag); retarget(); }
+}
+function checkCorner(px, py) {
+  const v = py < 2 ? "top" : py >= innerHeight - 2 ? "bottom" : "";
+  const h = px < 2 ? "Left" : px >= innerWidth - 2 ? "Right" : "";
+  if (!v || !h) { cornerArmed.drag = true; return; }
+  if (!cornerArmed.drag) return;
+  cornerArmed.drag = false;
+  triggerCorner(v + h);
+}
+for (const el of document.querySelectorAll(".hot-corner")) {
+  const corner = el.dataset.corner;
+  el.addEventListener("pointerenter", () => {
+    if (cornerArmed[corner] === false) return;
+    cornerArmed[corner] = false;
+    triggerCorner(corner);
+  });
+  el.addEventListener("pointerleave", () => { cornerArmed[corner] = true; });
+}
+
+// A drag and drop over the page (an item from another shell, a file…): the
+// edges and corners as above, and in the overview, holding it over a workspace
+// goes to it.
+let dndTimer = 0;
+let dndHover = null;
+addEventListener("dragover", (e) => {
+  watchEdges(e.clientX, e.clientY);
+  clearTimeout(dndTimer);
+  dndTimer = setTimeout(() => { stopEdges(); dndHover = null; }, 200);
+  if (!overview) return;
+  const t = dropTarget(e.clientX, e.clientY);
+  const ws = t?.ws ?? null;
+  if (ws !== dndHover?.ws) dndHover = { ws, since: performance.now() };
+  else if (ws && performance.now() - dndHover.since > 500) {
+    const i = layout.workspaces.indexOf(ws);
+    if (i >= 0 && i !== layout.cur) { layout.cur = i; commit(); }
+  }
+}, true);
+addEventListener("drop", () => { clearTimeout(dndTimer); stopEdges(); dndHover = null; }, true);
 
 // ---------------------------------------------------------------- launcher
 let apps = null;
@@ -1548,7 +2130,10 @@ function showHotkeys() {
     return tr;
   });
   const extra = [
-    ["Super + 1…9", "Focus Workspace"], ["Super + drag", "Move Window"], ["Super + right-drag", "Resize Column"],
+    ["Super + 1…9", "Focus Workspace"], ["Super + drag", "Move Window (a column, into one, a tab)"],
+    ["Super + right-drag", "Resize Window"], ["Super + middle-drag", "Drag the View"],
+    ["Three-finger swipe (or Super + two-finger scroll)", "Columns and Workspaces"],
+    ["Four-finger swipe up / down", "Open / Close the Overview"],
     ["Super + F", "Fullscreen (browser)"], ["Super + Tab", "Shells and windows (browser)"],
   ].map(([k, label]) => {
     const tr = document.createElement("tr");
@@ -1652,6 +2237,27 @@ try {
       container.append(slot);
       import(file).then((module) => module.default(shell, slot)).catch(console.error);
     };
+    // The minimap first: it needs the layout (and comes before the others).
+    try {
+      const { mountMinimap } = await import("./minimap.js");
+      const slot = document.createElement("span");
+      slot.style.display = "contents";
+      bar.left.append(slot);
+      minimap = mountMinimap(shell, slot, {
+        workspaces: () => layout.workspaces.map((ws, wi) => ({
+          id: ws.id, index: wi, current: wi === layout.cur, empty: isEmpty(ws), viewX: Math.round(ws.viewX),
+          columns: ws.columns.map((col, ci) => ({ x: colX(ws, ci), w: colWidth(col), tabbed: col.tabbed, active: col.active, items: [...col.items] })),
+          floating: ws.floating.map((f) => f.key),
+        })),
+        focused: () => focusedKey(),
+        screen: () => ({ width: W(), height: H(), gap: g }),
+        focus: (key) => { overview = false; updateShortcuts(); focusItem(key); refocus(); commit(); },
+        focusWorkspace: (i) => { actions.focusWorkspace(i); commit(); },
+        focusColumn: (d) => { actions.focusColumn(d); commit(); },
+      });
+    } catch (error) {
+      console.error(error);
+    }
     indicator("./media.js", bar.left);
     indicator("./network.js", bar.right);
     indicator("./bluetooth.js", bar.right);
@@ -1671,10 +2277,48 @@ try {
     const item = shell.itemFromDrop(e);
     if (!item) return;
     e.preventDefault();
+    const target = dropTarget(e.clientX, e.clientY);
     const window = item.windowId && shell.windows.get(item.windowId);
     const tab = item.tabId && shell.tabs.get(item.tabId);
     if (window) takeWindow(window);
     if (tab) takeTab(tab);
+    // Where it was dropped, as a window moved here would go.
+    const key = window ? `w:${window.id}` : tab ? `t:${tab.id}` : null;
+    if (key && target && find(key)) {
+      detach(key);
+      if (!place(key, target)) addItem(key);
+      focusItem(key);
+      refocus();
+      commit();
+    }
+  });
+  // niri's touchpad swipes, where the browser passes them on (patch 0074; on older
+  // builds the event never comes, and Super+two-finger scroll stands in): three
+  // fingers move the view and switch workspaces, the content following the fingers;
+  // four fingers up open the overview, down close it.
+  let swipe = null;
+  shell.addEventListener("touchpadswipe", (e) => {
+    const { phase, fingers, dx = 0, dy = 0 } = e.detail ?? {};
+    if (phase === "begin") {
+      swipe = { fingers, sumY: 0, done: false };
+      if (fingers === 3) { clearTimeout(gestureTimer); gestureEnd(); gestureBegin(); }
+      return;
+    }
+    if (!swipe) return;
+    if (swipe.fingers === 3) {
+      if (phase === "update") {
+        const z = overview ? CONFIG.overviewZoom : 1;
+        gestureUpdate(-dx / z, -dy / z);
+      } else gestureEnd();
+    } else if (swipe.fingers === 4 && phase === "update" && !swipe.done) {
+      swipe.sumY += dy;
+      if (Math.abs(swipe.sumY) > 60 && (swipe.sumY < 0) !== overview) {
+        swipe.done = true;
+        actions.toggleOverview();
+        commit();
+      }
+    }
+    if (phase === "end") swipe = null;
   });
   shell.addEventListener("change", () => {
     reconcile();

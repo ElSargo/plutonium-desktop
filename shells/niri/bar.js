@@ -1,4 +1,5 @@
-// niri's bar (as waybar is for niri): now playing on the left, the clock in
+// niri's bar (as waybar is for niri): the workspace minimap (minimap.js) and
+// now playing on the left, the clock in
 // the middle, the status indicators on the right. Each indicator is its own
 // module (audio.js, brightness.js, battery.js, power.js, media.js…) put in
 // one of the bar's sections; the layout leaves the bar's height free.

@@ -13,10 +13,22 @@ It's an installed shell (`~/.pluto/shells/niri`, [SHELL_PACKAGES.md](SHELL_PACKA
 
 - **Scrollable tiling.** Each workspace is an endless horizontal strip of columns. A column holds one or more windows stacked vertically, or tabbed (Super+W, with niri's tab indicator in the gap). New windows open as a column right of the focused one, at half the screen width. The view scrolls just enough to keep the focused column on screen (`center-focused-column "never"`).
 - **Workspaces.** These are dynamic and stacked vertically. There is always one empty workspace at the bottom, and an empty workspace goes away once you leave it. Switching slides vertically.
-- **Overview** ([screenshot](../images/niri-overview.png); Super+O, or the top-left hot corner). It zooms out to 0.5 and shows every workspace as a card with the wallpaper, rounded corners and a shadow, on niri's `#262626` backdrop.
+- **Overview** ([screenshot](../images/niri-overview.png); Super+O, or a hot corner). It zooms out to 0.5 and shows every workspace as a card with the wallpaper, rounded corners and a shadow, on niri's `#262626` backdrop.
   - Click a window to go to it, or click a workspace to switch.
-  - Drag a window to put it in another workspace, at the column where you drop it.
-  - The wheel switches workspaces, and Escape or Enter closes the overview.
+  - Drag a window anywhere a Super+drag can put it (below), on any workspace, or into the gap between two workspaces for a new one there.
+  - Drag a workspace to drag the view (sideways: columns; up and down: workspaces).
+  - The wheel switches workspaces (Shift or sideways: columns), a two-finger scroll swipes, and Escape or Enter closes the overview. Every bind keeps working in it.
+  - Holding a drag and drop (a window from another shell, a file) over a workspace for half a second goes to it; near the top or bottom edge the workspaces switch.
+- **Moving windows** (Super+drag, or the app's own title bar), as niri's interactive move: the window leaves the layout, the others close up, and niri's insert hint shows where it goes:
+  - the sides of a column, or the gap between two: a new column there;
+  - the top or bottom of a window: into that column, above or below it;
+  - the middle of a window, or anywhere on a tabbed column: a **tab** of that column (it becomes tabbed);
+  - a workspace dot in the bar's minimap: the last column of that workspace.
+  Near the left or right edge the view scrolls along (niri's `dnd-edge-view-scroll`), and the hot corners work mid-drag. Dropped nowhere (on the bar), it goes back. A window or tab dropped here from another shell or display lands the same way.
+- **Resizing** (Super+right-drag) from the edge or corner nearest the pointer, as niri: sideways the column's width, up and down the window's height in its column. A double click there toggles the full width, or resets the height.
+- **Swipes and the view drag.** niri's three-finger swipes (sideways: the view; up and down: workspaces) follow the fingers and snap to a column or workspace at the end, carried on by the swipe's speed. With Chromium patch 0074 the shell library passes three- and four-finger swipes to the shell page (`touchpadswipe`, DRM only): three fingers swipe as niri's (the content follows the fingers), four fingers up open the overview and down close it. Without it the event never comes, and a two-finger scroll with Super held (or any in the overview) is the swipe instead. Super+middle-drag drags the view the same way.
+- **Hot corners** (`CONFIG.hotCorners`, niri's `gestures { hot-corners }`): top left by default; any corner can be turned on. With several displays only a corner of the whole desktop is hot.
+- **The bar's minimap** (`minimap.js`, on the left): a numbered dot per workspace, then the focused workspace's columns at the screen's proportions, each window as its app's icon (a tab as its site's favicon; a letter if there's none), a tabbed column as its active tab with a count, floating windows after it, and the part on screen outlined. Click a window to go to it, a dot for its workspace; the wheel over the strip moves between columns.
 - **Floating windows** (Super+V, Super+Shift+V): above the tiles, centred at their tiled size. Super+drag moves them, and Super+right-drag resizes them.
 - **The look.** niri's knobs are at the top of the script (`CONFIG`):
   - gaps 16;
@@ -55,14 +67,19 @@ These are niri's default `config.kdl` binds, with Mod = Super:
 | Super+Ctrl+F | expand column to the available width |
 | Super+C, Super+Ctrl+C | center column, center the visible columns |
 | Super+V, Super+Shift+V | floating, switch focus between floating and tiling |
-| Super+W | tabbed column |
+| Super+W | tabbed column (a click on the tab indicator goes to that tab) |
 | Super+O | overview |
-| Super+wheel, +Shift / sideways, +Ctrl | workspace, column, move the column |
-| Super+drag, Super+right-drag | move window (onto another column position, or a floating one), resize column |
+| Super+Shift+←→↑↓ / H J K L | focus the display that way |
+| Super+Ctrl+Shift+the same | move the column to the display that way (each window a column there) |
+| Super+Shift+E, Ctrl+Alt+Delete | exit niri (ends the session), after a confirm |
+| Super+Alt+L | lock the screen (the session service; until the shell has it, a notice) |
+| Super+wheel | workspace; +Ctrl moves the column there; +Shift, or sideways: column; +Ctrl+Shift, or Ctrl sideways: move the column |
+| Super+two-finger scroll | swipe: the view, workspaces |
+| Super+drag, Super+right-drag, Super+middle-drag | move window (a column, into one, a tab), resize from the nearest edge, drag the view |
 
 All of them are registered as shell shortcuts, so they work while an app or tab has the keyboard. Super itself is registered too. While it's held, a layer over the windows takes the pointer, so Super+drag and Super+wheel reach the page.
 
-**Left out:** Super+Tab (the browser's shells overlay; niri uses it for the previous workspace), Super+Escape (the browser's pointer release), screenshots (Print), lock (Super+Alt+L), quit (Super+Shift+E), power off monitors, and multi-monitor binds.
+**Left out:** Super+Tab (the browser's shells overlay; niri uses it for the previous workspace), Super+Escape (the browser's pointer release), and power off monitors (Super+Shift+P: nothing to turn the display off with yet). Three- and four-finger swipes need patch 0074 (see Swipes).
 
 ## Chromium changes (`chromium/patches/0016-*.patch`)
 
@@ -101,7 +118,6 @@ These were tested on Xvfb only: consume-or-expel, floating (Super+V), overview c
 - **Not tried yet:** Super+drag and Super+right-drag (uinput can't hold Super during a mouse drag), dragging in the overview, browser tabs as tiles, the Claude Code launcher entry.
 - **Resizes aren't animated.** Sizes change at once, and only positions animate. Animating the element's size would reconfigure the app every frame.
 - **No close animation.** The element disappears with its window.
-- **No interactive tiling move.** Super+drag of a tiled window drops it as a new column (niri can also insert it into a column).
-- **One output only.**
+- **Swipes and drop zones are checked against a mock broker only** (`preview` tab, 2026-10-27): the drop zones, insert hint, tab click, resize from an edge, swipe snapping and overview drops. Not yet on DRM with a real touchpad and mouse: whether Chromium's touchpad scroll deltas are told apart from wheel notches as expected (`isNotch()`), and Super+middle-drag.
 - **Dialogs (transient windows) are tiled.** niri floats them, but the broker doesn't report a window's parent.
 - **Shell-wide Super.** While niri is visible, apps never see Super (it is a shell shortcut), so app shortcuts with Super don't work.
