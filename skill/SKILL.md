@@ -40,6 +40,7 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
   - `media`: MPRIS players and the browser's media session, most recent first; `play-pause`, `next`, `previous`, `play`, `pause`, `stop`.
   - The volume, brightness and media keys already work in every shell; listen for the shell's `systemkey` event to draw a level. niri's and plain's indicators (`audio.js`, `power.js`, … in their folders, one module each over `tray.js`) are examples to copy.
   - `network` (Wi-Fi list, connect with a password, on/off, wired and VPN connections) and `bluetooth` (on/off, devices, discover, pair, connect): their state and actions are in DESKTOP_SERVICES.md. When either needs the user (a Wi-Fi password, a pairing code), the shell gets a `systemrequest` event; without `preventDefault()` the library shows its own prompt.
+- **Touchpad gestures**: two-finger scrolling arrives as ordinary wheel events. Swipes with three fingers or more go only to the visible shell, as the shell's `touchpadswipe` event (`{ phase: "begin" | "update" | "end", fingers, dx, dy, x, y }`, dx/dy the fingers' movement since the last one); use them for workspaces, overviews and the like. Not on X11 test sessions (no touchpad there).
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 
 ## shell.json

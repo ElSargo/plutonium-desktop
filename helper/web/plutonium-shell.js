@@ -363,6 +363,14 @@ export class PlutoniumShell extends EventTarget {
       this.broker.addEventListener("displayschanged", () => this._refreshDisplays());
       await this._refreshDisplays();
     }
+    // Touchpad swipes with three fingers or more (only the focused display's
+    // visible shell gets them, and nothing else does): "touchpadswipe", its
+    // detail {phase: "begin" | "update" | "end", fingers, dx, dy, x, y}, dx and
+    // dy the fingers' movement since the last one. None on X11, or before
+    // Chromium patch 0070.
+    this.broker.addEventListener("touchpadswipe", (event) => {
+      this.dispatchEvent(new CustomEvent("touchpadswipe", { detail: event.detail }));
+    });
     // The browser's shells overlay asks this shell to show an item.
     this.broker.addEventListener("windowfocusrequest", async (event) => {
       const window = this.windows.get(event.windowId) ?? { ...plain(event.entry), threadId: event.entry.tag || null };
