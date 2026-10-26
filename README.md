@@ -15,10 +15,10 @@ Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (
 
 ## Status
 
-A public beta: usable day to day by its developer, new to everyone else. Working: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), the file picker, global shortcuts, H.264 video in tabs, and a login screen entry. Not there yet:
-- input methods in native apps (in progress);
+A public beta: usable day to day by its developer, new to everyone else. Working: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), the file picker and printing for native apps, input methods (text-input-v3), global shortcuts, H.264 video in tabs, and a login screen entry. Not there yet:
 - installing and editing shells as packages (in progress);
-- the other desktop portals, such as printing from native apps.
+- a settings page to choose an input method;
+- the other desktop portals (notifications, settings, OpenURI).
 
 **Supported:** x86-64 Linux with systemd and rootless podman, and an AMD or Intel GPU on Mesa. It's developed on NixOS with AMD graphics. Fedora 44 and Ubuntu 24.04 are tested as far as a container allows, not on hardware yet; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
