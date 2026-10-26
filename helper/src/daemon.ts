@@ -412,8 +412,9 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
-    this.services.register(
-      new NotificationsService(undefined, {
+    const notifications = new NotificationsService(
+      undefined,
+      {
         // EXO-SERVICES: the tabs' web notifications, through the Plutonium domain.
         onChange: (listener) => this.desktop?.notificationListeners.add(listener),
         action: async (id, action, button) => {
@@ -421,8 +422,10 @@ export class Daemon {
           await this.desktop.notificationAction(id, action, button);
         },
         showSite: (origin) => this.showSite(origin),
-      }, notificationsOnBus(options)),
+      },
+      notificationsOnBus(options),
     );
+    this.services.register(notifications);
     this.services.register(new AudioService());
     this.services.register(new PowerService({ logOut: () => this.logOut() }));
     this.services.register(
@@ -454,11 +457,24 @@ export class Daemon {
         stopNative: (name) => this.native?.stop(name),
         openTerminal: (terminal) => this.terminals.create(24, 80, terminal).id,
         threadSetup: (thread) => this.threadSetup(thread),
+        // A rollback, a crash, a failed server: the shells' shellnotice, and a notification
+        // (which the shells using the notifications service pop up).
+        notice: (notice) => {
+          this.relay.notifyAll("shellnotice", { ...notice });
+          const summary =
+            notice.kind === "rollback"
+              ? `${notice.title}: a change was rolled back`
+              : notice.kind === "crash"
+                ? `${notice.title} crashed`
+                : `${notice.title}'s server failed`;
+          notifications.notify(["Plutonium", 0, "", summary, notice.message, [], new Map([["urgency", 2]]), -1]);
+        },
       };
     }
     this.serverTabs = cdp ? new ServerTabs(cdp) : null;
     this.desktop = cdp ? new Desktop(cdp) : null;
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
+    if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
       this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
@@ -1142,6 +1158,36 @@ export class Daemon {
     else await this.ask(threadId, "answer_dialog", { tabId, accept, text });
     await sleep(150);
     return threadTab(await this.ownedTab(threadId, tabId));
+  }
+
+  /**
+   * Installed shells' pages that crash (Target.targetCrashed, with target
+   * discovery on): an edit that just went in is rolled back, else the shells
+   * are told (ShellPackages.crashed).
+   */
+  private watchCrashes(cdp: BrowserCdp, desktop: Desktop, shells: ShellPackages): void {
+    const urls = new Map<string, string>();
+    cdp.addEventListener(({ method, params, sessionId }) => {
+      if (sessionId) return;
+      const value = params as { targetInfo?: { targetId: string; type: string; url: string }; targetId?: string };
+      if (method === "Target.targetCreated" || method === "Target.targetInfoChanged") {
+        if (value.targetInfo?.type === "page") urls.set(value.targetInfo.targetId, value.targetInfo.url);
+      } else if (method === "Target.targetDestroyed") {
+        urls.delete(value.targetId ?? "");
+      } else if (method === "Target.targetCrashed") {
+        const url = urls.get(value.targetId ?? "");
+        if (!url) return;
+        try {
+          shells.crashed(new URL(url).origin);
+        } catch {
+          // Not a URL with an origin.
+        }
+      }
+    });
+    desktop.enableListeners.add(() => {
+      urls.clear();
+      void cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
+    });
   }
 
   /** Shows a tab of `origin` in its thread's shell (a web notification was clicked): the focused one, else the newest. */

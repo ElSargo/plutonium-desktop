@@ -115,6 +115,15 @@ container_cmd() {
       for dev in /dev/video* /dev/media*; do
         [[ -c $dev ]] && mounts+=(--device "$dev")
       done
+      # The host's fonts and fontconfig (LINUX_COMPAT.md, "Fonts"), in place
+      # of the image's: its /etc/fonts and the font directories it names
+      # (NixOS: the store). The user's own are in $HOME (lib/session.sh).
+      if [[ -f /etc/fonts/fonts.conf ]]; then
+        mounts+=(-v /etc/fonts:/etc/fonts:ro --label plutonium.host-fonts=1)
+        for dir in /usr/share/fonts /usr/local/share/fonts /nix/store; do
+          [[ -d $dir ]] && mounts+=(-v "$dir:$dir:ro")
+        done
+      fi
       # - host pid namespace: Exo reports real client pids, which the helper
       #   maps to threads;
       # - /dev/dri, /dev/input and udev: Ash on DRM with evdev input (and the

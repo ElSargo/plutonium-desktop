@@ -9,6 +9,9 @@
 // goes back to the last commit that came up (refs/plutonium/good) in a new
 // commit, and the shell reloads; the failed commit is kept
 // (refs/plutonium/failed) for Retry and Diff, and the switcher shows a notice.
+// A shell's page that crashes soon after an edit rolls it back too. Rollbacks,
+// crashes and servers that fail are also told to the shells (hooks.notice:
+// the library's shellnotice event, and a notification).
 import { randomUUID } from "node:crypto";
 import {
   cpSync,
@@ -57,6 +60,8 @@ import type { TerminalOptions } from "./terminal.ts";
 export const CONNECT_TIMEOUT_MS = 20_000;
 // Saves that come together are one edit.
 const EDIT_DEBOUNCE_MS = 700;
+/** A shell's page that crashes this soon after an edit was applied rolls the edit back. */
+const CRASH_WINDOW_MS = 60_000;
 // A start with no shell connected after this long counts as failed; after two
 // the launcher starts in safe mode.
 const START_TIMEOUT_MS = 60_000;
@@ -70,7 +75,18 @@ export interface BrowserShell {
 }
 
 /** What the helper does for the installed shells (the daemon's parts). */
+/** Something about an installed shell the user should know, wherever they are (`shellnotice`). */
+export interface ShellNotice {
+  readonly shell: string;
+  readonly title: string;
+  /** "rollback": an edit didn't come up and was undone; "crash": its page crashed; "server": its server failed. */
+  readonly kind: "rollback" | "crash" | "server";
+  readonly message: string;
+}
+
 export interface ShellHooks {
+  /** Tells the shells (and the user) about a rollback, a crash, a failed server. */
+  notice?(notice: ShellNotice): void;
   /** Reloads the browser's pages on an origin, bypassing the cache. */
   reloadPages?(origin: string): Promise<number>;
   /** Stops a shell's native side: it was edited, or turned off. */
@@ -126,6 +142,10 @@ export class ShellPackages {
   private readonly editTimers = new Map<string, NodeJS.Timeout>();
   private readonly checks = new Map<string, Check>();
   private readonly notices = new Map<string, string>();
+  /** The edit each shell last applied, and when: a crash soon after rolls it back. */
+  private readonly applied = new Map<string, { readonly commit: string; readonly at: number; readonly good: string }>();
+  /** Shells whose server an edit is restarting: its failure is the rollback's to tell. */
+  private readonly restarting = new Set<string>();
   /** Each watched shell's HEAD as last applied: a commit made another way is applied too. */
   private readonly heads = new Map<string, string>();
   /** When a page of each origin last connected. */
@@ -234,7 +254,11 @@ export class ShellPackages {
   private server(manifest: ShellManifest): ShellServer {
     let server = this.servers.get(manifest.name);
     if (!server) {
-      server = new ShellServer(manifest, this.context);
+      const name = manifest.name;
+      server = new ShellServer(manifest, this.context, () => {
+        if (this.servers.get(name)?.state !== "failed" || this.restarting.has(name)) return;
+        this.notify(name, "server", `its server failed: ${this.servers.get(name)!.status().detail}.`);
+      });
       this.servers.set(manifest.name, server);
     } else {
       server.setManifest(manifest);
@@ -460,9 +484,12 @@ export class ShellPackages {
     // A shell that isn't on: nothing to check now.
     if (!this.activeOrigins.has(origin)) return;
     const since = Date.now();
+    this.applied.set(name, { commit, at: since, good: this.goodCommit(shellDir(this.home, name)) });
     if (manifest.server?.run === "plutonium" && manifest.server.restartOnEdit) {
       const server = this.server(manifest);
-      if (!(await server.restart())) {
+      this.restarting.add(name);
+      const up = await server.restart().finally(() => this.restarting.delete(name));
+      if (!up) {
         this.rollback(name, commit, `its server didn't come up (${server.status().detail})`);
         return;
       }
@@ -510,8 +537,10 @@ export class ShellPackages {
   }
 
   /** Puts the folder back as it was at the last commit that came up, in a new commit. */
-  private rollback(name: string, failed: string, reason: string): void {
+  private rollback(name: string, failed: string, reason: string, goodBefore?: string): void {
     const dir = shellDir(this.home, name);
+    // A crash after the edit had come up: back to what was good before it.
+    if (goodBefore) git(dir, ["update-ref", GOOD_REF, goodBefore]);
     const good = this.goodCommit(dir);
     const subject = git(dir, ["log", "-1", "--format=%s", failed]).trim();
     git(dir, ["update-ref", FAILED_REF, failed]);
@@ -531,7 +560,9 @@ export class ShellPackages {
     }
     const notice = `${title}: your change “${subject}” didn't come up (${reason}), so it was rolled back to ${short(good)}. Retry or see the diff on its page.`;
     this.notices.set(name, notice);
+    this.applied.delete(name);
     console.warn(`plutoniumd: shell ${name}: ${notice}`);
+    this.hooks.notice?.({ shell: name, title, kind: "rollback", message: notice });
     // The good version, applied again (a server restarts; pages reload).
     void (async () => {
       let manifest: ShellManifest;
@@ -545,6 +576,38 @@ export class ShellPackages {
       if (manifest.server?.run === "plutonium" && manifest.server.restartOnEdit) await this.server(manifest).restart();
       await this.hooks.reloadPages?.(origin).catch(() => 0);
     })();
+  }
+
+  /**
+   * A page on `origin` crashed (its renderer, Target.targetCrashed). An
+   * installed shell's, soon after an edit: the edit is rolled back; else the
+   * shells are told.
+   */
+  crashed(origin: string): void {
+    const shell = this.byOrigin(origin);
+    if (!shell) return;
+    const check = this.checks.get(shell.name);
+    const edit = this.applied.get(shell.name);
+    const commit = check?.commit ?? (edit && Date.now() - edit.at < CRASH_WINDOW_MS ? edit.commit : undefined);
+    if (commit && commit === this.head(shell.dir)) {
+      if (check) clearTimeout(check.timer);
+      this.checks.delete(shell.name);
+      this.rollback(shell.name, commit, "its page crashed", edit?.commit === commit ? edit.good : undefined);
+      return;
+    }
+    this.notify(shell.name, "crash", "its page crashed. Reload it from the switcher (Super+Tab).");
+  }
+
+  private notify(name: string, kind: ShellNotice["kind"], what: string): void {
+    let title = name;
+    try {
+      title = this.manifestOf(name).title;
+    } catch {
+      // Its name.
+    }
+    const message = `${title}: ${what}`;
+    console.warn(`plutoniumd: shell ${name}: ${message}`);
+    this.hooks.notice?.({ shell: name, title, kind, message });
   }
 
   // --- Actions (the switcher, the shells page) -----------------------------

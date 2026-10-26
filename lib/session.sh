@@ -143,9 +143,32 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
 HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
 [[ -n $HOST_TZ ]] || HOST_TZ=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
 ASH_ENV=(-e "TZ=${HOST_TZ:-UTC}" -e "LANG=${LANG:-C.UTF-8}")
+# Pages and shells use the host's fonts (LINUX_COMPAT.md, "Fonts"). In the
+# container, /etc/fonts is the host's when the container was made with it
+# (plutonium container create); this adds the user's own fonts and settings,
+# which the container's $HOME doesn't have. On the host, fontconfig is its own.
+if [[ -z ${HOST:-} ]]; then
+  FONTS_CONF=$DATA_DIR/fonts-$SOCKET.conf
+  data_home=${XDG_DATA_HOME:-$HOME/.local/share} config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+  cat > "$FONTS_CONF" <<FONTS
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir>$data_home/fonts</dir>
+  <dir>$HOME/.fonts</dir>
+  <include ignore_missing="yes">$config_home/fontconfig/conf.d</include>
+  <include ignore_missing="yes">$config_home/fontconfig/fonts.conf</include>
+</fontconfig>
+FONTS
+  ASH_ENV+=(-e "FONTCONFIG_FILE=$FONTS_CONF")
+  [[ $($PODMAN container inspect --format '{{index .Config.Labels "plutonium.host-fonts"}}' "$CONTAINER" 2> /dev/null) == 1 ]] ||
+    HOST_FONTS_NOTE="$CONTAINER has the image's fonts, not the host's: make it again for the host's (podman rm -f $CONTAINER; plutonium container create)"
+fi
 
 : > "$LOG"
 need_ash_runtime
+[[ -n ${HOST_FONTS_NOTE:-} ]] && log "note: $HOST_FONTS_NOTE"
 chrome_built || { log "ABORT: no Chromium at $CHROME_BIN (plutonium chromium build, or PREBUILT=1 and plutonium image pull)"; exit 1; }
 ash_running && { log "ABORT: an Ash with profile $PROFILE is already running (plutonium stop)"; exit 1; }
 mkdir -p "$PROFILE"

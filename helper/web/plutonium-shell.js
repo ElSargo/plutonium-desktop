@@ -1584,6 +1584,9 @@ export class PlutoniumShell extends EventTarget {
           this.system._changed(args.service, args.state);
           this.dispatchEvent(new CustomEvent("systemkey", { detail: args }));
         }
+        // An installed shell's change was rolled back, its page crashed or its server failed
+        // ({ shell, title, kind, message }); the notifications service has it too.
+        if (op === "shellnotice") this.dispatchEvent(new CustomEvent("shellnotice", { detail: args }));
         if (op === "native") this.native.dispatchEvent(new CustomEvent(args.event, { detail: args.detail }));
         if (op === "global_shortcuts") {
           this.globalShortcuts = args.shortcuts ?? [];
