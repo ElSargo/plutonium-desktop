@@ -30,6 +30,36 @@ await shell.system.available();            // [{ name, allowed }]: what this hel
   its state with what's there (`{ available: false }` or an empty list), not an
   error, so a shell can hide its control.
 
+### Asking the user
+
+Some services need the user in the middle of something: a Wi-Fi password
+NetworkManager asks for, a Bluetooth PIN or a code to confirm while pairing.
+The helper asks the visible shell that may use the service (`system_request`
+on its request stream). The library fires a cancelable `systemrequest` event
+on the shell first; without `preventDefault()`, it draws its own prompt.
+
+```js
+shell.addEventListener("systemrequest", (event) => {
+  const request = event.detail;   // { requestId, kind, source: { service }, detail, signal, answer }
+  event.preventDefault();         // this shell draws it
+  drawMyPrompt(request.detail, (values) => request.answer(values));   // {password: "…"}, {} for a yes, or null
+  request.signal.addEventListener("abort", () => closeMyPrompt());    // the service took it back
+});
+```
+
+- `kind`: `"secret"` (network), `"pin"`, `"passkey"`, `"confirm"`, `"display"`
+  (Bluetooth: a code to type on the device, shown until the pairing ends; its
+  answer is ignored, `null` cancels the pairing).
+- `detail` is enough to draw any of them: `title`, `message`, `code?`,
+  `fields?: [{ name, label, type: "password" | "text" | "number", value? }]`,
+  `acceptLabel?`, and the request's own facts (`ssid`, `device`, `name`, …).
+  Answer with the fields' values by `name`.
+- `connect({ systemRequest: false })` answers none (the service then gives
+  up, as it does when no shell is connected); a function draws them instead
+  (`systemRequest(request)`, return true when it took it).
+- The library's prompt: a dialog in the middle of the screen
+  (`.plutonium-system-prompt`, the dialog variables of the other prompts).
+
 ## In the helper
 
 `helper/src/services.ts`: a `DesktopService` is `{ name, start(changed),
@@ -221,7 +251,11 @@ over the shared `tray.js` (icons, a popover, a confirm, `--tray-*` colours):
 `audio.js` (scroll to change, middle-click to mute, a slider, the outputs and
 the microphone), `brightness.js`, `battery.js` (time left in its tooltip),
 `power.js` (suspend, restart, power off, log out, each after a confirm),
-`media.js` (now playing and its controls) and `osd.js` (the keys' level).
+`media.js` (now playing and its controls), `osd.js` (the keys' level),
+`network.js` (Wi-Fi's signal; on/off, the networks with a password field for
+a new one, Disconnect/Connect/Forget on a saved one, wired and VPN
+connections) and `bluetooth.js` (on/off, the paired devices, Find devices and
+pairing).
 Indicators hide when their service has nothing (no battery, no backlight, no
 player).
 Tested in the same session: both shells show the real volume, brightness and
@@ -260,3 +294,75 @@ notifications are kept while no shell shows them.
 - Not yet: tabs' web notifications (Chromium's own, see the backlog), images
   sent as data (`image-data`), sounds.
 
+### network
+
+NetworkManager on the system bus. The state is made from NetworkManager's
+objects, kept current by its `PropertiesChanged` signals (no polling); a
+service started without NetworkManager says `available: false`, and fills in
+when it starts.
+
+- **State:** `{ available, state: "connected" | "connecting" | "disconnecting"
+  | "offline" | "unknown", connectivity: "full" | "limited" | "portal" | "none"
+  | "unknown", primary: { id, name, type, strength? } | null, wifi: {
+  available, enabled, hardwareEnabled, scanning }, accessPoints: [{ ssid,
+  strength, secured, security: "open" | "owe" | "wep" | "wpa" | "sae" |
+  "enterprise", known, id, active, frequency }], connections: [{ id, name,
+  type, ssid?, active, state }] }`. `type`: `"wifi"`, `"ethernet"`, `"vpn"`
+  (WireGuard too), `"mobile"`, `"bluetooth"`, or NetworkManager's own (`"tun"`).
+  An access point entry is a network (its strongest access point), the active
+  one first; hidden networks aren't listed. `id` is a saved connection's UUID
+  (an access point's, if it's known). `connections` are the saved ones.
+- **Actions:** `scan`; `connect {ssid, password?}` (a known network; or a new
+  one, which NetworkManager saves with the password; WPA/WPA2/WPA3 personal,
+  WEP, open) or `connect {id}` (any saved connection: wired, a VPN);
+  `disconnect {id}`; `set-wifi {enabled}`; `forget {id}` or `forget {ssid}`.
+  A new 802.1X network: not yet (a known one's password is asked, below).
+  Hidden networks: later.
+- **Passwords NetworkManager asks for:** the helper is a NetworkManager secret
+  agent (one per helper, `org.plutonium.helper.<socket>`). When a connection
+  needs a password (a known network's changed, a new one's was wrong, an
+  802.1X one), the visible shell asks ("Asking the user": kind `"secret"`,
+  `retry` when the last one didn't work). The user's no is NetworkManager's
+  `UserCanceled`; no shell to ask leaves it to the next agent (`NoSecrets`).
+  A password given to `connect` for a known network goes to NetworkManager if
+  it asks within a minute. The helper keeps no secrets: NetworkManager saves
+  them in the connection (`SaveSecrets` is a no-op). `PLUTONIUM_NM_AGENT=0`
+  in the helper's environment turns the agent off (a test session on a
+  computer whose desktop answers them).
+- **Tested:** `helper/test/network.test.ts`, against a fake NetworkManager
+  (`test/fixtures/fakeNetworkManager.ts`, on the fake bus): the state, changes
+  from signals (a burst is one change), every action and the calls it makes,
+  the agent (asked, answered, refused, no shell, no interaction, a `connect`
+  password, `CancelGetSecrets`), and NetworkManager starting late. On the
+  real computer, read-only: the state, a scan, and both shells' menus, in a
+  slot's X11 session. Not run for real (they'd take the computer offline):
+  connecting, disconnecting, turning Wi-Fi off, forgetting, a real secret
+  request.
+
+### bluetooth
+
+BlueZ on the system bus: its objects (`GetManagedObjects`), kept current by
+`InterfacesAdded`/`Removed` and `PropertiesChanged`.
+
+- **State:** `{ available, adapter: { id, name, address, powered,
+  discovering, discoverable } | null, devices: [{ id, address, name, icon,
+  paired, trusted, connected, battery, pairing }] }`. The first adapter; its
+  paired devices and the named ones discovery found (unnamed ones, beacons
+  mostly, aren't listed), connected first. `icon` is BlueZ's
+  (`"input-mouse"`, `"audio-headset"`, …), `battery` 0–100 where BlueZ knows
+  it (`Battery1`), else null. `id` is the device's object path.
+- **Actions:** `set-powered {powered}`, `discover {on, seconds?}` (30 s by
+  default, at most 120, then it stops), `pair {device}` (pairs, trusts,
+  connects), `connect {device}`, `disconnect {device}`, `forget {device}`.
+- **Pairing:** the helper registers a BlueZ agent (`KeyboardDisplay`) but
+  doesn't ask to be the default one: it answers only for the pairings its own
+  `pair` starts, and a device pairing from its side goes to whatever agent the
+  computer has. A PIN, a passkey, a code to confirm or one to type on the
+  device go to the visible shell ("Asking the user").
+- **Tested:** `helper/test/bluetooth.test.ts`, against a fake BlueZ
+  (`test/fixtures/fakeBluez.ts`): the state, changes, discovery and its end,
+  every action, pairing with a confirmation, a PIN, a refusal, no shell, and
+  a code to type (taken back when the pairing ends; the user's cancel cancels
+  it). On the real computer, read-only: the state, discovery, both shells'
+  menus. Not run for real: power off, pairing, connecting, disconnecting,
+  forgetting (the user's keyboard and mouse are paired).
