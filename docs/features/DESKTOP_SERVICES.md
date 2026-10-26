@@ -235,9 +235,11 @@ popover's controls.
 
 The helper is the session's notification server (`org.freedesktop.Notifications`
 on the session bus: `notify-send`, GTK, Qt, Electron and Chromium-based apps).
-It takes the name only if nothing else has it (a notification daemon you run
-keeps it), and serves from the helper's start, so apps' notifications are kept
-while no shell shows them.
+Only the session in slot 0 (your desktop) serves it by default, taking it over
+from a helper that has it (a notification daemon you run that doesn't allow
+that keeps it); a test session in another slot doesn't, unless
+`PLUTONIUM_NOTIFICATIONS=1`. It serves from the helper's start, so apps'
+notifications are kept while no shell shows them.
 
 - **State:** `{ notifications: [{ id, app, icon, summary, body, actions: [{ key,
   label }], urgency: "low" | "normal" | "critical", desktopEntry?, transient,

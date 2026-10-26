@@ -2302,7 +2302,11 @@ export class Daemon {
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
     // Apps' notifications reach the shells from the start, whether or not one shows them yet.
-    if (this.options.cdpPort && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
+    // Only the user's own session (slot 0) by default: a test session in another slot would
+    // take the host desktop's notifications (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
+    const slot = this.options.shells?.context.slot ?? 0;
+    const notifications = process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0");
+    if (this.options.cdpPort && notifications !== "0") {
       this.services
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));

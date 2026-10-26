@@ -99,15 +99,16 @@ export class NotificationsService implements DesktopService {
     if (!address) throw new ServiceError(503, "There's no session bus (DBUS_SESSION_BUS_ADDRESS).");
     const bus = await DBusConnection.connect(address);
     bus.onCall = (message) => this.onBus(message);
-    // 1: another server may take the name from us. Queued while one has it
-    // (another session's helper, or a notification daemon the user runs).
+    // 1|2: another server may take the name from us, and we take it from one that
+    // allows it (a test session's helper); a daemon the user runs that doesn't
+    // allow it keeps it, and we wait in the queue.
     const [result] = (await bus.call({
       destination: "org.freedesktop.DBus",
       path: "/org/freedesktop/DBus",
       interface: "org.freedesktop.DBus",
       member: "RequestName",
       signature: "su",
-      body: [NAME, 1],
+      body: [NAME, 3],
     })) as [number];
     this.bus = bus;
     console.log(`plutoniumd: notifications ${result === 1 ? "serving" : "queued"} as ${NAME}`);
