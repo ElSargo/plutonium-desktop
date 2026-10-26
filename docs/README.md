@@ -2,6 +2,7 @@
 
 **Start here**
 - [../INSTALL.md](../INSTALL.md): installing, first sessions, troubleshooting
+- [BUILDING.md](BUILDING.md): building Chromium from source
 - [USING.md](USING.md): keys, shells, threads, agents, writing a shell
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces fit
 - [DEVELOPING.md](DEVELOPING.md): changing Chromium, the helper and the shells; testing sessions
