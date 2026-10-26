@@ -1,0 +1,95 @@
+import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { describe, test } from "node:test";
+
+import { CLOSED, NotificationsService, parseNotify, type NotificationsState } from "../src/services/notifications.ts";
+
+const run = promisify(execFile);
+const notifyArgs = (summary: string, extra: { actions?: string[]; hints?: Map<string, unknown>; timeout?: number; replaces?: number } = {}) => [
+  "app",
+  extra.replaces ?? 0,
+  "dialog-information",
+  summary,
+  "the body",
+  extra.actions ?? [],
+  extra.hints ?? new Map(),
+  extra.timeout ?? -1,
+];
+
+describe("notifications", () => {
+  test("what Notify describes", () => {
+    const n = parseNotify(7, notifyArgs("Hi", {
+      actions: ["default", "Open", "later", "Later"],
+      hints: new Map<string, unknown>([["urgency", 2], ["desktop-entry", "org.gnome.Nautilus"], ["transient", true]]),
+    }), 1000);
+    assert.deepEqual(n, {
+      id: 7, app: "app", icon: "dialog-information", summary: "Hi", body: "the body",
+      actions: [{ key: "default", label: "Open" }, { key: "later", label: "Later" }],
+      urgency: "critical", desktopEntry: "org.gnome.Nautilus", transient: true, time: 1000,
+    });
+    assert.equal(parseNotify(1, notifyArgs("x")).urgency, "normal");
+  });
+
+  test("the list: newest first, replace, dismiss, invoke, clear, expiry, do not disturb", async () => {
+    const service = new NotificationsService();
+    const states: NotificationsState[] = [];
+    // Not started: no bus, but the list works.
+    (service as unknown as { changed: (s: unknown) => void }).changed = (s) => states.push(s as NotificationsState);
+    const a = service.notify(notifyArgs("A"));
+    const b = service.notify(notifyArgs("B"));
+    assert.deepEqual((await service.state()).notifications.map((n) => n.summary), ["B", "A"]);
+    assert.equal(service.notify(notifyArgs("A again", { replaces: a })), a);
+    assert.deepEqual((await service.state()).notifications.map((n) => n.summary), ["A again", "B"]);
+    await service.call("dismiss", { id: b });
+    await service.call("invoke", { id: a, action: "default" });
+    assert.equal((await service.state()).notifications.length, 0);
+    await assert.rejects(service.call("invoke", { id: 99 }), /no notification/);
+    service.notify(notifyArgs("C"));
+    service.notify(notifyArgs("D"));
+    await service.call("clear", {});
+    assert.equal((await service.state()).notifications.length, 0);
+    service.notify(notifyArgs("brief", { timeout: 30 }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal((await service.state()).notifications.length, 0);
+    assert.equal(await service.call("set-do-not-disturb", { on: true }), true);
+    assert.equal(states.at(-1)?.doNotDisturb, true);
+    await assert.rejects(service.call("explode", {}), /no action/);
+    service.stop();
+  });
+
+  test("apps reach it over D-Bus (a private bus, notify-send)", async (t) => {
+    let daemon;
+    try {
+      daemon = spawn("dbus-daemon", ["--session", "--nofork", "--print-address=1"], { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      return t.skip("no dbus-daemon");
+    }
+    const address = await new Promise<string>((resolve, reject) => {
+      daemon.once("error", reject);
+      daemon.stdout!.once("data", (data: Buffer) => resolve(data.toString().trim()));
+    }).catch(() => "");
+    if (!address) return t.skip("no dbus-daemon");
+    const service = new NotificationsService(address);
+    const states: NotificationsState[] = [];
+    try {
+      await service.start((state) => states.push(state as NotificationsState));
+      const env = { ...process.env, DBUS_SESSION_BUS_ADDRESS: address };
+      const { stdout } = await run("notify-send", ["-p", "-u", "critical", "-a", "Tester", "Hello", "from an app"], { env });
+      const id = Number(stdout.trim());
+      const [n] = (await service.state()).notifications;
+      assert.equal(n?.id, id);
+      assert.equal(n?.summary, "Hello");
+      assert.equal(n?.app, "Tester");
+      assert.equal(n?.urgency, "critical");
+      assert.equal(states.length, 1);
+      const info = await run("gdbus", ["call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path",
+        "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.GetServerInformation"], { env }).catch(() => null);
+      if (info) assert.match(info.stdout, /Plutonium/);
+      assert.equal(CLOSED.dismissed, 2);
+    } finally {
+      service.stop();
+      daemon.kill();
+    }
+  });
+});

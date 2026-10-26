@@ -475,7 +475,8 @@ describe("helper end to end", () => {
         return volume;
       },
     });
-    assert.deepEqual(await shellJson("GET", "/v1/shell/system"), { status: 200, body: { services: [{ name: "audio", allowed: true }] } });
+    const listed = (await shellJson("GET", "/v1/shell/system")).body as { services: { name: string; allowed: boolean }[] };
+    assert.deepEqual(listed.services.find((service) => service.name === "audio"), { name: "audio", allowed: true });
     assert.deepEqual(await shellJson("GET", "/v1/shell/system/audio"), { status: 200, body: { volume: 0.5 } });
     assert.deepEqual(await shellJson("POST", "/v1/shell/system/audio/set-volume", { volume: 0.8 }), {
       status: 200,

@@ -154,6 +154,7 @@ const HELPER = new URL(import.meta.url).origin;
  *   onFocusTab?: (tab: BrowserTab) => boolean | Promise<boolean>,
  *   onOpenTab?: (tab: BrowserTab) => string | null | undefined | Promise<string | null | undefined>,
  *   contextMenu?: false | ((request: ContextMenuRequest) => boolean),
+ *   notificationPopups?: false | ((notification: any) => void),
  *   [feature: string]: any }} ConnectOptions
  *   onOpenTab: a link this page opened in a new tab or window (Ctrl+click, target=_blank,
  *   window.open) arrived as a tab, untagged. Return the thread to put it in (it is then tagged
@@ -401,6 +402,7 @@ export class PlutoniumShell extends EventTarget {
     if (this.captureAvailable) this._startCaptures();
     this._startGlobalShortcuts();
     this._serveBridge();
+    this._startNotifications();
     const windows = await this.broker.getWindows();
     for (const entry of windows) this._setWindow(entry);
     this._live = true;
@@ -1334,6 +1336,33 @@ export class PlutoniumShell extends EventTarget {
     for (const capture of captures) {
       if (!capture.acknowledged) this.acknowledgeCapture(capture.id).catch(() => {});
     }
+  }
+
+  // Apps' notifications (DESKTOP_SERVICES.md, "notifications"): the visible
+  // shell pops up the new ones. The "notificationPopups" option: false for
+  // none (the shell draws its own from shell.system.notifications), a
+  // function to draw each new one itself; else the library's.
+  _startNotifications() {
+    const option = this.options.notificationPopups;
+    if (option === false) return;
+    const service = this.system.notifications;
+    /** @type {Map<number, number> | null} id → time, of those already seen */
+    let seen = null;
+    service.addEventListener("change", (event) => {
+      const { notifications = [], doNotDisturb = false } = event.detail ?? {};
+      const fresh = seen ? notifications.filter((n) => seen.get(n.id) !== n.time) : [];
+      seen = new Map(notifications.map((n) => [n.id, n.time]));
+      if (typeof option !== "function") {
+        this._notificationPopups ??= new NotificationPopups(this);
+        this._notificationPopups.keep(new Set(seen.keys()));
+      }
+      if (document.visibilityState !== "visible") return;
+      for (const notification of fresh.reverse()) {
+        if (doNotDisturb && notification.urgency !== "critical") continue;
+        if (typeof option === "function") option(notification);
+        else this._notificationPopups.show(notification);
+      }
+    });
   }
 
   /** @returns {Capture[]} the running captures, oldest first */
@@ -4235,6 +4264,118 @@ class CaptureIndicator {
       }),
     );
   }
+}
+
+// The library's notification popups: a stack in the top right corner. A
+// popup goes after a few seconds (a critical one stays) but the notification
+// stays in shell.system.notifications until dismissed; × dismisses it,
+// clicking it runs its default action.
+class NotificationPopups {
+  constructor(shell) {
+    ensureNotificationStyle();
+    this.shell = shell;
+    /** @type {Map<number, HTMLElement>} */
+    this.popups = new Map();
+    this.element = document.createElement("div");
+    this.element.className = "plutonium-notifications";
+    this.element.popover = "manual";
+    this.element.setAttribute("role", "log");
+    this.element.setAttribute("aria-live", "polite");
+    document.body.append(this.element);
+  }
+
+  /** Removes the popups of notifications that are gone. */
+  keep(ids) {
+    for (const id of [...this.popups.keys()]) if (!ids.has(id)) this.hide(id);
+  }
+
+  show(notification) {
+    const service = this.shell.system.notifications;
+    const card = document.createElement("div");
+    card.className = `plutonium-dialog card ${notification.urgency}`;
+    const head = document.createElement("div");
+    head.className = "head";
+    const app = document.createElement("span");
+    app.className = "app";
+    app.textContent = notification.app;
+    const close = document.createElement("button");
+    close.className = "close";
+    close.textContent = "×";
+    close.title = "Dismiss";
+    close.onclick = (event) => {
+      event.stopPropagation();
+      service.call("dismiss", { id: notification.id }).catch(() => {});
+    };
+    head.append(app, close);
+    const summary = document.createElement("div");
+    summary.className = "summary";
+    summary.textContent = notification.summary;
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = notification.body;
+    card.append(head, summary);
+    if (notification.body) card.append(body);
+    const buttons = notification.actions.filter((action) => action.key !== "default");
+    if (buttons.length) {
+      const row = document.createElement("div");
+      row.className = "actions";
+      for (const action of buttons) {
+        const button = document.createElement("button");
+        button.textContent = action.label;
+        button.onclick = (event) => {
+          event.stopPropagation();
+          service.call("invoke", { id: notification.id, action: action.key }).catch(() => {});
+        };
+        row.append(button);
+      }
+      card.append(row);
+    }
+    const clickable = notification.actions.some((action) => action.key === "default");
+    card.onclick = () => {
+      if (clickable) service.call("invoke", { id: notification.id, action: "default" }).catch(() => {});
+      else this.hide(notification.id);
+    };
+    this.hide(notification.id);
+    this.popups.set(notification.id, card);
+    this.element.prepend(card);
+    if (!this.element.matches(":popover-open")) this.element.showPopover();
+    if (notification.urgency !== "critical") {
+      let timer = setTimeout(() => this.hide(notification.id, card), 6000);
+      // Not while the pointer is on it.
+      card.onpointerenter = () => clearTimeout(timer);
+      card.onpointerleave = () => (timer = setTimeout(() => this.hide(notification.id, card), 3000));
+    }
+  }
+
+  hide(id, card = this.popups.get(id)) {
+    if (!card || this.popups.get(id) !== card) return;
+    this.popups.delete(id);
+    card.remove();
+    if (!this.popups.size && this.element.matches(":popover-open")) this.element.hidePopover();
+  }
+}
+
+const NOTIFICATION_STYLE = `@layer plutonium {
+  .plutonium-notifications { inset: 8px 8px auto auto; margin: 0; padding: 0; border: 0; background: none; overflow: visible;
+    display: grid; gap: 8px; width: min(360px, calc(100vw - 16px)); }
+  .plutonium-notifications .card { position: static; margin: 0; padding: 8px 10px; display: grid; gap: 2px; cursor: default; }
+  .plutonium-notifications .card.critical { border-left: 3px solid var(--plutonium-notification-critical, #e5484d); }
+  .plutonium-notifications .head { display: flex; align-items: center; gap: 8px; font-size: .8em; opacity: .7; }
+  .plutonium-notifications .app { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plutonium-notifications .close { all: unset; padding: 0 4px; font-size: 1.2em; line-height: 1; opacity: .8; }
+  .plutonium-notifications .summary { font-weight: 600; overflow-wrap: anywhere; }
+  .plutonium-notifications .body { opacity: .85; white-space: pre-line; overflow-wrap: anywhere; max-height: 6lh; overflow: hidden; }
+  .plutonium-notifications .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .plutonium-notifications .actions button { font: inherit; }
+}`;
+
+let notificationStyle = null;
+function ensureNotificationStyle() {
+  if (notificationStyle) return;
+  ensureDialogStyle();
+  notificationStyle = document.createElement("style");
+  notificationStyle.textContent = NOTIFICATION_STYLE;
+  document.head.append(notificationStyle);
 }
 
 // The screenshot UI: the frozen output under a shade; dragging selects a

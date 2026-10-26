@@ -725,8 +725,10 @@ shell find it.
   connect; pairing PINs through the shell.
 - [ ] **Media.** S · MPRIS players (now playing, play/pause, next), and the
   media keys.
-- [ ] **Notifications.** M · The helper as `org.freedesktop.Notifications`,
-  handed to the visible shell (with the tab notifications item above).
+- [x] **Notifications.** Done 2026-10-26: the helper as
+  `org.freedesktop.Notifications`, `shell.system.notifications`, the
+  library's popups in the visible shell. Open: check the popups in a session;
+  tabs' web notifications (the item above) to go the same way.
 - [ ] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
   (Ash's own, or a locked page), inhibit while video plays.
 - [x] **A native side and storage for shells.** Done 2026-10-26:

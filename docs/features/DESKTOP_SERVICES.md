@@ -100,3 +100,31 @@ call, storage, CORS, another origin refused).
 Each section: its state, its actions, what it uses on the host, and how it was
 tested. (Filled in as each lands; see the backlog, "Desktop services for
 shells".)
+
+### notifications
+
+The helper is the session's notification server (`org.freedesktop.Notifications`
+on the session bus: `notify-send`, GTK, Qt, Electron and Chromium-based apps).
+It takes the name only if nothing else has it (a notification daemon you run
+keeps it), and serves from the helper's start, so apps' notifications are kept
+while no shell shows them.
+
+- **State:** `{ notifications: [{ id, app, icon, summary, body, actions: [{ key,
+  label }], urgency: "low" | "normal" | "critical", desktopEntry?, transient,
+  time }], doNotDisturb }`, newest first, up to 100. A notification stays until
+  it's dismissed, its app closes it, or its own timeout (if it set one) ends.
+- **Actions:** `dismiss {id}`, `invoke {id, action}` (the app gets
+  `ActionInvoked`; `"default"` is a click on it), `clear`,
+  `set-do-not-disturb {on}`.
+- **Popups:** the library pops up new ones in the visible shell (top right; a
+  few seconds, critical ones until closed; not in do not disturb unless
+  critical). `connect({ notificationPopups: false })` turns them off, for a
+  shell that draws its own; a function draws each one itself. The shipped
+  shells use it (`"uses": ["notifications"]`).
+- **Tested:** `helper/test/notifications.test.ts`: parsing, the list
+  (replace, dismiss, invoke, clear, expiry, do not disturb), and a real
+  `notify-send` and `gdbus` against the service on a private `dbus-daemon`.
+  The popups: in a session (with the other services' check).
+- Not yet: tabs' web notifications (Chromium's own, see the backlog), images
+  sent as data (`image-data`), sounds.
+

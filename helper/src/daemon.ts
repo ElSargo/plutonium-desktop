@@ -48,6 +48,7 @@ import { Portal } from "./portal.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { NativeError, ShellNative } from "./shellNative.ts";
+import { NotificationsService } from "./services/notifications.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -402,6 +403,7 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
+    this.services.register(new NotificationsService());
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -2229,6 +2231,12 @@ export class Daemon {
     }, 2000);
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
+    // Apps' notifications reach the shells from the start, whether or not one shows them yet.
+    if (this.options.cdpPort && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
+      this.services
+        .state("notifications")
+        .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
+    }
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
       const portal = new Portal({
