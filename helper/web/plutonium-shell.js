@@ -1590,7 +1590,9 @@ export class PlutoniumShell extends EventTarget {
           this._applyShortcuts();
           return;
         }
-        if (op === "file_chooser_cancel" || op === "print_cancel") this._appRequests?.get(args.handle)?.abort();
+        if (op === "file_chooser_cancel" || op === "print_cancel" || op === "system_request_cancel") {
+          this._appRequests?.get(args.handle)?.abort();
+        }
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));
           this.dispatchEvent(new Event("agentwindowschange"));
@@ -1696,6 +1698,20 @@ export class PlutoniumShell extends EventTarget {
         const option = this.options.fileChooser;
         if (option === false) throw new Error("this shell doesn't pick files");
         return this._appFileChooser(args, option);
+      }
+      case "system_request": {
+        // A desktop service needs the user (DESKTOP_SERVICES.md, "Asking the user"): a
+        // Wi-Fi password, a Bluetooth PIN. A cancelable "systemrequest" event first (its
+        // detail is the request: preventDefault() and answer it yourself), else the
+        // library's prompt. The "systemRequest" option: a function draws them instead;
+        // false leaves the services without them.
+        const option = this.options.systemRequest;
+        if (option === false) throw new Error("this shell doesn't answer system requests");
+        return this._appDialog({ ...args, source: { service: args.service } }, args.kind, option, (request) => {
+          const event = new CustomEvent("systemrequest", { detail: request, cancelable: true });
+          if (this.dispatchEvent(event)) new SystemPrompt(this, request);
+          return true;
+        });
       }
       case "print_prepare": {
         // A native app prints (the Print portal): the same dialog as tabs', without a
@@ -4382,6 +4398,104 @@ function ensureNotificationStyle() {
   notificationStyle.textContent = NOTIFICATION_STYLE;
   document.head.append(notificationStyle);
 }
+
+// The library's prompt for a desktop service's request ("system_request"):
+// a dialog in the middle of the screen, from the request's detail (title,
+// message, a code to compare or type, fields, acceptLabel). It answers with
+// the fields' values ({} for a yes), or null; the service can take it back.
+class SystemPrompt {
+  constructor(shell, request) {
+    ensureDialogStyle();
+    if (!systemPromptStyle) {
+      systemPromptStyle = document.createElement("style");
+      systemPromptStyle.textContent = SYSTEM_PROMPT_STYLE;
+      document.head.append(systemPromptStyle);
+    }
+    const { detail } = request;
+    const element = document.createElement("form");
+    element.className = "plutonium-dialog plutonium-system-prompt";
+    element.popover = "manual";
+    element.setAttribute("role", "dialog");
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = detail.title ?? "";
+    element.append(title);
+    if (detail.message) {
+      const message = document.createElement("div");
+      message.className = "message";
+      message.textContent = detail.message;
+      element.append(message);
+    }
+    if (detail.code) {
+      const code = document.createElement("div");
+      code.className = "code";
+      code.textContent = detail.code;
+      element.append(code);
+    }
+    const inputs = [];
+    for (const field of detail.fields ?? []) {
+      const label = document.createElement("label");
+      const text = document.createElement("span");
+      text.textContent = field.label ?? field.name;
+      const input = document.createElement("input");
+      input.name = field.name;
+      input.type = field.type === "password" ? "password" : "text";
+      if (field.type === "number") input.inputMode = "numeric";
+      input.value = field.value ?? "";
+      input.autocomplete = "off";
+      label.append(text, input);
+      element.append(label);
+      inputs.push(input);
+    }
+    const buttons = document.createElement("div");
+    buttons.className = "buttons";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    buttons.append(cancel);
+    // A code shown to type on the device has nothing to accept: it goes when the pairing ends.
+    if (request.kind !== "display") {
+      const accept = document.createElement("button");
+      accept.className = "default";
+      accept.textContent = detail.acceptLabel ?? "OK";
+      buttons.append(accept);
+    }
+    element.append(buttons);
+    const close = (answer) => {
+      element.remove();
+      request.answer(answer);
+    };
+    cancel.onclick = () => close(null);
+    element.onsubmit = (event) => {
+      event.preventDefault();
+      if (request.kind === "display") return;
+      close(Object.fromEntries(inputs.map((input) => [input.name, input.value])));
+    };
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(null);
+    });
+    request.signal.addEventListener("abort", () => element.remove());
+    document.body.append(element);
+    element.showPopover();
+    (inputs[0] ?? buttons.lastElementChild)?.focus();
+  }
+}
+
+const SYSTEM_PROMPT_STYLE = `@layer plutonium {
+  .plutonium-system-prompt { inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(360px, calc(100vw - 16px));
+    display: grid; gap: 10px; }
+  .plutonium-system-prompt .title { font-weight: 600; font-size: 1.1em; overflow-wrap: anywhere; }
+  .plutonium-system-prompt .message { opacity: .8; }
+  .plutonium-system-prompt .code { font-size: 2em; letter-spacing: .15em; text-align: center; font-variant-numeric: tabular-nums; }
+  .plutonium-system-prompt label { display: grid; gap: 4px; }
+  .plutonium-system-prompt input { font: inherit; padding: 5px 7px; }
+  .plutonium-system-prompt .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .plutonium-system-prompt button { font: inherit; }
+}`;
+
+let systemPromptStyle = null;
 
 // The screenshot UI: the frozen output under a shade; dragging selects a
 // region, a click picks the target under the pointer, Enter or Space the

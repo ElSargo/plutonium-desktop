@@ -483,7 +483,7 @@ describe("helper end to end", () => {
       body: { value: 0.8 },
     });
     assert.equal((await shellJson("POST", "/v1/shell/system/audio/explode", {})).status, 404);
-    assert.equal((await shellJson("GET", "/v1/shell/system/network")).status, 404);
+    assert.equal((await shellJson("GET", "/v1/shell/system/no-such-service")).status, 404);
     for (let i = 0; i < 50 && !shell.notices.some((notice) => notice.op === "system"); i++) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
