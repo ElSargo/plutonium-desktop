@@ -454,8 +454,13 @@ export class Daemon {
         : null,
       checker: checker ? unixChecker(checker) : null,
       settingsFile: join(plutoHome(), "session.json"),
-      // PLUTONIUM_SCREENSAVER=0: leave org.freedesktop.ScreenSaver alone.
-      sessionBus: process.env.PLUTONIUM_SCREENSAVER === "0" ? null : process.env.DBUS_SESSION_BUS_ADDRESS || null,
+      // org.freedesktop.ScreenSaver: only the user's own session (slot 0) by default; a test
+      // session in another slot would take the host desktop's apps' inhibitors
+      // (PLUTONIUM_SCREENSAVER=1 serves it anyway, 0 never).
+      sessionBus:
+        (process.env.PLUTONIUM_SCREENSAVER ?? ((options.shells?.context.slot ?? 0) === 0 ? "1" : "0")) === "0"
+          ? null
+          : process.env.DBUS_SESSION_BUS_ADDRESS || null,
       // logind's Lock and sleep are the seat's: a DRM session's, not an X11 one's.
       systemBus: options.waylandDisplay.includes("-x11") ? null : "unix:path=/run/dbus/system_bus_socket",
       sessionId: process.env.XDG_SESSION_ID,
@@ -711,6 +716,8 @@ export class Daemon {
     } finally {
       signal?.removeEventListener("abort", takeBack);
     }
+  }
+
   /** Who a shell is to the services: its name, or its origin if it isn't installed. */
   private callerOf(origin: string): string {
     return this.options.shells?.byOrigin(origin)?.name ?? origin;

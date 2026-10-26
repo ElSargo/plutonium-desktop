@@ -454,6 +454,13 @@ export class SessionService implements DesktopService {
     const bus = await DBusConnection.connect(address);
     bus.onCall = (message) => this.onScreenSaver(message);
     bus.onSignal = (message) => {
+      if (message.member === "NameLost" && message.body?.[0] === SCREENSAVER) {
+        // Slot 0's helper took it over from this (a test session's).
+        console.log(`plutoniumd: session: ${SCREENSAVER} went to another helper`);
+        bus.close();
+        if (this.session === bus) this.session = null;
+        return;
+      }
       // An app that inhibited went away: so does its inhibitor.
       if (message.member !== "NameOwnerChanged") return;
       const [name, , owner] = (message.body ?? []) as [string, string, string];
@@ -463,14 +470,16 @@ export class SessionService implements DesktopService {
       this.release(() => gone.forEach(([key]) => this.appInhibitors.delete(key)));
       void this.tick();
     };
-    // 4: don't queue. Another screensaver (a desktop's) keeps it.
+    // 1|2|4: another helper may take it from us, we take it from one that
+    // allows it (a test session's), and don't queue: a screensaver the user
+    // runs that doesn't allow it keeps it.
     const [result] = (await bus.call({
       destination: "org.freedesktop.DBus",
       path: "/org/freedesktop/DBus",
       interface: "org.freedesktop.DBus",
       member: "RequestName",
       signature: "su",
-      body: [SCREENSAVER, 4],
+      body: [SCREENSAVER, 7],
     })) as [number];
     if (result !== 1) {
       bus.close();

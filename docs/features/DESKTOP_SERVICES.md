@@ -414,8 +414,11 @@ off, and the lock itself.
   the next step is due, not on a fixed tick. Screen off on DRM is Ash's
   `DisplayConfigurator` turning the displays off, until the next key or
   pointer move, which Ash turns them on for itself.
-- **Inhibitors:** apps through `org.freedesktop.ScreenSaver.Inhibit` (the
-  helper serves it on the session bus if nothing else has it; an app's
+- **Inhibitors:** apps through `org.freedesktop.ScreenSaver.Inhibit` (on
+  the session bus, served as notifications are: only by the session in slot
+  0 by default, taking it over from a test session's helper, while a
+  screensaver you run that doesn't allow that keeps it; a test session in
+  another slot serves it only with `PLUTONIUM_SCREENSAVER=1`; an app's
   inhibitors go when it leaves the bus) and the portal's `Inhibit` with the
   idle flag (the helper's portal backend, until its request closes); the
   browser's screen wake locks (`PowerPolicyController`, which there's no
