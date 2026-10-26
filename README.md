@@ -58,7 +58,7 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
 
 In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
-The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Ask an agent** or **Open a terminal**. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
+The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
 
 **If it hangs,** press the kill switch: Ash is killed and you're back where you were. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
 
