@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 16:12:46 +1300
-Subject: [PATCH 15/73] Plutonium overlay: no empty Shells heading when a
+Subject: [PATCH 15/74] Plutonium overlay: no empty Shells heading when a
  search matches no shell
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

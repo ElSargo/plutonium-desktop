@@ -43,6 +43,7 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
   - `network` (Wi-Fi list, connect with a password, on/off, wired and VPN connections) and `bluetooth` (on/off, devices, discover, pair, connect): their state and actions are in DESKTOP_SERVICES.md. When either needs the user (a Wi-Fi password, a pairing code), the shell gets a `systemrequest` event; without `preventDefault()` the library shows its own prompt.
   - `notifications` lists apps' notifications and the tabs' web notifications (their `app` is the site; `invoke` with `"default"` runs the page's handler and shows its tab). The library pops them up unless `connect({ notificationPopups: false })`.
   - The shell's `shellnotice` event (`{ shell, title, kind: "rollback" | "crash" | "server", message }`): an installed shell's edit was rolled back, its page crashed or its server failed. It's also a notification, so a shell with popups shows it already (`{{PLUTONIUM}}/docs/features/SHELL_PACKAGES.md`).
+- **Touchpad gestures**: two-finger scrolling arrives as ordinary wheel events. Swipes with three fingers or more go only to the visible shell, as the shell's `touchpadswipe` event (`{ phase: "begin" | "update" | "end", fingers, dx, dy, x, y }`, dx/dy the fingers' movement since the last one); use them for workspaces, overviews and the like. Not on X11 test sessions (no touchpad there).
 - **Something is broken and you can't tell why**: `plutonium doctor`, then the logs. `plutonium run --safe` starts only the shipped plain shell.
 
 ## shell.json

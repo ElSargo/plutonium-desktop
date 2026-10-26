@@ -1,0 +1,451 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 08:17:19 +1300
+Subject: [PATCH 74/74] Plutonium: touchpad swipes with three fingers or more
+ go to the shell page
+
+libinput's swipe gestures, which the libinput converter didn't read, go on
+as ChromeOS's gesture library sends them: scroll events with their finger
+count (a fling cancel begins one, a fling start ends it). In shell mode,
+Ash's system gesture filter hands those with three fingers or more to a
+handler chrome sets, instead of overview and desks: the focused display's
+visible shell page gets them as navigator.windowBroker's "touchpadswipe"
+event (ShellObserver.OnTouchpadSwipe), {phase, fingers, dx, dy, x, y}.
+---
+ ash/wm/system_gesture_event_filter.cc         | 22 +++++++++
+ ash/wm/system_gesture_event_filter.h          | 12 ++++-
+ chrome/browser/plutonium_shell.cc             | 10 ++++
+ chrome/browser/plutonium_shells.cc            |  6 +++
+ chrome/browser/plutonium_shells.h             |  6 +++
+ .../chrome_browser_main_extra_parts_ash.cc    | 31 +++++++++++++
+ .../mojom/native_window/window_broker.mojom   |  5 ++
+ .../core/events/event_type_names.json5        |  2 +
+ .../core/html/native_window_broker.cc         | 18 ++++++--
+ .../renderer/core/html/native_window_broker.h |  2 +
+ .../core/html/native_window_broker.idl        |  5 ++
+ .../ozone/evdev/libinput_event_converter.cc   | 46 +++++++++++++++++++
+ .../ozone/evdev/libinput_event_converter.h    |  2 +
+ 13 files changed, 163 insertions(+), 4 deletions(-)
+
+diff --git a/ash/wm/system_gesture_event_filter.cc b/ash/wm/system_gesture_event_filter.cc
+index 6f28f2155e..7dc062310c 100644
+--- a/ash/wm/system_gesture_event_filter.cc
++++ b/ash/wm/system_gesture_event_filter.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "ash/wm/gestures/wm_gesture_handler.h"
+ #include "base/metrics/user_metrics.h"
++#include "base/no_destructor.h"
+ #include "ui/aura/window.h"
+ #include "ui/base/pointer/pointer_device.h"
+ #include "ui/events/event.h"
+@@ -13,6 +14,22 @@
+ 
+ namespace ash {
+ 
++namespace {
++
++SystemGestureEventFilter::PlutoniumSwipeHandler& SwipeHandlerInstance() {
++  static base::NoDestructor<SystemGestureEventFilter::PlutoniumSwipeHandler>
++      handler;
++  return *handler;
++}
++
++}  // namespace
++
++// static
++void SystemGestureEventFilter::SetPlutoniumSwipeHandler(
++    PlutoniumSwipeHandler handler) {
++  SwipeHandlerInstance() = std::move(handler);
++}
++
+ SystemGestureEventFilter::SystemGestureEventFilter()
+     : wm_gesture_handler_(std::make_unique<WmGestureHandler>()) {}
+ 
+@@ -27,6 +44,11 @@ void SystemGestureEventFilter::OnMouseEvent(ui::MouseEvent* event) {
+ }
+ 
+ void SystemGestureEventFilter::OnScrollEvent(ui::ScrollEvent* event) {
++  if (SwipeHandlerInstance() && event->finger_count() >= 3) {
++    SwipeHandlerInstance().Run(*event);
++    event->StopPropagation();
++    return;
++  }
+   if (wm_gesture_handler_ && wm_gesture_handler_->ProcessScrollEvent(*event))
+     event->StopPropagation();
+ }
+diff --git a/ash/wm/system_gesture_event_filter.h b/ash/wm/system_gesture_event_filter.h
+index 37a1c08e71..b6747d2784 100644
+--- a/ash/wm/system_gesture_event_filter.h
++++ b/ash/wm/system_gesture_event_filter.h
+@@ -7,13 +7,15 @@
+ 
+ #include <memory>
+ 
++#include "ash/ash_export.h"
++#include "base/functional/callback.h"
+ #include "ui/events/event_handler.h"
+ 
+ namespace ash {
+ class WmGestureHandler;
+ 
+ // An event filter which handles system level gesture events.
+-class SystemGestureEventFilter : public ui::EventHandler {
++class ASH_EXPORT SystemGestureEventFilter : public ui::EventHandler {
+  public:
+   SystemGestureEventFilter();
+ 
+@@ -22,6 +24,14 @@ class SystemGestureEventFilter : public ui::EventHandler {
+ 
+   ~SystemGestureEventFilter() override;
+ 
++  // PLUTONIUM: in shell mode, touchpad swipes with three fingers or more go
++  // to |handler| (the visible shell page) instead of Ash's overview and desks,
++  // and no further.
++  using PlutoniumSwipeHandler =
++      base::RepeatingCallback<void(const ui::ScrollEvent& event)>;
++  static void SetPlutoniumSwipeHandler(
++      PlutoniumSwipeHandler handler);
++
+   // Overridden from ui::EventHandler:
+   void OnMouseEvent(ui::MouseEvent* event) override;
+   void OnScrollEvent(ui::ScrollEvent* event) override;
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index 6edd120e59..61f955f0b2 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -948,6 +948,16 @@ class WindowBrokerImpl
+       observer->OnDisplaysChanged(CurrentDisplays(contents()));
+     }
+   }
++  void OnTouchpadSwipe(const std::string& swipe_json) override {
++    PlutoniumShells* shells = PlutoniumShells::Get();
++    if (shell_observers_.empty() || !StillShell() || !shells ||
++        shells->GetVisibleContents() != contents()) {
++      return;
++    }
++    for (auto& observer : shell_observers_) {
++      observer->OnTouchpadSwipe(swipe_json);
++    }
++  }
+ 
+   void ShowShell() override {
+     PlutoniumShells* shells = PlutoniumShells::Get();
+diff --git a/chrome/browser/plutonium_shells.cc b/chrome/browser/plutonium_shells.cc
+index edcb6734c1..a93820b290 100644
+--- a/chrome/browser/plutonium_shells.cc
++++ b/chrome/browser/plutonium_shells.cc
+@@ -92,6 +92,12 @@ void PlutoniumShells::NotifyDisplaysChanged() {
+   }
+ }
+ 
++void PlutoniumShells::NotifyTouchpadSwipe(const std::string& swipe_json) {
++  for (Observer& observer : observers_) {
++    observer.OnTouchpadSwipe(swipe_json);
++  }
++}
++
+ void PlutoniumShells::NotifyVisibleShellChanged(
+     content::WebContents* previous,
+     content::WebContents* visible) {
+diff --git a/chrome/browser/plutonium_shells.h b/chrome/browser/plutonium_shells.h
+index bbc1dd3ef3..e4028315e6 100644
+--- a/chrome/browser/plutonium_shells.h
++++ b/chrome/browser/plutonium_shells.h
+@@ -106,6 +106,9 @@ class PlutoniumShells {
+     // EXO-DISPLAYS: a display was added, removed or changed, or keyboard
+     // focus moved to another display.
+     virtual void OnDisplaysChanged() {}
++    // A touchpad swipe with three fingers or more (window_broker.mojom's
++    // ShellObserver.OnTouchpadSwipe), for the focused display's visible shell.
++    virtual void OnTouchpadSwipe(const std::string& swipe_json) {}
+   };
+ 
+   inline static constexpr char kShellsPref[] = "plutonium.shells";
+@@ -232,6 +235,9 @@ class PlutoniumShells {
+   // with the next shell selected, or moves its selection if it is open.
+   virtual void OnSwitchKey(int step) = 0;
+ 
++  // Sends a touchpad swipe (OnTouchpadSwipe) to the observers.
++  void NotifyTouchpadSwipe(const std::string& swipe_json);
++
+  protected:
+   PlutoniumShells();
+ 
+diff --git a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+index b6db79e902..a00121a68e 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/chrome_browser_main_extra_parts_ash.cc
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "ash/accelerators/accelerator_controller_impl.h"
++#include "ash/wm/system_gesture_event_filter.h"
+ #include "ash/constants/ash_features.h"
+ #include "ash/constants/ash_switches.h"
+ #include "ash/constants/webui_url_constants.h"
+@@ -30,6 +31,7 @@
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
++#include "base/json/json_writer.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/scoped_observation.h"
+ #include "base/strings/strcat.h"
+@@ -67,6 +69,7 @@
+ #include "chrome/browser/plutonium_downloads.h"
+ #include "chrome/browser/plutonium_file_chooser.h"
+ #include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_capture_ui.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_helper_client.h"
+ #include "chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h"
+@@ -142,6 +145,7 @@
+ #include "services/device/public/cpp/geolocation/geolocation_system_permission_manager.h"
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+ #include "ui/base/ime/ash/input_method_manager.h"
++#include "ui/events/event.h"
+ #include "ui/events/ozone/evdev/heatmap_palm_detector.h"
+ 
+ namespace {
+@@ -186,6 +190,31 @@ void SendSystemKeyToHelper(const std::string& key,
+           },
+           std::move(own_action)));
+ }
++
++// PLUTONIUM: touchpad swipes with three fingers or more go to the focused
++// display's visible shell page (navigator.windowBroker's "touchpadswipe").
++void SendSwipeToShell(const ui::ScrollEvent& event) {
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!shells) {
++    return;
++  }
++  const char* phase = event.type() == ui::EventType::kScrollFlingCancel
++                          ? "begin"
++                      : event.type() == ui::EventType::kScrollFlingStart
++                          ? "end"
++                          : "update";
++  std::optional<std::string> json = base::WriteJson(
++      base::DictValue()
++          .Set("phase", phase)
++          .Set("fingers", event.finger_count())
++          .Set("dx", event.x_offset())
++          .Set("dy", event.y_offset())
++          .Set("x", event.root_location_f().x())
++          .Set("y", event.root_location_f().y()));
++  if (json) {
++    shells->NotifyTouchpadSwipe(*json);
++  }
++}
+ }  // namespace
+ 
+ using GameMode = ash::ResourcedClient::GameMode;
+@@ -303,6 +332,8 @@ void ChromeBrowserMainExtraPartsAsh::PreProfileInit() {
+   if (plutonium_shell::IsShellMode()) {
+     plutonium_shells_ = std::make_unique<PlutoniumShellsImpl>();
+     plutonium_capture_ui_ = std::make_unique<PlutoniumCaptureUi>();
++    ash::SystemGestureEventFilter::SetPlutoniumSwipeHandler(
++        base::BindRepeating(&SendSwipeToShell));
+     if (plutonium_helper::IsAvailable()) {
+       PlutoniumDownloads::Get()->SetOpener(
+           base::BindRepeating(&OpenDownloadWithHelper));
+diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
+index 840407621e..a6473acdb2 100644
+--- a/third_party/blink/public/mojom/native_window/window_broker.mojom
++++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
+@@ -172,6 +172,11 @@ interface ShellObserver {
+   // EXO-DISPLAYS: every display, after any change (one added, removed or
+   // changed, or keyboard focus moved), and once on subscribing.
+   OnDisplaysChanged(array<NativeDisplayEntry> displays);
++  // PLUTONIUM: a touchpad swipe with three fingers or more, to the visible
++  // shell on the focused display only. |swipe_json|: {phase: "begin" |
++  // "update" | "end", fingers, dx, dy (the fingers' movement since the last
++  // one, in pixels), x, y (the pointer)}.
++  OnTouchpadSwipe(string swipe_json);
+ };
+ 
+ interface GroupObserver {
+diff --git a/third_party/blink/renderer/core/events/event_type_names.json5 b/third_party/blink/renderer/core/events/event_type_names.json5
+index f11a246082..7c0c02aa6e 100644
+--- a/third_party/blink/renderer/core/events/event_type_names.json5
++++ b/third_party/blink/renderer/core/events/event_type_names.json5
+@@ -369,6 +369,8 @@
+     "shellschanged",
+     // EXO-DISPLAYS: navigator.windowBroker.
+     "displayschanged",
++    // PLUTONIUM: navigator.windowBroker.
++    "touchpadswipe",
+     // EXO-TABS: navigator.windowBroker.
+     "tabadded",
+     "tabchanged",
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
+index 0ec4da04cf..6298556c56 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.cc
++++ b/third_party/blink/renderer/core/html/native_window_broker.cc
+@@ -200,7 +200,8 @@ void NativeWindowBroker::AddedEventListener(
+     SubscribeGroups();
+   }
+   if (event_type == event_type_names::kShellschanged ||
+-      event_type == event_type_names::kDisplayschanged) {
++      event_type == event_type_names::kDisplayschanged ||
++      event_type == event_type_names::kTouchpadswipe) {
+     SubscribeShells();
+   }
+   if (event_type == event_type_names::kContextmenurequest) {
+@@ -244,9 +245,11 @@ void NativeWindowBroker::RemovedEventListener(
+     group_observer_receiver_.reset();
+   }
+   if ((event_type == event_type_names::kShellschanged ||
+-       event_type == event_type_names::kDisplayschanged) &&
++       event_type == event_type_names::kDisplayschanged ||
++       event_type == event_type_names::kTouchpadswipe) &&
+       !HasAnyEventListeners({event_type_names::kShellschanged,
+-                             event_type_names::kDisplayschanged})) {
++                             event_type_names::kDisplayschanged,
++                             event_type_names::kTouchpadswipe})) {
+     shell_observer_receiver_.reset();
+   }
+   if (event_type == event_type_names::kContextmenurequest &&
+@@ -659,6 +662,15 @@ void NativeWindowBroker::OnDisplaysChanged(
+   DispatchEvent(*Event::Create(event_type_names::kDisplayschanged));
+ }
+ 
++void NativeWindowBroker::OnTouchpadSwipe(const String& swipe_json) {
++  if (!GetExecutionContext()) {
++    return;
++  }
++  // A ShellCaptureEvent only for its JSON |detail|.
++  DispatchEvent(*MakeGarbageCollected<ShellCaptureEvent>(
++      event_type_names::kTouchpadswipe, 0, swipe_json));
++}
++
+ void NativeWindowBroker::SubscribeGroups() {
+   if (group_observer_receiver_.is_bound() || !BindRemote()) {
+     return;
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
+index fa519e3e08..5c1a017c23 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.h
++++ b/third_party/blink/renderer/core/html/native_window_broker.h
+@@ -151,6 +151,7 @@ class CORE_EXPORT NativeWindowBroker final
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(groupschanged, kGroupschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(shellschanged, kShellschanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(displayschanged, kDisplayschanged)
++  DEFINE_ATTRIBUTE_EVENT_LISTENER(touchpadswipe, kTouchpadswipe)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(windowadded, kWindowadded)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(windowchanged, kWindowchanged)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(windowremoved, kWindowremoved)
+@@ -202,6 +203,7 @@ class CORE_EXPORT NativeWindowBroker final
+   void OnShellsChanged(Vector<mojom::blink::ShellEntryPtr> shells) override;
+   void OnDisplaysChanged(
+       Vector<mojom::blink::NativeDisplayEntryPtr> displays) override;
++  void OnTouchpadSwipe(const String& swipe_json) override;
+ 
+   // mojom::blink::ContextMenuObserver:
+   void OnContextMenuRequested(
+diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
+index 123f379280..e1a4e2faac 100644
+--- a/third_party/blink/renderer/core/html/native_window_broker.idl
++++ b/third_party/blink/renderer/core/html/native_window_broker.idl
+@@ -128,6 +128,11 @@
+     // moves to another display (and once on subscribing, as
+     // "shellschanged"); read them with getDisplays().
+     attribute EventHandler ondisplayschanged;
++    // PLUTONIUM: a touchpad swipe with three fingers or more (a
++    // ShellCaptureEvent: its |detail| is {phase: "begin" | "update" | "end",
++    // fingers, dx, dy, x, y}), to the visible shell on the focused display.
++    // Nothing else gets these swipes.
++    attribute EventHandler ontouchpadswipe;
+     // Asks the visible shell on display |displayId| to show window
+     // |windowId| or tab |tabId| (a "windowfocusrequest" or
+     // "tabfocusrequest" there; showing it takes it from where it is shown
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.cc b/ui/events/ozone/evdev/libinput_event_converter.cc
+index 8fc62e7872..bf34001ae4 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.cc
++++ b/ui/events/ozone/evdev/libinput_event_converter.cc
+@@ -90,6 +90,13 @@ libinput_event_pointer* LibInputEventConverter::LibInputEvent::PointerEvent()
+   return event;
+ }
+ 
++libinput_event_gesture* LibInputEventConverter::LibInputEvent::GestureEvent()
++    const {
++  auto* const event = libinput_event_get_gesture_event(event_);
++  DCHECK(event);
++  return event;
++}
++
+ libinput_event_type LibInputEventConverter::LibInputEvent::Type() const {
+   return libinput_event_get_type(event_);
+ }
+@@ -374,6 +381,16 @@ void LibInputEventConverter::HandleEvent(const LibInputEvent& event) {
+       HandlePointerAxis(event);
+       break;
+ 
++    // PLUTONIUM: touchpad swipes with three fingers or more, which nothing
++    // read before. They go on as ChromeOS's gesture library sends them:
++    // scroll events with their finger count (Ash's shell mode hands them to
++    // the visible shell page).
++    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
++    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE:
++    case LIBINPUT_EVENT_GESTURE_SWIPE_END:
++      HandleSwipe(event);
++      break;
++
+     default:
+       DVLOG(3) << "Ignoring libinput event: " << event.Type();
+       break;
+@@ -440,6 +457,35 @@ void LibInputEventConverter::HandlePointerAxis(const LibInputEvent& evt) {
+        cursor_->GetLocation(), delta, delta, 2, Timestamp(evt)});
+ }
+ 
++void LibInputEventConverter::HandleSwipe(const LibInputEvent& evt) {
++  libinput_event_gesture* event = evt.GestureEvent();
++  const int fingers = libinput_event_gesture_get_finger_count(event);
++  // Where the fingers moved (not the content: natural scrolling doesn't apply).
++  gfx::Vector2dF delta;
++  EventType type = EventType::kScroll;
++  switch (evt.Type()) {
++    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
++      // A scroll's start in ChromeOS's gesture library.
++      type = EventType::kScrollFlingCancel;
++      break;
++    case LIBINPUT_EVENT_GESTURE_SWIPE_END:
++      type = EventType::kScrollFlingStart;
++      break;
++    default:
++      delta = gfx::Vector2dF(libinput_event_gesture_get_dx(event),
++                             libinput_event_gesture_get_dy(event));
++      break;
++  }
++
++  DVLOG(3) << "Swipe fingers=" << fingers << " type=" << static_cast<int>(type)
++           << " delta=" << delta.ToString();
++
++  dispatcher_->DispatchScrollEvent(
++      {input_device_.id, type, cursor_->GetLocation(), delta, delta, fingers,
++       base::TimeTicks() +
++           base::Microseconds(libinput_event_gesture_get_time_usec(event))});
++}
++
+ base::TimeTicks LibInputEventConverter::Timestamp(const LibInputEvent& evt) {
+   libinput_event_pointer* event = evt.PointerEvent();
+   uint64_t time_usec = libinput_event_pointer_get_time_usec(event);
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.h b/ui/events/ozone/evdev/libinput_event_converter.h
+index 4a343835ca..2d393493d6 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.h
++++ b/ui/events/ozone/evdev/libinput_event_converter.h
+@@ -36,6 +36,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     ~LibInputEvent();
+ 
+     libinput_event_pointer* PointerEvent() const;
++    libinput_event_gesture* GestureEvent() const;
+     libinput_event_type Type() const;
+ 
+    private:
+@@ -133,6 +134,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+   void HandlePointerMotion(const LibInputEvent& evt);
+   void HandlePointerButton(const LibInputEvent& evt);
+   void HandlePointerAxis(const LibInputEvent& evt);
++  void HandleSwipe(const LibInputEvent& evt);
+   base::TimeTicks Timestamp(const LibInputEvent& evt);
+ 
+   RAW_PTR_EXCLUSION DeviceEventDispatcherEvdev* const dispatcher_;
