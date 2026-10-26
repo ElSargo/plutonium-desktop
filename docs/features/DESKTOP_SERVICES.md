@@ -225,8 +225,11 @@ the microphone), `brightness.js`, `battery.js` (time left in its tooltip),
 Indicators hide when their service has nothing (no battery, no backlight, no
 player).
 Tested in the same session: both shells show the real volume, brightness and
-battery, in order; the volume popover and the power menu (its four entries;
-none was run) open.
+battery, in order. From niri's bar: the volume slider, wheel, mute button and
+middle-click, the brightness slider and wheel (all put back after); the power
+menu's four entries, and Restart's confirm cancelled (none was run); a real
+`mpv` as now playing, paused from the bar's icon and played from the
+popover's controls.
 
 ### notifications
 
