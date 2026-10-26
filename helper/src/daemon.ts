@@ -54,8 +54,10 @@ import { PowerService } from "./services/power.ts";
 import { MediaService } from "./services/media.ts";
 import { BluetoothService } from "./services/bluetooth.ts";
 import { NetworkService } from "./services/network.ts";
+import { SessionService } from "./services/session.ts";
+import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
-import { ShellError } from "./shells.ts";
+import { plutoHome, ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -359,6 +361,8 @@ export class Daemon {
     this.relay.notifyWhere((origin) => this.mayUse(origin, service), "system", { service, state }),
   );
   readonly apps = new DesktopApps();
+  /** EXO-LOCK: the lock screen and idle (services/session.ts). */
+  readonly session: SessionService;
   readonly terminals: Terminals;
   readonly serverTabs: ServerTabs | null;
   /** The browser's windows and tabs, if it has the Plutonium DevTools domain. */
@@ -415,7 +419,8 @@ export class Daemon {
     // (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
     const notificationSlot = options.shells?.context.slot ?? 0;
     const serveNotifications = (process.env.PLUTONIUM_NOTIFICATIONS ?? (notificationSlot === 0 ? "1" : "0")) !== "0";
-    this.services.register(new NotificationsService(undefined, serveNotifications));
+    const notifications = new NotificationsService(undefined, serveNotifications);
+    this.services.register(notifications);
     this.services.register(new AudioService());
     this.services.register(new PowerService({ logOut: () => this.logOut() }));
     this.services.register(
@@ -435,6 +440,27 @@ export class Daemon {
     const agentId = `org.plutonium.helper.${basename(options.socketPath).replace(/[^A-Za-z0-9_-]/g, "_")}`;
     this.services.register(new NetworkService({ agentId, ask: (kind, detail, signal) => this.askForService("network", kind, detail, signal) }));
     this.services.register(new BluetoothService({ ask: (kind, detail, signal) => this.askForService("bluetooth", kind, detail, signal) }));
+    // EXO-LOCK: unix_chkpwd checks the password; PLUTONIUM_PASSWORD_CHECKER
+    // names a stand-in with its interface, for tests.
+    const checker = process.env.PLUTONIUM_PASSWORD_CHECKER || findChecker();
+    this.session = new SessionService({
+      browser: cdp
+        ? {
+            lock: (user, message) => this.desktop!.lock(user, message),
+            idle: () => this.desktop!.idle(),
+            setDisplaysOff: (off) => this.desktop!.setDisplaysOff(off),
+            onLockChanged: (listener) => this.desktop?.lockListeners.add(listener),
+          }
+        : null,
+      checker: checker ? unixChecker(checker) : null,
+      settingsFile: join(plutoHome(), "session.json"),
+      sessionBus: process.env.DBUS_SESSION_BUS_ADDRESS || null,
+      // logind's Lock and sleep are the seat's: a DRM session's, not an X11 one's.
+      systemBus: options.waylandDisplay.includes("-x11") ? null : "unix:path=/run/dbus/system_bus_socket",
+      sessionId: process.env.XDG_SESSION_ID,
+      notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
+    });
+    this.services.register(this.session);
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -462,6 +488,14 @@ export class Daemon {
           : this.relay.notify(page, "pointer", { ...pointer });
       serverTabs.onOrphaned = (key) => this.relay.notifyAll("server_tab_orphaned", { ...key });
       if (this.desktop) this.openServerTabs(serverTabs, this.desktop);
+    }
+    {
+      // EXO-LOCK: a shell's inhibitor goes with its last page.
+      const disconnect = this.relay.onDisconnect;
+      this.relay.onDisconnect = (page) => {
+        disconnect(page);
+        this.session.keepShells(new Set(this.relay.shells().map(({ origin }) => this.callerOf(origin))));
+      };
     }
     // The shells show the windows agents work in as such (agent_windows),
     // also to a page that connects later.
@@ -676,6 +710,9 @@ export class Daemon {
     } finally {
       signal?.removeEventListener("abort", takeBack);
     }
+  /** Who a shell is to the services: its name, or its origin if it isn't installed. */
+  private callerOf(origin: string): string {
+    return this.options.shells?.byOrigin(origin)?.name ?? origin;
   }
 
   /** Whether the shell on `origin` may use desktop service `service` (its "uses"). */
@@ -1673,7 +1710,9 @@ export class Daemon {
           if (method === "GET" && !action) return sendJson(response, 200, await this.services.state(name));
           if (method === "POST" && action) {
             const args = (await readJson(request)) as Record<string, unknown>;
-            return sendJson(response, 200, { value: (await this.services.call(name, action, args ?? {})) ?? null });
+            return sendJson(response, 200, {
+              value: (await this.services.call(name, action, args ?? {}, this.callerOf(origin))) ?? null,
+            });
           }
         } catch (error) {
           if (error instanceof ServiceError) throw new HttpError(error.status, error.message);
@@ -1948,6 +1987,21 @@ export class Daemon {
       if (method === "POST" && path === "/v1/system/key") {
         const { key } = await readJson(request);
         return sendJson(response, 200, { handled: await this.systemKey(String(key)) });
+      }
+      // EXO-LOCK: from Ash: Super+L, and the password typed on the lock.
+      if (method === "POST" && path === "/v1/session/lock") {
+        try {
+          await this.services.call("session", "lock", {});
+        } catch (error) {
+          if (error instanceof ServiceError) throw new HttpError(error.status, error.message);
+          throw error;
+        }
+        return sendJson(response, 200, { ok: true });
+      }
+      if (method === "POST" && path === "/v1/session/unlock") {
+        const { password } = await readJson(request);
+        if (typeof password !== "string") throw new HttpError(400, "password is required.");
+        return sendJson(response, 200, await this.session.unlock(password));
       }
       // EXO-TAB-FEATURES: the browser's "open" and "show" for a download.
       if (method === "POST" && path === "/v1/downloads/open") {
@@ -2355,6 +2409,10 @@ export class Daemon {
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
     }
+    // EXO-LOCK: idle, logind and apps' inhibitors from the start.
+    if (this.options.cdpPort) {
+      this.services.state("session").catch((error: unknown) => console.warn(`plutoniumd: no session: ${(error as Error).message}`));
+    }
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
       const portal = new Portal({
@@ -2367,6 +2425,8 @@ export class Daemon {
         },
         notifyShells: (op, args) => this.relay.notifyAll(op, args),
         windows: () => this.relay.windows(),
+        inhibit: (key, who, why) => this.session.portalInhibit(key, who, why),
+        uninhibit: (key) => this.session.portalUninhibit(key),
       });
       portal.start().then(
         () => (this.portal = portal),

@@ -1,5 +1,6 @@
-// The power menu (shell.system.power): suspend, restart, power off and log
-// out, each after a confirm. Log out ends this Plutonium session.
+// The power menu (shell.system.power): lock (shell.system.session), then
+// suspend, restart, power off and log out, each after a confirm. Log out ends
+// this Plutonium session.
 import { button, closePopover, confirm, icon, item, popover, style, watch } from "./tray.js";
 
 const ACTIONS = [
@@ -12,12 +13,37 @@ const ACTIONS = [
 export default function power(shell, container) {
   style();
   const service = shell.system.power;
+  const session = shell.system.session;
   const element = button("Power");
   element.innerHTML = icon("power");
   container.append(element);
   let state = null;
+  let sessionState = null;
+
+  const failed = (label, error) =>
+    popover(element, (again) => {
+      fill(again);
+      const message = document.createElement("div");
+      message.className = "error";
+      message.textContent = `${label}: ${error.message ?? error}`;
+      again.append(message);
+    });
 
   const fill = (pop) => {
+    if (sessionState) {
+      // No confirm: the password brings it back. Disabled (with why) when there's no way to check one.
+      const lock = item("lock", "Lock", async () => {
+        closePopover();
+        try {
+          await session.call("lock");
+        } catch (error) {
+          failed("Lock", error);
+        }
+      });
+      lock.disabled = !sessionState.canLock;
+      if (sessionState.problem) lock.title = sessionState.problem;
+      pop.append(lock);
+    }
     for (const entry of ACTIONS) {
       const can = state?.can?.[entry.can] ?? "na";
       if (can === "na") continue;
@@ -27,13 +53,7 @@ export default function power(shell, container) {
         try {
           await service.call(entry.action);
         } catch (error) {
-          popover(element, (again) => {
-            fill(again);
-            const message = document.createElement("div");
-            message.className = "error";
-            message.textContent = `${entry.label}: ${error.message ?? error}`;
-            again.append(message);
-          });
+          failed(entry.label, error);
         }
       });
       // "challenge" would ask for a password, which needs a polkit agent.
@@ -42,9 +62,16 @@ export default function power(shell, container) {
     }
   };
 
+  const show = () => {
+    element.hidden = !sessionState && (!state || !Object.values(state.can ?? {}).some((can) => can !== "na"));
+  };
   watch(service, (next) => {
     state = next;
-    element.hidden = !state || !Object.values(state.can ?? {}).some((can) => can !== "na");
+    show();
+  });
+  watch(session, (next) => {
+    sessionState = next;
+    show();
   });
   element.addEventListener("click", () => popover(element, fill));
 }

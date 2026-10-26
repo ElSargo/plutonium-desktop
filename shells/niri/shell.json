@@ -3,5 +3,5 @@
   "version": "2",
   "description": "A clone of the niri compositor: scrollable tiling, with niri's default binds.",
   "static": "index.html",
-  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth"]
+  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"]
 }

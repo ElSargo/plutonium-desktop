@@ -3,5 +3,5 @@
   "version": "2",
   "description": "A minimal thread-based shell: threads on the left, each thread's apps and tabs on the right.",
   "static": "index.html",
-  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth"]
+  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"]
 }

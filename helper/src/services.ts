@@ -14,8 +14,11 @@ export interface DesktopService {
   start(changed: (state: unknown) => void): Promise<void>;
   /** The state now. */
   state(): Promise<unknown>;
-  /** Runs `action`; throw ServiceError(404) for one it doesn't have. */
-  call(action: string, args: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Runs `action`; throw ServiceError(404) for one it doesn't have. `caller`:
+   * the shell asking (its name, or its origin if it isn't installed).
+   */
+  call(action: string, args: Record<string, unknown>, caller?: string): Promise<unknown>;
   stop?(): void;
 }
 
@@ -61,8 +64,8 @@ export class DesktopServices {
     return (await this.use(name)).state();
   }
 
-  async call(name: string, action: string, args: Record<string, unknown>): Promise<unknown> {
-    return (await this.use(name)).call(action, args);
+  async call(name: string, action: string, args: Record<string, unknown>, caller?: string): Promise<unknown> {
+    return (await this.use(name)).call(action, args, caller);
   }
 
   stop(): void {

@@ -119,6 +119,7 @@ describe("portal backend on a bus", { skip: dbusDaemon ? false : "no dbus-daemon
   let portal: Portal;
   let client: DBusConnection;
   let shots: string;
+  const inhibits: string[] = [];
 
   before(async () => {
     dir = mkdtempSync(join(tmpdir(), "plutonium-portal-"));
@@ -133,6 +134,8 @@ describe("portal backend on a bus", { skip: dbusDaemon ? false : "no dbus-daemon
       apps: { list: () => [{ id: "com.obsproject.Studio.desktop", name: "OBS Studio" }] } as never,
       threadForPid: () => "t3:thread/1",
       address,
+      inhibit: (key, who, why) => inhibits.push(`inhibit ${key} ${who} ${why}`),
+      uninhibit: (key) => inhibits.push(`uninhibit ${key}`),
     });
     await portal.start();
     client = await DBusConnection.connect(address);
@@ -221,6 +224,18 @@ describe("portal backend on a bus", { skip: dbusDaemon ? false : "no dbus-daemon
     // Closing the session stops its capture.
     await client.call({ destination: PORTAL_NAME, path: session, interface: "org.freedesktop.impl.portal.Session", member: "Close" });
     assert.ok(desktop.commands.some((entry) => entry.command === "stop" && entry.args.id === 1));
+  });
+
+  test("Inhibit for idle holds until its request closes", async () => {
+    const INHIBIT = "org.freedesktop.impl.portal.Inhibit";
+    // Logout and suspend only (1 | 4): not the session service's.
+    await call(INHIBIT, "Inhibit", "ossua{sv}", [handle(), "com.obsproject.Studio", "", 5, new Map()]);
+    assert.deepEqual(inhibits, []);
+    const request = handle();
+    await call(INHIBIT, "Inhibit", "ossua{sv}", [request, "com.obsproject.Studio", "", 8, new Map([["reason", ["s", "Recording"]]])]);
+    assert.deepEqual(inhibits, [`inhibit ${request} OBS Studio Recording`]);
+    await client.call({ destination: PORTAL_NAME, path: request, interface: "org.freedesktop.impl.portal.Request", member: "Close" });
+    assert.deepEqual(inhibits.at(-1), `uninhibit ${request}`);
   });
 
   test("a refused request is cancelled", async () => {

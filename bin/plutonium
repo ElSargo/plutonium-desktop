@@ -1459,6 +1459,11 @@ doctor() {
   check_opt "foot (the shells' terminal, Super+T)" "command -v foot" "$(install_hint foot)"
   check_opt "xwayland-satellite (X11 apps)" "command -v xwayland-satellite || [ -x \"\${PLUTONIUM_XWAYLAND_SATELLITE:-}\" ]" "$(install_hint xwayland-satellite)"
   check_opt "systemd-socket-activate (X11 apps)" "command -v systemd-socket-activate" "$(install_hint socket-activate)"
+  # EXO-LOCK: the lock screen checks the password with PAM's unix_chkpwd; without it, it won't lock.
+  check_opt "unix_chkpwd (the lock screen's password check)" \
+    "test -x /run/wrappers/bin/unix_chkpwd || test -x /usr/sbin/unix_chkpwd || test -x /sbin/unix_chkpwd || test -x /usr/bin/unix_chkpwd || test -x /usr/libexec/unix_chkpwd" \
+    "it comes with PAM (pam_unix): without it the screen can't be locked (Super+L, idle) and says so"
+  check_opt "systemd-inhibit (the lock before suspend)" "command -v systemd-inhibit" "it comes with systemd"
   check_opt "the helper's dependencies (agents driving pages)" "[ -d $ROOT/helper/node_modules/playwright-core ]" \
     "plutonium run installs them, or: (cd helper && npm ci --omit=dev)"
   if [[ -n ${HOST:-} ]]; then

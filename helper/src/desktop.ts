@@ -9,6 +9,7 @@
 // `available()` is false and the daemon asks the shell instead.
 import { type BrowserCdp, type CdpEvent, CdpError } from "./cdp.ts";
 import type { BrowserSession } from "./services/media.ts";
+import type { BrowserIdle } from "./services/session.ts";
 
 /** A browser tab (Plutonium.Tab). */
 export interface DesktopTab {
@@ -147,6 +148,8 @@ export class Desktop {
   /** EXO-CAPTURE: a capture started, changed or stopped. */
   /** The browser's active media session as it changes (null when there's none). */
   readonly mediaListeners = new Set<(session: BrowserSession | null) => void>();
+  /** EXO-LOCK: the lock went up or down. */
+  readonly lockListeners = new Set<(locked: boolean) => void>();
   readonly captureListeners = new Set<(type: "start" | "change" | "stop", capture: DesktopCapture) => void>();
 
   constructor(cdp: BrowserCdp) {
@@ -247,6 +250,10 @@ export class Desktop {
         for (const listener of this.captureListeners) listener(type, capture);
         return;
       }
+      case "Plutonium.lockChanged": {
+        for (const listener of this.lockListeners) listener(value.locked === true);
+        return;
+      }
       case "Plutonium.mediaSessionChanged": {
         const session = mediaSessionOf(value.session);
         for (const listener of this.mediaListeners) listener(session);
@@ -277,6 +284,23 @@ export class Desktop {
   /** Plays, pauses… the browser's active media session ("play-pause", "next", …). */
   async mediaSessionAction(action: string): Promise<void> {
     await this.cdp.send("Plutonium.mediaSessionAction", { action });
+  }
+
+  /** EXO-LOCK: puts Ash's lock up (only the password takes it down). */
+  async lock(user: string, message: string): Promise<void> {
+    if (!(await this.available())) throw new Error("The browser has no Plutonium domain.");
+    await this.cdp.send("Plutonium.lock", { user, message });
+  }
+
+  /** EXO-LOCK: the lock, the idle time, the displays and the browser's wake locks. */
+  async idle(): Promise<BrowserIdle> {
+    if (!(await this.available())) throw new Error("The browser has no Plutonium domain.");
+    return (await this.cdp.send("Plutonium.getIdle")) as BrowserIdle;
+  }
+
+  /** EXO-LOCK: the displays off (until the user does something) or on; false where it can't (X11). */
+  async setDisplaysOff(off: boolean): Promise<boolean> {
+    return ((await this.cdp.send("Plutonium.setDisplaysOff", { off })) as { applied: boolean }).applied;
   }
 
   /** Every tab, oldest first. Call available() first. */

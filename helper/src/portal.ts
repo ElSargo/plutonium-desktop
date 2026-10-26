@@ -51,6 +51,9 @@ const SCREENCAST = "org.freedesktop.impl.portal.ScreenCast";
 const SCREENSHOT = "org.freedesktop.impl.portal.Screenshot";
 const GLOBAL_SHORTCUTS = "org.freedesktop.impl.portal.GlobalShortcuts";
 const FILE_CHOOSER = "org.freedesktop.impl.portal.FileChooser";
+const INHIBIT = "org.freedesktop.impl.portal.Inhibit";
+/** Inhibit's flag for idle (1 logout, 2 user switch, 4 suspend). */
+const INHIBIT_IDLE = 8;
 const REQUEST = "org.freedesktop.impl.portal.Request";
 const SESSION = "org.freedesktop.impl.portal.Session";
 const PROPERTIES = "org.freedesktop.DBus.Properties";
@@ -148,6 +151,12 @@ export interface PortalOptions {
   readonly print?: boolean;
   /** The native windows (the shell relay's), to find a request's parent. */
   readonly windows?: () => Promise<readonly { id: number; appId: string; pid: number; focused: boolean }[]>;
+  /**
+   * EXO-LOCK: an app's Inhibit for idle (the session service holds off the
+   * screen off and the lock), `key` its request; uninhibit when it ends.
+   */
+  readonly inhibit?: (key: string, who: string, why: string) => void;
+  readonly uninhibit?: (key: string) => void;
 }
 
 /** A global shortcut an app bound: its combo, if it has one. */
@@ -261,6 +270,9 @@ export class Portal {
     if (iface === FILE_CHOOSER && (member === "OpenFile" || member === "SaveFile" || member === "SaveFiles")) {
       return this.chooseFiles(member, String(body[0]), String(body[1]), String(body[2]), String(body[3]), optionsOf(body[4]));
     }
+    if (iface === INHIBIT && member === "Inhibit") {
+      return this.inhibit(String(body[0]), String(body[1]), Number(body[3]), optionsOf(body[4]));
+    }
     if (iface === SCREENSHOT) {
       switch (member) {
         case "Screenshot":
@@ -282,6 +294,18 @@ export class Portal {
     }
     if (iface === SCREENSHOT) return { version: ["u", 2] };
     if (iface === GLOBAL_SHORTCUTS) return { version: ["u", 1] };
+    return {};
+  }
+
+  /** EXO-LOCK: an app's Inhibit; it lasts until the frontend closes its request. */
+  private inhibit(handle: string, appId: string, flags: number, options: Map<string, unknown>): Reply {
+    if (!(flags & INHIBIT_IDLE) || !this.options.inhibit) return {};
+    const reason = options.get("reason");
+    this.options.inhibit(handle, this.appName(appId, 0), typeof reason === "string" ? reason : "");
+    this.requests.set(handle, () => {
+      this.requests.delete(handle);
+      this.options.uninhibit?.(handle);
+    });
     return {};
   }
 
@@ -721,6 +745,9 @@ const INTROSPECTION = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object I
     <method name="OpenFile"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
     <method name="SaveFile"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
     <method name="SaveFiles"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
+  </interface>
+  <interface name="${INHIBIT}">
+    <method name="Inhibit"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="a{sv}" direction="in"/></method>
   </interface>
   <interface name="${GLOBAL_SHORTCUTS}">
     <method name="CreateSession"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>
