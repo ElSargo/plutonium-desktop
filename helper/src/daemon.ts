@@ -410,7 +410,12 @@ export class Daemon {
       COLORTERM: "truecolor",
     }));
     const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
-    this.services.register(new NotificationsService());
+    // Only the user's own session (slot 0) is the bus's notification server by default:
+    // a test session in another slot would take the host desktop's notifications
+    // (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
+    const notificationSlot = options.shells?.context.slot ?? 0;
+    const serveNotifications = (process.env.PLUTONIUM_NOTIFICATIONS ?? (notificationSlot === 0 ? "1" : "0")) !== "0";
+    this.services.register(new NotificationsService(undefined, serveNotifications));
     this.services.register(new AudioService());
     this.services.register(new PowerService({ logOut: () => this.logOut() }));
     this.services.register(
@@ -2342,12 +2347,10 @@ export class Daemon {
     }, 2000);
     setTimeout(() => clearInterval(check), 120_000).unref();
     check.unref();
-    // Apps' notifications reach the shells from the start, whether or not one shows them yet.
-    // Only the user's own session (slot 0) by default: a test session in another slot would
-    // take the host desktop's notifications (PLUTONIUM_NOTIFICATIONS=1 serves them anyway).
+    // Apps' notifications reach the shells from the start, whether or not one shows them yet
+    // (the service decides whether it's on the bus: see its registration).
     const slot = this.options.shells?.context.slot ?? 0;
-    const notifications = process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0");
-    if (this.options.cdpPort && notifications !== "0") {
+    if (this.options.cdpPort && (process.env.PLUTONIUM_NOTIFICATIONS ?? (slot === 0 ? "1" : "0")) !== "0") {
       this.services
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));

@@ -81,6 +81,7 @@ export function parseNotify(id: number, body: readonly unknown[], now = Date.now
 export class NotificationsService implements DesktopService {
   readonly name = "notifications";
   private readonly address: string | undefined;
+  private readonly serve: boolean;
   private bus: DBusConnection | null = null;
   private list: Notification[] = [];
   private readonly timers = new Map<number, NodeJS.Timeout>();
@@ -88,13 +89,19 @@ export class NotificationsService implements DesktopService {
   private doNotDisturb = false;
   private changed: (state: unknown) => void = () => {};
 
-  /** `address`: the session bus (default $DBUS_SESSION_BUS_ADDRESS). */
-  constructor(address?: string) {
+  /**
+   * `address`: the session bus (default $DBUS_SESSION_BUS_ADDRESS). `serve`
+   * false: not on the bus at all (a test session's helper, which would take the
+   * host desktop's notifications); the shell's and tabs' own still work.
+   */
+  constructor(address?: string, serve = true) {
     this.address = address;
+    this.serve = serve;
   }
 
   async start(changed: (state: unknown) => void): Promise<void> {
     this.changed = changed;
+    if (!this.serve) return;
     const address = this.address ?? process.env.DBUS_SESSION_BUS_ADDRESS;
     if (!address) throw new ServiceError(503, "There's no session bus (DBUS_SESSION_BUS_ADDRESS).");
     const bus = await DBusConnection.connect(address);

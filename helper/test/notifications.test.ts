@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, test } from "node:test";
 
+import { DBusConnection } from "../src/dbus.ts";
 import { CLOSED, NotificationsService, parseNotify, type NotificationsState } from "../src/services/notifications.ts";
 
 const run = promisify(execFile);
@@ -87,6 +88,19 @@ describe("notifications", () => {
         "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.GetServerInformation"], { env }).catch(() => null);
       if (info) assert.match(info.stdout, /Plutonium/);
       assert.equal(CLOSED.dismissed, 2);
+      // A test session's (serve false) stays off the bus, even started.
+      const quiet = new NotificationsService(address, false);
+      await quiet.start(() => {});
+      quiet.notify(["Shell", 0, "", "Its own", "", [], new Map(), -1]);
+      assert.equal((await quiet.state()).notifications[0]?.summary, "Its own");
+      service.stop();
+      const bus = await DBusConnection.connect(address);
+      const hasOwner = async () => ((await bus.call({ destination: "org.freedesktop.DBus", path: "/org/freedesktop/DBus",
+        interface: "org.freedesktop.DBus", member: "NameHasOwner", signature: "s", body: ["org.freedesktop.Notifications"] })) as [boolean])[0];
+      for (let i = 0; i < 50 && (await hasOwner()); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(await hasOwner(), false);
+      bus.close();
+      quiet.stop();
     } finally {
       service.stop();
       daemon.kill();
