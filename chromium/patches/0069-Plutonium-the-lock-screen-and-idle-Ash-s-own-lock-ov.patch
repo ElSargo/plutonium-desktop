@@ -31,10 +31,10 @@ does something) and the lockChanged event.
  .../chrome_browser_main_extra_parts_ash.cc    |   6 +
  .../chrome_browser_main_extra_parts_ash.h     |   3 +
  .../main_extra_parts/plutonium_lock_impl.cc   | 538 ++++++++++++++++++
- .../main_extra_parts/plutonium_lock_impl.h    | 118 ++++
+ .../main_extra_parts/plutonium_lock_impl.h    | 120 ++++
  .../dbus/power/power_policy_controller.cc     |  11 +
  chromeos/dbus/power/power_policy_controller.h |   5 +
- 14 files changed, 893 insertions(+), 1 deletion(-)
+ 14 files changed, 895 insertions(+), 1 deletion(-)
  create mode 100644 chrome/browser/plutonium_lock.cc
  create mode 100644 chrome/browser/plutonium_lock.h
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
@@ -983,10 +983,10 @@ index 0000000000..67935da723
 +}
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
 new file mode 100644
-index 0000000000..2b1ea4b97d
+index 0000000000..4d469c1172
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,120 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -995,6 +995,7 @@ index 0000000000..2b1ea4b97d
 +#define CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_LOCK_IMPL_H_
 +
 +#include <memory>
++#include <optional>
 +#include <string>
 +#include <vector>
 +
@@ -1002,6 +1003,7 @@ index 0000000000..2b1ea4b97d
 +#include "base/memory/weak_ptr.h"
 +#include "base/time/time.h"
 +#include "base/timer/timer.h"
++#include "base/values.h"
 +#include "chrome/browser/plutonium_lock.h"
 +#include "ui/aura/window_tracker.h"
 +#include "ui/base/user_activity/user_activity_observer.h"
