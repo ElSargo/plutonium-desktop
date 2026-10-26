@@ -623,6 +623,27 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   stacking fixed after it.
 - [x] **Frontends** (step 4). M · T3 and the plain shell register threads,
   tag what they open, show an "Elsewhere" area with import.
+- [x] **Shells as installed packages** (`SHELL_PACKAGES.md`). L · Shipped
+  shells installed in `~/.pluto/shells/<name>` as git repositories with a
+  `shell.json`; static ones served by the helper on `<name>.localhost`,
+  servers (T3 Code) run and supervised by the helper; `shells.json` follows
+  the switcher; `plutonium shells install|update|list`; Customize (an agent
+  or a terminal in the folder), edits committed and rolled back when the
+  shell doesn't come up; safe mode; adding from a folder, git or an address.
+- [ ] **Installed shells: check the switcher's parts in a session** (Customize,
+  server controls, a rolled back change's notice, Add a shell turning one on)
+  and an agent's edit end to end; then on DRM.
+- [ ] **Installed shells: notices outside the switcher.** A rollback shows in
+  the switcher's status line and the shell's page; the visible shell isn't
+  told (a `shellnotice` event in the library for shells to show).
+- [ ] **Installed shells: a renderer crash** of a shell after an edit isn't
+  noticed (only "no page connected in time"): watch the shell's contents
+  over DevTools (`Inspector.targetCrashed`) and roll back.
+- [ ] **Installed shells: Ask an agent in T3 Code** (a T3 thread in the
+  shell's folder) when T3 is running, rather than Claude Code in a terminal.
+- [ ] **Installed shells: the T3 checkout as part of the T3 shell.** Its
+  manifest runs `plutonium t3 serve` from the checkout Plutonium runs from
+  (`T3CODE_DIR`); a T3 install could live in the shell's folder instead.
 
 ## Several monitors (`MULTI_MONITOR.md`)
 

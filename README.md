@@ -19,7 +19,7 @@ Early, but usable day to day: several monitors, the clipboard between apps and p
 - a login-screen session entry (you start it from a text console);
 - the file picker for native apps (tabs have one), and the other desktop portals;
 - input methods in native apps (in progress);
-- installing and editing shells as packages (in progress).
+- shells as installed packages in `~/.pluto/shells`, which you or an agent edit safely ([SHELL_PACKAGES.md](docs/features/SHELL_PACKAGES.md)).
 
 It has been developed on AMD graphics. Intel should work; NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
@@ -56,6 +56,8 @@ bin/plutonium run niri plain
 ```
 
 In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells.
+
+The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Ask an agent** or **Open a terminal**. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
 
 ## Building from source
 

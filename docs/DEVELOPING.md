@@ -6,7 +6,7 @@
 |---|---|---|
 | The helper, its API, link opening, MCP tools | `helper/` (TypeScript run by Node 24 directly, no build) | restart the session, or only its helper |
 | The shell library (`/v1/shell.js`) | `helper/web/plutonium-shell.js` | reload the shells; from a worktree, `plutonium live apply shell-lib` |
-| A shell's UI | `shells/<name>/index.html` | reload the page (`plutonium live reload <name>`); from a worktree, `plutonium live apply <name>` |
+| A shell's UI | `shells/<name>/` (what's shipped) | `plutonium shells update <name> [--from <checkout>]` merges it into the installed copy, whose save reloads the shell; or edit `$PLUTO_HOME/shells/<name>` directly ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)) |
 | T3 Code's integration | the checkout in `frontends/t3code/checkout` | `plutonium t3 build`, reload; or `plutonium live apply t3`; commit, then `plutonium t3 export` |
 | Chromium: Exo, the broker, elements, tabs, shell mode | the checkout in `$CHROMIUM_DIR/src`, branch `plutonium` | `plutonium chromium build`, restart the session; commit, then `plutonium chromium export` |
 
@@ -32,7 +32,7 @@ The patch series in `chromium/patches/` is the source of truth. The checkout's `
 
 Several checkouts (git worktrees) can be worked on at once, by people or agents, each with its own sessions.
 
-**A worktree:** `plutonium worktree add <name> [<start>]` makes one in `.worktrees/<name>` (on branch `<name>`), links the main checkout's `plutonium.env` into it, and gives it a **slot**. In slot N, a session's ports are 100 × N higher (DevTools, helper, the niri and plain shells' servers, T3 Code) and its socket, profile and Xvfb display have their own names (`wayland-plutonium-x11-s1`, `profile-x11-s1`, `:100`). `plutonium worktree info` lists them. The main checkout is slot 0, with the usual names. For a worktree made some other way (T3 Code makes its own), run `plutonium worktree setup` in it.
+**A worktree:** `plutonium worktree add <name> [<start>]` makes one in `.worktrees/<name>` (on branch `<name>`), links the main checkout's `plutonium.env` into it, and gives it a **slot**. In slot N, a session's ports are 100 × N higher (DevTools, helper, the static shells' port, T3 Code), it has its own installed shells (`$PLUTO_HOME` is `$DATA_DIR/pluto-s<N>`, not `~/.pluto`), and its socket, profile and Xvfb display have their own names (`wayland-plutonium-x11-s1`, `profile-x11-s1`, `:100`). `plutonium worktree info` lists them. The main checkout is slot 0, with the usual names. For a worktree made some other way (T3 Code makes its own), run `plutonium worktree setup` in it.
 
 Settings for one worktree go in its `plutonium.local.env`, which is read after `plutonium.env`. For example, `T3_HOME=…` to run T3 Code there: Plutonium won't run two T3 Code servers on the same data.
 
@@ -64,17 +64,17 @@ Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium conta
 
 ## Applying changes to a running session
 
-`plutonium live` changes what a running session's shells are made of, with no restart: niri, plain, the helper's `shell.js` (`shell-lib`), and T3 Code's web app (`t3`).
+`plutonium live` changes what a running session's shells are made of, with no restart: the helper's `shell.js` (`shell-lib`), and T3 Code's web app (`t3`). niri, plain and the other installed shells need no `live`: the helper serves them from `$PLUTO_HOME/shells` on every request, and a change there reloads them. `plutonium shells update niri --from <worktree>` merges a worktree's version in.
 
 ```
-plutonium live apply niri plain --from ~/.t3/worktrees/plutonium-desktop/t3-60ce77be
+plutonium live apply shell-lib --from ~/.t3/worktrees/plutonium-desktop/t3-60ce77be
 plutonium live apply t3 --from ~/.t3/worktrees/t3code-oauth-popups
 plutonium live status
 plutonium live revert t3
 ```
 
-**How it works.** Ash gives shell rights to origins fixed when it starts (`127.0.0.1:8775`, and so on), so a worktree's own servers, on its slot's ports, can't stand in for them. What's behind those origins can change instead:
-- **The links.** The shell servers serve `$DATA_DIR/live/slot<N>/<part>/current`, and the helper serves `shell.js` from `shell-lib/current`. These are links. Until something is applied, each one points at the checkout's own files, which is how sessions worked before.
+**How it works.** Ash gives shell rights to origins fixed when it starts (`127.0.0.1:3773`, and so on), so a worktree's own servers, on its slot's ports, can't stand in for them. What's behind those origins can change instead:
+- **The links.** The helper serves `shell.js` from `$DATA_DIR/live/slot<N>/shell-lib/current`. It's a link. Until something is applied, each one points at the checkout's own files, which is how sessions worked before.
 - **T3 Code.** Its server serves its checkout's `apps/web/dist`, read on every request. The first `apply t3` keeps a copy of the build that's there, then makes `dist` a link to the live one.
 - **`apply`** copies the part from a checkout's files as they are (a worktree an agent is working in, uncommitted changes included) or from a commit of this repository. For t3, it builds the checkout's web app into the copy, as the running server's version (about 40 s; the checkout needs its `pnpm install`). It then points `current` at the copy, in one rename, and reloads every page of this slot's sessions that uses the part, bypassing the cache. The page keeps its origin, so it keeps its shell rights. `--follow` points at the checkout's own files instead of a copy, so each reload shows its latest edits. `--no-reload` leaves reloading to you.
 - **`revert`** goes back to the previous one. The newest `LIVE_KEEP` (5) copies of each part are kept, and `live list <part>` shows them.
@@ -82,7 +82,7 @@ plutonium live revert t3
 **What it can't change without a restart:**
 - **The T3 Code server.** Its web app talks to it through `packages/contracts`. `apply t3` refuses a checkout whose `apps/server/src` or `packages/contracts/src` differ from what the running server was started from: restart the server on it instead (`plutonium t3 server`, with `T3CODE_DIR` pointing at it). `--force` applies it anyway. A restart cuts running agent turns, which T3 then continues.
 - **The helper's own code**, and Chromium.
-- **A session from before `live`.** Its shell servers serve other files. The first `apply` of a shell restarts that shell's server on the link, which pages don't notice. Its helper keeps serving its own `shell.js` until the session restarts; `live status` says so.
+- **A session from before `live`.** Its helper keeps serving its own `shell.js` until the session restarts; `live status` says so.
 
 **Reloading** loses what a page doesn't keep. niri and plain keep their layout and state in the page's storage. T3 Code's browser panel tabs move to Elsewhere, as after any reload.
 

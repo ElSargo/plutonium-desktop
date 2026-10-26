@@ -164,11 +164,11 @@ plutonium run --vt tty2 niri
 plutonium run --vt tty2 --hold 120 niri    # unattended: stops after 120 s
 ```
 
-**Choosing shells.** List them in order; the first one is the desktop:
-- `niri`, `plain` or `t3`;
+**Choosing shells.** The first run installs the shipped shells in `~/.pluto/shells` (`plutonium shells list`). With no shells named, `plutonium run` runs the ones that are on there, in order. The switcher's changes (Super+Tab: add, remove, turn off, reorder) are saved for next time. Or list them in order, and the first one is the desktop:
+- installed shells by name: `niri`, `plain`, `t3`, and any you added;
 - `<name>=<url>` for any web app you've written against the shell API (see `docs/USING.md`).
 
-The browser profile remembers shells, including ones added from the Super+Tab overlay, so they come back next time.
+`plutonium run --safe` runs only the shipped plain shell, whatever your shells do ([docs/features/SHELL_PACKAGES.md](docs/features/SHELL_PACKAGES.md)).
 
 **Logs.** These are in `logs/`:
 - `session-*.log`: the launcher;
@@ -180,7 +180,7 @@ The browser profile remembers shells, including ones added from the Super+Tab ov
 ```
 plutonium t3 fetch            # clone at frontends/t3code/BASE, apply the patches
 plutonium t3 build            # pnpm install + build the web app (the checkout grows to ~4 GB)
-plutonium run t3 niri         # starts T3 Code's server and pairs the shell
+plutonium run t3 niri         # the helper starts T3 Code's server; the shell pairs itself
 ```
 
 T3 Code runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
@@ -210,4 +210,4 @@ The niri shell's launcher (Super+D) has an entry that starts Claude Code with th
 | Apps render in software | See `logs/helper-*.log` and `docs/features/GPU_X11.md`. The host needs Mesa with your GPU's driver |
 | Hotplugged keyboards or mice are ignored on DRM | The container is from before the fix (it maps uid 65534, so libudev drops the host's udev events; `plutonium doctor` says so). Make it again: `plutonium container stop`, `podman rm <container>`, then `plutonium container create` |
 | X11 apps don't start | Install `xwayland-satellite`, or set `PLUTONIUM_XWAYLAND_SATELLITE` |
-| `run`: "port 8775 is taken" | Another copy of the shell server is running, for example from another checkout. Stop it |
+| `run`: the helper says the shells port is taken | Another session in the same slot, or something else on 8770 (+100 per slot), has it. Stop it, or set `SHELLS_PORT` |
