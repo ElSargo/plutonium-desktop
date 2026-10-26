@@ -24,9 +24,10 @@
     column (the sides of a column, or the gap), into a column (the top or
     bottom of a window), or a tab (the middle of a window; any of a tabbed
     column). Near a screen edge the view scrolls along.
-  - niri's touchpad swipes follow the fingers and snap at the end: Chromium
-    gives the page no three-finger gestures, so a two-finger scroll with
-    Super held (any in the overview) is the swipe. Super+middle-drag, and a
+  - niri's touchpad swipes follow the fingers and snap at the end: three
+    fingers (the shell library's touchpadswipe, Chromium patch 0070), or a
+    two-finger scroll with Super held (any in the overview) where the
+    browser doesn't pass swipes on. Four fingers open and close the overview. Super+middle-drag, and a
     drag on a workspace in the overview, drag the view the same way.
   - The bar's minimap (minimap.js) shows the workspaces and the focused
     one's columns, with app icons.
@@ -2131,7 +2132,8 @@ function showHotkeys() {
   const extra = [
     ["Super + 1…9", "Focus Workspace"], ["Super + drag", "Move Window (a column, into one, a tab)"],
     ["Super + right-drag", "Resize Window"], ["Super + middle-drag", "Drag the View"],
-    ["Super + two-finger scroll", "Swipe Columns and Workspaces"],
+    ["Three-finger swipe (or Super + two-finger scroll)", "Columns and Workspaces"],
+    ["Four-finger swipe up / down", "Open / Close the Overview"],
     ["Super + F", "Fullscreen (browser)"], ["Super + Tab", "Shells and windows (browser)"],
   ].map(([k, label]) => {
     const tr = document.createElement("tr");
@@ -2289,6 +2291,34 @@ try {
       refocus();
       commit();
     }
+  });
+  // niri's touchpad swipes, where the browser passes them on (patch 0070; on older
+  // builds the event never comes, and Super+two-finger scroll stands in): three
+  // fingers move the view and switch workspaces, the content following the fingers;
+  // four fingers up open the overview, down close it.
+  let swipe = null;
+  shell.addEventListener("touchpadswipe", (e) => {
+    const { phase, fingers, dx = 0, dy = 0 } = e.detail ?? {};
+    if (phase === "begin") {
+      swipe = { fingers, sumY: 0, done: false };
+      if (fingers === 3) { clearTimeout(gestureTimer); gestureEnd(); gestureBegin(); }
+      return;
+    }
+    if (!swipe) return;
+    if (swipe.fingers === 3) {
+      if (phase === "update") {
+        const z = overview ? CONFIG.overviewZoom : 1;
+        gestureUpdate(-dx / z, -dy / z);
+      } else gestureEnd();
+    } else if (swipe.fingers === 4 && phase === "update" && !swipe.done) {
+      swipe.sumY += dy;
+      if (Math.abs(swipe.sumY) > 60 && (swipe.sumY < 0) !== overview) {
+        swipe.done = true;
+        actions.toggleOverview();
+        commit();
+      }
+    }
+    if (phase === "end") swipe = null;
   });
   shell.addEventListener("change", () => {
     reconcile();

@@ -26,7 +26,7 @@ It's an installed shell (`~/.pluto/shells/niri`, [SHELL_PACKAGES.md](SHELL_PACKA
   - a workspace dot in the bar's minimap: the last column of that workspace.
   Near the left or right edge the view scrolls along (niri's `dnd-edge-view-scroll`), and the hot corners work mid-drag. Dropped nowhere (on the bar), it goes back. A window or tab dropped here from another shell or display lands the same way.
 - **Resizing** (Super+right-drag) from the edge or corner nearest the pointer, as niri: sideways the column's width, up and down the window's height in its column. A double click there toggles the full width, or resets the height.
-- **Swipes and the view drag.** niri's three-finger swipes (sideways: the view; up and down: workspaces) follow the fingers and snap to a column or workspace at the end, carried on by the swipe's speed. Chromium hands the page no swipe gestures (its libinput converter has no `LIBINPUT_EVENT_GESTURE_*`), so here it's a two-finger scroll with Super held, or any in the overview. Super+middle-drag drags the view the same way.
+- **Swipes and the view drag.** niri's three-finger swipes (sideways: the view; up and down: workspaces) follow the fingers and snap to a column or workspace at the end, carried on by the swipe's speed. With Chromium patch 0070 (branch `gestures`) the shell library passes three- and four-finger swipes to the shell page (`touchpadswipe`, DRM only): three fingers swipe as niri's (the content follows the fingers), four fingers up open the overview and down close it. Without it the event never comes, and a two-finger scroll with Super held (or any in the overview) is the swipe instead. Super+middle-drag drags the view the same way.
 - **Hot corners** (`CONFIG.hotCorners`, niri's `gestures { hot-corners }`): top left by default; any corner can be turned on. With several displays only a corner of the whole desktop is hot.
 - **The bar's minimap** (`minimap.js`, on the left): a numbered dot per workspace, then the focused workspace's columns at the screen's proportions, each window as its app's icon (a tab as its site's favicon; a letter if there's none), a tabbed column as its active tab with a count, floating windows after it, and the part on screen outlined. Click a window to go to it, a dot for its workspace; the wheel over the strip moves between columns.
 - **Floating windows** (Super+V, Super+Shift+V): above the tiles, centred at their tiled size. Super+drag moves them, and Super+right-drag resizes them.
@@ -79,7 +79,7 @@ These are niri's default `config.kdl` binds, with Mod = Super:
 
 All of them are registered as shell shortcuts, so they work while an app or tab has the keyboard. Super itself is registered too. While it's held, a layer over the windows takes the pointer, so Super+drag and Super+wheel reach the page.
 
-**Left out:** Super+Tab (the browser's shells overlay; niri uses it for the previous workspace), Super+Escape (the browser's pointer release), and power off monitors (Super+Shift+P: nothing to turn the display off with yet). Three- and four-finger touchpad gestures don't reach the page (see Swipes).
+**Left out:** Super+Tab (the browser's shells overlay; niri uses it for the previous workspace), Super+Escape (the browser's pointer release), and power off monitors (Super+Shift+P: nothing to turn the display off with yet). Three- and four-finger swipes need patch 0070 (see Swipes).
 
 ## Chromium changes (`chromium/patches/0016-*.patch`)
 
