@@ -184,7 +184,8 @@ export class NetworkService implements DesktopService {
     this.settings.clear();
     this.connectionPaths = null;
     await this.sync();
-    if (this.options.ask) {
+    // PLUTONIUM_NM_AGENT=0 leaves the secrets to another agent (a test session's helper on the real computer).
+    if (this.options.ask && process.env.PLUTONIUM_NM_AGENT !== "0") {
       try {
         await this.nm("AgentManager", `${NM}.AgentManager`, "RegisterWithCapabilities", "su", [
           this.options.agentId ?? "org.plutonium.helper",
