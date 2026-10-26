@@ -245,6 +245,29 @@ describe("edits", () => {
     assert.equal(packages.status().find((shell) => shell.name === "demo")!.failed, undefined);
   });
 
+  test("a commit made another way (plutonium shells update) is applied too", async () => {
+    const home = fresh("home");
+    installShell(home, shipped(), "demo");
+    const reloads: string[] = [];
+    const packages = new ShellPackages(context(home), {
+      connectTimeoutMs: 600,
+      hooks: { reloadPages: async (origin) => (reloads.push(origin), 1) },
+    });
+    const origin = "http://demo.localhost:8970";
+    packages.start([origin]);
+    after(() => packages.stop());
+    const dir = shellDir(home, "demo");
+    packages.connected(origin);
+    await sleep(300);
+    writeFileSync(join(dir, "index.html"), "<h1>merged</h1>\n");
+    execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "Merge shipped"]);
+    await waitFor(() => reloads.length === 1);
+    packages.connected(origin);
+    await sleep(800);
+    assert.equal(gitLog(dir)[0], "Merge shipped");
+    assert.equal(reloads.length, 1);
+  });
+
   test("the browser's list is saved; an unknown page becomes an external shell", () => {
     const home = fresh("home");
     installShell(home, shipped(), "demo");

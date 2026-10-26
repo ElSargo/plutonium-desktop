@@ -126,6 +126,8 @@ export class ShellPackages {
   private readonly editTimers = new Map<string, NodeJS.Timeout>();
   private readonly checks = new Map<string, Check>();
   private readonly notices = new Map<string, string>();
+  /** Each watched shell's HEAD as last applied: a commit made another way is applied too. */
+  private readonly heads = new Map<string, string>();
   /** When a page of each origin last connected. */
   private readonly connectedAt = new Map<string, number>();
   /** Servers the user stopped: the browser's list doesn't start them again. */
@@ -323,6 +325,15 @@ export class ShellPackages {
     }
   }
 
+  /** The full HEAD of a shell's folder. */
+  private head(dir: string): string | undefined {
+    try {
+      return git(dir, ["rev-parse", "HEAD"]).trim();
+    } catch {
+      return undefined;
+    }
+  }
+
   private commitOf(dir: string): string | undefined {
     try {
       return short(git(dir, ["rev-parse", "HEAD"]).trim());
@@ -393,6 +404,8 @@ export class ShellPackages {
       });
       watcher.on("error", () => this.watchers.delete(name));
       this.watchers.set(name, watcher);
+      const head = this.head(dir);
+      if (head) this.heads.set(name, head);
     } catch (error) {
       console.warn(`plutoniumd: can't watch ${dir}: ${(error as Error).message}`);
     }
@@ -419,13 +432,20 @@ export class ShellPackages {
       console.warn(`plutoniumd: shell ${name}: couldn't commit an edit: ${(error as Error).message}`);
       return;
     }
-    if (!commit) return;
+    if (!commit) {
+      // Committed another way (`plutonium shells update`, an agent's own git commit): applied the same.
+      const head = this.head(dir);
+      if (!head || head === this.heads.get(name)) return;
+      commit = head;
+    }
     console.log(`plutoniumd: shell ${name}: ${git(dir, ["log", "-1", "--format=%h %s"]).trim()}`);
     void this.apply(name, commit);
   }
 
   /** Applies the folder's HEAD to the running shell and waits for it to come up. */
   private async apply(name: string, commit: string): Promise<void> {
+    const head = this.head(shellDir(this.home, name));
+    if (head) this.heads.set(name, head);
     const previous = this.checks.get(name);
     if (previous) clearTimeout(previous.timer);
     this.checks.delete(name);
@@ -501,6 +521,8 @@ export class ShellPackages {
     } catch {
       // Nothing changed.
     }
+    const head = this.head(dir);
+    if (head) this.heads.set(name, head);
     let title = name;
     try {
       title = this.manifestOf(name).title;
