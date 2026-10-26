@@ -133,7 +133,7 @@ plutonium session install             # /usr/share/wayland-sessions/plutonium.de
 
 Log out, pick Plutonium at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
 - it starts the container if it isn't running, and waits up to 10 s for the kill switch, which starts with your login;
-- it runs `plutonium run niri plain` on the display manager's VT. Set `SESSION_SHELLS="t3 niri"` in `plutonium.env` for other shells;
+- it runs `plutonium run` on the display manager's VT, with your installed shells. `SESSION_SHELLS="niri plain"` in `plutonium.env` names others instead;
 - when the session ends (Ctrl+Alt+Backspace, the kill switch, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
 
 The display manager's own automatic login, with the Plutonium session, starts it at power-on. `plutonium session uninstall` removes the entry. The entry is new: if it doesn't work with your display manager, please report it, and start from a text console meanwhile.

@@ -1239,10 +1239,11 @@ session_start() {
     case $1 in --dry-run) dry=1 ;; *) shells+=("$1") ;; esac
     shift
   done
+  # With none named, run starts the user's installed shells (shells.json).
   # shellcheck disable=SC2206
-  [[ ${#shells[@]} -gt 0 ]] || shells=(${SESSION_SHELLS:-niri plain})
+  [[ ${#shells[@]} -gt 0 ]] || shells=(${SESSION_SHELLS:-})
   local sid=${XDG_SESSION_ID:-} problem=
-  session_log info "starting for $(id -un) in logind session ${sid:-(none)}${sid:+ ($(loginctl show-session "$sid" -p TTY --value 2>/dev/null))}: plutonium run ${shells[*]}"
+  session_log info "starting for $(id -un) in logind session ${sid:-(none)}${sid:+ ($(loginctl show-session "$sid" -p TTY --value 2>/dev/null))}: plutonium run ${shells[*]:-(your shells)}"
   if [[ -z ${HOST:-} ]] && ! container_running; then
     if [[ -n $dry ]]; then session_log info "would start the container $CONTAINER (plutonium container start)"
     else container_cmd start > /dev/null 2>&1 || problem="the container $CONTAINER doesn't start (plutonium doctor)"; fi
@@ -1263,11 +1264,11 @@ session_start() {
     [[ -n $dry ]] || exit 1
   fi
   if [[ -n $dry ]]; then
-    session_log info "would run: plutonium run ${shells[*]} (in session ${sid:-none}); back to the login screen when it exits"
+    session_log info "would run: plutonium run ${shells[*]:-(your shells)} (in session ${sid:-none}); back to the login screen when it exits"
     return
   fi
   local started=$SECONDS rc=0
-  "$ROOT/bin/plutonium" run "${shells[@]}" || rc=$?
+  "$ROOT/bin/plutonium" run ${shells[@]+"${shells[@]}"} || rc=$?
   session_vars drm
   if (( rc != 0 && SECONDS - started < 30 )); then
     session_log err "Plutonium didn't start (exit $rc after $((SECONDS - started)) s); back to the login screen. Logs: $LOGS/session-$SOCKET.log, $LOGS/ash-$SOCKET.log"
