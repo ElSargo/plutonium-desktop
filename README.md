@@ -15,56 +15,51 @@ Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (
 
 ## Status
 
-Early, but usable day to day: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), global shortcuts, and H.264 video in tabs work. Not there yet:
-- a login-screen session entry (you start it from a text console);
-- the file picker for native apps (tabs have one), and the other desktop portals;
+A public beta: usable day to day by its developer, new to everyone else. Working: several monitors, the clipboard between apps and pages, screen sharing and screenshots (the desktop portal, grim), the file picker, global shortcuts, H.264 video in tabs, and a login screen entry. Not there yet:
 - input methods in native apps (in progress);
-- installing and editing shells as packages (in progress).
+- installing and editing shells as packages (in progress);
+- the other desktop portals, such as printing from native apps.
 
-It has been developed on AMD graphics. Intel should work; NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
+**Supported:** x86-64 Linux with systemd and rootless podman, and an AMD or Intel GPU on Mesa. It's developed on NixOS with AMD graphics. Fedora 44 and Ubuntu 24.04 are tested as far as a container allows, not on hardware yet; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
-## Running it
+## Quick start
 
-You need a Linux machine with podman, Node.js 24 and Python 3. [INSTALL.md](INSTALL.md) has the details, along with the build-from-source path.
+With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [docs/BUILDING.md](docs/BUILDING.md) builds it from source.
 
-```sh
-git clone https://github.com/ElSargo/plutonium-desktop.git plutonium
-cd plutonium
-echo PREBUILT=1 > plutonium.env
+1. Install podman, Node.js 24, Python 3, git and curl, and add yourself to the `input` group ([INSTALL.md](INSTALL.md) has the command for your distribution). Then get Plutonium:
 
-bin/plutonium image pull          # prebuilt Chromium, ~1.3 GB
-bin/plutonium container create
-```
+   ```sh
+   git clone https://github.com/ElSargo/plutonium-desktop.git plutonium
+   cd plutonium
+   echo PREBUILT=1 > plutonium.env
+   bin/plutonium doctor              # what's missing, and the command that fixes each
+   ```
 
-Try it in a window on your current desktop:
+2. Download Chromium, and make its container:
 
-```sh
-bin/plutonium run --x11 :0 niri
-```
+   ```sh
+   bin/plutonium image pull          # ~1.3 GB
+   bin/plutonium container create
+   ```
 
-Or run it as your whole desktop. First set up a kill switch, a key that gets you out if something hangs:
+3. Try it in a window on your current desktop:
 
-```sh
-bin/plutonium killswitch find      # press a spare key, copy the two lines into plutonium.env
-bin/plutonium killswitch install
-```
+   ```sh
+   bin/plutonium run --x11 :0 niri   # bin/plutonium stop --x11 ends it
+   ```
 
-Then switch to a text console (Ctrl+Alt+F2), log in, and run:
+4. To run it as your whole desktop, first set up a kill switch, a key that gets you out if something hangs:
 
-```sh
-bin/plutonium run niri plain
-```
+   ```sh
+   bin/plutonium killswitch find     # press a spare key, copy the two lines into plutonium.env
+   bin/plutonium killswitch install
+   ```
 
-In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells.
+5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run niri plain`; or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
 
-## Building from source
+In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
-To change Chromium, or not use the prebuilt image, build it yourself. This needs about 50 GB of disk and a couple of hours:
-
-```sh
-bin/plutonium container build && bin/plutonium container create
-bin/plutonium chromium fetch && bin/plutonium chromium patch && bin/plutonium chromium build
-```
+**If it hangs,** press the kill switch: Ash is killed and you're back where you were. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
 
 ## Repository
 
@@ -77,7 +72,7 @@ bin/plutonium chromium fetch && bin/plutonium chromium patch && bin/plutonium ch
 | `frontends/t3code/` | Patches that turn T3 Code into a shell |
 | `container/` | The build image and the prebuilt runtime image |
 | `killswitch/`, `tools/` | The kill switch; test tools |
-| `docs/` | [Using](docs/USING.md), [architecture](docs/ARCHITECTURE.md), [developing](docs/DEVELOPING.md), per-feature docs |
+| `docs/` | [Using](docs/USING.md), [building](docs/BUILDING.md), [architecture](docs/ARCHITECTURE.md), [developing](docs/DEVELOPING.md), per-feature docs |
 
 ## License
 

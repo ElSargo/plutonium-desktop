@@ -1,118 +1,78 @@
 # Installing Plutonium
 
-From a fresh clone to a running desktop. Expect an afternoon: most of it is building Chromium. The download is 28 GB; on a fast connection it took 4 minutes. Each step has a `plutonium` command, and `bin/plutonium doctor` shows what's done.
+From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the time is the 1.3 GB download. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each. Building Chromium yourself is its own page, [docs/BUILDING.md](docs/BUILDING.md).
 
 ## 1. What you need
 
 **Machine**
-- x86-64 Linux with an AMD or Intel GPU on Mesa. It has been developed on AMD; NVIDIA is untested.
-- 16 GB of RAM at least; 32 GB is better for building.
-- About 60 GB of free disk: about 28 GB for the checkout (sources and dependencies, no history), 21 GB for the build, and 2 GB for the container image.
-- Many cores help. The first build takes about two hours on 32 threads.
+- x86-64 Linux with an AMD or Intel GPU on Mesa. It has been developed on AMD graphics; Intel should work. NVIDIA is untested, and its proprietary driver probably doesn't work.
+- 16 GB of RAM is comfortable (less is untested), and about 3 GB of disk for the image.
+- systemd (logind and a user session), and rootless podman.
 
-**Host software.** The build runs in a container, so the host needs only a few things:
+**Distributions.** It's developed on NixOS. Fedora 44 and Ubuntu 24.04 are tested in containers, from the packages below up to `plutonium doctor` and the helper's tests; not yet booted on hardware. Others with systemd, podman and Node 24 should work. If yours doesn't, please say so (Reporting a bug, below).
+
+**Packages.** The browser runs in a container, so the host needs only a few things:
 
 | | Why |
 |---|---|
-| podman (rootless, with `/etc/subuid` and `/etc/subgid` entries for you) | the build and run container |
-| systemd user session (`systemctl --user`) | keeps the container running; the kill switch service |
-| Node.js 24 or newer | the helper, which runs on the host, where your apps are |
-| python3, git, curl | the scripts |
-| sudo | only for `--vt`, KMS screenshots and the uinput test devices |
+| podman (rootless) | the container Chromium runs in |
+| Node.js 24 or newer, and npm | the helper, which runs on the host, where your apps are |
+| python3, git, curl, procps (`pgrep`) | the scripts |
+| sudo | only for `plutonium session install`, and some test tools |
 | optional: `foot` | the terminal the shells open (Super+T) |
 | optional: `xwayland-satellite`, `systemd-socket-activate` | X11 apps (each thread gets a rootless Xwayland) |
 | optional: pnpm (or corepack, included with Node 24) | the T3 Code frontend |
 
-Examples:
-
 ```
+# Fedora (its plain nodejs is Node 22)
+sudo dnf install podman nodejs24-bin nodejs24-npm-bin python3 git curl procps-ng foot xwayland-satellite
+# Ubuntu 24.04, Debian (apt's Node is too old: Node 24 from NodeSource;
+# xwayland-satellite isn't packaged, build it from github.com/Supreeeme/xwayland-satellite)
+sudo apt install podman python3 git curl procps foot
+curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh && sudo bash /tmp/nodesource.sh && sudo apt install nodejs
 # Arch
-sudo pacman -S podman nodejs python git curl foot xwayland-satellite
-# Fedora
-sudo dnf install podman nodejs python3 git curl foot xwayland-satellite
-# Debian/Ubuntu: Node 24 from nodesource or nvm; xwayland-satellite from source or cargo
-sudo apt install podman python3 git curl foot
+sudo pacman -S podman nodejs npm python git curl procps-ng foot xwayland-satellite
 # NixOS (configuration.nix)
 virtualisation.podman.enable = true;
 environment.systemPackages = with pkgs; [ nodejs_24 python3 git curl foot xwayland-satellite ];
 ```
 
-**Groups.** Add yourself to `input` (`sudo usermod -aG input $USER`, then log in again). The kill switch reads a button through it.
+**Your user**
+- **`input` group** (`sudo usermod -aG input $USER`, then log out and in again). The kill switch reads a key through it.
+- **Subordinate ids** for rootless podman. Most distributions add them for new users; `grep $USER /etc/subuid /etc/subgid` should print two lines. If not: `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER`, then `podman system migrate`.
 
-## 2. Settings
+## 2. Get it
 
 ```
 git clone https://github.com/ElSargo/plutonium-desktop.git plutonium && cd plutonium
-cp plutonium.env.example plutonium.env
+echo PREBUILT=1 > plutonium.env
+bin/plutonium doctor
 ```
 
-Every setting has a default, so the file can stay empty. The ones you're most likely to change:
+`plutonium.env` holds your settings; `plutonium.env.example` lists them all, each with its default. Add `bin/` to your `PATH`, or call `bin/plutonium`.
 
-- **`CHROMIUM_DIR`** (`~/chromium`) and **`DEPOT_TOOLS`** (`~/depot_tools`): put them on a fast disk with room.
-- **`PODMAN=lib/pm.sh`**: needed if `podman info` fails with "cannot re-exec process to join the existing user namespace". That happens in a shell inside another user namespace, such as some sandboxes and IDE terminals.
-- **`KILLSWITCH_DEVICE`, `KILLSWITCH_KEY`**: set in step 5.
+`doctor` prints a line for each missing piece, and the command that fixes it on your distribution. It exits with 1 until everything it needs is there. Run it again after each step.
 
-Add `bin/` to your `PATH`, or call `bin/plutonium`. Then check:
+## 3. Chromium: the prebuilt image
 
 ```
-plutonium doctor
+plutonium image pull          # ghcr.io/elsargo/plutonium, ~1.3 GB
+plutonium container create    # the container, from that image, started
 ```
 
-## Prebuilt or built yourself
+The image holds a release build of Plutonium's Chromium and the libraries it needs. Its tag is a hash of `chromium/` (the base revision, the patches and the build settings), so it always matches your checkout. Everything else, including the helper, the shells and T3 Code, runs from this repository.
 
-There are two ways to get Plutonium's Chromium:
+- **"no prebuilt image for this checkout's chromium/".** The patches changed after the last published image. Check out a commit that has one, or build Chromium yourself ([docs/BUILDING.md](docs/BUILDING.md)).
+- **"won't give … without a login".** The image isn't public yet. Log in with a GitHub token that can read packages: `gh auth refresh -s read:packages && gh auth token | podman login ghcr.io -u <you> --password-stdin`.
+- **After `git pull`**, `doctor` says whether the container still runs this checkout's image. If not: `plutonium image pull`, `plutonium container stop`, `podman rm plutonium`, `plutonium container create`.
+- **After a reboot**, `plutonium container start` (a login session from the login screen entry starts it itself).
 
-- **Prebuilt** (`PREBUILT=1` in `plutonium.env`): download the image `ghcr.io/elsargo/plutonium`. It holds a release build of the patched Chromium and the libraries it needs, about 1.3 GB, and needs no checkout, build tools or build time. Its tag is a hash of `chromium/` (the base revision, patches and release arguments), so it always matches your clone. Do steps 1 and 2, then:
+## 4. The kill switch
 
-  ```
-  plutonium image pull          # the image for this checkout's chromium/
-  plutonium container create    # the container, from that image
-  ```
-
-  Then skip to step 5. Everything else, including the helper, shells and T3 Code, runs from this repository as usual.
-
-  The image is private while the repository is. Log in with a GitHub token that can read packages:
-  `gh auth refresh -s read:packages && gh auth token | podman login ghcr.io -u <you> --password-stdin`.
-- **On the host, without the container** (Nix only for now, `HOST=1`): a release build, from the prebuilt image or your own `out/Release`, with its libraries from your system's nixpkgs (`nix/chrome.nix`). Ash then runs as a normal host process, with no user namespace in between. Podman is only needed to copy the binary out of the prebuilt image:
-
-  ```
-  plutonium image pull          # with PREBUILT=1; or: plutonium chromium build --release
-  plutonium host build          # → ~/.local/share/plutonium/host-chrome/bin/chrome
-  echo HOST=1 >> plutonium.env
-  ```
-
-  It also builds the tools the container would otherwise provide (Xvfb, Python with websockets for `plutonium cdp`) into `host-tools`. Run `plutonium host build` again after pulling a new image or rebuilding. Development builds (`out/Plutonium`) still run in the container.
-- **Built yourself:** steps 3 and 4. You need this to change Chromium. It is also a development build: faster to rebuild, and it stops on internal assertion failures.
-
-## 3. The container
+On DRM, Ash takes the display and every input device, and the text console's keyboard is turned off while it runs. If the session hangs, Ctrl+Alt+F*n* won't get you out. The kill switch is a key that kills Ash and switches back to your normal desktop session (or the text console, or the login screen). Pick a key you never use: a laptop's spare hotkey, Scroll Lock, a macro key.
 
 ```
-plutonium container build     # Ubuntu 24.04 + Chromium's build dependencies (~1.6 GB, ~10 min)
-plutonium container create    # creates and starts the container 'plutonium'
-```
-
-The container shares the host's process IDs (Exo must see your apps' real pids), network, GPU (`/dev/dri`) and input devices. It mounts this repository, the Chromium checkout, depot_tools, the data dir and `$XDG_RUNTIME_DIR` at the same paths as on the host. Its home is `~/.local/share/plutonium/container-home`.
-
-After a reboot, run `plutonium container start`.
-
-## 4. Chromium
-
-```
-plutonium chromium fetch      # depot_tools, then the checkout at chromium/BASE
-plutonium chromium patch      # the patch series, on a branch 'plutonium'
-plutonium chromium build      # out/Plutonium/chrome
-```
-
-- **`fetch`** clones depot_tools and writes a `.gclient` for Chromium with `target_os = ['chromeos']`. It then syncs straight to the pinned revision with no history and 4 jobs (googlesource rate-limits the default), and runs the hooks. If it stops partway, run it again; it resumes.
-- **`patch`** refuses to touch a checkout with uncommitted changes. Run it again with `--force` to reset the `plutonium` branch.
-- **`build`** copies `chromium/args.gn` into the build dir and runs `autoninja`. Incremental builds after that take seconds to minutes.
-
-## 5. The kill switch
-
-On DRM, Ash takes the display and every input device, and the text console's keyboard is turned off while it runs. If the session hangs, Ctrl+Alt+F*n* won't get you out. The kill switch is a button that kills Ash and switches back to your normal desktop session (or leaves you on the text console). Pick a key you never use: a laptop's spare hotkey, Scroll Lock, a macro key.
-
-```
-plutonium killswitch find     # press the button; it prints KILLSWITCH_DEVICE=… KILLSWITCH_KEY=…
+plutonium killswitch find     # press the key; it prints KILLSWITCH_DEVICE=… KILLSWITCH_KEY=…
 # put those two lines in plutonium.env, then:
 plutonium killswitch install  # a systemd user service, started now and at every login
 plutonium killswitch test     # shows what a press would kill, without doing it
@@ -122,7 +82,7 @@ plutonium killswitch test     # shows what a press would kill, without doing it
 - **`--hold <seconds>`** stops Ash by itself after that long.
 - **`--no-killswitch`** starts anyway. Only use it if you can stop the session another way, such as `plutonium stop --drm` over ssh.
 
-## 6. First session: in a window
+## 5. First session: in a window
 
 On an X11 or Xwayland desktop (Plasma, GNOME and most others provide Xwayland on `:0`):
 
@@ -137,7 +97,7 @@ plutonium run --x11 :0 niri
 
 If apps render in software, `plutonium run` says so, and `logs/helper-*.log` explains why (`docs/features/GPU_X11.md`).
 
-## 7. As the desktop: DRM
+## 6. As the desktop
 
 1. Switch to a text console (Ctrl+Alt+F2, or F3…) and log in.
 2. From this repository, run:
@@ -164,18 +124,43 @@ plutonium run --vt tty2 niri
 plutonium run --vt tty2 --hold 120 niri    # unattended: stops after 120 s
 ```
 
+**From the login screen.** With a display manager (GDM, SDDM, LightDM), Plutonium can be a session you pick when you log in:
+
+```
+plutonium session install --dry-run   # shows the entry it would write
+plutonium session install             # /usr/share/wayland-sessions/plutonium.desktop, with sudo
+```
+
+Log out, pick Plutonium at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
+- it starts the container if it isn't running, and waits up to 10 s for the kill switch, which starts with your login;
+- it runs `plutonium run niri plain` on the display manager's VT. Set `SESSION_SHELLS="t3 niri"` in `plutonium.env` for other shells;
+- when the session ends (Ctrl+Alt+Backspace, the kill switch, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
+
+The display manager's own automatic login, with the Plutonium session, starts it at power-on. `plutonium session uninstall` removes the entry. The entry is new: if it doesn't work with your display manager, please report it, and start from a text console meanwhile.
+
+**Without a display manager.** Log in on tty1 automatically, and start Plutonium from the login shell. For getty autologin, run `sudo systemctl edit getty@tty1` and add (NixOS: `services.getty.autologinUser = "<you>";`):
+
+```
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin <you> %I $TERM
+```
+
+Then, at the end of `~/.bash_profile` (or your shell's login file):
+
+```
+if [ "$(tty)" = /dev/tty1 ]; then ~/plutonium/bin/plutonium session start; fi
+```
+
+Not `exec`: when the session ends, or doesn't start, you're at tty1's prompt, rather than logged in again into the same failure.
+
 **Choosing shells.** List them in order; the first one is the desktop:
 - `niri`, `plain` or `t3`;
 - `<name>=<url>` for any web app you've written against the shell API (see `docs/USING.md`).
 
 The browser profile remembers shells, including ones added from the Super+Tab overlay, so they come back next time.
 
-**Logs.** These are in `logs/`:
-- `session-*.log`: the launcher;
-- `ash-*.log`: Ash, with the previous run kept as `*.prev.log`;
-- `helper-*.log`: the helper.
-
-## 8. Optional: T3 Code
+## 7. Optional: T3 Code
 
 ```
 plutonium t3 fetch            # clone at frontends/t3code/BASE, apply the patches
@@ -187,7 +172,7 @@ T3 Code runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same thr
 
 Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium t3` (T3's CLI on the same data): `plutonium t3 connect link` for T3 Connect, or `plutonium t3 pair --tailscale`.
 
-## 9. Agents
+## 8. Agents
 
 - **Under T3 Code:** T3 gives its Claude sessions the helper's MCP server.
 - **Any other agent:** run it inside a thread, for example from a terminal you opened in a shell, which already has the thread's environment. Then give it the bridge:
@@ -197,6 +182,30 @@ claude --mcp-config '{"mcpServers":{"plutonium":{"type":"stdio","command":"node"
 ```
 
 The niri shell's launcher (Super+D) has an entry that starts Claude Code with these tools. The tools are listed in `helper/README.md`.
+
+## If it hangs
+
+- **Ash doesn't respond, or the screen is black:** press the kill switch. Ash is killed, and you're back at your other desktop, the text console or the login screen.
+- **No kill switch at hand:** from another machine, `ssh` in and run `plutonium stop --drm`, or `loginctl activate <session>` to switch to another session (`loginctl list-sessions`).
+- **A shell page misbehaves, but Ash responds:** Super+Tab to another shell, or Ctrl+Alt+Backspace to end the session.
+- **The console stays dark after Ash ends:** switch VTs (Ctrl+Alt+F3, then back). logind restores the console's mode whenever Ash exits, crashes included, so this shouldn't happen; please report it.
+
+## Logs
+
+In `logs/` in your checkout, one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
+- `session-*.log`: the launcher: what it checked, and why it stopped;
+- `ash-*.log`: Ash, Plutonium's Chromium, with the previous run kept as `*.prev.log`;
+- `helper-*.log`: the helper (apps, threads, the GPU check);
+- `login-session.log`, and `journalctl -t plutonium-session`: sessions from the login screen;
+- `journalctl --user -u plutonium-killswitch`: the kill switch.
+
+## Reporting a bug
+
+Open an issue at https://github.com/ElSargo/plutonium-desktop/issues with:
+- what you did, what you expected and what happened;
+- your distribution, and your GPU (`lspci -k | grep -A3 -E 'VGA|3D'`);
+- the output of `plutonium doctor` and `plutonium status`;
+- the logs above from that session: the session log whole, and the end of the Ash and helper logs. Have a look first: they can hold page URLs and window titles.
 
 ## Troubleshooting
 

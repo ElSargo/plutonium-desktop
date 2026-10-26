@@ -9,6 +9,8 @@ On DRM, Ash is the controller of a logind session on a VT, like any Wayland comp
 | **Switch back** | Ctrl+Alt+F*n* to Ash's VT, from wherever you are. Ash gets the devices back, sets the display up again, and opens the input devices again. The page and apps are as they were. |
 | **Stop** | Ctrl+Alt+Backspace, `plutonium stop --drm`, or the kill switch. However Ash ends, crashes and SIGKILL included, logind puts the VT back in text mode with the keyboard on, so the console works again. |
 
+**From a login screen.** A display manager starts a Wayland session on a VT of its own, in a logind session like a text console's, so `plutonium session start` (the entry `plutonium session install` writes) runs `plutonium run` in it as it is. When Ash exits, the launcher does too, and the display manager's login screen comes back. The kill switch leaves that session alone when it looks for one to switch to (its `Desktop` is `plutonium`).
+
 ## How it works
 
 Before this, Ash opened `/dev/dri/card*` and `/dev/input/event*` itself and held them for as long as it ran. A VT switch then left the other session without DRM master (a black screen), and Ash went on reading keys typed on the other VT. The launcher set the VT's keyboard off itself (`lib/tty_vt.py`, gone now). Ash couldn't put it back after a crash, which left a dead console.

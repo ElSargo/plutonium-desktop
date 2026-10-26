@@ -25,6 +25,8 @@ Setup (INSTALL.md walks through these in order):
                              session uses (nix/host-tools.nix): no container to run it
   killswitch find            show the key codes of buttons as you press them
   killswitch install         a user service that kills Ash on a button press (DRM safety)
+  session install [--dry-run] a login screen entry (/usr/share/wayland-sessions, with sudo)
+                             that starts Plutonium: plutonium session start
 
 Sessions:
   run [options] [shell...]   start a session; shells are niri, plain, t3, or <name>=<url>.
@@ -184,7 +186,15 @@ image_cmd() {
     push)
       pm push "$ref" && pm push "$PREBUILT_REPO:latest" ;;
     pull)
-      pm pull "$ref" ;;
+      local err
+      err=$(pm pull "$ref" 2>&1 | tee /dev/stderr) && return
+      case $err in
+        *unauthorized*|*denied*|*authentication*)
+          die "ghcr.io won't give $ref without a login: log in with a GitHub token that can read packages (INSTALL.md, Prebuilt)" ;;
+        *"manifest unknown"*|*"not found"*)
+          die "there is no prebuilt image for this checkout's chromium/ ($PREBUILT_TAG): its patches changed after the last published image. Check out a commit that has one, or build Chromium yourself (INSTALL.md, steps 3 and 4)" ;;
+        *) die "could not pull $ref" ;;
+      esac ;;
     login)
       # A token with write:packages (gh auth refresh -s write:packages).
       gh auth token | pm login ghcr.io -u "$(gh api user --jq .login)" --password-stdin ;;
@@ -725,6 +735,8 @@ run_cmd() {
     shift
   done
   [[ ${#shells[@]} -gt 0 ]] || shells=(t3)
+  [[ -d $RUN_DIR ]] || die "no $RUN_DIR: this shell has no systemd user session; log in normally (a text console, ssh, a display manager), not through su or sudo"
+  need_ash_runtime
   # DRM and X11 sessions have their own socket and ports, so both can run.
   session_vars "$mode"
   [[ $mode == x11 ]] && XDISP=${XDISP:-$PRIVATE_XDISP}
@@ -1196,53 +1208,243 @@ worktree_cmd() {
   esac
 }
 
+# --- Login screen ------------------------------------------------------------
+# A Wayland session entry, so a display manager (GDM, SDDM, LightDM) starts
+# Plutonium for whoever logs in. The display manager runs `plutonium session
+# start` in a logind session on a VT of its own, which `plutonium run` (DRM)
+# takes as it would a text console's. When it exits, for whatever reason, the
+# display manager's login screen comes back.
+SESSION_ENTRY=/usr/share/wayland-sessions/plutonium.desktop
+session_entry() {
+  cat <<EOF2
+[Desktop Entry]
+Name=Plutonium
+Comment=A web-based desktop (from $ROOT)
+Exec=$ROOT/bin/plutonium session start
+TryExec=$ROOT/bin/plutonium
+Type=Application
+DesktopNames=Plutonium
+EOF2
+}
+# Messages a display manager's user sees nowhere else: the journal, tagged
+# plutonium-session (journalctl -t plutonium-session), and the session log.
+session_log() {   # <priority> <message>
+  logger -t plutonium-session -p "user.$1" -- "$2" 2>/dev/null || true
+  echo "$(date +%T) $2" >> "$LOGS/login-session.log"
+  echo "$2" >&2
+}
+session_start() {
+  local dry= shells=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in --dry-run) dry=1 ;; *) shells+=("$1") ;; esac
+    shift
+  done
+  # shellcheck disable=SC2206
+  [[ ${#shells[@]} -gt 0 ]] || shells=(${SESSION_SHELLS:-niri plain})
+  local sid=${XDG_SESSION_ID:-} problem=
+  session_log info "starting for $(id -un) in logind session ${sid:-(none)}${sid:+ ($(loginctl show-session "$sid" -p TTY --value 2>/dev/null))}: plutonium run ${shells[*]}"
+  if [[ -z ${HOST:-} ]] && ! container_running; then
+    if [[ -n $dry ]]; then session_log info "would start the container $CONTAINER (plutonium container start)"
+    else container_cmd start > /dev/null 2>&1 || problem="the container $CONTAINER doesn't start (plutonium doctor)"; fi
+  fi
+  # The kill switch is a user service, started with the user's manager at
+  # login, so it may still be opening its device.
+  local i
+  for i in $(seq 1 10); do
+    [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
+      journalctl --user -u plutonium-killswitch -o cat --no-pager -n 50 |
+        grep -E 'killswitch starting|listening on|lost |device not found' | tail -1 | grep -q 'listening on' && break
+    [[ $i == 10 ]] && problem=${problem:-"the kill switch isn't listening (plutonium killswitch install; plutonium doctor)"}
+    [[ -n $dry ]] && break
+    sleep 1
+  done
+  if [[ -n $problem ]]; then
+    session_log err "not starting: $problem"
+    [[ -n $dry ]] || exit 1
+  fi
+  if [[ -n $dry ]]; then
+    session_log info "would run: plutonium run ${shells[*]} (in session ${sid:-none}); back to the login screen when it exits"
+    return
+  fi
+  local started=$SECONDS rc=0
+  "$ROOT/bin/plutonium" run "${shells[@]}" || rc=$?
+  session_vars drm
+  if (( rc != 0 && SECONDS - started < 30 )); then
+    session_log err "Plutonium didn't start (exit $rc after $((SECONDS - started)) s); back to the login screen. Logs: $LOGS/session-$SOCKET.log, $LOGS/ash-$SOCKET.log"
+    tail -n 15 "$LOGS/session-$SOCKET.log" 2>/dev/null | logger -t plutonium-session -p user.err 2>/dev/null || true
+  elif (( rc != 0 )); then
+    session_log err "Ash exited ($rc) after $((SECONDS - started)) s; back to the login screen. Log: $LOGS/ash-$SOCKET.log"
+  else
+    session_log info "the session ended; back to the login screen"
+  fi
+  exit "$rc"
+}
+session_cmd() {
+  case "${1:-}" in
+    start) shift; session_start "$@" ;;
+    install)
+      if [[ ${2:-} == --dry-run ]]; then echo "would write $SESSION_ENTRY (with sudo):"; session_entry; return; fi
+      local tmp
+      tmp=$(mktemp)
+      session_entry > "$tmp"
+      echo "writing $SESSION_ENTRY (sudo)"
+      sudo install -Dm644 "$tmp" "$SESSION_ENTRY"
+      rm -f "$tmp"
+      echo "Log out: the login screen lists Plutonium among the sessions." ;;
+    uninstall) sudo rm -f "$SESSION_ENTRY" && echo "removed $SESSION_ENTRY" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
 # --- Doctor ------------------------------------------------------------------
+# The first-run guide: every check that fails says what's wrong and the command
+# that fixes it, for this distribution. It exits 1 while something required
+# is missing.
+
+# The distribution family, from /etc/os-release: fedora, debian, arch, suse,
+# nixos, or empty.
+distro_family() {
+  local id= like=
+  [[ -f /etc/os-release ]] && { id=$(. /etc/os-release; echo "${ID:-}"); like=$(. /etc/os-release; echo "${ID_LIKE:-}"); }
+  case " $id $like " in
+    *" nixos "*) echo nixos ;;
+    *" fedora "*|*" rhel "*|*" centos "*) echo fedora ;;
+    *" debian "*|*" ubuntu "*) echo debian ;;
+    *" arch "*) echo arch ;;
+    *" suse "*|*" opensuse "*) echo suse ;;
+  esac
+}
+# The command that installs what a check needs: <what>... from podman,
+# node, python, git, curl, procps, uidmap, foot, xwayland-satellite, socket-activate.
+install_hint() {
+  local family=$DISTRO pkgs=() p
+  for p in "$@"; do
+    case $family:$p in
+      fedora:node) echo "sudo dnf install --allowerasing nodejs24-bin nodejs24-npm-bin (node is Node 22 on Fedora)"; return ;;
+      debian:node) echo "Node 24 from NodeSource: curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh && sudo bash /tmp/nodesource.sh && sudo apt install nodejs"; return ;;
+      arch:node) pkgs+=(nodejs npm) ;;
+      suse:node) pkgs+=(nodejs24 npm24) ;;
+      nixos:node) pkgs+=(nodejs_24) ;;
+      fedora:python|debian:python|suse:python|nixos:python) pkgs+=(python3) ;;
+      arch:python) pkgs+=(python) ;;
+      fedora:procps|arch:procps) pkgs+=(procps-ng) ;;
+      *:procps) pkgs+=(procps) ;;
+      fedora:uidmap|arch:uidmap|suse:uidmap) pkgs+=(shadow) ;;
+      debian:uidmap) pkgs+=(uidmap) ;;
+      debian:xwayland-satellite) echo "not packaged: build it from https://github.com/Supreeeme/xwayland-satellite"; return ;;
+      *:socket-activate) pkgs+=(systemd) ;;
+      *) pkgs+=("$p") ;;
+    esac
+  done
+  case $family in
+    fedora) echo "sudo dnf install ${pkgs[*]}" ;;
+    debian) echo "sudo apt install ${pkgs[*]}" ;;
+    arch) echo "sudo pacman -S ${pkgs[*]}" ;;
+    suse) echo "sudo zypper install ${pkgs[*]}" ;;
+    nixos) echo "add to environment.systemPackages in configuration.nix: ${pkgs[*]}" ;;
+    *) echo "install ${pkgs[*]} with your package manager" ;;
+  esac
+}
+# Why podman doesn't work from here, and what fixes it.
+podman_fix() {
+  local err
+  err=$(pm info 2>&1 > /dev/null | grep -iE 'error|cannot|denied' | tail -1)
+  if ! grep -q "^$(id -un):" /etc/subuid 2>/dev/null || ! grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+    echo "no /etc/subuid or /etc/subgid entry for $(id -un): sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un), then podman system migrate"
+  elif [[ $err == *"re-exec"* ]]; then
+    echo "this shell is in another user namespace: set PODMAN=lib/pm.sh in plutonium.env"
+  elif [[ $err == *newuidmap* && ! -x /usr/bin/newuidmap ]]; then
+    echo "no newuidmap: $(install_hint uidmap)"
+  elif [[ $err == *newuidmap* ]]; then
+    echo "newuidmap can't map your subordinate ids (${err:0:120}): it must be setuid root (sudo chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap), or this is a container"
+  else
+    echo "${err:-podman info fails}; see podman info"
+  fi
+}
+
 doctor() {
-  local ok=1
-  check() { if eval "$2" > /dev/null 2>&1; then echo "  ok   $1"; else echo "  MISSING  $1${3:+ — $3}"; ok=0; fi; }
-  echo "Host:"
-  check "podman" "command -v podman"
-  check "podman works from this shell" "pm info" "set PODMAN=lib/pm.sh in plutonium.env"
-  check "node 24+" "node -e 'process.exit(+process.versions.node.split(\".\")[0] >= 24 ? 0 : 1)'"
-  check "python3" "command -v python3"
-  check "git, curl" "command -v git && command -v curl"
-  check "xwayland-satellite (X11 apps)" "command -v xwayland-satellite || [ -x \"\${PLUTONIUM_XWAYLAND_SATELLITE:-}\" ]" "optional"
-  check "systemd-socket-activate (X11 apps)" "command -v systemd-socket-activate" "optional"
-  check "foot (the shells' terminal)" "command -v foot" "optional"
-  check "in the 'input' group (kill switch)" "id -nG | grep -qw input" "optional, for the kill switch"
+  local missing=0 node
+  DISTRO=$(distro_family)
+  # ok <what>; missing <what> <fix>; optional <what> <fix>.
+  ok() { echo "  ok       $1"; }
+  missing() { echo "  MISSING  $1: $2"; missing=$((missing + 1)); }
+  optional() { echo "  -        $1: optional; $2"; }
+  # check <what> <test> <fix>, required; check_opt for optional ones.
+  check() { if eval "$2" > /dev/null 2>&1; then ok "$1"; else missing "$1" "$3"; fi; }
+  check_opt() { if eval "$2" > /dev/null 2>&1; then ok "$1"; else optional "$1" "$3"; fi; }
+  echo "Host${DISTRO:+ ($DISTRO)}:"
+  check "podman" "command -v podman" "$(install_hint podman)"
+  local podman_ok=
+  if command -v podman > /dev/null; then
+    if pm info > /dev/null 2>&1; then ok "podman works from this shell"; podman_ok=1
+    else missing "podman works from this shell" "$(podman_fix)"; fi
+  fi
+  check "a systemd user session ($RUN_DIR)" "[ -d $RUN_DIR ] && systemctl --user show-environment" \
+    "log in normally (a display manager, a text console or ssh), not through su or sudo"
+  node=$(node --version 2>/dev/null || true)
+  check "node 24+${node:+ (found $node)}" "node -e 'process.exit(+process.versions.node.split(\".\")[0] >= 24 ? 0 : 1)' && command -v npm" "$(install_hint node)"
+  check "python3" "command -v python3" "$(install_hint python)"
+  check "git, curl" "command -v git && command -v curl" "$(install_hint git curl)"
+  check "pgrep, pkill" "command -v pgrep && command -v pkill" "$(install_hint procps)"
+  check_opt "foot (the shells' terminal, Super+T)" "command -v foot" "$(install_hint foot)"
+  check_opt "xwayland-satellite (X11 apps)" "command -v xwayland-satellite || [ -x \"\${PLUTONIUM_XWAYLAND_SATELLITE:-}\" ]" "$(install_hint xwayland-satellite)"
+  check_opt "systemd-socket-activate (X11 apps)" "command -v systemd-socket-activate" "$(install_hint socket-activate)"
+  check_opt "the helper's dependencies (agents driving pages)" "[ -d $ROOT/helper/node_modules/playwright-core ]" \
+    "plutonium run installs them, or: (cd helper && npm ci --omit=dev)"
   if [[ -n ${HOST:-} ]]; then
     echo "Ash on the host (HOST=1):"
-    check "nix" "command -v nix" "for plutonium host build"
+    check "nix" "command -v nix" "HOST=1 needs Nix; remove it from plutonium.env to run Ash in the container"
     check "chrome ($CHROME_BIN)" "chrome_built" "plutonium host build"
     check "Xvfb (--x11 without a display)" "on_ash sh -c 'command -v Xvfb'" "plutonium host build"
     check "python3 websockets (plutonium cdp)" "on_ash python3 -c 'import websockets'" "plutonium host build"
+  elif [[ -z $podman_ok ]]; then
+    echo "Container: (checked once podman works)"
   else
-    echo "Container:"
-    [[ -n ${PREBUILT:-} ]] || check "image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
-    check "container $CONTAINER running" "container_running" "plutonium container create / start"
-    check "the system D-Bus in the container (DRM)" "in_container test -S /run/dbus/system_bus_socket" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
-    check "uid 65534 unmapped in the container (DRM input hotplug)" "in_container cat /proc/self/uid_map | awk '\$1 <= 65534 && 65534 < \$1 + \$3 { m = 1 } END { exit m }'" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
-    local camera
-    for camera in /dev/video*; do
-      [[ -c $camera ]] || continue
-      check "camera $camera in the container (tabs' getUserMedia)" "in_container test -c $camera" "make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
-    done
-    echo "Chromium:"
+    echo "Container and Chromium:"
+    local remake="make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
     if [[ -n ${PREBUILT:-} ]]; then
-      check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull"
-      check "chrome in the container" "chrome_built" "plutonium container create (with PREBUILT=1)"
+      check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull (about 1.3 GB)"
     else
-      check "checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1"
+      check "build image $IMAGE" "pm image exists $IMAGE" "plutonium container build, or PREBUILT=1 in plutonium.env for the prebuilt Chromium"
+    fi
+    if ! pm container exists "$CONTAINER"; then
+      missing "container $CONTAINER" "plutonium container create"
+    elif ! container_running; then
+      missing "container $CONTAINER running" "plutonium container start"
+    else
+      ok "container $CONTAINER running"
+      if [[ -n ${PREBUILT:-} ]]; then
+        check "it runs this checkout's image" "[ \"\$(pm container inspect -f '{{.ImageName}}' $CONTAINER)\" = $IMAGE ]" \
+          "the image changed with chromium/ (git pull): plutonium image pull, then $remake"
+      fi
+      check "the system D-Bus in the container (DRM)" "in_container test -S /run/dbus/system_bus_socket" "$remake"
+      check "uid 65534 unmapped in the container (DRM input hotplug)" "in_container cat /proc/self/uid_map | awk '\$1 <= 65534 && 65534 < \$1 + \$3 { m = 1 } END { exit m }'" "$remake"
+      local camera
+      for camera in /dev/video*; do
+        [[ -c $camera ]] || continue
+        check_opt "camera $camera in the container (tabs' getUserMedia)" "in_container test -c $camera" "$remake"
+      done
+      if [[ -n ${PREBUILT:-} ]]; then
+        check "chrome in the container" "chrome_built" "$remake"
+      fi
+    fi
+    if [[ -z ${PREBUILT:-} ]]; then
+      check "Chromium checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1 in plutonium.env"
       check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
       check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
     fi
   fi
-  echo "T3 Code (optional):"
-  check "checkout at $T3CODE_DIR" "[ -d $T3CODE_DIR/.git ]" "plutonium t3 fetch"
-  check "web app built" "[ -f $T3CODE_DIR/apps/web/dist/index.html ]" "plutonium t3 build"
-  echo "Kill switch (DRM):"
+  echo "Kill switch (a key that gets you out of a DRM session):"
+  check "in the 'input' group" "id -nG | grep -qw input" "sudo usermod -aG input $(id -un), then log out and in again"
+  check "KILLSWITCH_DEVICE and KILLSWITCH_KEY set" "[ -n \"\${KILLSWITCH_DEVICE:-}\" ] && [ -n \"\${KILLSWITCH_KEY:-}\" ]" \
+    "plutonium killswitch find, press a spare key, put the two lines it prints in plutonium.env"
   check "plutonium-killswitch running" "[ \$(systemctl --user is-active plutonium-killswitch) = active ]" "plutonium killswitch install"
-  [[ $ok == 1 ]] && echo "All set." || true
+  echo "Optional:"
+  check_opt "login screen entry" "[ -f /usr/share/wayland-sessions/plutonium.desktop ]" "plutonium session install"
+  check_opt "T3 Code checkout at $T3CODE_DIR" "[ -d $T3CODE_DIR/.git ]" "plutonium t3 fetch"
+  check_opt "T3 Code's web app built" "[ -f $T3CODE_DIR/apps/web/dist/index.html ]" "plutonium t3 build"
+  if (( missing )); then echo "$missing to fix."; return 1; fi
+  echo "All set. Try it in a window (plutonium run --x11 :0 niri), or on a text console: plutonium run niri plain"
 }
 
 cmd=${1:-help}
@@ -1258,6 +1460,7 @@ case "$cmd" in
   stop) stop_cmd "$@" ;;
   status) status_cmd ;;
   killswitch) killswitch_cmd "$@" ;;
+  session) session_cmd "$@" ;;
   live) live_cmd "$@" ;;
   worktree) worktree_cmd "$@" ;;
   helper)
