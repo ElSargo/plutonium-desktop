@@ -496,6 +496,7 @@ function decodeCapture(result: unknown): Capture {
 function mediaSessionOf(value: unknown): BrowserSession | null {
   if (!value || typeof value !== "object") return null;
   const session = value as Record<string, unknown>;
+  if (session.active === false) return null;
   const text = (key: string) => (typeof session[key] === "string" ? (session[key] as string) : "");
   return {
     playing: session.playing === true,
