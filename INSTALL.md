@@ -103,7 +103,8 @@ If apps render in software, `plutonium run` says so, and `logs/helper-*.log` exp
 2. From this repository, run:
 
 ```
-plutonium run niri plain       # niri first, the plain shell behind it (Super+Tab)
+plutonium run                  # your installed shells: the first run installs them, with T3 Code and plain on
+plutonium run niri plain       # or name them: niri first, the plain shell behind it (Super+Tab)
 ```
 
 Ash runs in that console's logind session, which hands it the display and input devices ([docs/features/SEAT.md](docs/features/SEAT.md)).

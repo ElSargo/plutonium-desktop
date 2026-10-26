@@ -54,7 +54,7 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
    bin/plutonium killswitch install
    ```
 
-5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run niri plain`; or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
+5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
 
 In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
