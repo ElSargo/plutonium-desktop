@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import {
+  baseUrl,
   effectiveList,
   entryUrl,
   installedShells,
@@ -21,9 +22,9 @@ import {
   readManifest,
   shellDir,
   ShellError,
-  shellOrigin,
   shippedNames,
   updateShell,
+  withHelper,
   writeList,
   type ShellContext,
   type ShellListEntry,
@@ -144,7 +145,10 @@ export function runShellsCommand(args: string[]): number {
           list.map((entry) => {
             const manifest = readManifest(shellDir(home, entry.name), entry.name);
             // An off shell's URL is only listed: no entry command (pairing) for it.
-            const url = entry.enabled ? entryUrl(manifest, context) : shellOrigin(manifest, context) + "/";
+            // It still names the helper, so the page finds it once switched on.
+            const url = entry.enabled
+              ? entryUrl(manifest, context)
+              : withHelper(baseUrl(manifest, context), manifest, context);
             return [manifest.title, entry.enabled, url];
           }),
         );
