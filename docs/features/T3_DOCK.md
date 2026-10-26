@@ -1,6 +1,6 @@
 # The dock in T3 Code
 
-**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 ("Step 1 as built", below).
+**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below).
 
 T3 works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a tray in the sidebar's footer, it makes T3 a desktop without changing how its chat works.
 
@@ -62,6 +62,16 @@ They are all T3 keybinding commands, so `keybindings.json` can change them. They
 - **fold:** the chat column folds away. For a panel app or tab this is the panel's maximize (patch 0010). For the terminal drawer, the conversation hides and the drawer takes the column.
 - Folded, the chat leaves a thin strip with the thread's title and the agent's state (working, done, waiting for you); a question from the agent lights it and shows a toast. (Not in step 1.)
 
+## The dock in the sidebar
+
+A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, a globe for a site) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
+
+- **Click:** what Super+N does. Clicking the one that shows goes back, or puts it away (panel hidden, drawer closed) when there's nowhere remembered to go back to. The click doesn't take the keyboard.
+- **Right click:** put the panel's tab or the terminal there; keep an app in each thread, each project or everywhere; beside the chat or fold the chat away; clear.
+- **Panel tabs** in the dock show their slot's number.
+
+ChatView publishes the active thread's context (`publishDockContext`) for the sidebar, which is outside it.
+
 ## Setting it up
 
 - Right-click a panel tab: **Dock ▸ Super+1…9**, **Dock scope ▸ thread / project / everywhere**, **Remove from dock**.
@@ -93,7 +103,7 @@ The sidebar's footer gets a row: the clock and date on the left; network, volume
 - Keybinding commands `dock.slot.N`, `dock.slotOther.N`, `dock.assign.N`, `dock.toggleLayout`; their defaults have `when: "plutoniumShell"`, a new context that is true in the Plutonium shell only, so Cmd+1 on a Mac stays T3's.
 - The terminal fold: the drawer takes the chat column (`fill`), the conversation is hidden.
 - Fixed on the way: a browser tab's page or an app's window given the keyboard lost it to the composer a frame later, when the shell window's `focus` event followed. `shouldRefocusComposerOnWindowFocus` now leaves `EMBED` and `NATIVE-WINDOW` alone, as it did `IFRAME` and `WEBVIEW`.
-- Not yet: sites in project or global scope (a site slot uses the thread's tabs whatever its scope), the folded chat's strip, a slot number on panel tabs.
+- Not yet: sites in project or global scope (a site slot uses the thread's tabs whatever its scope), the folded chat's strip.
 
 Verified on Xvfb (slot 14, its own T3 data, keys as synthetic events in the page, so not through Ash):
 

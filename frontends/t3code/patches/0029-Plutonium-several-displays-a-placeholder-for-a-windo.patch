@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <datzeesix@gmail.com>
 Date: Sun, 25 Oct 2026 09:01:38 +1300
-Subject: [PATCH 29/31] Plutonium: several displays: a placeholder for a window
+Subject: [PATCH 29/32] Plutonium: several displays: a placeholder for a window
  another display took, To display N
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
