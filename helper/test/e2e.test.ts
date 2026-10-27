@@ -105,6 +105,8 @@ class FakeShell {
         return this.reply(event.id, { ok: true, value: null });
       case "snapshot":
         return this.send(event.id, "image/png", PNG);
+      case "forget_thread_permissions":
+        return this.reply(event.id, { ok: true, value: { revoked: 2 } });
       case "system_request":
         return this.reply(event.id, { ok: true, value: event.args.kind === "secret" ? { password: "from the shell" } : null });
       default:
@@ -457,6 +459,20 @@ describe("helper end to end", () => {
     assert.deepEqual(setup.mcpServer.args.slice(-1), ["mcp"]);
     const missing = await helperRequest(socketPath, "GET", "/v1/thread-setup");
     assert.equal(missing.status, 400);
+  });
+
+  test("a frontend's archived thread: a shell page forgets its permissions, or the next one to connect", async () => {
+    const forget = () =>
+      helperJson<{ revoked?: number; queued?: boolean }>(socketPath, "POST", `/v1/threads/${encodeURIComponent("t3:thread/x")}/permissions/forget`);
+    assert.deepEqual(await forget(), { revoked: 2 });
+    assert.deepEqual(shell.ops.at(-1), { op: "forget_thread_permissions", args: { thread: "t3:thread/x" } });
+    shell.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await forget(), { queued: true });
+    const before = shell.ops.length;
+    await shell.connect();
+    for (let i = 0; i < 50 && shell.ops.length === before; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(shell.ops.slice(before), [{ op: "forget_thread_permissions", args: { thread: "t3:thread/x" } }]);
   });
 
   test("desktop services: state, actions and changes for the shell", async () => {

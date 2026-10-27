@@ -1,0 +1,306 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 20:08:08 +1300
+Subject: [PATCH 38/38] Plutonium: usage-limit warnings in
+ orchestrator_capabilities
+
+Agents choosing a provider instance for a new thread or child task couldn't
+see which ones were close to their limits. Each instance now has a
+usageWarning when a subscription window is at 80% or more:
+{level: near_limit | at_limit, window, usedPercent, resetsAt, message}, for
+the window closest to its limit (at the limit, the one that frees last). A
+window past its reset time has reset. Not the usage data the UI draws.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/mcp/OrchestratorMcpService.test.ts    | 52 ++++++++++++++
+ apps/server/src/mcp/OrchestratorMcpService.ts |  4 ++
+ .../src/mcp/providerUsageWarning.test.ts      | 70 +++++++++++++++++++
+ apps/server/src/mcp/providerUsageWarning.ts   | 52 ++++++++++++++
+ .../src/mcp/toolkits/orchestrator/tools.ts    |  2 +-
+ packages/contracts/src/orchestratorMcp.ts     | 17 +++++
+ 6 files changed, 196 insertions(+), 1 deletion(-)
+ create mode 100644 apps/server/src/mcp/providerUsageWarning.test.ts
+ create mode 100644 apps/server/src/mcp/providerUsageWarning.ts
+
+diff --git a/apps/server/src/mcp/OrchestratorMcpService.test.ts b/apps/server/src/mcp/OrchestratorMcpService.test.ts
+index 64f2d86eda..c740bde0f9 100644
+--- a/apps/server/src/mcp/OrchestratorMcpService.test.ts
++++ b/apps/server/src/mcp/OrchestratorMcpService.test.ts
+@@ -1084,6 +1084,58 @@ describe("OrchestratorMcpService provider resolution", () => {
+     }),
+   );
+ 
++  it.effect("warns about an instance near its usage limit, and only that one", () =>
++    Effect.gen(function* () {
++      const codex = providerSnapshot({
++        instanceId: codexInstanceId,
++        driver: ProviderDriverKind.make("codex"),
++        model: "gpt-5.4",
++      });
++      const layerDependencies = Layer.mergeAll(
++        NodeServices.layer,
++        Layer.mock(ThreadManagementService.ThreadManagementService)({
++          getThreadRecords: () => Effect.succeed(parentProjection([])),
++        }),
++        ServerSettings.layerTest(),
++        providerRegistryLayer([
++          {
++            ...codex,
++            usageLimits: {
++              checkedAt: "2026-10-27T12:00:00.000Z",
++              windows: [
++                { id: "five_hour", kind: "session", label: "Session", usedPercent: 40 },
++                {
++                  id: "seven_day",
++                  kind: "weekly",
++                  label: "Weekly",
++                  usedPercent: 100,
++                  resetsAt: "2026-10-30T00:00:00.000Z",
++                },
++              ],
++            },
++          },
++        ]),
++        adapterRegistryLayer([codexInstanceId]),
++        Layer.mock(ProjectService.ProjectService)({}),
++        Layer.mock(SecretRequests.SecretRequests)({}),
++        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
++      );
++
++      yield* Effect.gen(function* () {
++        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
++        const capabilities = yield* service.capabilities(scope);
++        assert.deepEqual(capabilities.providers[0]?.usageWarning, {
++          level: "at_limit",
++          window: "Weekly",
++          usedPercent: 100,
++          resetsAt: "2026-10-30T00:00:00.000Z",
++          message:
++            "Weekly limit reached: this instance can't run turns until 2026-10-30T00:00:00.000Z.",
++        });
++      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
++    }),
++  );
++
+   it.effect(
+     "delegates to an Antigravity instance whose adapter resolves through the registry",
+     () =>
+diff --git a/apps/server/src/mcp/OrchestratorMcpService.ts b/apps/server/src/mcp/OrchestratorMcpService.ts
+index 5c0a93cb1c..96d95f6ffd 100644
+--- a/apps/server/src/mcp/OrchestratorMcpService.ts
++++ b/apps/server/src/mcp/OrchestratorMcpService.ts
+@@ -88,6 +88,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
+ import * as ProjectService from "../project/ProjectService.ts";
+ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
++import { providerUsageWarning } from "./providerUsageWarning.ts";
+ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+ import * as ServerSettings from "../serverSettings.ts";
+ import {
+@@ -1920,6 +1921,7 @@ const make = Effect.gen(function* () {
+         const { parent, limits } = yield* loadCaller(scope);
+         const providers = yield* loadProviders;
+         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
++        const nowMs = yield* Clock.currentTimeMillis;
+         // Models the user hid from pickers stay out of the catalog agents choose from.
+         const modelPreferences = yield* serverSettings.getSettings.pipe(
+           Effect.map((settings) => settings.providerModelPreferences ?? {}),
+@@ -1936,6 +1938,7 @@ const make = Effect.gen(function* () {
+               provider,
+               orchestrationCapableInstanceIds.has(provider.instanceId),
+             );
++            const usageWarning = providerUsageWarning(provider.usageLimits, nowMs);
+             return {
+               providerInstanceId: provider.instanceId,
+               driverKind: provider.driver,
+@@ -1961,6 +1964,7 @@ const make = Effect.gen(function* () {
+               canRunChildTask: constraints.length === 0,
+               canRunCrossProviderChildTask: constraints.length === 0,
+               constraints: [...constraints],
++              ...(usageWarning === undefined ? {} : { usageWarning }),
+             };
+           }),
+           features: {
+diff --git a/apps/server/src/mcp/providerUsageWarning.test.ts b/apps/server/src/mcp/providerUsageWarning.test.ts
+new file mode 100644
+index 0000000000..710d54ef28
+--- /dev/null
++++ b/apps/server/src/mcp/providerUsageWarning.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from "@effect/vitest";
++import type { ServerProviderUsageLimits } from "@t3tools/contracts";
++
++import { providerUsageWarning } from "./providerUsageWarning.ts";
++
++const now = Date.parse("2026-10-27T12:00:00.000Z");
++const limits = (
++  windows: ReadonlyArray<{ label: string; usedPercent: number; resetsAt?: string }>,
++): ServerProviderUsageLimits =>
++  ({
++    checkedAt: "2026-10-27T12:00:00.000Z",
++    windows: windows.map((window, index) => ({ id: `w${index}`, kind: "other", ...window })),
++  }) as unknown as ServerProviderUsageLimits;
++
++describe("providerUsageWarning", () => {
++  it("says nothing below the threshold, or without usage", () => {
++    expect(providerUsageWarning(undefined, now)).toBeUndefined();
++    expect(
++      providerUsageWarning(limits([{ label: "Session", usedPercent: 79 }]), now),
++    ).toBeUndefined();
++    expect(
++      providerUsageWarning(
++        {
++          ...limits([{ label: "Session", usedPercent: 100 }]),
++          unavailable: { reason: "probeFailed" },
++        },
++        now,
++      ),
++    ).toBeUndefined();
++  });
++
++  it("warns near a limit with the most used window and its reset", () => {
++    expect(
++      providerUsageWarning(
++        limits([
++          { label: "Session", usedPercent: 81, resetsAt: "2026-10-27T14:00:00.000Z" },
++          { label: "Weekly", usedPercent: 92.4, resetsAt: "2026-10-30T00:00:00.000Z" },
++        ]),
++        now,
++      ),
++    ).toEqual({
++      level: "near_limit",
++      window: "Weekly",
++      usedPercent: 92,
++      resetsAt: "2026-10-30T00:00:00.000Z",
++      message: "Weekly limit 92% used; it resets at 2026-10-30T00:00:00.000Z.",
++    });
++  });
++
++  it("at a limit, names the window that frees last; a window past its reset has reset", () => {
++    const warning = providerUsageWarning(
++      limits([
++        { label: "Session", usedPercent: 100, resetsAt: "2026-10-27T14:00:00.000Z" },
++        { label: "Weekly", usedPercent: 100, resetsAt: "2026-10-30T00:00:00.000Z" },
++        { label: "Weekly · Opus", usedPercent: 100, resetsAt: "2026-10-27T11:00:00.000Z" },
++      ]),
++      now,
++    );
++    expect(warning).toMatchObject({ level: "at_limit", window: "Weekly", usedPercent: 100 });
++    expect(warning?.message).toBe(
++      "Weekly limit reached: this instance can't run turns until 2026-10-30T00:00:00.000Z.",
++    );
++    expect(
++      providerUsageWarning(
++        limits([{ label: "Session", usedPercent: 100, resetsAt: "2026-10-27T11:00:00.000Z" }]),
++        now,
++      ),
++    ).toBeUndefined();
++  });
++});
+diff --git a/apps/server/src/mcp/providerUsageWarning.ts b/apps/server/src/mcp/providerUsageWarning.ts
+new file mode 100644
+index 0000000000..cdc1394589
+--- /dev/null
++++ b/apps/server/src/mcp/providerUsageWarning.ts
+@@ -0,0 +1,52 @@
++/**
++ * Plutonium: the usage warning `orchestrator_capabilities` gives each provider
++ * instance, so an agent choosing one for a new thread or child task can avoid
++ * one at or near its subscription limits. Only the window that matters, not
++ * the usage data the UI draws (claudeUsageLimits.ts for Claude).
++ */
++import type { OrchestratorMcpUsageWarning, ServerProviderUsageLimits } from "@t3tools/contracts";
++
++/** From this much of a window used, the instance is near its limit. */
++export const NEAR_LIMIT_PERCENT = 80;
++/** Rounding: a window the provider reports at 99.6% is used up. */
++const AT_LIMIT_PERCENT = 99.5;
++
++/**
++ * The window closest to its limit, when one is near or at it; undefined when
++ * none is, or the instance reports no windows. A window whose reset time has
++ * passed has reset already, whatever it said.
++ */
++export function providerUsageWarning(
++  limits: ServerProviderUsageLimits | undefined,
++  nowMs: number,
++): OrchestratorMcpUsageWarning | undefined {
++  if (limits === undefined || limits.unavailable !== undefined) return undefined;
++  const current = limits.windows.filter(
++    (window) =>
++      window.usedPercent >= NEAR_LIMIT_PERCENT &&
++      (window.resetsAt === undefined || Date.parse(window.resetsAt) > nowMs),
++  );
++  // The most used; of those at the limit, the one that frees last.
++  const worst = current.toSorted((left, right) => {
++    const leftAt = left.usedPercent >= AT_LIMIT_PERCENT;
++    const rightAt = right.usedPercent >= AT_LIMIT_PERCENT;
++    if (leftAt && rightAt) {
++      return Date.parse(right.resetsAt ?? "") - Date.parse(left.resetsAt ?? "") || 0;
++    }
++    return right.usedPercent - left.usedPercent;
++  })[0];
++  if (worst === undefined) return undefined;
++  const level = worst.usedPercent >= AT_LIMIT_PERCENT ? "at_limit" : "near_limit";
++  const used = Math.round(worst.usedPercent);
++  const resets = worst.resetsAt === undefined ? "" : ` until ${worst.resetsAt}`;
++  return {
++    level,
++    window: worst.label,
++    usedPercent: used,
++    ...(worst.resetsAt === undefined ? {} : { resetsAt: worst.resetsAt }),
++    message:
++      level === "at_limit"
++        ? `${worst.label} limit reached: this instance can't run turns${resets}.`
++        : `${worst.label} limit ${used}% used${worst.resetsAt === undefined ? "" : `; it resets at ${worst.resetsAt}`}.`,
++  };
++}
+diff --git a/apps/server/src/mcp/toolkits/orchestrator/tools.ts b/apps/server/src/mcp/toolkits/orchestrator/tools.ts
+index 36c4d78723..635e5ece2b 100644
+--- a/apps/server/src/mcp/toolkits/orchestrator/tools.ts
++++ b/apps/server/src/mcp/toolkits/orchestrator/tools.ts
+@@ -52,7 +52,7 @@ const threadMetadataDependencies = [
+ 
+ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
+   description:
+-    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
++    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. An instance near or at a subscription usage limit has a usageWarning (the window, how much is used, when it resets): prefer another for new work. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+   success: OrchestratorMcpCapabilitiesResult,
+   failure: OrchestratorMcpFailure,
+   failureMode: "return",
+diff --git a/packages/contracts/src/orchestratorMcp.ts b/packages/contracts/src/orchestratorMcp.ts
+index 80328d2797..dc78b915ad 100644
+--- a/packages/contracts/src/orchestratorMcp.ts
++++ b/packages/contracts/src/orchestratorMcp.ts
+@@ -491,6 +491,21 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
+ });
+ export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
+ 
++/**
++ * An instance near or at one of its subscription usage limits (the window
++ * closest to it), for choosing where new work goes.
++ */
++export const OrchestratorMcpUsageWarning = Schema.Struct({
++  level: Schema.Literals(["near_limit", "at_limit"]),
++  /** The window's label, e.g. "Session" or "Weekly". */
++  window: Schema.String,
++  usedPercent: Schema.Number,
++  /** When the window resets, if the provider says. */
++  resetsAt: Schema.optional(Schema.String),
++  message: Schema.String,
++});
++export type OrchestratorMcpUsageWarning = typeof OrchestratorMcpUsageWarning.Type;
++
+ export const OrchestratorMcpProviderCapability = Schema.Struct({
+   providerInstanceId: ProviderInstanceId,
+   driverKind: ProviderDriverKind,
+@@ -508,6 +523,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
+   canRunChildTask: Schema.Boolean,
+   canRunCrossProviderChildTask: Schema.Boolean,
+   constraints: Schema.Array(Schema.String),
++  /** Omitted while the instance is clear of its usage limits. */
++  usageWarning: Schema.optional(OrchestratorMcpUsageWarning),
+ });
+ export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
+ 

@@ -111,6 +111,44 @@ describe("the relay", () => {
       result: { tabs: [{ id: 2, targetId: "shown", embedded: false }] },
     });
   });
+
+  test("grantPermissions asks the user over the tab, and a refusal isn't asked again at once", async () => {
+    const { tabs, socket } = serving();
+    const key = { threadId: "thread-1", tabId: "tab-1" };
+    tabs.attach(key, { targetId: "shown", browserTabId: 2, page: "shell", url: () => "", title: () => "" }, () => true);
+    const asked: Array<[number, string[], string | undefined]> = [];
+    let answer = "allow";
+    tabs.onRequestPermissions = async (browserTabId, permissions, origin) => {
+      asked.push([browserTabId, permissions, origin]);
+      return { answer, scope: "thread" };
+    };
+    const grant = async (id: number, params: Record<string, unknown>) => {
+      socket.command({
+        type: "cdp",
+        ...key,
+        message: JSON.stringify({ id, method: "Browser.grantPermissions", params }),
+      });
+      await settle();
+      await settle();
+      const reply = socket.events.findLast((event) => event["type"] === "cdp");
+      return JSON.parse(String(reply?.["message"])) as { id: number; result?: unknown; error?: { message: string } };
+    };
+    assert.deepEqual(await grant(1, { permissions: ["videoCapture", "audioCapture"], origin: "https://a.test" }), {
+      id: 1,
+      result: {},
+    });
+    // Nothing a page asks for: nothing to ask.
+    assert.deepEqual(await grant(2, { permissions: ["clipboardSanitizedWrite"] }), { id: 2, result: {} });
+    answer = "deny";
+    const refused = await grant(3, { permissions: ["notifications"] });
+    assert.match(refused.error?.message ?? "", /didn't allow notifications \(deny\)/);
+    const again = await grant(4, { permissions: ["notifications"] });
+    assert.match(again.error?.message ?? "", /didn't allow notifications/);
+    assert.deepEqual(asked, [
+      [2, ["camera", "microphone"], "https://a.test"],
+      [2, ["notifications"], undefined],
+    ]);
+  });
 });
 
 const fakeCdp = { addEventListener: () => {}, addCloseListener: () => {} } as unknown as BrowserCdp;

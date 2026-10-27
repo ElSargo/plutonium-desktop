@@ -1723,6 +1723,10 @@ export class PlutoniumShell extends EventTarget {
       case "answer_dialog":
         this.answerTabDialog(args.tabId, args.accept, args.text ?? "");
         return {};
+      // A frontend archived or deleted the thread (the helper's
+      // POST /v1/threads/<thread>/permissions/forget). Null: no thread grants here.
+      case "forget_thread_permissions":
+        return this.forgetThreadPermissions(args.thread);
       case "groups":
         if (!this.tagsAvailable) throw new Error("this Chromium has no groups");
         return (await this.broker.getGroups()).map(plainGroup);
