@@ -462,6 +462,7 @@ export class Daemon {
             lock: (user, message) => this.desktop!.lock(user, message),
             idle: () => this.desktop!.idle(),
             setDisplaysOff: (off) => this.desktop!.setDisplaysOff(off),
+            setIdleInhibited: (inhibited) => this.desktop!.setIdleInhibited(inhibited),
             onLockChanged: (listener) => this.desktop?.lockListeners.add(listener),
           }
         : null,

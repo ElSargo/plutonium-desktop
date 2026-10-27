@@ -100,8 +100,10 @@ const HELPER = new URL(import.meta.url).origin;
 /**
  * @typedef {{ id: number, appId: string, title: string, width: number, height: number,
  *   deviceScaleFactor: number, embedded: boolean, focused: boolean, pid: number,
- *   tag: string, tags: string[] }} NativeWindowEntry
+ *   tag: string, tags: string[], iconName: string, icon: string }} NativeWindowEntry
  *   tag: the thread that started it ("" if none); tags: tag first, then the ones shells added.
+ *   iconName, icon: the icon the app set (xdg_toplevel_icon_v1), an icon theme name and a
+ *   PNG data URL, "" if none; windowIcon() picks.
  * @typedef {NativeWindowEntry & { threadId: string | null | undefined }} ShellWindow
  *   threadId: the thread that started it; null if none did; undefined until known.
  * @typedef {{ tag: string, label: string, shellId: string }} ItemGroup
@@ -1221,6 +1223,22 @@ export class PlutoniumShell extends EventTarget {
       this._appIcons.set(appId, icon);
     }
     return icon;
+  }
+
+  /**
+   * A URL for window `window`'s icon, or null: the icon the app set
+   * (xdg_toplevel_icon_v1) by name if the helper finds it, else its pixels, else
+   * its app's icon (appIcon(window.appId)).
+   * @param {NativeWindowEntry} window
+   * @returns {Promise<string | null>}
+   */
+  async windowIcon(window) {
+    if (window.iconName) {
+      const named = await this.appIcon(window.iconName);
+      if (named) return named;
+    }
+    if (window.icon) return window.icon;
+    return window.appId ? this.appIcon(window.appId) : null;
   }
 
   /**
@@ -3688,6 +3706,8 @@ function plain(entry) {
     pid: entry.pid,
     tag: entry.tag ?? "",
     tags: [...(entry.tags ?? [])],
+    iconName: entry.iconName ?? "",
+    icon: entry.icon ?? "",
   };
 }
 

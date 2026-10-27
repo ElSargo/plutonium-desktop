@@ -27,6 +27,8 @@ class FakeBrowser implements SessionBrowser {
   /** setDisplaysOff's answer: false as on X11. */
   canTurnOff = true;
   readonly locks: { user: string; message: string }[] = [];
+  /** What setIdleInhibited was last told. */
+  idleInhibited: boolean | null = null;
   private readonly listeners = new Set<(locked: boolean) => void>();
 
   async lock(user: string, message: string): Promise<void> {
@@ -40,6 +42,9 @@ class FakeBrowser implements SessionBrowser {
     if (!this.canTurnOff) return false;
     this.displaysOff = off;
     return true;
+  }
+  async setIdleInhibited(inhibited: boolean): Promise<void> {
+    this.idleInhibited = inhibited;
   }
   onLockChanged(listener: (locked: boolean) => void): void {
     this.listeners.add(listener);
@@ -167,8 +172,10 @@ describe("session service", () => {
     assert.equal(state.idleSeconds, 0);
     assert.equal(state.idleAction, "none");
     assert.equal(browser.locks.length, 0);
+    assert.equal(browser.idleInhibited, true, "Wayland apps' idle notifications are held off too");
     state = (await session.call("uninhibit", {}, "niri")) as SessionState;
     assert.deepEqual(state.inhibitors, []);
+    assert.equal(browser.idleInhibited, false);
     assert.equal(state.locked, false, "not straight away: idle starts again");
     // A tab playing video, through the browser's wake locks; the browser's own captures don't count.
     browser.wakeLocks = ["Video Wake Lock", "Capturing"];

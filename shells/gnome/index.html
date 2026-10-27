@@ -1676,7 +1676,7 @@ function appOf(item) {
   if (item.kind === "t") return PSEUDO[WEB];
   const app = appFor(item.entry.appId);
   if (app) return app;
-  return { id: `window:${item.entry.appId || item.id}`, name: item.entry.appId || titleOf(item), windowAppId: item.entry.appId };
+  return { id: `window:${item.entry.appId || item.id}`, name: item.entry.appId || titleOf(item), windowAppId: item.entry.appId, window: item.entry };
 }
 const appKeyOf = (item) => appOf(item).id;
 
@@ -1684,7 +1684,8 @@ const iconCache = new Map();
 function appIconEl(app) {
   if (!app) return el("span", "letter", "?");
   if (app.glyph) { const g = el("span", `glyph ${app.glyph}`); g.innerHTML = icon(app.glyph); return g; }
-  const id = app.hasIcon ? app.id : app.windowAppId;
+  // A window with no desktop app: the icon it set (xdg_toplevel_icon_v1), else its app id's.
+  const id = app.hasIcon ? app.id : app.window ? `window:${app.window.appId || app.window.id}` : app.windowAppId;
   if (id && shell) {
     const img = document.createElement("img");
     img.alt = "";
@@ -1693,7 +1694,7 @@ function appIconEl(app) {
     const cached = iconCache.get(id);
     if (cached) { img.src = cached; return img; }
     if (cached === null) return letter;
-    Promise.resolve(shell.appIcon(id)).then((url) => {
+    Promise.resolve(app.window && !app.hasIcon ? shell.windowIcon(app.window) : shell.appIcon(id)).then((url) => {
       iconCache.set(id, url ?? null);
       if (url) { img.src = url; letter.replaceWith(img); }
     }).catch(() => iconCache.set(id, null));

@@ -14,7 +14,9 @@
 // (served here on the session bus if nothing else has it) and the portal's
 // Inhibit, the browser's wake locks (a tab playing video, the Screen Wake
 // Lock API, a Wayland app's idle inhibitor), and shells' `inhibit`. Idle
-// counts again from when the last inhibitor went.
+// counts again from when the last inhibitor went. The browser is told whether
+// there are any (Plutonium.setIdleInhibited), for Wayland apps'
+// ext_idle_notify_v1 (Discord's away status), which they hold off too.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -42,6 +44,8 @@ export interface SessionBrowser {
   lock(user: string, message: string): Promise<void>;
   idle(): Promise<BrowserIdle>;
   setDisplaysOff(off: boolean): Promise<boolean>;
+  /** Whether any inhibitor holds idle off, for Wayland apps' idle notifications. */
+  setIdleInhibited?(inhibited: boolean): Promise<void>;
   onLockChanged(listener: (locked: boolean) => void): void;
 }
 
@@ -392,6 +396,8 @@ export class SessionService implements DesktopService {
     this.displaysOff = idle.displaysOff;
     this.release(() => (this.browserInhibitors = wakeLockInhibitors(idle.wakeLocks)));
     const inhibited = this.inhibitors().length > 0;
+    // Each look, not only on a change: a browser that restarted starts uninhibited.
+    browser.setIdleInhibited?.(inhibited).catch(() => {});
     const sinceInhibited = (Date.now() - this.inhibitedUntil) / 1000;
     this.idleSeconds = inhibited ? 0 : Math.min(idle.idleSeconds, sinceInhibited);
     const { lockAfter, screenOffAfter } = this.settings;
