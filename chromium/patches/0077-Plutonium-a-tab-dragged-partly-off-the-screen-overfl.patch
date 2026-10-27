@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 19:41:21 +1300
+Subject: [PATCH 77/77] Plutonium: a tab dragged partly off the screen
+ overflows instead of laying out again
+
+SurfaceEmbed sized the embedded page from the plugin's unobscured rect,
+which MapToVisualRectInAncestorSpace clips by ancestors' overflow: in a
+shell whose desktop is overflow: hidden, a tab dragged half off the screen
+got a frame the size of its visible part and laid out again to fit. It also
+sent the visible part of the <embed> as the visible viewport, which for a
+main frame is its visual viewport.
+
+WebPluginContainer::ContentBoxSize() gives the element's content box,
+untransformed and unclipped, from the last layout; the plugin reads it in
+UpdateGeometry() and uses it for both. A tab overflows, as a native window
+does.
+---
+ .../renderer/surface_embed_web_plugin.cc      | 36 ++++++++++++-------
+ .../renderer/surface_embed_web_plugin.h       |  1 +
+ .../blink/public/web/web_plugin_container.h   |  5 +++
+ .../exported/web_plugin_container_impl.cc     |  5 +++
+ .../core/exported/web_plugin_container_impl.h |  1 +
+ 5 files changed, 35 insertions(+), 13 deletions(-)
+
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.cc b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+index eb6a0c54ef..182dd2e62e 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.cc
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+@@ -216,15 +216,20 @@ void SurfaceEmbedWebPlugin::UpdateGeometry(const gfx::Rect& window_rect,
+   // Note: Layer bounds are set by WebPluginContainerImpl::Paint()
+   // so we don't need to set them here for the time being.
+ 
++  // EXO-TABS: read here, where layout is clean.
++  const gfx::Size content_size =
++      container_ ? container_->ContentBoxSize() : gfx::Size();
+   if (last_window_rect_ == window_rect && last_clip_rect_ == clip_rect &&
+       last_unobscured_rect_ == unobscured_rect &&
+-      last_is_visible_ == is_visible && !frame_sink_id_changed_) {
++      last_content_size_ == content_size && last_is_visible_ == is_visible &&
++      !frame_sink_id_changed_) {
+     return;
+   }
+ 
+   last_window_rect_ = window_rect;
+   last_clip_rect_ = clip_rect;
+   last_unobscured_rect_ = unobscured_rect;
++  last_content_size_ = content_size;
+   last_is_visible_ = is_visible;
+ 
+   if (frame_sink_id_.is_valid()) {
+@@ -393,11 +398,6 @@ void SurfaceEmbedWebPlugin::SynchronizeVisualProperties(
+       ancestor_widget->PinchGestureActiveInMainFrame();
+   pending_visual_properties.screen_infos = ancestor_widget->GetScreenInfos();
+ 
+-  // For separate WebContents acting like an iframe, the "visible viewport" is
+-  // the portion of the plugin that is visible within the plugin bounds.
+-  pending_visual_properties.visible_viewport_size =
+-      gfx::Size(last_clip_rect_.width(), last_clip_rect_.height());
+-
+   const std::vector<gfx::Rect>& viewport_segments =
+       ancestor_widget->ViewportSegments();
+   pending_visual_properties.root_widget_viewport_segments.assign(
+@@ -408,14 +408,24 @@ void SurfaceEmbedWebPlugin::SynchronizeVisualProperties(
+   // only change how it is drawn. |last_window_rect_| is the transformed
+   // bounding box, so a scaled-down <embed> would otherwise get a scaled-down
+   // page (drawn scaled down a second time).
+-  // |last_unobscured_rect_| is the element's content box in its own
+-  // (untransformed) space (WebPluginContainerImpl::ComputeClipRectsForPlugin);
+-  // reading it doesn't force a layout, which this may run in the middle of
+-  // (e.g. while the element is being removed).
+-  const gfx::Size local_frame_size = last_unobscured_rect_.IsEmpty()
+-                                         ? last_window_rect_.size()
+-                                         : last_unobscured_rect_.size();
++  // |last_content_size_| is the element's content box in its own space,
++  // untransformed and unclipped, kept from the last UpdateGeometry(): reading
++  // it here could force a layout, which this may run in the middle of (e.g.
++  // while the element is being removed). |last_unobscured_rect_| is clipped
++  // by ancestors' overflow (MapToVisualRectInAncestorSpace), so a tab in a
++  // shell whose desktop is overflow: hidden laid out at its visible part.
++  const gfx::Size local_frame_size =
++      !last_content_size_.IsEmpty()      ? last_content_size_
++      : !last_unobscured_rect_.IsEmpty() ? last_unobscured_rect_.size()
++                                         : last_window_rect_.size();
+   pending_visual_properties.local_frame_size = local_frame_size;
++  // EXO-TABS: the embedded page is a main frame, so the visible viewport is
++  // its visual viewport (innerWidth, visualViewport, what fixed elements fit
++  // in). A tab is a window: dragged partly off the screen or clipped by its
++  // container it overflows, as a native window does, instead of laying out
++  // again to fit what's left visible. (Upstream used the visible part of the
++  // plugin, as for an iframe.)
++  pending_visual_properties.visible_viewport_size = local_frame_size;
+   // How much smaller the page is drawn than it lays out.
+   const float scale =
+       local_frame_size.width() > 0
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.h b/components/surface_embed/renderer/surface_embed_web_plugin.h
+index b341ebda59..ebda619dd5 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.h
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.h
+@@ -135,6 +135,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+   gfx::Rect last_window_rect_;
+   gfx::Rect last_clip_rect_;
+   gfx::Rect last_unobscured_rect_;
++  gfx::Size last_content_size_;
+   bool last_is_visible_ = false;
+   bool last_is_throttled_ = false;
+   bool last_subtree_throttled_ = false;
+diff --git a/third_party/blink/public/web/web_plugin_container.h b/third_party/blink/public/web/web_plugin_container.h
+index 4926e59c90..917ffcb5c8 100644
+--- a/third_party/blink/public/web/web_plugin_container.h
++++ b/third_party/blink/public/web/web_plugin_container.h
+@@ -103,6 +103,11 @@ class WebPluginContainer {
+   // content. The rectangle is in the plugin's coordinate system.
+   virtual bool IsRectTopmost(const gfx::Rect&) = 0;
+ 
++  // EXO-TABS: the element's content box in its own space: neither transformed
++  // nor clipped by the viewport or an ancestor's overflow. Read from the last
++  // layout (it never forces one); empty without a layout box.
++  virtual gfx::Size ContentBoxSize() const { return gfx::Size(); }
++
+   // Notifies when the plugin changes the kind of touch-events it accepts.
+   virtual void RequestTouchEventType(TouchEventRequestType) = 0;
+ 
+diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
+index 50481b8ff3..88e516a71b 100644
+--- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
+@@ -1216,6 +1216,11 @@ void WebPluginContainerImpl::ComputeClipRectsForPlugin(
+   }
+ }
+ 
++gfx::Size WebPluginContainerImpl::ContentBoxSize() const {
++  const auto* box = DynamicTo<LayoutBox>(element_->GetLayoutObject());
++  return box ? ToRoundedSize(box->PhysicalContentBoxRect().size) : gfx::Size();
++}
++
+ void WebPluginContainerImpl::CalculateGeometry(gfx::Rect& window_rect,
+                                                gfx::Rect& clip_rect,
+                                                gfx::Rect& unobscured_rect) {
+diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
+index 3ce134e011..486676e661 100644
+--- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
++++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
+@@ -129,6 +129,7 @@ class CORE_EXPORT WebPluginContainerImpl final
+   v8::Local<v8::Object> V8ObjectForElement() override;
+   void LoadFrameRequest(const WebURLRequest&, const WebString& target) override;
+   bool IsRectTopmost(const gfx::Rect&) override;
++  gfx::Size ContentBoxSize() const override;
+   void RequestTouchEventType(TouchEventRequestType) override;
+   void SetWantsWheelEvents(bool) override;
+   gfx::Point RootFrameToLocalPoint(const gfx::Point&) override;

@@ -122,6 +122,7 @@ T3 has a full browser (the right panel's Browser surface, a mini player, and `pr
 
 Chromium fixes found on the way:
 - **SurfaceEmbed under a transform:** the plugin sized the page from the element's transformed bounding box, so a scaled-down `<embed>` got a scaled-down page, drawn scaled down again. It now lays out at the element's own size, as an out-of-process iframe does, and rasters at the drawn scale.
+- **A tab partly off the screen** (patch 0077): the plugin sized the page from its "unobscured" rect, which Blink clips by every ancestor's overflow (`MapToVisualRectInAncestorSpace`), and sent the visible part of the `<embed>` as the visible viewport, which for a main frame is its visual viewport. In a shell whose desktop is `overflow: hidden`, a tab dragged half off the screen got a frame the size of what was left and laid out again to fit. It now lays out at the element's own content box (`WebPluginContainer::ContentBoxSize()`, from the last layout) and overflows, as a native window does.
 - **Performance manager:** a SurfaceEmbed tab's main frame is an outermost frame to the graph, and telling the graph it isn't intersecting the viewport is a "bad message". With the renderer gone it was a browser DCHECK; inside a message it would have killed the shell's renderer.
 
 Verified, Xvfb and panel:
