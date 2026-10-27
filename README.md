@@ -6,7 +6,7 @@ In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real 
 
 ![The niri shell: a terminal and a browser tab side by side](docs/images/niri.png)
 
-- **Bring your own shell.** It comes with three: [niri](docs/features/NIRI_SHELL.md) (scrollable tiling), a minimal reference shell, and [T3 Code](frontends/t3code/README.md) (coding agents). You can run several at once and switch between them with Super+Tab.
+- **Bring your own shell.** It comes with four: [niri](docs/features/NIRI_SHELL.md) (scrollable tiling), [GNOME](docs/features/GNOME_SHELL.md) (floating windows, workspaces as threads), a minimal reference shell, and [T3 Code](frontends/t3code/README.md) (coding agents). You can run several at once and switch between them with Super+Tab.
 - **Apps and tabs side by side.** Apps get the GPU, keyboard, mouse, touchpad, fullscreen, pointer lock, and drag and drop. Tabs are real Chromium tabs.
 - **Work stays together.** Every app and tab belongs to the thread or workspace that started it. A link clicked in a terminal opens as a tab next to it, and a file opens in its app in the same place.
 - **Built for agents.** An agent can see, launch, screenshot and drive its own thread's apps and tabs over MCP.

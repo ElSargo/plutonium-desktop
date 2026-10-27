@@ -82,6 +82,7 @@ await shell.launch("mine:thread/1", ["foot"]);
 | Sizing, fullscreen, controls, drag and drop | `{{PLUTONIUM}}/docs/features/WINDOW_SIZING.md`, `CONTROLS.md`, `DRAG_AND_DROP.md` (same folder) |
 | Several shells, the switcher | `{{PLUTONIUM}}/docs/features/SHELLS.md` |
 | The niri shell | `{{PLUTONIUM}}/docs/features/NIRI_SHELL.md` |
+| The GNOME shell | `{{PLUTONIUM}}/docs/features/GNOME_SHELL.md` |
 | Agents driving apps and tabs (MCP tools) | `{{PLUTONIUM}}/docs/features/AGENT_CONTROL.md` |
 | How it's built | `{{PLUTONIUM}}/docs/ARCHITECTURE.md` |
 | Complete example shells | `{{PLUTONIUM}}/shells/plain/index.html` (small), `{{PLUTONIUM}}/shells/niri/index.html` (large) |

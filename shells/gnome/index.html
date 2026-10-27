@@ -1,0 +1,2438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNOME Shell</title>
+<!--
+  A GNOME-like Plutonium shell.
+
+  - The top bar: the workspace indicator (Activities), the clock and its menu
+    (notifications, media, calendar: datemenu.js), the status icons and quick
+    settings (quick.js).
+  - Floating windows with Adwaita header bars. Drag a header bar to move;
+    to the top edge to maximize, to the left or right edge to tile (a corner
+    tiles a quarter). Two tiled windows share their edge when resized.
+  - Workspaces are dynamic, side by side, and each one is a thread
+    (gnome:workspace/<id>): apps, tabs and agents started there belong to
+    it. Moving a window to another workspace moves it to that thread.
+  - The Activities overview: the workspaces zoomed out with their windows
+    spread, workspace thumbnails, search (apps, windows, settings, the web),
+    the dash with pinned apps, and the app grid. Tap Super, or Alt+F1, the
+    hot corner, or swipe up with three fingers.
+  - Settings (settings.js): Wi-Fi, Bluetooth, sound, power, appearance,
+    multitasking, keyboard shortcuts (rebindable, and custom ones), apps.
+  Keys: see ACTIONS below; all of them can be changed in Settings → Keyboard.
+-->
+<style>
+  :root {
+    --bar-h: 32px; --hb-h: 38px; --accent: #3584e4; --accent-fg: #fff;
+    --win-bg: #ffffff; --hb-bg: #ebebeb; --hb-fg: #2e2e2e; --hb-inactive: #fafafa;
+    --btn-bg: #00000014; --btn-hover: #00000026;
+    --panel-bg: #2a2a2d; --panel-card: #ffffff12; --panel-card-hover: #ffffff20; --panel-fg: #fff; --panel-dim: #ffffffa0;
+    --plutonium-menu-bg: #ffffff; --plutonium-menu-fg: #2e2e2e;
+    --plutonium-menu-border: 1px solid #0000001f; --plutonium-menu-radius: 12px;
+    --plutonium-menu-shadow: 0 4px 18px #0004; --plutonium-menu-hover-bg: #0000000f;
+    --plutonium-menu-hover-fg: #2e2e2e; --plutonium-menu-separator: #0000001f;
+    --wallpaper: radial-gradient(circle at 75% 30%, #3d6fc4 0, transparent 45%),
+                 radial-gradient(circle at 20% 85%, #7a4fb3 0, transparent 40%),
+                 linear-gradient(135deg, #1b2a4e, #1a3f7a 50%, #2b1d4f);
+    --ease: cubic-bezier(.25, 1, .5, 1); --dur: .25s;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --win-bg: #1e1e1e; --hb-bg: #303030; --hb-fg: #ffffff; --hb-inactive: #242424;
+      --btn-bg: #ffffff1a; --btn-hover: #ffffff2a;
+      --plutonium-menu-bg: #383838; --plutonium-menu-fg: #fff;
+      --plutonium-menu-border: 1px solid #ffffff1a; --plutonium-menu-hover-bg: #ffffff1a;
+      --plutonium-menu-hover-fg: #fff; --plutonium-menu-separator: #ffffff1a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body {
+    font: 14px/1.4 Cantarell, "Inter", system-ui, sans-serif; color: #fff; background: #000;
+    user-select: none;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: default; padding: 0; }
+  button:disabled { opacity: .45; }
+  .ic { width: 16px; height: 16px; flex: none; }
+  .round { width: 34px; height: 34px; border-radius: 99px; display: grid; place-items: center; }
+  .round:hover:not(:disabled) { background: #ffffff1f; }
+  #kbd-sink { position: fixed; width: 1px; height: 1px; left: -10px; top: -10px; outline: none; }
+  body.live .win, body.live .wscard, body.live #dash, body.live #ov-top, body.live #shade, body.live #grid { transition: none !important; }
+
+  /* Top bar. */
+  #topbar {
+    position: fixed; inset: 0 0 auto; height: var(--bar-h); z-index: 1000; background: #000;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 6px;
+    font-weight: 700; font-size: 14px; transition: background .25s;
+  }
+  body.overview #topbar { background: transparent; }
+  #topbar > :first-child { justify-self: start; }
+  #topbar > :nth-child(2) { justify-self: center; }
+  #topbar > :last-child { justify-self: end; }
+  .pill-btn { height: 24px; padding: 0 10px; border-radius: 99px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .pill-btn:hover, .pill-btn.open { background: #ffffff26; }
+  #activities { gap: 5px; }
+  #activities .ws { width: 7px; height: 7px; border-radius: 99px; background: #ffffff70; transition: width .25s var(--ease), background .25s; }
+  #activities .ws.full { background: #ffffffb0; }
+  #activities .ws.cur { width: 34px; background: #fff; }
+  #tray .pct { font-size: 13px; }
+  #clock { position: relative; }
+  .clock-dot { position: absolute; right: 2px; top: 3px; width: 5px; height: 5px; border-radius: 99px; background: #fff; }
+  .clock-dot[hidden] { display: none; }
+
+  /* The desktop. */
+  #desk { position: fixed; inset: var(--bar-h) 0 0; overflow: hidden; background: var(--wallpaper) center / cover; }
+  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease); }
+  #hotcorner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 1001; }
+  #cards { position: absolute; inset: 0; pointer-events: none; }
+  .wscard {
+    position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 16px; opacity: 0;
+    background: var(--wallpaper) center / cover; box-shadow: 0 4px 24px #0008;
+    transition: transform var(--dur) var(--ease), opacity var(--dur) var(--ease);
+  }
+  body.overview .wscard { pointer-events: auto; }
+  #windows { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+  body.ovdragging #windows { z-index: 5; }
+  body.searching #windows, body.searching #cards, body.searching #ov-chrome { opacity: 0; pointer-events: none !important; }
+  #windows, #cards, #ov-chrome { transition: opacity .2s; }
+  #windows > * { pointer-events: auto; }
+  #snap-preview {
+    position: absolute; left: 0; top: 0; border-radius: 12px; background: color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); opacity: 0; pointer-events: none; z-index: 900;
+    transition: opacity .15s, left .15s var(--ease), top .15s var(--ease), width .15s var(--ease), height .15s var(--ease);
+  }
+  #snap-preview.shown { opacity: 1; }
+
+  /* A window: an Adwaita header bar above the app or tab. */
+  .win {
+    position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 12px;
+    background: var(--win-bg); box-shadow: 0 2px 6px #0003, 0 8px 28px #0004;
+    transition: transform var(--dur) var(--ease), box-shadow .2s, opacity var(--dur) var(--ease), scale var(--dur) var(--ease);
+  }
+  .win.dragging, .win.resizing { transition: box-shadow .2s; }
+  .win.hidden { opacity: 0; pointer-events: none; }
+  .win.focused { box-shadow: 0 3px 9px #0004, 0 14px 44px #0007; }
+  .win.tiled { border-radius: 0; }
+  .win.max { border-radius: 0; box-shadow: none; }
+  .win.opening { opacity: 0 !important; scale: .94; }
+  .win .hb {
+    height: var(--hb-h); border-radius: 12px 12px 0 0; background: var(--hb-inactive); color: var(--hb-fg);
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 7px; gap: 6px;
+    border-bottom: 1px solid #0000001a; font-weight: 700; font-size: 13.5px;
+  }
+  .win.notitle .hb { display: none; }
+  .win.focused .hb { background: var(--hb-bg); }
+  .win.max .hb, .win.tiled .hb { border-radius: 0; }
+  .win .hb .title { grid-column: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55vw; text-align: center; }
+  .win .hb .title.url { cursor: text; }
+  .win .hb .address { grid-column: 2; width: min(60vw, 640px); height: 28px; border-radius: 8px; border: 0; padding: 0 10px; font: inherit; font-weight: 400; color: var(--hb-fg); background: var(--btn-bg); outline: 2px solid var(--accent); }
+  .win .hb .btns { grid-column: 3; justify-self: end; display: flex; gap: 8px; }
+  .win .hb .left { grid-column: 1; display: flex; gap: 2px; }
+  .win .hb button {
+    width: 24px; height: 24px; border-radius: 99px; background: var(--btn-bg); color: var(--hb-fg);
+    display: grid; place-items: center; padding: 0;
+  }
+  .win .hb button .ic { width: 14px; height: 14px; stroke-width: 2.2; }
+  .win .hb button:hover:not(:disabled) { background: var(--btn-hover); }
+  .win .hb button[hidden] { display: none; }
+  .win .hb .left button { background: none; width: 30px; height: 28px; border-radius: 6px; }
+  .win .hb .left button .ic { width: 16px; height: 16px; stroke-width: 1.9; }
+  .win .hb .left button:hover:not(:disabled) { background: var(--btn-bg); }
+  .win .body { position: relative; border-radius: 0 0 12px 12px; overflow: hidden; }
+  .win.notitle .body { border-radius: 12px; }
+  .win.max .body, .win.tiled .body { border-radius: 0; }
+  .win native-window, .win embed { display: block; border: 0; }
+  .win .rs { position: absolute; z-index: 2; }
+  .win.max .rs { display: none; }
+  .win.tiled .rs { display: none; }
+  .win.tile-l .rs.e, .win.tile-tl .rs.e, .win.tile-bl .rs.e,
+  .win.tile-r .rs.w, .win.tile-tr .rs.w, .win.tile-br .rs.w,
+  .win.tile-tl .rs.s, .win.tile-tr .rs.s, .win.tile-bl .rs.n, .win.tile-br .rs.n { display: block; }
+  .rs.n, .rs.s { left: 8px; right: 8px; height: 8px; cursor: ns-resize; }
+  .rs.e, .rs.w { top: 8px; bottom: 8px; width: 8px; cursor: ew-resize; }
+  .rs.n { top: -5px; } .rs.s { bottom: -5px; } .rs.e { right: -5px; } .rs.w { left: -5px; }
+  .rs.ne, .rs.nw, .rs.se, .rs.sw { width: 14px; height: 14px; }
+  .rs.ne { top: -5px; right: -5px; cursor: nesw-resize; } .rs.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+  .rs.nw { top: -5px; left: -5px; cursor: nwse-resize; } .rs.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+  body.overview .win .rs { display: none; }
+  body.overview .win { border-radius: 12px; pointer-events: none; }
+  body.overview .win.hidden { opacity: 1; }
+  .win .taken {
+    position: absolute; inset: 0; display: none; place-content: center; gap: 10px; text-align: center;
+    background: var(--win-bg); color: var(--hb-fg);
+  }
+  .win.is-taken .taken { display: grid; }
+  .win .taken button { background: var(--btn-bg); padding: 6px 14px; border-radius: 8px; }
+
+  /* The overview. */
+  #ov-chrome { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  #ov-chrome .cap { pointer-events: auto; position: absolute; border-radius: 12px; opacity: 0; transition: opacity .15s; }
+  body.overview.settled #ov-chrome .cap { opacity: 1; }
+  #ov-chrome .cap:hover { box-shadow: 0 0 0 4px #ffffff70; }
+  #ov-chrome .cap .cap-icon {
+    position: absolute; left: 50%; bottom: -22px; width: 44px; height: 44px; margin-left: -22px; display: grid; place-items: center;
+  }
+  #ov-chrome .cap .cap-icon img, #ov-chrome .cap .cap-icon .letter { width: 40px; height: 40px; }
+  #ov-chrome .cap .cap-title {
+    position: absolute; left: 50%; bottom: -54px; transform: translateX(-50%); max-width: 100%; padding: 3px 10px; border-radius: 99px;
+    background: #000a; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity .15s;
+  }
+  #ov-chrome .cap:hover .cap-title { opacity: 1; }
+  #ov-chrome .cap .cap-close {
+    position: absolute; right: -12px; top: -12px; width: 28px; height: 28px; border-radius: 99px; background: #3a3a3a;
+    display: grid; place-items: center; opacity: 0; transition: opacity .15s; box-shadow: 0 2px 6px #0006;
+  }
+  #ov-chrome .cap .cap-close:hover { background: #4a4a4a; }
+  #ov-chrome .cap:hover .cap-close { opacity: 1; }
+  #ov-chrome .cap.dragging { opacity: 0 !important; }
+  #ov-top {
+    position: absolute; top: 0; left: 0; right: 0; display: grid; justify-items: center; gap: 12px; padding-top: 14px;
+    opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease);
+  }
+  body.overview #search, body.overview .thumb { pointer-events: auto; }
+  #search {
+    width: 320px; height: 36px; border-radius: 99px; border: 0; padding: 0 16px 0 38px; font: inherit; color: #fff; outline: none;
+    background: #ffffff1f url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23ffffffb0'%3E%3Cpath d='M6.5 1a5.5 5.5 0 0 1 4.38 8.82l3.65 3.65-1.06 1.06-3.65-3.65A5.5 5.5 0 1 1 6.5 1zm0 1.5a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'/%3E%3C/svg%3E") no-repeat 13px center / 16px;
+  }
+  #search:focus { box-shadow: 0 0 0 2px var(--accent); }
+  #search::placeholder { color: #ffffffa0; }
+  #thumbs { display: flex; gap: 10px; height: 58px; transition: opacity .2s; }
+  body.apps #thumbs, body.searching #thumbs { opacity: 0; pointer-events: none; }
+  .thumb {
+    position: relative; height: 100%; border-radius: 8px; overflow: hidden; background: var(--wallpaper) center / cover;
+    box-shadow: 0 1px 4px #0006; outline: 2px solid transparent; outline-offset: 2px;
+  }
+  .thumb.cur { outline-color: #fff; }
+  .thumb.drop { outline-color: var(--accent); }
+  .thumb .tw { position: absolute; border-radius: 2px; background: #ffffffd0; box-shadow: 0 0 0 1px #0004; display: grid; place-items: center; overflow: hidden; }
+  .thumb .tw img, .thumb .tw .letter { width: 14px; height: 14px; font-size: 8px; border-radius: 3px; }
+  .thumb .tname { position: absolute; left: 4px; bottom: 2px; font-size: 10px; font-weight: 700; text-shadow: 0 1px 2px #000; }
+  #dash {
+    position: absolute; bottom: 12px; left: 50%; transform: translate(-50%, 150%); display: flex; align-items: center; gap: 4px;
+    padding: 6px; border-radius: 22px; background: #2e2e2ee6; transition: transform var(--dur) var(--ease); z-index: 950;
+    box-shadow: 0 2px 12px #0006;
+  }
+  body.overview #dash, body.dock-always #dash, body.dock-shown #dash { transform: translate(-50%, 0); }
+  #dock-edge { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 949; display: none; }
+  body.dock-auto #dock-edge { display: block; }
+  #dash .sep { width: 1px; height: 40px; margin: 0 4px; background: #ffffff30; }
+  .icon-btn { position: relative; width: calc(var(--dock-icon) + 16px); height: calc(var(--dock-icon) + 16px); border-radius: 14px; display: grid; place-items: center; }
+  .icon-btn:hover, .icon-btn.sel { background: #ffffff1f; }
+  .icon-btn img, .icon-btn .letter, .icon-btn .glyph, .icon-btn > .ic { width: var(--dock-icon); height: var(--dock-icon); }
+  .icon-btn .dots { position: absolute; bottom: 1px; left: 0; right: 0; display: flex; justify-content: center; gap: 3px; }
+  .icon-btn .dots i { width: 5px; height: 5px; border-radius: 99px; background: #fff; }
+  .icon-btn.focused-app .dots i { background: var(--accent); }
+  .icon-btn.drop-before::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
+  .icon-btn.ghost { opacity: .35; }
+  .letter {
+    display: grid; place-items: center; border-radius: 22%; font-size: 22px; font-weight: 700;
+    background: linear-gradient(#5e9cee, #2a6fca); color: #fff;
+  }
+  .glyph { display: grid; place-items: center; border-radius: 22%; color: #fff; }
+  .glyph .ic { width: 62%; height: 62%; }
+  .glyph.web { background: linear-gradient(#5e9cee, #1c63c4); }
+  .glyph.agent { background: linear-gradient(#e08a5c, #b5532c); }
+  .glyph.settings { background: linear-gradient(#8e8d93, #56555b); }
+  #show-apps .ic { width: 60%; height: 60%; }
+  body.apps #show-apps { background: #ffffff2a; }
+  #grid {
+    position: absolute; inset: 72px 8% 110px; display: grid; gap: 8px 4px; align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); overflow-y: auto; scrollbar-width: none;
+    opacity: 0; pointer-events: none; transform: scale(.94); transition: opacity .2s, transform .2s var(--ease);
+  }
+  body.apps #grid, body.searching #grid { opacity: 1; pointer-events: auto; transform: none; }
+  #grid > button {
+    height: 124px; border-radius: 16px; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 8px; padding: 6px; font-size: 13px; text-align: center;
+  }
+  #grid > button:hover, #grid > button.sel { background: #ffffff1f; }
+  #grid > button img, #grid > button .letter, #grid > button .glyph { width: 64px; height: 64px; }
+  #grid > button span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #grid > button small { color: #ffffff90; font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -6px; }
+  #grid .section { grid-column: 1 / -1; font-weight: 700; color: #ffffffb0; padding: 8px 12px 0; }
+  #grid .none { grid-column: 1 / -1; text-align: center; color: #ffffffb0; padding-top: 40px; }
+  #drag-ghost { position: fixed; z-index: 3000; pointer-events: none; width: 56px; height: 56px; transform: translate(-50%, -50%); opacity: .9; }
+  #drag-ghost img, #drag-ghost .letter, #drag-ghost .glyph { width: 100%; height: 100%; }
+
+  /* Popovers (quick settings, the date menu). */
+  .popover {
+    position: fixed; top: calc(var(--bar-h) + 4px); z-index: 1002; padding: 12px; color: var(--panel-fg);
+    border-radius: 22px; background: var(--panel-bg); box-shadow: 0 6px 30px #000a; font-weight: 400;
+    max-height: calc(100vh - var(--bar-h) - 16px); overflow: auto; scrollbar-width: none;
+  }
+  .popover[hidden] { display: none !important; }
+  .qs { right: 6px; width: 380px; display: grid; gap: 12px; align-content: start; }
+  .qs-top { display: flex; align-items: center; gap: 8px; }
+  .qs-spacer { flex: 1; }
+  .qs-round { width: 38px; height: 38px; border-radius: 99px; background: var(--panel-card); display: grid; place-items: center; }
+  .qs-round:hover { background: var(--panel-card-hover); }
+  .qs-battery { height: 38px; padding: 0 14px; border-radius: 99px; background: var(--panel-card); display: flex; align-items: center; gap: 6px; }
+  .qs-battery:hover { background: var(--panel-card-hover); }
+  .qs-slider { display: flex; align-items: center; gap: 8px; }
+  .qs-icon { width: 38px; height: 38px; border-radius: 99px; display: grid; place-items: center; flex: none; }
+  .qs-icon:hover { background: var(--panel-card); }
+  .qs-arrow { flex: none; }
+  .slider { flex: 1; min-width: 0; appearance: none; height: 6px; border-radius: 99px; outline: none; margin: 0 6px;
+    background: linear-gradient(to right, #fff var(--fill), #ffffff30 var(--fill)); }
+  .slider::-webkit-slider-thumb { appearance: none; width: 20px; height: 20px; border-radius: 99px; background: #fff; box-shadow: 0 1px 4px #0008; }
+  .qs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .qs-toggle { display: flex; height: 52px; border-radius: 99px; background: var(--panel-card); overflow: hidden; }
+  .qs-toggle.active { background: var(--accent); color: var(--accent-fg); }
+  .qs-toggle .qs-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 16px; text-align: left; }
+  .qs-toggle .qs-main:hover:not(:disabled) { background: #ffffff14; }
+  .qs-toggle .qs-text { display: grid; min-width: 0; line-height: 1.2; }
+  .qs-toggle .qs-text b { font-size: 13.5px; }
+  .qs-toggle .qs-text small { font-size: 12px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qs-toggle .qs-text small:empty { display: none; }
+  .qs-toggle .qs-more { width: 40px; flex: none; display: grid; place-items: center; border-left: 1px solid #00000022; }
+  .qs-toggle .qs-more:hover { background: #ffffff14; }
+  .qs-sub-head { display: flex; align-items: center; gap: 10px; }
+  .qs-sub-title { flex: 1; display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+  .qs-sub-title .ic { width: 22px; height: 22px; padding: 8px; box-sizing: content-box; border-radius: 99px; background: var(--accent); }
+  .qs-list { display: grid; gap: 2px; padding: 6px; border-radius: 16px; background: #0000002a; }
+  .qs-row { display: flex; align-items: center; gap: 4px; }
+  .qs-row-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; text-align: left; }
+  .qs-row-main:hover:not(:disabled) { background: var(--panel-card); }
+  .qs-row-main.wide { justify-content: center; color: var(--panel-dim); }
+  .qs-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qs-row-main small { color: var(--panel-dim); font-size: 12px; }
+  .qs-check { color: var(--accent); }
+  .qs-row-act { flex: none; width: 32px; height: 32px; }
+  .qs-empty { padding: 14px; text-align: center; color: var(--panel-dim); }
+  .qs-empty.small { padding: 4px; font-size: 12px; }
+  .qs-password { display: flex; gap: 6px; padding: 4px 6px 8px 40px; }
+  .qs-password .entry { flex: 1; }
+  .qs-footer { padding: 9px 14px; border-radius: 10px; text-align: left; }
+  .qs-footer:hover { background: var(--panel-card); }
+  .qs-note { color: var(--panel-dim); }
+  .entry { height: 34px; border-radius: 8px; border: 0; padding: 0 10px; font: inherit; color: inherit; background: #ffffff1a; outline: none; min-width: 0; }
+  .entry:focus { box-shadow: 0 0 0 2px var(--accent); }
+  button.suggested { background: var(--accent); color: var(--accent-fg); border-radius: 8px; padding: 0 14px; height: 34px; font-weight: 700; }
+  .switch { position: relative; width: 46px; height: 26px; border-radius: 99px; background: #ffffff30; flex: none; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; left: 3px; top: 3px; width: 20px; height: 20px; border-radius: 99px; background: #fff; transition: left .15s var(--ease); box-shadow: 0 1px 3px #0006; }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { left: 23px; }
+
+  .datemenu { left: 50%; transform: translateX(-50%); display: flex; gap: 12px; width: 720px; max-width: calc(100vw - 16px); }
+  .dm-left { flex: 1.3; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 360px; }
+  .dm-sep { width: 1px; background: #ffffff1a; }
+  .dm-right { flex: 1; display: grid; align-content: start; gap: 6px; }
+  .dm-list { flex: 1; display: grid; gap: 8px; align-content: start; overflow: auto; max-height: 460px; scrollbar-width: none; }
+  .dm-empty { display: grid; place-items: center; align-content: center; gap: 10px; height: 280px; color: var(--panel-dim); }
+  .dm-empty .ic { width: 64px; height: 64px; opacity: .5; }
+  .dm-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .dm-dnd { display: flex; align-items: center; gap: 10px; }
+  .dm-clear { padding: 7px 16px; border-radius: 99px; background: var(--panel-card); }
+  .dm-clear:hover:not(:disabled) { background: var(--panel-card-hover); }
+  .dm-today { display: grid; text-align: left; padding: 6px 10px; border-radius: 10px; }
+  .dm-today:hover { background: var(--panel-card); }
+  .dm-today small { color: var(--panel-dim); }
+  .dm-today b { font-size: 17px; }
+  .dm-nav { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+  .dm-cal { border-collapse: collapse; font-size: 13px; margin: 0 auto; }
+  .dm-cal th, .dm-cal td { width: 40px; height: 34px; text-align: center; }
+  .dm-cal th { color: var(--panel-dim); font-weight: 400; font-size: 12px; }
+  .dm-cal td.weekend { color: #ffffffc0; }
+  .dm-cal td.other { color: #ffffff40; }
+  .dm-cal td.today { background: var(--accent); color: var(--accent-fg); border-radius: 99px; font-weight: 700; }
+  .dm-media { display: grid; grid-template-columns: 48px 1fr auto; align-items: center; gap: 10px; padding: 10px; border-radius: 14px; background: var(--panel-card); }
+  .dm-art { width: 48px; height: 48px; border-radius: 8px; background: #ffffff1a center / cover; display: grid; place-items: center; }
+  .dm-art .ic { width: 24px; height: 24px; }
+  .dm-media-text { display: grid; min-width: 0; }
+  .dm-media-text > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dm-media-text small { color: var(--panel-dim); }
+  .dm-media-controls { display: flex; }
+  .n-card { padding: 10px 12px; border-radius: 14px; background: var(--panel-card); display: grid; gap: 4px; cursor: default; }
+  .n-card:hover { background: var(--panel-card-hover); }
+  .n-card.critical { box-shadow: inset 3px 0 0 #e62d42; }
+  .n-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--panel-dim); }
+  .n-icon { width: 18px; height: 18px; display: grid; place-items: center; }
+  .n-icon img { width: 18px; height: 18px; border-radius: 4px; }
+  .n-app { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .n-close { width: 24px; height: 24px; }
+  .n-body b { display: block; font-size: 13.5px; }
+  .n-body p { margin: 2px 0 0; font-size: 13px; color: #ffffffd0; white-space: pre-line; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+  .n-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .n-action { flex: 1; padding: 6px; border-radius: 8px; background: #ffffff14; }
+  .n-action:hover { background: #ffffff26; }
+  .banners { position: fixed; top: calc(var(--bar-h) + 6px); left: 50%; transform: translateX(-50%); z-index: 1500; display: grid; gap: 8px; width: 420px; pointer-events: none; }
+  .banner { pointer-events: auto; border-radius: 16px; background: var(--panel-bg); box-shadow: 0 6px 24px #0009; animation: drop .25s var(--ease); }
+  .banner.out { opacity: 0; transform: translateY(-12px); transition: opacity .2s, transform .2s; }
+  .banner .n-card { background: none; }
+  @keyframes drop { from { opacity: 0; transform: translateY(-16px); } }
+
+  /* Menus and dialogs (ui.js). */
+  .menu {
+    position: fixed; z-index: 2500; min-width: 210px; padding: 6px; border-radius: 14px; background: var(--panel-bg);
+    box-shadow: 0 6px 24px #000b, 0 0 0 1px #ffffff12; display: grid; font-weight: 400; color: var(--panel-fg);
+  }
+  .menu-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; text-align: left; outline: none; }
+  .menu-item:hover:not(:disabled), .menu-item:focus { background: var(--panel-card-hover); }
+  .menu-item.danger { color: #ff7b7b; }
+  .menu-icon { width: 16px; display: grid; place-items: center; }
+  .menu-icon:empty { display: none; }
+  .menu-label { flex: 1; }
+  .menu-check { color: var(--panel-dim); font-size: 12px; min-width: 16px; text-align: right; }
+  .menu-check .ic { color: var(--accent); }
+  .menu-sep { height: 1px; margin: 5px 8px; background: #ffffff1a; }
+  .menu-heading { padding: 6px 10px 2px; font-size: 12px; font-weight: 700; color: var(--panel-dim); }
+  .modal-back { position: fixed; inset: 0; z-index: 2400; display: grid; place-items: center; background: #0008; animation: fade .15s; }
+  .modal { width: 420px; max-width: calc(100vw - 32px); padding: 24px 24px 18px; border-radius: 22px; background: var(--panel-bg); color: var(--panel-fg); box-shadow: 0 10px 40px #000c; display: grid; gap: 12px; font-weight: 400; animation: pop .18s var(--ease); }
+  .modal h2 { margin: 0; font-size: 18px; text-align: center; }
+  .modal p { margin: 0; text-align: center; color: #ffffffd0; }
+  .modal-body { display: grid; gap: 10px; }
+  .modal-buttons { display: flex; gap: 10px; margin-top: 8px; }
+  .modal-button { flex: 1; height: 40px; border-radius: 12px; background: var(--panel-card); font-weight: 700; }
+  .modal-button:hover { background: var(--panel-card-hover); }
+  .modal-button.suggested { background: var(--accent); color: var(--accent-fg); }
+  .modal-button.danger { background: #c01c28; color: #fff; }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes pop { from { opacity: 0; transform: scale(.94); } }
+
+  /* The app and window switcher (Alt+Tab, Alt+`). */
+  #switcher { position: fixed; inset: 0; z-index: 2000; display: grid; place-items: center; pointer-events: none; }
+  #switcher[hidden] { display: none; }
+  #switcher .sw-box { pointer-events: auto; display: flex; gap: 8px; padding: 14px; border-radius: 24px; background: #262626f2; box-shadow: 0 8px 40px #000c; max-width: 92vw; overflow: hidden; }
+  #switcher .sw-item { width: 128px; display: grid; justify-items: center; gap: 8px; padding: 12px 8px 10px; border-radius: 16px; }
+  #switcher .sw-item:hover { background: #ffffff14; }
+  #switcher .sw-item.sel { background: #ffffff26; }
+  #switcher .sw-item img, #switcher .sw-item .letter, #switcher .sw-item .glyph { width: 80px; height: 80px; }
+  #switcher .sw-item span { max-width: 100%; font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0; }
+  #switcher .sw-item.sel span, #switcher.windows .sw-item span { opacity: 1; }
+  #switcher .sw-item .count { position: absolute; }
+  #switcher.windows .sw-item { width: 200px; }
+  #switcher.windows .sw-item span { font-weight: 400; }
+
+  /* The on-screen level (volume, brightness keys). */
+  #osd {
+    position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); z-index: 2200; display: flex; align-items: center; gap: 14px;
+    padding: 12px 20px; border-radius: 99px; background: #262626f0; box-shadow: 0 6px 24px #000a; opacity: 0; transition: opacity .25s; pointer-events: none;
+  }
+  #osd.shown { opacity: 1; }
+  #osd .ic { width: 22px; height: 22px; }
+  #osd .level { width: 180px; height: 6px; border-radius: 99px; background: #ffffff30; overflow: hidden; }
+  #osd .level i { display: block; height: 100%; background: #fff; border-radius: 99px; }
+  #osd .level.over i { background: #ff7b63; }
+  #osd .label { font-weight: 700; }
+
+  #toast {
+    position: fixed; top: calc(var(--bar-h) + 12px); left: 50%; transform: translateX(-50%); z-index: 2300;
+    background: var(--panel-bg); padding: 10px 16px; border-radius: 12px; box-shadow: 0 6px 24px #0008;
+    transition: opacity .3s; opacity: 0; pointer-events: none; display: flex; gap: 12px; align-items: center;
+  }
+  #toast.shown { opacity: 1; pointer-events: auto; }
+  #toast button { padding: 4px 10px; border-radius: 8px; background: var(--panel-card); }
+  #kbd-hint { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 2300; padding: 8px 14px; border-radius: 12px; background: #262626f0; font-size: 13px; }
+  #kbd-hint[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="kbd-sink" tabindex="-1"></div>
+<div id="topbar">
+  <button id="activities" class="pill-btn" title="Activities"></button>
+  <span id="clock-slot"></span>
+  <span id="tray-slot"></span>
+</div>
+<div id="hotcorner"></div>
+<div id="desk">
+  <div id="shade"></div>
+  <div id="cards"></div>
+  <div id="windows"></div>
+  <div id="snap-preview"></div>
+  <div id="ov-chrome"></div>
+  <div id="ov-top">
+    <input id="search" placeholder="Type to search" spellcheck="false" autocomplete="off">
+    <div id="thumbs"></div>
+  </div>
+  <div id="grid"></div>
+  <div id="dock-edge"></div>
+  <div id="dash"></div>
+</div>
+<div id="switcher" hidden><div class="sw-box"></div></div>
+<div id="osd"></div>
+<div id="toast"></div>
+<div id="kbd-hint" hidden></div>
+<script type="module">
+import { icon, volumeIcon } from "./icons.js";
+import { el, button, menu, closeMenu, menuOpen, confirm, ask } from "./ui.js";
+import { mountQuick } from "./quick.js";
+import { mountDateMenu } from "./datemenu.js";
+
+const params = new URLSearchParams(location.search);
+const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+const display = params.get("display") ?? "";
+const $ = (id) => document.getElementById(id);
+// Each workspace is a thread, tagged with its id. A second display's page
+// has workspaces of its own.
+const WS_PREFIX = display ? `gnome:${display}:workspace/` : "gnome:workspace/";
+const wsTag = (id) => `${WS_PREFIX}${id}`;
+const SUFFIX = display ? `.${display}` : "";
+// Workspaces belong to one session's windows: keyed by its helper too.
+// (Storage keys are file names: letters, digits, "_", "." and "-".)
+const SESSION = `-${new URL(helper).port}${SUFFIX}`.replace(/[^\w.-]/g, "_");
+const MIN_W = 240, MIN_H = 120;
+const WEB = "plutonium:web", AGENT = "plutonium:agent", SETTINGS = "plutonium:settings";
+
+export const WALLPAPERS = {
+  adwaita: getComputedStyle(document.documentElement).getPropertyValue("--wallpaper"),
+  dusk: "radial-gradient(circle at 70% 120%, #f6a14b 0, transparent 50%), linear-gradient(170deg, #1d1638, #5b2a6e 55%, #c2456b)",
+  mint: "radial-gradient(circle at 20% 20%, #4fc3a1 0, transparent 45%), linear-gradient(150deg, #0d2b2f, #1f5c58 60%, #2e8b74)",
+  slate: "radial-gradient(circle at 80% 20%, #5b6b80 0, transparent 50%), linear-gradient(160deg, #1c2026, #2f3640 60%, #3f4a57)",
+  sunrise: "radial-gradient(circle at 50% 110%, #ffcf70 0, transparent 45%), linear-gradient(180deg, #24346b, #8b4f8f 55%, #f08a5d)",
+  forest: "radial-gradient(circle at 25% 75%, #6aa84f55 0, transparent 45%), linear-gradient(140deg, #0f1f17, #1e3d2a 55%, #35583b)",
+  night: "radial-gradient(circle at 50% 0%, #2a3550 0, transparent 60%), #0c0f14",
+};
+export const ACCENTS = {
+  blue: "#3584e4", teal: "#2190a4", green: "#3a944a", yellow: "#c88800", orange: "#ed5b00",
+  red: "#e62d42", pink: "#d56199", purple: "#9141ac", slate: "#6f8396",
+};
+const DEFAULT_PREFS = {
+  overlayKey: true, hotCorner: true, edgeTiling: true, dynamicWorkspaces: true, fixedWorkspaces: 4,
+  switcherCurrentWorkspace: false, dock: "overview", dockIconSize: 48,
+  wallpaper: "adwaita", wallpaperUrl: "", accent: "blue", titlebarButtons: "close",
+  clock24: null, clockSeconds: false, clockWeekday: true, batteryPercent: false, weekStartsSunday: false,
+  banners: true, terminal: "foot", homepage: "https://duckduckgo.com/",
+  keys: {}, custom: [],
+};
+
+// ---------------------------------------------------------------- state
+let shell = null;
+let listed = false;          // the broker's lists are in (removing what's gone is safe)
+let prefs = { ...DEFAULT_PREFS };
+let favorites = null;        // app ids, in the dash's order
+let workspaces = [{ id: 1, name: "" }];
+let nextWsId = 2;
+let cur = 0;                 // the current workspace's index
+// key ("w:<id>" | "t:<id>") → item: { key, kind, id, el, entry, ws, geom, tile, hidden, above, notitle, ... }
+const items = new Map();
+let stack = [];              // keys, bottom to top
+let mru = [];                // keys, most recently focused first
+let focused = null;
+let pendingFocus = null;
+const pendingWs = new Map(); // key → { ws, until }: a move whose tags haven't come back yet
+let apps = [];
+let quick = null, dateMenu = null, settings = null;
+let loaded = false;           // the saved workspaces are in
+
+let toastTimer;
+function toast(text, { action, onAction, ms = 3500 } = {}) {
+  const t = $("toast");
+  t.replaceChildren(el("span", "", text));
+  if (action) t.append(button("", { label: action, onClick: () => { t.classList.remove("shown"); onAction(); } }));
+  t.classList.add("shown");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("shown"), ms);
+}
+
+// Kept with the shell (shell.storage: outside its folder, the same in every
+// slot), and in localStorage when there's no helper.
+const saveTimers = new Map();
+const store = {
+  async get(key) {
+    try { if (shell?.available) { const v = await shell.storage.get(key); if (v !== undefined) return v; } } catch {}
+    try { return JSON.parse(localStorage.getItem(`gnome.${key}`)) ?? undefined; } catch { return undefined; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(`gnome.${key}`, JSON.stringify(value)); } catch {}
+    clearTimeout(saveTimers.get(key));
+    saveTimers.set(key, setTimeout(() => shell?.storage.set(key, value).catch(() => {}), 300));
+  },
+};
+// Geometry is per window id, which lasts as long as Ash: the page's own storage.
+const geomKey = `gnome.geom2${SUFFIX}`;
+const savedGeom = (() => { try { return JSON.parse(localStorage.getItem(geomKey)) ?? {}; } catch { return {}; } })();
+let geomTimer = null;
+function saveGeom() {
+  clearTimeout(geomTimer);
+  geomTimer = setTimeout(() => { try { localStorage.setItem(geomKey, JSON.stringify(savedGeom)); } catch {} }, 200);
+}
+
+// ---------------------------------------------------------------- the helper
+try {
+  const { connect } = await import(`${helper}/v1/shell.js`);
+  shell = connect({
+    // An agent, the switcher or a link asked to show a window: bring it here and raise it.
+    onFocus(window) {
+      if (!mine(window)) {
+        if (!shell.tagsAvailable) return false;
+        claim(window, "w");
+      }
+      pendingFocus = `w:${window.id}`;
+      sync();
+      return true;
+    },
+    // A link a page opened in a new tab: this workspace's.
+    onOpenTab: () => curTag(),
+    onFocusTab(tab) {
+      if (!mine(tab)) claim(tab, "t");
+      pendingFocus = `t:${tab.id}`;
+      sync();
+      return true;
+    },
+    // GNOME's banners (datemenu.js).
+    notificationPopups: (n) => dateMenu?.banner(n),
+  });
+  shell.addEventListener("change", () => sync());
+  shell.addEventListener("windowopened", (event) => {
+    if (event.detail.show) { pendingFocus = `w:${event.detail.window.id}`; sync(); }
+  });
+} catch (error) {
+  console.error(error);
+}
+
+// What's kept: settings, pinned apps, workspaces.
+prefs = { ...DEFAULT_PREFS, ...((await store.get("prefs")) ?? {}) };
+favorites = (await store.get("favorites")) ?? null;
+{
+  const saved = await store.get(`workspaces${SESSION}`);
+  if (saved?.list?.length) {
+    workspaces = saved.list.map((w) => ({ id: w.id, name: w.name ?? "" }));
+    nextWsId = Math.max(saved.next ?? 0, ...workspaces.map((w) => w.id + 1));
+    cur = Math.max(0, workspaces.findIndex((w) => w.id === saved.cur));
+  }
+}
+loaded = true;
+function saveWorkspaces() {
+  store.set(`workspaces${SESSION}`, { list: workspaces, next: nextWsId, cur: workspaces[cur]?.id });
+}
+function setPref(key, value) {
+  prefs[key] = value;
+  store.set("prefs", prefs);
+  applyPrefs();
+}
+
+// ---------------------------------------------------------------- workspaces
+const curWs = () => workspaces[cur];
+const curTag = () => wsTag(curWs().id);
+const wsIndex = (id) => workspaces.findIndex((w) => w.id === id);
+const wsName = (w, i = workspaces.indexOf(w)) => w.name || `Workspace ${i + 1}`;
+const itemsOn = (id) => [...items.values()].filter((it) => it.ws === id);
+const tagsOf = (entry) => (entry.tags?.length ? entry.tags : entry.threadId ? [entry.threadId] : entry.tag ? [entry.tag] : []);
+const mine = (entry) => tagsOf(entry).some((t) => t.startsWith(WS_PREFIX));
+
+/** The workspace an item is on: a tag a shell added (a move), else its origin's. */
+function wsIdOf(entry) {
+  const tags = tagsOf(entry).filter((t) => t.startsWith(WS_PREFIX));
+  const origin = entry.tag ?? entry.threadId;
+  const tag = tags.find((t) => t !== origin) ?? tags[0];
+  return tag ? Number(tag.slice(WS_PREFIX.length)) : null;
+}
+
+/** Brings another shell's (or nobody's) window or tab into the current workspace. */
+function claim(entry, kind, wsId = curWs().id) {
+  const remove = tagsOf(entry).filter((t) => t.startsWith(WS_PREFIX) && t !== entry.tag && t !== wsTag(wsId));
+  const p = kind === "w" ? shell.tagWindow(entry.id, [wsTag(wsId)], remove) : shell.tagTab(entry.id, [wsTag(wsId)], remove);
+  p.catch(() => {});
+  pendingWs.set(`${kind}:${entry.id}`, { ws: wsId, until: Date.now() + 3000 });
+}
+
+// Windows and tabs nobody claims come here, while this shell is the one shown.
+const adopted = new Set();
+function adoptStrays() {
+  if (!shell?.tagsAvailable || document.visibilityState !== "visible" || !listed) return;
+  for (const w of shell.windows.values()) {
+    if (w.threadId !== null || tagsOf(w).length || adopted.has(`w:${w.id}`)) continue;
+    adopted.add(`w:${w.id}`);
+    claim(w, "w");
+  }
+  if (shell.tabsAvailable) {
+    const othersLink = (t) => t.openedBy?.startsWith("shell:") && t.openedBy !== `shell:${shell.shellId}`;
+    for (const t of shell.tabs.values()) {
+      if (t.tags.length || othersLink(t) || adopted.has(`t:${t.id}`)) continue;
+      adopted.add(`t:${t.id}`);
+      claim(t, "t");
+    }
+  }
+}
+
+/**
+ * GNOME's dynamic workspaces: the empty ones go (not the current one), and
+ * there's always one empty at the end. A window for a thread whose workspace
+ * is gone brings it back.
+ */
+function normalizeWorkspaces() {
+  const curId = curWs()?.id;
+  const known = new Set(workspaces.map((w) => w.id));
+  for (const item of items.values()) {
+    if (item.ws === null || known.has(item.ws)) continue;
+    // Before the empty one at the end.
+    const at = workspaces.length && !itemsOn(workspaces.at(-1).id).length ? workspaces.length - 1 : workspaces.length;
+    workspaces.splice(at, 0, { id: item.ws, name: "" });
+    known.add(item.ws);
+    nextWsId = Math.max(nextWsId, item.ws + 1);
+  }
+  if (prefs.dynamicWorkspaces) {
+    const full = (w) => itemsOn(w.id).length > 0;
+    const last = workspaces.at(-1);
+    // A workspace the user named is a thread they keep, empty or not.
+    let kept = workspaces.filter((w) => full(w) || w.id === curId || w.name);
+    if (!kept.length || full(kept.at(-1)) || kept.at(-1).name) kept.push(kept.includes(last) || !last || last.name ? { id: nextWsId++, name: "" } : last);
+    // At most one empty at the end besides the current.
+    while (kept.length > 1 && !full(kept.at(-1)) && !full(kept.at(-2)) && kept.at(-2).id !== curId && !kept.at(-2).name) kept.splice(-2, 1);
+    workspaces = kept;
+  } else {
+    while (workspaces.length < prefs.fixedWorkspaces) workspaces.push({ id: nextWsId++, name: "" });
+    workspaces = workspaces.filter((w, i) => i < prefs.fixedWorkspaces || itemsOn(w.id).length || w.id === curId);
+  }
+  cur = Math.max(0, workspaces.findIndex((w) => w.id === curId));
+  publishGroups();
+  saveWorkspaces();
+}
+
+let groupsSent = "";
+function publishGroups() {
+  if (!shell?.tagsAvailable || !listed) return;
+  const groups = workspaces.map((w, i) => ({ tag: wsTag(w.id), label: wsName(w, i) }));
+  const json = JSON.stringify(groups);
+  if (json === groupsSent) return;
+  groupsSent = json;
+  shell.setGroups(groups);
+}
+
+/** Moves an item to workspace `id`: its thread becomes that workspace's. */
+function moveToWorkspace(item, id, { follow = false } = {}) {
+  if (item.ws === id) return;
+  if (shell?.tagsAvailable) claim(item.entry, item.kind, id);
+  item.ws = id;
+  if (focused === item.key && !follow) { focused = null; focusTop(); }
+  normalizeWorkspaces();
+  if (follow) switchTo(wsIndex(id), { focusKey: item.key });
+  render();
+}
+
+function switchTo(index, { focusKey, animate = true } = {}) {
+  index = Math.max(0, Math.min(index, workspaces.length - 1));
+  const changed = index !== cur;
+  cur = index;
+  slide = 0;
+  if (!animate) document.body.classList.add("live");
+  if (focusKey) focusItem(focusKey);
+  else if (changed && !overview()) focusTop();
+  normalizeWorkspaces();
+  render();
+  if (!animate) requestAnimationFrame(() => document.body.classList.remove("live"));
+}
+const switchBy = (d) => switchTo(cur + d);
+
+// ---------------------------------------------------------------- windows
+function sync() {
+  if (!shell || !loaded) return;
+  adoptStrays();
+  const wanted = new Map();
+  for (const w of shell.windows.values()) if (mine(w)) wanted.set(`w:${w.id}`, w);
+  if (shell.tabsAvailable) for (const t of shell.tabs.values()) if (mine(t)) wanted.set(`t:${t.id}`, t);
+  if (listed) for (const key of [...items.keys()]) if (!wanted.has(key)) removeItem(key);
+  for (const [key, entry] of wanted) {
+    const item = items.get(key) ?? createItem(key, entry);
+    item.entry = entry;
+    const pend = pendingWs.get(key);
+    if (pend && (Date.now() > pend.until || wsIdOf(entry) === pend.ws)) pendingWs.delete(key);
+    item.ws = pendingWs.get(key)?.ws ?? wsIdOf(entry);
+    updateChrome(item);
+  }
+  normalizeWorkspaces();
+  if (pendingFocus && items.has(pendingFocus)) {
+    const key = pendingFocus;
+    pendingFocus = null;
+    setView(0);
+    focusItem(key);
+  }
+  if (listed) {
+    for (const key of Object.keys(savedGeom)) if (!items.has(key)) delete savedGeom[key];
+    saveGeom();
+  }
+  render();
+}
+
+const titleOf = (item) => {
+  const e = item.entry;
+  return item.kind === "w" ? (e.title || e.appId || `Window ${e.id}`) : (e.title || e.url || "New Tab");
+};
+
+function updateChrome(item) {
+  const title = titleOf(item);
+  if (item.titleEl.textContent !== title) item.titleEl.textContent = title;
+  if (item.kind === "t") {
+    item.backBtn.disabled = !item.entry.canGoBack;
+    item.fwdBtn.hidden = !item.entry.canGoForward;
+    item.reloadBtn.innerHTML = icon(item.entry.loading ? "stop" : "reload");
+    item.titleEl.title = item.entry.url;
+  }
+}
+
+function createItem(key, entry) {
+  const [kind, raw] = key.split(":");
+  const id = Number(raw);
+  const root = el("div", "win");
+  const hb = el("div", "hb");
+  const left = el("div", "left");
+  const titleEl = el("span", "title");
+  const btns = el("div", "btns");
+  const body = el("div", "body");
+  const item = { key, kind, id, el: root, hb, titleEl, btns, body, entry, ws: null, tile: null, hidden: false, above: false, notitle: false };
+  const minBtn = button("", { icon: "minimize", title: "Minimize", onClick: () => minimize(item) });
+  const maxBtn = button("", { icon: "maximize", title: "Maximize", onClick: () => setTile(item, item.tile === "max" ? null : "max") });
+  const closeBtn = button("", { icon: "close", title: "Close", onClick: () => closeItem(item) });
+  item.minBtn = minBtn; item.maxBtn = maxBtn;
+  btns.append(minBtn, maxBtn, closeBtn);
+  hb.append(left, titleEl, btns);
+
+  if (kind === "w") {
+    const content = document.createElement("native-window");
+    content.crossfade = 150;
+    content.addEventListener("windowfocus", () => focusItem(key, { keyboard: false }));
+    content.addEventListener("windowrequest", (e) => {
+      if (e.request === "move") beginDrag(item, "move", null, null);
+      else if (e.request === "resize") beginDrag(item, edgeCode(e.edge), null, null);
+      else if (e.request === "maximize") setTile(item, "max");
+      else if (e.request === "unmaximize") setTile(item, null);
+      else if (e.request === "minimize") minimize(item);
+    });
+    content.addEventListener("windowerror", () => toast("Could not show a window"));
+    const taken = el("div", "taken");
+    taken.append(el("div", "", "Shown on another display."), button("", { label: "Bring it back", onClick: () => reclaim(item) }));
+    const update = () => root.classList.toggle("is-taken", content.windowState === "taken");
+    content.addEventListener("windowtaken", update);
+    content.addEventListener("windowchange", update);
+    body.append(content, taken);
+    item.content = content;
+    shell.grantFor(id).then((grant) => {
+      content.setAttribute("window", String(id));
+      content.setAttribute("grant", grant);
+    }, () => toast("No grant for a window"));
+  } else {
+    const content = shell.tabElement(id);
+    content.addEventListener("focus", () => focusItem(key, { keyboard: false }));
+    body.append(content);
+    item.content = content;
+    item.backBtn = button("", { icon: "back", title: "Back", onClick: () => shell.tabCommand(id, "back") });
+    item.fwdBtn = button("", { icon: "forward", title: "Forward", onClick: () => shell.tabCommand(id, "forward") });
+    item.reloadBtn = button("", { icon: "reload", title: "Reload", onClick: () => shell.tabCommand(id, item.entry.loading ? "stop" : "reload") });
+    left.append(item.backBtn, item.fwdBtn, item.reloadBtn);
+    titleEl.classList.add("url");
+  }
+
+  for (const edge of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+    const h = el("div", `rs ${edge}`);
+    h.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      h.setPointerCapture(e.pointerId);
+      focusItem(key);
+      beginDrag(item, edge, e.clientX, e.clientY);
+    });
+    root.append(h);
+  }
+  hb.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button, input")) return;
+    if (e.button === 1) { e.preventDefault(); lower(item); return; }
+    if (e.button !== 0) return;
+    e.preventDefault();
+    hb.setPointerCapture(e.pointerId);
+    focusItem(key);
+    beginDrag(item, "move", e.clientX, e.clientY);
+    // A tab's title is its address: a click (not a drag) edits it.
+    if (kind === "t" && e.target === titleEl && e.detail === 1) drag.editOnClick = true;
+  });
+  hb.addEventListener("dblclick", (e) => { if (!e.target.closest("button, input")) setTile(item, item.tile === "max" ? null : "max"); });
+  hb.addEventListener("contextmenu", (e) => { e.preventDefault(); windowMenu(item, { x: e.clientX, y: e.clientY }); });
+  root.append(hb, body);
+  $("windows").append(root);
+
+  const saved = savedGeom[key];
+  item.geom = saved?.geom ?? initialGeom(entry);
+  item.tile = saved?.tile ?? null;
+  item.hidden = saved?.hidden ?? false;
+  item.above = saved?.above ?? false;
+  item.notitle = saved?.notitle ?? (kind === "w" && !!prefs.noTitle?.[entry.appId]);
+  items.set(key, item);
+  stack.push(key);
+  restack();
+  if (listed && !saved) {
+    // GNOME's open animation: from a little smaller, fading in.
+    root.classList.add("opening");
+    requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove("opening")));
+  }
+  return item;
+}
+
+function initialGeom(entry) {
+  const wa = workArea();
+  const w = Math.min(entry.width > 100 ? entry.width : 960, wa.w - 80);
+  const h = Math.min((entry.height > 100 ? entry.height : 620) + hbH(), wa.h - 60);
+  // Centered, as GNOME places new windows; each next one a little lower and right.
+  const n = [...items.values()].filter((it) => it.ws === curWs().id).length % 6;
+  return { x: Math.round(wa.x + (wa.w - w) / 2 + n * 28), y: Math.round(wa.y + (wa.h - h) / 2 + n * 24), w, h };
+}
+
+function removeItem(key) {
+  const item = items.get(key);
+  item.el.remove();
+  items.delete(key);
+  stack = stack.filter((k) => k !== key);
+  mru = mru.filter((k) => k !== key);
+  if (focused === key) { focused = null; if (!overview()) focusTop(); }
+}
+
+function closeItem(item) {
+  if (item.kind === "w") shell.close(item.id);
+  else shell.tabCommand(item.id, "close");
+}
+
+const hbH = (item) => (item?.notitle ? 0 : 38);
+const W = () => $("desk").clientWidth;
+const H = () => $("desk").clientHeight;
+const dockReserve = () => (prefs.dock === "always" ? Number(prefs.dockIconSize) + 16 + 12 + 12 : 0);
+/** Where windows go (desk coordinates): the desk less an always-shown dock. */
+const workArea = () => ({ x: 0, y: 0, w: W(), h: H() - dockReserve() });
+
+const TILES = ["max", "l", "r", "tl", "tr", "bl", "br"];
+/** A tiled window's rect, on its workspace's split. */
+function tileRect(tile, ws) {
+  const wa = workArea();
+  const sx = ws?.split ?? 0.5, sy = ws?.vsplit ?? 0.5;
+  const lw = Math.round(wa.w * sx), th = Math.round(wa.h * sy);
+  switch (tile) {
+    case "max": return { ...wa };
+    case "l": return { x: wa.x, y: wa.y, w: lw, h: wa.h };
+    case "r": return { x: wa.x + lw, y: wa.y, w: wa.w - lw, h: wa.h };
+    case "tl": return { x: wa.x, y: wa.y, w: lw, h: th };
+    case "tr": return { x: wa.x + lw, y: wa.y, w: wa.w - lw, h: th };
+    case "bl": return { x: wa.x, y: wa.y + th, w: lw, h: wa.h - th };
+    case "br": return { x: wa.x + lw, y: wa.y + th, w: wa.w - lw, h: wa.h - th };
+  }
+  return null;
+}
+const wsById = (id) => workspaces.find((w) => w.id === id);
+/** The frame's rect on the desk (header bar included). */
+const rectOf = (item) => (item.tile ? tileRect(item.tile, wsById(item.ws)) : item.geom);
+
+/** Sizes the content (the app takes that size) and the frame's classes. */
+function size(item) {
+  const r = rectOf(item);
+  item.content.style.width = `${Math.round(r.w)}px`;
+  item.content.style.height = `${Math.max(1, Math.round(r.h - hbH(item)))}px`;
+  const c = item.el.classList;
+  c.toggle("max", item.tile === "max");
+  c.toggle("tiled", !!item.tile && item.tile !== "max");
+  for (const t of TILES) c.toggle(`tile-${t}`, item.tile === t);
+  c.toggle("hidden", item.hidden);
+  c.toggle("notitle", item.notitle);
+  c.toggle("dragging", drag?.item === item && drag.mode === "move" && drag.moved);
+  item.minBtn.hidden = item.maxBtn.hidden = prefs.titlebarButtons !== "all";
+  item.maxBtn.innerHTML = icon(item.tile === "max" ? "restore" : "maximize");
+  savedGeom[item.key] = { geom: item.geom, tile: item.tile, hidden: item.hidden, above: item.above, notitle: item.notitle };
+}
+
+function restack() {
+  const order = [...stack.filter((k) => !items.get(k).above), ...stack.filter((k) => items.get(k).above)];
+  order.forEach((key, i) => { items.get(key).el.style.zIndex = String(i + 1); });
+}
+
+function focusItem(key, { keyboard = true } = {}) {
+  const item = items.get(key);
+  if (!item) return;
+  if (item.ws !== curWs().id && wsIndex(item.ws) >= 0) {
+    cur = wsIndex(item.ws);
+    normalizeWorkspaces();
+  }
+  if (item.hidden) item.hidden = false;
+  stack = [...stack.filter((k) => k !== key), key];
+  mru = [key, ...mru.filter((k) => k !== key)];
+  restack();
+  focused = key;
+  for (const it of items.values()) it.el.classList.toggle("focused", it.key === key);
+  if (keyboard && !overview()) giveKeyboard(item);
+  render();
+}
+
+/** The current workspace's top window gets the focus (or nothing does). */
+function focusTop() {
+  const order = [...mru, ...stack.slice().reverse().filter((k) => !mru.includes(k))];
+  const next = order.map((k) => items.get(k)).find((it) => it && it.ws === curWs().id && !it.hidden);
+  if (next) focusItem(next.key);
+  else {
+    focused = null;
+    for (const it of items.values()) it.el.classList.remove("focused");
+    if (!overview()) takeKeyboard($("kbd-sink"));
+  }
+}
+
+function giveKeyboard(item) {
+  if (item.kind === "t") { item.content.focus(); return; }
+  const c = item.content;
+  if (c.windowState === "attached") { c.focusWindow(); return; }
+  const onChange = () => {
+    if (c.windowState !== "attached") return;
+    c.removeEventListener("windowchange", onChange);
+    if (focused === item.key && !overview()) c.focusWindow();
+  };
+  c.addEventListener("windowchange", onChange);
+}
+
+// The shell's own UI takes the keyboard (the search, a switcher, a dialog,
+// Settings): moving the page's focus isn't enough, the app has to let go.
+function blurWindows() {
+  for (const it of items.values()) {
+    if (it.kind === "w" && (it.content.windowFocused || it.entry.focused)) it.content.blurWindow?.();
+    // A tab has no blur: its page keeps the keys until its element goes away
+    // for a moment (two frames, too short to see).
+    if (it.kind === "t" && it.entry.focused && it.content.style.display !== "none") {
+      const c = it.content;
+      c.style.display = "none";
+      requestAnimationFrame(() => requestAnimationFrame(() => { c.style.display = ""; }));
+    }
+  }
+}
+function takeKeyboard(target) {
+  blurWindows();
+  target.focus();
+}
+document.addEventListener("focusin", (e) => {
+  if (e.target.matches?.("input, select, textarea, #kbd-sink, .settings, .modal-back *, .menu *")) blurWindows();
+}, true);
+// A dialog or menu that closed gives the keyboard back to the focused window.
+document.addEventListener("focusout", () => {
+  setTimeout(() => {
+    const a = document.activeElement;
+    if (a && a !== document.body) return;
+    if (overview() || switcher || kbMode || recorder || settings?.isOpen?.()) return;
+    const it = items.get(focused);
+    if (it && it.ws === curWs().id && !it.hidden) giveKeyboard(it);
+  }, 0);
+}, true);
+
+function reclaim(item) {
+  const grant = item.content.getAttribute("grant");
+  if (!grant) return;
+  item.content.removeAttribute("grant");
+  item.content.setAttribute("grant", grant);
+}
+
+function setTile(item, tile) {
+  if (!item) return;
+  item.tile = tile;
+  item.hidden = false;
+  focusItem(item.key);
+  render();
+}
+function minimize(item) {
+  if (!item) return;
+  item.hidden = true;
+  if (focused === item.key) { focused = null; focusTop(); }
+  render();
+}
+function lower(item) {
+  stack = [item.key, ...stack.filter((k) => k !== item.key)];
+  restack();
+}
+
+// A tab's title is its address: a click edits it.
+function editAddress(item) {
+  if (item.hb.querySelector(".address")) return;
+  const input = el("input", "address");
+  input.value = item.entry.url ?? "";
+  input.spellcheck = false;
+  item.titleEl.hidden = true;
+  item.hb.insertBefore(input, item.btns);
+  input.focus();
+  input.select();
+  const done = () => { input.remove(); item.titleEl.hidden = false; };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") { done(); giveKeyboard(item); }
+    if (e.key === "Enter") { shell.navigateTab(item.id, toUrl(input.value)); done(); giveKeyboard(item); }
+  });
+  input.addEventListener("blur", done);
+}
+const looksLikeAddress = (q) => /^(https?:\/\/|about:|localhost[:/]|[\w-]+(\.[\w-]+)+(:\d+)?(\/|$))/i.test(q) && !/\s/.test(q);
+const toUrl = (q) => (looksLikeAddress(q) ? q : `https://duckduckgo.com/?q=${encodeURIComponent(q)}`);
+
+// ---------------------------------------------------------------- rendering
+// The view: 0 the desktop, 1 the overview, 2 the app grid; in between while
+// a swipe follows the fingers. `slide` is the workspaces' offset (pixels on
+// the desktop), while a swipe or a drag moves between them.
+let view = 0;
+let slide = 0;
+let searching = false;
+const overview = () => view > 0.5;
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/** The overview's geometry: the workspace cards and where each window goes in them. */
+function overviewLayout() {
+  const w = W(), h = H();
+  const top = 116, bottom = Number(prefs.dockIconSize) + 16 + 12 + 26;
+  let ch = h - top - bottom;
+  let cw = ch * (w / h);
+  if (cw > w * 0.8) { cw = w * 0.8; ch = cw * (h / w); }
+  const gap = Math.max(24, (w - cw) / 2 - 64);
+  const k = cw / w;
+  const cards = workspaces.map((ws, i) => ({ ws, x: (w - cw) / 2 + (i - cur) * (cw + gap) + slide * (cw + gap) / w, y: top, w: cw, h: ch, k }));
+  const slots = new Map();
+  for (const card of cards) {
+    const shown = itemsOn(card.ws.id).sort((a, b) => a.id - b.id);
+    const n = shown.length;
+    if (!n) continue;
+    const pad = 18;
+    const area = { x: card.x + pad, y: card.y + pad, w: card.w - 2 * pad, h: card.h - 2 * pad - 40 };
+    const cols = Math.max(1, Math.round(Math.sqrt(n * (area.w / area.h) / 1.4)));
+    const rows = Math.ceil(n / cols);
+    const cellW = area.w / cols, cellH = area.h / rows;
+    shown.forEach((item, i) => {
+      const r = Math.floor(i / cols);
+      const inRow = r === rows - 1 ? n - r * cols : cols;
+      const c = i % cols;
+      const g = rectOf(item);
+      const s = Math.min((cellW - 28) / g.w, (cellH - 48) / g.h, 1);
+      const x = area.x + (cols - inRow) * cellW / 2 + c * cellW + (cellW - g.w * s) / 2;
+      const y = area.y + r * cellH + (cellH - 30 - g.h * s) / 2;
+      slots.set(item.key, { x, y, s, w: g.w * s, h: g.h * s });
+    });
+  }
+  return { cards, slots };
+}
+
+function render() {
+  const p = view;
+  const live = document.body.classList.contains("live");
+  const b = document.body.classList;
+  b.toggle("overview", p > 0.01 || overviewTarget > 0);
+  b.toggle("apps", overviewTarget === 2 && !searching);
+  b.toggle("searching", searching);
+  b.toggle("settled", !live && Math.abs(p - overviewTarget) < 0.01 && overviewTarget === 1);
+  const w = W();
+  const ov = p > 0.001 ? overviewLayout() : null;
+  const t = Math.min(p, 1);
+  const fade = Math.max(0, p - 1); // toward the app grid
+  for (const item of items.values()) {
+    size(item);
+    const i = wsIndex(item.ws);
+    const r = rectOf(item);
+    const nx = r.x + (i - cur) * w + slide, ny = r.y;
+    let x = nx, y = ny, s = 1, o = item.hidden ? 0 : 1;
+    const slot = ov?.slots.get(item.key);
+    if (slot) {
+      x = lerp(nx, slot.x, t); y = lerp(ny, slot.y, t); s = lerp(1, slot.s, t);
+      o = item.hidden ? t : 1;
+      if (fade) { o *= 1 - fade; s *= 1 - fade * 0.15; }
+    }
+    if (drag?.item === item || ovDrag?.item === item) {
+      if (ovDrag?.item === item && ovDrag.started) { x = ovDrag.x; y = ovDrag.y; s = ovDrag.s; o = 1; }
+    }
+    item.el.style.transform = `translate(${x}px, ${y}px) scale(${s})`;
+    item.el.style.opacity = String(o);
+  }
+  // The workspace cards: the desktop itself shrinking into its card.
+  const cardsEl = $("cards");
+  while (cardsEl.children.length < workspaces.length) cardsEl.append(makeCard());
+  while (cardsEl.children.length > workspaces.length) cardsEl.lastChild.remove();
+  workspaces.forEach((ws, i) => {
+    const card = cardsEl.children[i];
+    card.dataset.ws = String(ws.id);
+    const full = { x: (i - cur) * w + slide, y: 0, w, h: H() };
+    const c = ov?.cards[i] ?? full;
+    const x = lerp(full.x, c.x, t), y = lerp(full.y, c.y, t), sc = lerp(1, c.w / w, t);
+    card.style.width = `${w}px`;
+    card.style.height = `${H()}px`;
+    card.style.transform = `translate(${x}px, ${y}px) scale(${sc})`;
+    card.style.opacity = String(p <= 0.001 ? 0 : Math.min(1, t * 3) * (1 - fade));
+    card.style.borderRadius = `${16 / Math.max(sc, 0.1)}px`;
+  });
+  $("shade").style.opacity = String(Math.min(1, t) * 0.55);
+  $("ov-top").style.opacity = String(t);
+  $("dash").style.setProperty("--p", String(t));
+  renderCaptions(ov);
+  renderThumbs();
+  renderIndicator();
+  renderDash();
+  if (!live) saveGeom();
+}
+
+function makeCard() {
+  const card = el("div", "wscard");
+  card.addEventListener("click", () => {
+    const i = wsIndex(Number(card.dataset.ws));
+    if (i === cur) setView(0);
+    else switchTo(i);
+  });
+  card.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(wsById(Number(card.dataset.ws)), { x: e.clientX, y: e.clientY }); });
+  return card;
+}
+
+// In the overview: a click target over each window, its app's icon, its title and a close button.
+function renderCaptions(ov) {
+  const layer = $("ov-chrome");
+  if (!ov || overviewTarget !== 1) { if (layer.childElementCount) layer.replaceChildren(); return; }
+  const have = new Map([...layer.children].map((c) => [c.dataset.key, c]));
+  for (const [key, slot] of ov.slots) {
+    const item = items.get(key);
+    let cap = have.get(key);
+    have.delete(key);
+    if (!cap) {
+      cap = el("div", "cap");
+      cap.dataset.key = key;
+      const ic = el("div", "cap-icon");
+      ic.append(appIconEl(appOf(item)));
+      cap.append(ic, el("div", "cap-title"), button("cap-close", { icon: "close", title: "Close", onClick: (e) => { e.stopPropagation(); closeItem(items.get(key)); } }));
+      cap.addEventListener("pointerdown", (e) => ovPointerDown(e, key));
+      cap.addEventListener("auxclick", (e) => { if (e.button === 1) closeItem(items.get(key)); });
+      cap.addEventListener("contextmenu", (e) => { e.preventDefault(); windowMenu(items.get(key), { x: e.clientX, y: e.clientY }); });
+      layer.append(cap);
+    }
+    cap.querySelector(".cap-title").textContent = titleOf(item);
+    Object.assign(cap.style, { left: `${slot.x}px`, top: `${slot.y}px`, width: `${slot.w}px`, height: `${slot.h}px` });
+    cap.classList.toggle("dragging", ovDrag?.item?.key === key && ovDrag.started);
+  }
+  for (const c of have.values()) c.remove();
+}
+
+// The workspace thumbnails above the cards.
+function renderThumbs() {
+  const box = $("thumbs");
+  if (!overview()) { if (box.childElementCount) box.replaceChildren(); return; }
+  const th = 58, tw = th * (W() / H());
+  const k = th / H();
+  box.replaceChildren(...workspaces.map((ws, i) => {
+    const t = el("div", `thumb ${i === cur ? "cur" : ""} ${ovDrop?.ws === ws.id ? "drop" : ""}`);
+    t.style.width = `${tw}px`;
+    t.dataset.ws = String(ws.id);
+    t.title = wsName(ws, i);
+    for (const item of stack.map((key) => items.get(key)).filter((it) => it.ws === ws.id && !it.hidden)) {
+      const r = rectOf(item);
+      const m = el("div", "tw");
+      Object.assign(m.style, { left: `${r.x * k}px`, top: `${r.y * k}px`, width: `${r.w * k}px`, height: `${r.h * k}px` });
+      m.append(appIconEl(appOf(item)));
+      t.append(m);
+    }
+    if (ws.name) t.append(el("span", "tname", ws.name));
+    t.addEventListener("click", () => switchTo(i));
+    t.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(ws, { x: e.clientX, y: e.clientY }); });
+    return t;
+  }));
+}
+
+// The top bar's Activities button: a dot per workspace, the current one long.
+function renderIndicator() {
+  const a = $("activities");
+  const want = workspaces.length;
+  while (a.children.length < want) a.append(el("span", "ws"));
+  while (a.children.length > want) a.lastChild.remove();
+  workspaces.forEach((ws, i) => {
+    const d = a.children[i];
+    d.className = `ws ${i === cur ? "cur" : ""} ${itemsOn(ws.id).length ? "full" : ""}`;
+  });
+  a.title = `Activities — ${wsName(curWs(), cur)}`;
+}
+
+// ---------------------------------------------------------------- the overview
+let overviewTarget = 0;
+let settleTimer = null;
+function setView(target, { from } = {}) {
+  if (from !== undefined) view = from;
+  const was = overviewTarget;
+  overviewTarget = target;
+  view = target;
+  if (target === 0) { searching = false; $("search").value = ""; }
+  document.body.classList.remove("live");
+  closeMenu();
+  if (target > 0) {
+    quick?.close(); dateMenu?.close();
+    if (was === 0) { $("search").value = ""; searching = false; }
+    takeKeyboard($("search"));
+    if (target === 2 || searching) renderGrid();
+  } else if (was > 0) {
+    $("search").blur();
+    const item = items.get(focused);
+    if (item && item.ws === curWs().id && !item.hidden) giveKeyboard(item);
+    else focusTop();
+  }
+  updateShortcuts();
+  render();
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(render, 260);
+}
+const toggleOverview = () => setView(overviewTarget === 1 ? 0 : 1);
+const toggleApps = () => setView(overviewTarget === 2 ? 0 : 2);
+
+$("activities").onclick = toggleOverview;
+$("activities").addEventListener("wheel", (e) => {
+  e.preventDefault();
+  wheelSwitch(e);
+}, { passive: false });
+let wheelLock = 0;
+function wheelSwitch(e) {
+  const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  if (Math.abs(d) < 2 || Date.now() < wheelLock) return;
+  wheelLock = Date.now() + 250;
+  switchBy(d > 0 ? 1 : -1);
+}
+$("hotcorner").addEventListener("pointerenter", () => { if (prefs.hotCorner && !drag && !ovDrag) toggleOverview(); });
+$("shade").addEventListener("click", () => setView(0));
+// The wheel over the overview moves between workspaces.
+$("desk").addEventListener("wheel", (e) => {
+  if (!overview() || overviewTarget === 2 || searching || e.target.closest("#grid, #dash")) return;
+  e.preventDefault();
+  wheelSwitch(e);
+}, { passive: false });
+
+// Dragging a window in the overview: to another workspace's card or thumbnail.
+let ovDrag = null;
+let ovDrop = null;
+function ovPointerDown(e, key) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const item = items.get(key);
+  const cap = e.currentTarget;
+  cap.setPointerCapture(e.pointerId);
+  const box = cap.getBoundingClientRect();
+  const d = $("desk").getBoundingClientRect();
+  ovDrag = { item, sx: e.clientX, sy: e.clientY, ox: (e.clientX - box.left) / box.width, oy: (e.clientY - box.top) / box.height, started: false, d };
+  const move = (ev) => {
+    if (!ovDrag.started && Math.hypot(ev.clientX - ovDrag.sx, ev.clientY - ovDrag.sy) < 8) return;
+    ovDrag.started = true;
+    document.body.classList.add("live", "ovdragging");
+    const r = rectOf(item);
+    const s = Math.min(0.22, 280 / r.w);
+    ovDrag.s = s;
+    ovDrag.x = ev.clientX - d.left - r.w * s * ovDrag.ox;
+    ovDrag.y = ev.clientY - d.top - r.h * s * ovDrag.oy;
+    ovDrop = dropTargetAt(ev.clientX, ev.clientY);
+    item.el.style.zIndex = "999";
+    render();
+  };
+  const up = (ev) => {
+    cap.removeEventListener("pointermove", move);
+    cap.removeEventListener("pointerup", up);
+    cap.removeEventListener("pointercancel", up);
+    const was = ovDrag;
+    ovDrag = null;
+    document.body.classList.remove("live", "ovdragging");
+    restack();
+    if (!was.started) { setView(0); focusItem(key); return; }
+    const target = ovDrop;
+    ovDrop = null;
+    if (target?.ws && target.ws !== item.ws) moveToWorkspace(item, target.ws);
+    else if (target?.newAt !== undefined) {
+      const ws = { id: nextWsId++, name: "" };
+      workspaces.splice(target.newAt, 0, ws);
+      moveToWorkspace(item, ws.id);
+    }
+    render();
+  };
+  cap.addEventListener("pointermove", move);
+  cap.addEventListener("pointerup", up);
+  cap.addEventListener("pointercancel", up);
+}
+/** What's under the pointer for a drop: a workspace (its thumbnail or card), or the gap between two thumbnails. */
+function dropTargetAt(x, y) {
+  for (const t of $("thumbs").children) {
+    const r = t.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top - 8 && y <= r.bottom + 8) return { ws: Number(t.dataset.ws) };
+  }
+  const thumbs = [...$("thumbs").children];
+  for (let i = 1; i < thumbs.length; i++) {
+    const a = thumbs[i - 1].getBoundingClientRect(), b = thumbs[i].getBoundingClientRect();
+    if (x > a.right && x < b.left && y >= a.top && y <= a.bottom) return { newAt: i };
+  }
+  for (const c of $("cards").children) {
+    const r = c.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return { ws: Number(c.dataset.ws) };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- moving, resizing, tiling
+// From a header bar or an edge (sx/sy known), or an app's own request, where the
+// page gets the rest of the drag without a pointerdown (sx/sy from the first move).
+let drag = null;
+const edgeCode = (edge) => ({ top: "n", bottom: "s", left: "w", right: "e", "top-left": "nw", "top-right": "ne", "bottom-left": "sw", "bottom-right": "se" })[edge] ?? "se";
+function beginDrag(item, mode, x, y) {
+  if (overview()) return;
+  drag = { item, mode, sx: x, sy: y, g0: { ...item.geom }, tile0: item.tile, moved: false, zone: null };
+  item.el.classList.add(mode === "move" ? "dragging" : "resizing");
+}
+addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  if (!e.buttons) { endDrag(e); return; }
+  if (drag.sx === null) { drag.sx = e.clientX; drag.sy = e.clientY; }
+  const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+  if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+  drag.moved = true;
+  document.body.classList.add("live");
+  const { item, mode } = drag;
+  const d = $("desk").getBoundingClientRect();
+  const wa = workArea();
+  if (mode === "move") {
+    if (item.tile) {
+      // Pulled out of a tile or maximized: restored under the pointer, as GNOME does.
+      const r = rectOf(item);
+      const fx = (drag.sx - d.left - r.x) / r.w;
+      item.tile = null;
+      drag.g0 = { ...item.geom, x: e.clientX - d.left - item.geom.w * fx, y: Math.max(0, e.clientY - d.top - 18) };
+      drag.sx = e.clientX; drag.sy = e.clientY;
+      item.geom = { ...drag.g0 };
+    } else {
+      item.geom = { ...drag.g0, x: drag.g0.x + dx, y: Math.max(-4, drag.g0.y + dy) };
+    }
+    showSnap(prefs.edgeTiling ? snapZone(e.clientX - d.left, e.clientY - d.top, e.clientY < d.top + 2) : null);
+  } else if (item.tile && item.tile !== "max") {
+    // A tiled window's inner edge: both sides of the split follow.
+    const ws = wsById(item.ws);
+    if (mode.includes("e") || mode.includes("w")) ws.split = Math.max(0.2, Math.min(0.8, (e.clientX - d.left - wa.x) / wa.w));
+    if (mode.includes("n") || mode.includes("s")) ws.vsplit = Math.max(0.2, Math.min(0.8, (e.clientY - d.top - wa.y) / wa.h));
+  } else {
+    const g0 = drag.g0, g = { ...g0 };
+    if (mode.includes("e")) g.w = Math.max(MIN_W, g0.w + dx);
+    if (mode.includes("s")) g.h = Math.max(MIN_H, g0.h + dy);
+    if (mode.includes("w")) { g.w = Math.max(MIN_W, g0.w - dx); g.x = g0.x + g0.w - g.w; }
+    if (mode.includes("n")) { g.h = Math.max(MIN_H, g0.h - dy); g.y = g0.y + g0.h - g.h; }
+    item.geom = g;
+  }
+  render();
+});
+addEventListener("pointerup", (e) => endDrag(e));
+function endDrag(e) {
+  if (!drag) return;
+  const { item, mode, moved, zone, editOnClick } = drag;
+  item.el.classList.remove("dragging", "resizing");
+  drag = null;
+  document.body.classList.remove("live");
+  showSnap(null);
+  if (mode === "move" && moved && zone) {
+    // Tiled: the size it had before stays its size when it's pulled out again.
+    item.tile = zone;
+  }
+  if (!moved && mode === "move") { if (editOnClick) editAddress(item); return; }
+  render();
+}
+/** The edge-tiling zone under the pointer (desk coordinates): GNOME's top edge maximizes, the sides tile. */
+function snapZone(x, y, atTop) {
+  const w = W(), h = workArea().h;
+  const edge = 6;
+  const corner = Math.min(120, h * 0.2);
+  if (x <= edge) return y < corner ? "tl" : y > h - corner ? "bl" : "l";
+  if (x >= w - edge) return y < corner ? "tr" : y > h - corner ? "br" : "r";
+  if (atTop || y <= 0) return "max";
+  return null;
+}
+function showSnap(zone) {
+  if (drag) drag.zone = zone;
+  const p = $("snap-preview");
+  if (!zone) { p.classList.remove("shown"); return; }
+  const r = tileRect(zone, wsById(drag?.item.ws ?? curWs().id));
+  Object.assign(p.style, { left: `${r.x + 4}px`, top: `${r.y + 4}px`, width: `${r.w - 8}px`, height: `${r.h - 8}px` });
+  p.classList.add("shown");
+}
+addEventListener("resize", () => render());
+
+// Keyboard tiling (Super+arrows), GNOME's with quarters added: left/right
+// tile a half, then up/down make it a quarter; up maximizes, down restores,
+// then minimizes.
+function tileKey(dir) {
+  const item = items.get(focused);
+  if (!item) return;
+  const t = item.tile;
+  const next = {
+    left: { null: "l", l: null, r: null, tr: "tl", br: "bl", tl: "l", bl: "l", max: "l" },
+    right: { null: "r", r: null, l: null, tl: "tr", bl: "br", tr: "r", br: "r", max: "r" },
+    up: { null: "max", l: "tl", r: "tr", bl: "l", br: "r", tl: "max", tr: "max", max: "max" },
+    down: { null: "min", max: null, l: "bl", r: "br", tl: "l", tr: "r", bl: null, br: null },
+  }[dir][String(t)];
+  if (next === "min") minimize(item);
+  else setTile(item, next);
+}
+
+// Moving and resizing with the keyboard (Alt+F7, Alt+F8): arrows, Enter or a click to finish, Escape to cancel.
+let kbMode = null;
+function keyboardMove(mode) {
+  const item = items.get(focused);
+  if (!item || overview()) return;
+  if (item.tile) { const r = rectOf(item); item.geom = { ...r }; item.tile = null; }
+  kbMode = { item, mode, g0: { ...item.geom } };
+  takeKeyboard($("kbd-sink"));
+  const hint = $("kbd-hint");
+  hint.textContent = mode === "move" ? "Move with the arrow keys; Enter to finish, Escape to cancel" : "Resize with the arrow keys; Enter to finish, Escape to cancel";
+  hint.hidden = false;
+  updateShortcuts();
+  render();
+}
+function endKeyboardMove(keep) {
+  if (!kbMode) return;
+  if (!keep) kbMode.item.geom = kbMode.g0;
+  const item = kbMode.item;
+  kbMode = null;
+  $("kbd-hint").hidden = true;
+  updateShortcuts();
+  render();
+  giveKeyboard(item);
+}
+
+// ---------------------------------------------------------------- apps: the dash and the grid
+const PSEUDO = {
+  [WEB]: { id: WEB, name: "Web", comment: "Browse the web in a new tab", keywords: ["browser", "internet", "tab"], glyph: "web" },
+  [AGENT]: { id: AGENT, name: "Claude Code", comment: "An agent working in this workspace's thread", keywords: ["ai", "agent", "claude"], glyph: "agent" },
+  [SETTINGS]: { id: SETTINGS, name: "Settings", comment: "Network, sound, appearance, shortcuts and more", keywords: ["preferences", "control panel", "configuration"], glyph: "settings" },
+};
+const appById = (id) => PSEUDO[id] ?? apps.find((a) => a.id === id);
+const norm = (s) => String(s ?? "").toLowerCase().replace(/\.desktop$/, "");
+/** The desktop app a window is from: its id, its last part, or its name. */
+function appFor(appId) {
+  if (!appId) return null;
+  const a = norm(appId);
+  return apps.find((app) => norm(app.id) === a)
+    ?? apps.find((app) => norm(app.id).split(".").at(-1) === a.split(".").at(-1))
+    ?? apps.find((app) => app.name.toLowerCase() === a)
+    ?? apps.find((app) => app.startupWMClass && app.startupWMClass.toLowerCase() === a);
+}
+/** An item's app: { id, name, app?, appId? } (tabs are all Web's). */
+function appOf(item) {
+  if (item.kind === "t") return PSEUDO[WEB];
+  const app = appFor(item.entry.appId);
+  if (app) return app;
+  return { id: `window:${item.entry.appId || item.id}`, name: item.entry.appId || titleOf(item), windowAppId: item.entry.appId };
+}
+const appKeyOf = (item) => appOf(item).id;
+
+const iconCache = new Map();
+function appIconEl(app) {
+  if (!app) return el("span", "letter", "?");
+  if (app.glyph) { const g = el("span", `glyph ${app.glyph}`); g.innerHTML = icon(app.glyph); return g; }
+  const id = app.hasIcon ? app.id : app.windowAppId;
+  if (id && shell) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.draggable = false;
+    const letter = el("span", "letter", (app.name ?? "?").trim()[0]?.toUpperCase() ?? "?");
+    const cached = iconCache.get(id);
+    if (cached) { img.src = cached; return img; }
+    if (cached === null) return letter;
+    Promise.resolve(shell.appIcon(id)).then((url) => {
+      iconCache.set(id, url ?? null);
+      if (url) { img.src = url; letter.replaceWith(img); }
+    }).catch(() => iconCache.set(id, null));
+    return letter;
+  }
+  return el("span", "letter", (app.name ?? "?").trim()[0]?.toUpperCase() ?? "?");
+}
+
+function defaultFavorites() {
+  const ids = new Set(apps.map((a) => a.id));
+  const pick = (...c) => c.find((id) => ids.has(id));
+  return [WEB, pick("org.gnome.Nautilus.desktop", "nemo.desktop", "thunar.desktop", "org.kde.dolphin.desktop"),
+    pick("org.gnome.Console.desktop", "org.gnome.Terminal.desktop", "foot.desktop", "kitty.desktop", "alacritty.desktop"),
+    pick("org.gnome.TextEditor.desktop", "org.gnome.gedit.desktop", "code.desktop"), AGENT].filter(Boolean);
+}
+function setFavorites(list) {
+  favorites = [...new Set(list)];
+  store.set("favorites", favorites);
+  render();
+  if (overviewTarget === 2) renderGrid();
+}
+const isFavorite = (id) => favorites?.includes(id);
+const pin = (id) => { if (!isFavorite(id)) setFavorites([...(favorites ?? []), id]); };
+const unpin = (id) => setFavorites((favorites ?? []).filter((f) => f !== id));
+
+/** The windows of each app, most recently used first. */
+function runningApps({ currentWorkspace = false } = {}) {
+  const groups = new Map();
+  const order = [...mru, ...stack.slice().reverse().filter((k) => !mru.includes(k))];
+  for (const key of order) {
+    const item = items.get(key);
+    if (!item || (currentWorkspace && item.ws !== curWs().id)) continue;
+    const app = appOf(item);
+    if (!groups.has(app.id)) groups.set(app.id, { app, items: [] });
+    groups.get(app.id).items.push(item);
+  }
+  return groups;
+}
+
+let dashSig = "";
+function renderDash() {
+  const dash = $("dash");
+  document.documentElement.style.setProperty("--dock-icon", `${prefs.dockIconSize}px`);
+  const running = runningApps();
+  const fav = favorites ?? [];
+  const extra = [...running.keys()].filter((id) => !fav.includes(id));
+  const focusApp = focused && items.get(focused) ? appKeyOf(items.get(focused)) : "";
+  const sig = JSON.stringify([fav, extra, [...running].map(([id, g]) => [id, g.items.length]), focusApp, appDrag?.over, apps.length, prefs.dockIconSize]);
+  if (sig === dashSig) return;
+  dashSig = sig;
+  const make = (id) => {
+    const app = appById(id) ?? running.get(id)?.app;
+    const group = running.get(id);
+    const b = el("button", `icon-btn ${id === focusApp ? "focused-app" : ""}`);
+    b.dataset.app = id;
+    b.title = app?.name ?? id;
+    b.append(appIconEl(app ?? { name: id }));
+    if (group) {
+      const dots = el("span", "dots");
+      for (let i = 0; i < Math.min(3, group.items.length); i++) dots.append(el("i"));
+      b.append(dots);
+    }
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", (e) => activateApp(id, { newWindow: e.ctrlKey }));
+    b.addEventListener("auxclick", (e) => { if (e.button === 1) activateApp(id, { newWindow: true }); });
+    b.addEventListener("contextmenu", (e) => { e.preventDefault(); appMenu(id, { anchor: b }); });
+    b.addEventListener("pointerdown", (e) => appPointerDown(e, id, b, "dash"));
+    return b;
+  };
+  const children = [...fav.map(make), ...(extra.length && fav.length ? [el("div", "sep")] : []), ...extra.map(make)];
+  if (appDrag?.over !== undefined && appDrag.over !== null) {
+    const favButtons = children.filter((c) => c.dataset?.app && fav.includes(c.dataset.app));
+    const at = favButtons[appDrag.over];
+    if (at) at.classList.add("drop-before");
+    else if (favButtons.length) favButtons.at(-1).after(Object.assign(el("div", "icon-btn"), { style: "width:6px" }));
+    if (appDrag.from === "dash") children.find((c) => c.dataset?.app === appDrag.id)?.classList.add("ghost");
+  }
+  const show = el("button", "icon-btn");
+  show.id = "show-apps";
+  show.title = "Show Apps";
+  show.innerHTML = icon("grid");
+  show.addEventListener("mousedown", (e) => e.preventDefault());
+  show.onclick = toggleApps;
+  dash.replaceChildren(...children, el("div", "sep"), show);
+}
+
+/** A dash or grid icon's click: the app's window (the next one if it's on top), or a new one. */
+function activateApp(id, { newWindow = false } = {}) {
+  const group = runningApps().get(id);
+  if (!group || newWindow) { launchAppId(id); return; }
+  const here = group.items.filter((it) => it.ws === curWs().id);
+  const list = here.length ? here : group.items;
+  const top = list[0];
+  const target = top.key === focused && list.length > 1 ? list.at(-1) : top;
+  if (target.key === focused && !overview() && list.length === 1) { minimize(target); return; }
+  setView(0);
+  focusItem(target.key);
+}
+
+function appMenu(id, { anchor, x, y } = {}) {
+  const app = appById(id) ?? runningApps().get(id)?.app;
+  const group = runningApps().get(id);
+  const entries = [];
+  if (group) {
+    entries.push({ heading: "Open Windows" });
+    for (const it of group.items.slice(0, 8)) entries.push({ label: titleOf(it), action: () => { setView(0); focusItem(it.key); } });
+    entries.push("-");
+  }
+  const launchable = appById(id);
+  if (launchable) entries.push({ label: id === WEB ? "New Tab" : "New Window", icon: "plus", action: () => launchAppId(id) });
+  if (launchable && workspaces.length > 1) {
+    const other = workspaces.map((w, i) => ({ w, i })).filter(({ i }) => i !== cur);
+    entries.push({ label: `New Window in ${wsName(other.at(-1).w, other.at(-1).i)}`, icon: "workspace", action: () => launchAppId(id, other.at(-1).w.id) });
+  }
+  if (launchable) entries.push(isFavorite(id) ? { label: "Unpin", icon: "unpin", action: () => unpin(id) } : { label: "Pin to Dash", icon: "pin", action: () => pin(id) });
+  if (group) {
+    entries.push("-", { label: group.items.length > 1 ? `Quit (${group.items.length} windows)` : "Quit", icon: "close", danger: true, action: () => group.items.forEach(closeItem) });
+  }
+  if (!entries.length) entries.push({ label: app?.name ?? id, disabled: true });
+  menu(entries, { anchor, x, y, align: "center" });
+}
+
+// Dragging an app icon (the dash or the grid): to the dash to pin it or
+// move it there, out of the dash to unpin it, or onto a workspace to open it there.
+let appDrag = null;
+function appPointerDown(e, id, btn, from) {
+  if (e.button !== 0) return;
+  const sx = e.clientX, sy = e.clientY;
+  let started = false;
+  const ghost = () => {
+    const g = el("div");
+    g.id = "drag-ghost";
+    g.append(appIconEl(appById(id) ?? runningApps().get(id)?.app));
+    document.body.append(g);
+    return g;
+  };
+  let g = null;
+  const move = (ev) => {
+    if (!started && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 10) return;
+    if (!started) {
+      started = true;
+      btn.setPointerCapture?.(ev.pointerId);
+      appDrag = { id, from, over: null };
+      g = ghost();
+      if (from === "grid" && overviewTarget === 2) setView(1);
+    }
+    g.style.left = `${ev.clientX}px`;
+    g.style.top = `${ev.clientY}px`;
+    appDrag.over = dashSlotAt(ev.clientX, ev.clientY);
+    const t = overview() ? dropTargetAt(ev.clientX, ev.clientY) : null;
+    if ((t?.ws ?? null) !== (ovDrop?.ws ?? null)) { ovDrop = t; renderThumbs(); }
+    renderDash();
+  };
+  const up = (ev) => {
+    removeEventListener("pointermove", move, true);
+    removeEventListener("pointerup", up, true);
+    if (!started) return;
+    g?.remove();
+    const over = appDrag.over;
+    appDrag = null;
+    const target = ovDrop;
+    ovDrop = null;
+    const fav = (favorites ?? []).filter((f) => f !== id);
+    if (over !== null && appById(id)) {
+      fav.splice(Math.min(over, fav.length), 0, id);
+      setFavorites(fav);
+    } else if (target?.ws) {
+      launchAppId(id, target.ws);
+    } else if (from === "dash" && isFavorite(id) && !inDash(ev.clientX, ev.clientY)) {
+      unpin(id);
+      toast(`${appById(id)?.name ?? id} unpinned`, { action: "Undo", onAction: () => pin(id) });
+    }
+    dashSig = "";
+    render();
+    // The click that follows a drag isn't one.
+    const eat = (c) => { c.stopPropagation(); c.preventDefault(); };
+    addEventListener("click", eat, { capture: true, once: true });
+    setTimeout(() => removeEventListener("click", eat, true), 0);
+  };
+  addEventListener("pointermove", move, true);
+  addEventListener("pointerup", up, true);
+}
+const inDash = (x, y) => { const r = $("dash").getBoundingClientRect(); return x >= r.left - 20 && x <= r.right + 20 && y >= r.top - 30 && y <= r.bottom + 10; };
+/** Where in the pinned apps a drop at (x, y) goes, or null when it's not over the dash. */
+function dashSlotAt(x, y) {
+  if (!inDash(x, y)) return null;
+  const favButtons = [...$("dash").querySelectorAll(".icon-btn[data-app]")].filter((b) => (favorites ?? []).includes(b.dataset.app) && !b.classList.contains("ghost"));
+  let i = 0;
+  for (const b of favButtons) {
+    const r = b.getBoundingClientRect();
+    if (x > r.left + r.width / 2) i++;
+  }
+  const without = (favorites ?? []).filter((f) => f !== appDrag?.id);
+  return Math.min(i, without.length);
+}
+
+// The app grid, and search results.
+let gridSel = 0;
+let gridList = [];
+function matches(query) {
+  const q = query.trim().toLowerCase();
+  const all = [PSEUDO[WEB], PSEUDO[AGENT], PSEUDO[SETTINGS], ...apps];
+  if (!q) return all;
+  const score = (app) => {
+    const name = app.name.toLowerCase();
+    if (name.startsWith(q)) return 0;
+    if (name.split(/\s+/).some((w) => w.startsWith(q))) return 1;
+    if (name.includes(q)) return 2;
+    const extra = [app.genericName, app.comment, ...(app.keywords ?? []), app.id].join(" ").toLowerCase();
+    return extra.includes(q) ? 3 : -1;
+  };
+  return all.map((app) => [score(app), app]).filter(([s]) => s >= 0).sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).map(([, app]) => app);
+}
+function renderGrid() {
+  const query = $("search").value.trim();
+  const grid = $("grid");
+  const out = [];
+  gridList = [];
+  const add = (b, run) => { const i = gridList.length; gridList.push(run); b.addEventListener("mouseenter", () => { gridSel = i; markSel(); }); out.push(b); };
+  const tile = (iconEl, label, sub, run, extra) => {
+    const b = el("button");
+    b.append(iconEl, el("span", "", label));
+    if (sub) b.append(el("small", "", sub));
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", run);
+    extra?.(b);
+    add(b, run);
+  };
+  const list = matches(query);
+  if (query) out.push(el("div", "section", "Applications"));
+  for (const app of query ? list.slice(0, 18) : list) {
+    tile(appIconEl(app), app.name, null, () => launchAppId(app.id), (b) => {
+      b.title = app.comment || app.name;
+      b.addEventListener("contextmenu", (e) => { e.preventDefault(); appMenu(app.id, { x: e.clientX, y: e.clientY }); });
+      b.addEventListener("pointerdown", (e) => appPointerDown(e, app.id, b, "grid"));
+    });
+  }
+  if (query) {
+    if (!list.length) out.pop();
+    const q = query.toLowerCase();
+    const wins = [...items.values()].filter((it) => titleOf(it).toLowerCase().includes(q) || appOf(it).name.toLowerCase().includes(q));
+    if (wins.length) {
+      out.push(el("div", "section", "Open Windows"));
+      for (const it of wins.slice(0, 12)) tile(appIconEl(appOf(it)), titleOf(it), wsName(wsById(it.ws) ?? curWs()), () => { setView(0); focusItem(it.key); });
+    }
+    const pages = settings?.search(q) ?? [];
+    if (pages.length) {
+      out.push(el("div", "section", "Settings"));
+      for (const p of pages.slice(0, 6)) {
+        const g = el("span", "glyph web");
+        g.innerHTML = icon(p.icon);
+        g.style.background = "linear-gradient(#77767b, #4a4a4f)";
+        tile(g, p.title, p.detail, () => { setView(0); settings.open(p.page); });
+      }
+    }
+    out.push(el("div", "section", "Web"));
+    const g = el("span", "glyph web");
+    g.innerHTML = icon("web");
+    tile(g, looksLikeAddress(query) ? `Open ${query}` : `Search the web for “${query}”`, null, () => openTab(toUrl(query)));
+  }
+  if (!gridList.length) out.push(el("div", "none", apps.length ? "No results" : "No apps found"));
+  grid.replaceChildren(...out);
+  gridSel = 0;
+  markSel();
+}
+function markSel() {
+  const buttons = [...$("grid").querySelectorAll(":scope > button")];
+  buttons.forEach((b, i) => b.classList.toggle("sel", i === gridSel && (searching || keyNav)));
+  buttons[gridSel]?.scrollIntoView({ block: "nearest" });
+}
+let keyNav = false;
+$("search").addEventListener("input", () => {
+  searching = !!$("search").value.trim();
+  if (searching || overviewTarget === 2) renderGrid();
+  render();
+});
+$("search").addEventListener("keydown", (e) => {
+  const n = gridList.length;
+  const cols = Math.max(1, Math.floor($("grid").clientWidth / 132));
+  const move = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols, Tab: e.shiftKey ? -1 : 1 }[e.key];
+  if (move && (searching || overviewTarget === 2) && n) {
+    e.preventDefault();
+    keyNav = true;
+    gridSel = (gridSel + move + n) % n;
+    markSel();
+    return;
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if ($("search").value) { $("search").value = ""; searching = false; render(); if (overviewTarget === 2) renderGrid(); }
+    else setView(overviewTarget === 2 ? 1 : 0);
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    gridList[gridSel]?.();
+  }
+  if (!overview() || overviewTarget === 0) return;
+  if ((e.key === "PageDown" || e.key === "PageUp") && !searching) { e.preventDefault(); switchBy(e.key === "PageDown" ? 1 : -1); }
+});
+
+// ---------------------------------------------------------------- launching
+async function launchAppId(id, wsId = curWs().id) {
+  if (id === WEB) return openTab(prefs.homepage || "about:blank", { edit: true, wsId });
+  if (id === AGENT) return startAgent(wsId);
+  if (id === SETTINGS) { setView(0); return settings.open(); }
+  setView(0);
+  if (wsId !== curWs().id) switchTo(wsIndex(wsId));
+  try {
+    const result = await shell.launchApp(wsTag(wsId), id, { waitMs: 8000 });
+    const w = result?.windows?.[0];
+    if (w) { pendingFocus = `w:${w.id}`; sync(); }
+  } catch (error) { toast(error.message); }
+}
+async function launch(argv, wsId = curWs().id) {
+  setView(0);
+  try {
+    const { windows } = await shell.launch(wsTag(wsId), argv, { waitMs: 8000, show: true });
+    if (windows[0]) { pendingFocus = `w:${windows[0].id}`; sync(); }
+    else toast(`${argv[0]} started, no window yet`);
+  } catch (error) { toast(error.message); }
+}
+const terminalArgv = () => (prefs.terminal || "foot").trim().split(/\s+/);
+async function openTab(url, { edit = false, wsId = curWs().id } = {}) {
+  setView(0);
+  if (!shell?.tabsAvailable) { toast("This Chromium has no browser tabs"); return; }
+  try {
+    const tab = await shell.createTab(wsTag(wsId), url);
+    pendingFocus = `t:${tab.id}`;
+    sync();
+    // Once the page has loaded: a page that focuses its own field then would take the keys.
+    if (edit) {
+      const started = Date.now();
+      const wait = () => {
+        const it = items.get(`t:${tab.id}`);
+        if (it && (!it.entry.loading || Date.now() - started > 4000) && Date.now() - started > 300) editAddress(it);
+        else if (Date.now() - started < 5000) setTimeout(wait, 150);
+      };
+      setTimeout(wait, 150);
+    }
+  } catch (error) { toast(error.message); }
+}
+// Claude Code in a terminal, in the workspace's thread: it sees and drives that workspace's apps and tabs.
+async function startAgent(wsId = curWs().id) {
+  try {
+    const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(wsTag(wsId))}`).then((r) => r.json());
+    const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
+    launch([...terminalArgv(), "-T", "Claude Code", "-e", "claude", "--mcp-config", mcp], wsId);
+  } catch (error) { toast(`Claude Code: ${error.message}`); }
+}
+async function runDialog() {
+  const cmd = await ask("Run a Command", { placeholder: "Enter a command", action: "Run" });
+  if (!cmd?.trim()) return;
+  if (cmd.trim() === "r") { location.reload(); return; }
+  launch(["sh", "-c", cmd]);
+}
+
+// ---------------------------------------------------------------- screenshots
+async function screenshot() {
+  if (!shell?.captureAvailable) { toast("Screenshots aren't available"); return; }
+  setView(0);
+  const targets = stack.map((k) => items.get(k)).filter((it) => !it.hidden && it.ws === curWs().id).reverse().map((it) => ({
+    source: it.kind === "w" ? { type: "window", id: it.id } : { type: "tab", id: it.id },
+    rect: it.content.getBoundingClientRect(),
+  }));
+  try {
+    const shot = await shell.takeScreenshot({ targets });
+    if (shot) toast(`Screenshot saved to ${shot.path}`);
+  } catch (error) { toast(`Screenshot failed: ${error.message}`); }
+}
+async function quickShot(which) {
+  if (!shell?.captureAvailable) { toast("Screenshots aren't available"); return; }
+  try {
+    let source;
+    if (which === "window") {
+      const it = items.get(focused);
+      if (!it) return;
+      source = it.kind === "w" ? { type: "window", id: it.id } : { type: "tab", id: it.id };
+    } else source = await shell.outputSource();
+    const path = await shell.saveScreenshot(await shell.screenshot(source));
+    toast(`Screenshot saved to ${path}`);
+  } catch (error) { toast(`Screenshot failed: ${error.message}`); }
+}
+
+async function lock() {
+  try { await shell.system.session.call("lock"); }
+  catch (error) { toast(`Can't lock: ${error.message}`); }
+}
+
+// ---------------------------------------------------------------- menus
+function windowMenu(item, at) {
+  if (!item) return;
+  const others = workspaces.map((w, i) => ({ w, i })).filter(({ w }) => w.id !== item.ws);
+  const i = wsIndex(item.ws);
+  menu([
+    { label: "Minimize", icon: "minimize", action: () => minimize(item) },
+    item.tile === "max" ? { label: "Unmaximize", icon: "restore", action: () => setTile(item, null) } : { label: "Maximize", icon: "maximize", action: () => setTile(item, "max") },
+    { label: "Tile Left", icon: "tile-left", checked: item.tile === "l", action: () => setTile(item, item.tile === "l" ? null : "l") },
+    { label: "Tile Right", icon: "tile-right", checked: item.tile === "r", action: () => setTile(item, item.tile === "r" ? null : "r") },
+    "-",
+    { label: "Always on Top", icon: "above", checked: item.above, action: () => { item.above = !item.above; restack(); render(); } },
+    { label: "Title Bar", icon: "title", checked: !item.notitle, action: () => toggleTitle(item) },
+    "-",
+    i > 0 ? { label: "Move to Workspace Left", icon: "back", action: () => moveToWorkspace(item, workspaces[i - 1].id) } : null,
+    i < workspaces.length - 1 ? { label: "Move to Workspace Right", icon: "forward", action: () => moveToWorkspace(item, workspaces[i + 1].id) } : null,
+    ...others.slice(0, 6).filter(({ i: j }) => Math.abs(j - i) > 1).map(({ w, i: j }) => ({ label: `Move to ${wsName(w, j)}`, icon: "workspace", action: () => moveToWorkspace(item, w.id) })),
+    "-",
+    item.kind === "t" ? { label: "Copy Address", icon: "web", action: () => navigator.clipboard?.writeText(item.entry.url).catch(() => {}) } : null,
+    { label: "Close", icon: "close", danger: true, accel: "Alt+F4", action: () => closeItem(item) },
+  ], at.anchor ? { anchor: at.anchor } : { x: at.x, y: at.y });
+}
+// A window's title bar on or off; remembered for its app (GTK apps draw their own).
+function toggleTitle(item) {
+  item.notitle = !item.notitle;
+  if (item.kind === "w" && item.entry.appId) {
+    setPref("noTitle", { ...(prefs.noTitle ?? {}), [item.entry.appId]: item.notitle || undefined });
+  }
+  render();
+}
+
+function workspaceMenu(ws, at) {
+  if (!ws) return;
+  const i = wsIndex(ws.id);
+  const list = itemsOn(ws.id);
+  menu([
+    { heading: wsName(ws, i) },
+    { label: "Switch to It", icon: "workspace", disabled: i === cur, action: () => switchTo(i) },
+    { label: "Rename…", icon: "edit", action: async () => {
+      const name = await ask("Rename Workspace", { value: ws.name, placeholder: `Workspace ${i + 1}`, message: "Its thread takes the same name: agents and the switcher see it.", action: "Rename" });
+      if (name === null) return;
+      ws.name = name.trim();
+      normalizeWorkspaces();
+      render();
+    } },
+    { label: "Open Claude Code Here", icon: "agent", action: () => startAgent(ws.id) },
+    { label: "Open a Terminal Here", icon: "terminal", action: () => launch(terminalArgv(), ws.id) },
+    "-",
+    { label: list.length ? `Close ${list.length} Window${list.length > 1 ? "s" : ""}` : "Close All", icon: "close", danger: true, disabled: !list.length, action: async () => {
+      if (await confirm("Close Every Window?", `Close the ${list.length} windows and tabs in ${wsName(ws, i)}?`, "Close All")) list.forEach(closeItem);
+    } },
+  ], { x: at.x, y: at.y });
+}
+
+// ---------------------------------------------------------------- Alt+Tab
+// GNOME's switchers: Alt+Tab apps (their windows go along), Alt+` the
+// focused app's windows, Alt+Escape windows directly. The release of Alt
+// picks: the page takes the keyboard while it's open, so the release comes here.
+let switcher = null;
+function openSwitcher(mode, dir) {
+  if (switcher) { stepSwitcher(dir, mode); return; }
+  if (overview()) setView(0);
+  let entries;
+  const onlyHere = prefs.switcherCurrentWorkspace;
+  if (mode === "apps") {
+    entries = [...runningApps({ currentWorkspace: onlyHere }).values()].map((g) => ({ app: g.app, items: g.items, label: g.app.name }));
+  } else {
+    const app = focused && items.get(focused) ? appKeyOf(items.get(focused)) : null;
+    const order = [...mru, ...stack.slice().reverse().filter((k) => !mru.includes(k))].map((k) => items.get(k)).filter(Boolean);
+    entries = order.filter((it) => (mode === "windows" ? appKeyOf(it) === app : true) && (!onlyHere || it.ws === curWs().id))
+      .map((it) => ({ app: appOf(it), items: [it], label: titleOf(it) }));
+  }
+  if (!entries.length) return;
+  switcher = { mode, entries, index: entries.length > 1 ? (dir > 0 ? 1 : entries.length - 1) : 0, shown: false, byMeta: !!lastKey?.metaKey };
+  takeKeyboard($("kbd-sink"));
+  updateShortcuts();
+  // Shown after a moment: a quick Alt+Tab just goes back to the last one.
+  switcher.timer = setTimeout(() => { if (switcher) { switcher.shown = true; renderSwitcher(); } }, 140);
+}
+function stepSwitcher(dir, mode) {
+  if (!switcher) return;
+  if (mode && mode !== switcher.mode && mode === "windows" && switcher.mode === "apps") {
+    // Alt+` while the apps show: that app's windows.
+    const e = switcher.entries[switcher.index];
+    switcher.mode = "windows";
+    switcher.entries = e.items.map((it) => ({ app: appOf(it), items: [it], label: titleOf(it) }));
+    switcher.index = Math.min(1, switcher.entries.length - 1);
+  } else {
+    const n = switcher.entries.length;
+    switcher.index = (switcher.index + dir + n) % n;
+  }
+  switcher.shown = true;
+  renderSwitcher();
+}
+function renderSwitcher() {
+  const box = $("switcher");
+  if (!switcher?.shown) { box.hidden = true; return; }
+  box.hidden = false;
+  box.classList.toggle("windows", switcher.mode !== "apps");
+  const list = box.querySelector(".sw-box");
+  list.replaceChildren(...switcher.entries.map((e, i) => {
+    const b = el("button", `sw-item ${i === switcher.index ? "sel" : ""}`);
+    b.append(appIconEl(e.app), el("span", "", e.label));
+    if (switcher.mode === "apps" && e.items.length > 1) b.title = `${e.items.length} windows`;
+    b.addEventListener("mousedown", (ev) => ev.preventDefault());
+    b.addEventListener("click", () => { switcher.index = i; commitSwitcher(); });
+    b.addEventListener("mouseenter", () => { switcher.index = i; renderSwitcher(); });
+    return b;
+  }));
+}
+function commitSwitcher() {
+  if (!switcher) return;
+  const e = switcher.entries[switcher.index];
+  closeSwitcher();
+  if (e?.items.length) { setView(0); focusItem(e.items[0].key); }
+  else { const it = items.get(focused); if (it) giveKeyboard(it); }
+}
+function closeSwitcher({ restore = false } = {}) {
+  if (!switcher) return;
+  clearTimeout(switcher.timer);
+  switcher = null;
+  $("switcher").hidden = true;
+  updateShortcuts();
+  if (restore) { const it = items.get(focused); if (it) giveKeyboard(it); }
+}
+
+// ---------------------------------------------------------------- keys
+// Every action, its default keys (GNOME's), and what Settings → Keyboard
+// lets the user change. Combos are "Super+Ctrl+Alt+Shift+<code>" in that order.
+const ACTIONS = [];
+const action = (id, group, label, keys, run, opts = {}) => ACTIONS.push({ id, group, label, defaults: keys, run, ...opts });
+const focusedItem = () => items.get(focused);
+action("overview", "Navigation", "Show the overview", ["Alt+F1"], toggleOverview);
+action("app-grid", "Navigation", "Show all apps", ["Super+KeyA"], toggleApps);
+action("quick-settings", "Navigation", "Open the quick settings", ["Super+KeyS"], () => quick?.toggle());
+action("notifications", "Navigation", "Open the notification list", ["Super+KeyV", "Super+KeyN"], () => dateMenu?.toggle());
+action("run", "Navigation", "Run a command", ["Alt+F2"], runDialog);
+action("switch-apps", "Navigation", "Switch applications", ["Alt+Tab", "Super+Backquote"], () => openSwitcher("apps", 1), { repeat: true });
+action("switch-apps-back", "Navigation", "Switch applications backwards", ["Alt+Shift+Tab"], () => openSwitcher("apps", -1), { repeat: true });
+action("switch-group", "Navigation", "Switch windows of an application", ["Alt+Backquote"], () => openSwitcher("windows", 1), { repeat: true });
+action("switch-group-back", "Navigation", "Switch windows of an app backwards", ["Alt+Shift+Backquote"], () => openSwitcher("windows", -1), { repeat: true });
+action("cycle-windows", "Navigation", "Switch windows", ["Alt+Escape"], () => openSwitcher("all", 1), { repeat: true });
+action("ws-left", "Navigation", "Switch to the workspace on the left", ["Super+PageUp", "Ctrl+Alt+ArrowLeft", "Super+Alt+ArrowLeft"], () => switchBy(-1), { repeat: true });
+action("ws-right", "Navigation", "Switch to the workspace on the right", ["Super+PageDown", "Ctrl+Alt+ArrowRight", "Super+Alt+ArrowRight"], () => switchBy(1), { repeat: true });
+action("ws-first", "Navigation", "Switch to the first workspace", ["Super+Home"], () => switchTo(0));
+action("ws-last", "Navigation", "Switch to the last workspace", ["Super+End"], () => switchTo(workspaces.length - 1));
+for (let n = 1; n <= 9; n++) action(`ws-${n}`, "Navigation", `Switch to workspace ${n}`, [`Super+Alt+Digit${n}`], () => switchTo(n - 1));
+const moveWs = (target) => { const it = focusedItem(); if (!it) return; const i = typeof target === "function" ? target(wsIndex(it.ws)) : target; if (i < 0) return; let ws = workspaces[i]; if (!ws) { ws = { id: nextWsId++, name: "" }; workspaces.push(ws); } moveToWorkspace(it, ws.id, { follow: true }); };
+action("move-ws-left", "Windows", "Move the window one workspace left", ["Super+Shift+PageUp", "Ctrl+Alt+Shift+ArrowLeft", "Super+Alt+Shift+ArrowLeft"], () => moveWs((i) => i - 1));
+action("move-ws-right", "Windows", "Move the window one workspace right", ["Super+Shift+PageDown", "Ctrl+Alt+Shift+ArrowRight", "Super+Alt+Shift+ArrowRight"], () => moveWs((i) => i + 1));
+action("move-ws-first", "Windows", "Move the window to the first workspace", ["Super+Shift+Home"], () => moveWs(0));
+action("move-ws-last", "Windows", "Move the window to the last workspace", ["Super+Shift+End"], () => moveWs(workspaces.length - 1));
+for (let n = 1; n <= 9; n++) action(`move-ws-${n}`, "Windows", `Move the window to workspace ${n}`, [`Super+Alt+Shift+Digit${n}`], () => moveWs(n - 1));
+action("close", "Windows", "Close the window", ["Alt+F4", "Super+KeyQ"], () => { const it = focusedItem(); if (it) closeItem(it); });
+action("maximize-toggle", "Windows", "Maximize or restore", ["Alt+F10"], () => { const it = focusedItem(); if (it) setTile(it, it.tile === "max" ? null : "max"); });
+action("tile-up", "Windows", "Maximize (from a half: a top quarter)", ["Super+ArrowUp"], () => tileKey("up"), { repeat: true });
+action("tile-down", "Windows", "Restore, then minimize (from a half: a bottom quarter)", ["Super+ArrowDown"], () => tileKey("down"), { repeat: true });
+action("tile-left", "Windows", "Tile on the left half", ["Super+ArrowLeft"], () => tileKey("left"), { repeat: true });
+action("tile-right", "Windows", "Tile on the right half", ["Super+ArrowRight"], () => tileKey("right"), { repeat: true });
+action("minimize", "Windows", "Minimize the window", ["Super+KeyH"], () => minimize(focusedItem()));
+action("show-desktop", "Windows", "Hide all windows (show the desktop)", ["Super+KeyD", "Ctrl+Alt+KeyD"], showDesktop);
+action("window-menu", "Windows", "Show the window menu", ["Alt+Space"], () => { const it = focusedItem(); if (it) windowMenu(it, { anchor: it.titleEl }); });
+action("always-on-top", "Windows", "Toggle always on top", [], () => { const it = focusedItem(); if (it) { it.above = !it.above; restack(); } });
+action("move", "Windows", "Move with the keyboard", ["Alt+F7"], () => keyboardMove("move"));
+action("resize", "Windows", "Resize with the keyboard", ["Alt+F8"], () => keyboardMove("resize"));
+action("lower", "Windows", "Lower the window below the others", [], () => { const it = focusedItem(); if (it) { lower(it); focusTop(); } });
+for (let n = 1; n <= 9; n++) action(`app-${n}`, "Apps", `Open pinned app ${n}`, [`Super+Digit${n}`], () => { const id = favorites?.[n - 1]; if (id) activateApp(id); });
+for (let n = 1; n <= 9; n++) action(`app-new-${n}`, "Apps", `New window of pinned app ${n}`, [`Super+Ctrl+Digit${n}`], () => { const id = favorites?.[n - 1]; if (id) launchAppId(id); });
+action("terminal", "Apps", "Open a terminal", ["Super+Enter", "Ctrl+Alt+KeyT"], () => launch(terminalArgv()));
+action("web", "Apps", "Open a browser tab", ["Super+KeyB"], () => launchAppId(WEB));
+action("agent", "Apps", "Start Claude Code in this workspace", ["Super+Shift+Enter"], () => startAgent());
+action("settings", "Apps", "Open Settings", ["Super+KeyI"], () => settings?.open());
+action("screenshot", "Screenshots", "Take a screenshot (interactive)", ["PrintScreen", "Super+Shift+KeyS"], screenshot);
+action("screenshot-screen", "Screenshots", "Screenshot the screen", ["Shift+PrintScreen"], () => quickShot("screen"));
+action("screenshot-window", "Screenshots", "Screenshot the window", ["Alt+PrintScreen"], () => quickShot("window"));
+action("lock", "System", "Lock the screen", [], lock);
+action("log-out", "System", "Log out", ["Ctrl+Alt+Delete"], () => quick?.openSub("power"));
+
+const comboOf = (e) => `${e.metaKey ? "Super+" : ""}${e.ctrlKey ? "Ctrl+" : ""}${e.altKey ? "Alt+" : ""}${e.shiftKey ? "Shift+" : ""}${e.code}`;
+const normalizeCombo = (text) => {
+  const parts = text.split("+");
+  const code = parts.pop();
+  const has = (m) => parts.includes(m);
+  return `${has("Super") ? "Super+" : ""}${has("Ctrl") ? "Ctrl+" : ""}${has("Alt") ? "Alt+" : ""}${has("Shift") ? "Shift+" : ""}${code}`;
+};
+/** The keys an action has now: the user's, else its defaults. */
+const keysOf = (a) => (prefs.keys?.[a.id] ?? a.defaults).map(normalizeCombo);
+let byCombo = new Map();
+// A keyboard Ash takes for a Chromebook's sends its top row as actions: F1–F4
+// arrive as Back, Forward, Refresh and the zoom key, so those answer too.
+// (F5 on are brightness and media keys there: not taken.)
+const TOP_ROW = { F1: "BrowserBack", F2: "BrowserForward", F3: "BrowserRefresh", F4: "ZoomToggle" };
+const withTopRow = (combo) => {
+  const code = combo.split("+").pop();
+  return TOP_ROW[code] ? [combo, combo.slice(0, -code.length) + TOP_ROW[code]] : [combo];
+};
+function buildBindings() {
+  byCombo = new Map();
+  for (const a of ACTIONS) for (const k of keysOf(a)) for (const c of withTopRow(k)) byCombo.set(c, a);
+  for (const c of prefs.custom ?? []) {
+    if (!c.combo || !c.command) continue;
+    byCombo.set(normalizeCombo(c.combo), { id: `custom:${c.name}`, label: c.name, run: () => launch(["sh", "-c", c.command]) });
+  }
+  updateShortcuts();
+}
+
+// Super alone opens the overview (GNOME's overlay key). The page sees a key
+// only when it's a shell shortcut, so with Super held every other key is
+// one too (but Ash's: Super+Tab, +L, +F, +Escape, Super+Shift+arrows), and
+// a Super that came with any of them isn't a tap.
+const SUPER_KEYS = [
+  ..."ABCDEGHIJKMNOPQRSTUVWXYZ".split("").map((c) => `Key${c}`), ..."0123456789".split("").map((d) => `Digit${d}`),
+  ...Array.from({ length: 12 }, (_, i) => `F${i + 1}`), "Space", "Enter", "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown",
+  "Minus", "Equal", "BracketLeft", "BracketRight", "Backslash", "Semicolon", "Quote", "Backquote", "Comma", "Period", "Slash",
+  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PrintScreen",
+];
+const MODS = ["", "Ctrl+", "Alt+", "Shift+", "Ctrl+Alt+", "Ctrl+Shift+", "Alt+Shift+"];
+const ASH_KEYS = new Set(["Super+Shift+ArrowLeft", "Super+Shift+ArrowRight", "Super+Shift+ArrowUp", "Super+Shift+ArrowDown", "Super+Ctrl+Shift+ArrowLeft", "Super+Ctrl+Shift+ArrowRight"]);
+const OVERLAY_SHORTCUTS = [
+  "MetaLeft", "MetaRight", "Super+MetaLeft", "Super+MetaRight",
+  "Super+ShiftLeft", "Super+ShiftRight", "Super+ControlLeft", "Super+ControlRight", "Super+AltLeft", "Super+AltRight",
+  "Super+Shift+ShiftLeft", "Super+Ctrl+ControlLeft", "Super+Alt+AltLeft",
+  ...MODS.flatMap((m) => SUPER_KEYS.map((k) => normalizeCombo(`Super+${m}${k}`))).filter((k) => !ASH_KEYS.has(k)),
+];
+
+function updateShortcuts() {
+  if (!shell) return;
+  const list = [...byCombo.keys()];
+  if (prefs.overlayKey) list.push(...OVERLAY_SHORTCUTS);
+  // While the overview, a switcher or a keyboard move is up, its keys too.
+  if (overview()) list.push("Escape", "Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown");
+  if (switcher) list.push("Escape", "Enter", "Alt+Tab", "Alt+Shift+Tab", "Alt+Backquote", "Alt+ArrowLeft", "Alt+ArrowRight", "Alt+Escape");
+  if (kbMode) list.push("Escape", "Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Shift+ArrowLeft", "Shift+ArrowRight", "Shift+ArrowUp", "Shift+ArrowDown");
+  shell.setShellShortcuts([...new Set(list)]);
+}
+
+// Settings → Keyboard records a new combo: keys go there meanwhile.
+let recorder = null;
+let lastKey = null;
+const superTap = { down: false, used: false, at: 0 };
+addEventListener("keydown", (e) => {
+  const isMeta = e.code === "MetaLeft" || e.code === "MetaRight";
+  if (isMeta) {
+    if (!e.repeat) Object.assign(superTap, { down: true, used: false, at: Date.now() });
+    if (!recorder) { e.preventDefault(); return; }
+  } else if (superTap.down) superTap.used = true;
+  if (recorder) {
+    if (["ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"].includes(e.code)) return;
+    e.preventDefault(); e.stopPropagation();
+    recorder(e.code === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey ? null : e.code === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey ? "" : comboOf(e));
+    return;
+  }
+  // The switcher's own keys.
+  if (switcher) {
+    e.preventDefault(); e.stopPropagation();
+    if (!e.altKey && !e.metaKey && e.code !== "Escape" && e.code !== "Enter") { commitSwitcher(); return; }
+    if (e.code === "Escape") closeSwitcher({ restore: true });
+    else if (e.code === "Enter") commitSwitcher();
+    else if (e.code === "Tab" || e.code === "ArrowRight") stepSwitcher(e.shiftKey || e.code === "ArrowLeft" ? -1 : 1);
+    else if (e.code === "ArrowLeft") stepSwitcher(-1);
+    else if (e.code === "Backquote") stepSwitcher(e.shiftKey ? -1 : 1, e.metaKey ? undefined : "windows");
+    else if (e.code === "KeyQ" && switcher.mode === "apps") { const en = switcher.entries[switcher.index]; en?.items.forEach(closeItem); closeSwitcher(); }
+    return;
+  }
+  if (kbMode) {
+    e.preventDefault(); e.stopPropagation();
+    const step = e.shiftKey ? 2 : 20;
+    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.code];
+    if (d) {
+      const g = kbMode.item.geom;
+      kbMode.item.geom = kbMode.mode === "move" ? { ...g, x: g.x + d[0], y: Math.max(-4, g.y + d[1]) } : { ...g, w: Math.max(MIN_W, g.w + d[0]), h: Math.max(MIN_H, g.h + d[1]) };
+      render();
+    } else if (e.code === "Enter") endKeyboardMove(true);
+    else if (e.code === "Escape") endKeyboardMove(false);
+    return;
+  }
+  lastKey = e;
+  const a = byCombo.get(comboOf(e));
+  if (!a) {
+    if (overview() && e.code === "Escape" && document.activeElement !== $("search")) { e.preventDefault(); setView(0); }
+    return;
+  }
+  if (e.target.closest?.(".modal-back, .settings input, .menu")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.repeat && !a.repeat) return;
+  a.run();
+}, true);
+addEventListener("keyup", (e) => {
+  if (e.code === "MetaLeft" || e.code === "MetaRight") {
+    const tap = superTap.down && !superTap.used && Date.now() - superTap.at < 1200;
+    superTap.down = false;
+    if (tap && prefs.overlayKey && !recorder && !switcher && !kbMode) {
+      e.preventDefault();
+      if (menuOpen()) closeMenu();
+      toggleOverview();
+    }
+  }
+  if (switcher && (e.code === "AltLeft" || e.code === "AltRight" || (e.code.startsWith("Meta") && switcher.byMeta))) commitSwitcher();
+}, true);
+// A switcher whose modifier's release went elsewhere: the next move without it picks.
+addEventListener("pointermove", (e) => { if (switcher && !e.altKey && !e.metaKey) commitSwitcher(); });
+// A Super held through a click, a scroll or a switch away isn't a tap.
+for (const type of ["pointerdown", "wheel"]) addEventListener(type, () => { if (superTap.down) superTap.used = true; }, true);
+addEventListener("blur", () => { superTap.down = false; if (switcher) commitSwitcher(); });
+document.addEventListener("visibilitychange", () => {
+  superTap.down = false;
+  if (document.visibilityState === "visible" && !overview()) { sync(); const it = items.get(focused); if (it && it.ws === curWs().id && !it.hidden) giveKeyboard(it); else focusTop(); }
+});
+
+// Super+D: everything on this workspace minimized, and back.
+let shownBeforeDesktop = null;
+function showDesktop() {
+  const here = itemsOn(curWs().id);
+  if (shownBeforeDesktop && here.every((it) => it.hidden)) {
+    for (const key of shownBeforeDesktop) { const it = items.get(key); if (it) it.hidden = false; }
+    const top = shownBeforeDesktop.at(-1);
+    shownBeforeDesktop = null;
+    if (top && items.has(top)) focusItem(top);
+    render();
+    return;
+  }
+  shownBeforeDesktop = stack.filter((k) => here.includes(items.get(k)) && !items.get(k).hidden);
+  for (const it of here) it.hidden = true;
+  focusTop();
+  render();
+}
+
+// ---------------------------------------------------------------- touchpad swipes
+// GNOME's: three or four fingers up open the overview, again the app grid,
+// down go back; sideways switch workspaces. Each follows the fingers, and
+// the speed at the end carries it on.
+let swipe = null;
+function swipeBegin() {
+  swipe = { axis: null, sumX: 0, sumY: 0, view0: view, samples: [] };
+  document.body.classList.add("live");
+}
+function swipeUpdate(dx, dy) {
+  if (!swipe) return;
+  swipe.sumX += dx; swipe.sumY += dy;
+  swipe.samples.push({ t: performance.now(), dx, dy });
+  if (swipe.samples.length > 8) swipe.samples.shift();
+  if (!swipe.axis) {
+    if (Math.hypot(swipe.sumX, swipe.sumY) < 12) return;
+    swipe.axis = Math.abs(swipe.sumX) > Math.abs(swipe.sumY) ? "x" : "y";
+  }
+  if (swipe.axis === "y") {
+    // A full screen's height of travel is one step.
+    view = Math.max(0, Math.min(2, swipe.view0 - (swipe.sumY / (H() * 0.35))));
+    overviewTarget = view > 0.01 ? Math.max(1, overviewTarget) : overviewTarget;
+    render();
+  } else {
+    const w = W();
+    // At the ends: a little give, as GNOME's rubber band.
+    let s = swipe.sumX * (overview() ? 2.2 : 1.6);
+    const min = -(workspaces.length - 1 - cur) * w, max = cur * w;
+    if (s > max) s = max + (s - max) * 0.25;
+    if (s < min) s = min + (s - min) * 0.25;
+    slide = s;
+    render();
+  }
+}
+function swipeEnd() {
+  if (!swipe) return;
+  const sw = swipe;
+  swipe = null;
+  document.body.classList.remove("live");
+  const now = performance.now();
+  const recent = sw.samples.filter((s) => now - s.t < 120);
+  const span = recent.length > 1 ? (recent.at(-1).t - recent[0].t) || 16 : 16;
+  const vx = recent.reduce((a, s) => a + s.dx, 0) / span, vy = recent.reduce((a, s) => a + s.dy, 0) / span;
+  // A fling goes on to the next step in its direction (one at most), else the nearest.
+  const FLING = 0.35; // px/ms
+  if (sw.axis === "y") {
+    const target = vy < -FLING ? Math.ceil(view) : vy > FLING ? Math.floor(view) : Math.round(view);
+    setView(Math.max(0, Math.min(2, target)));
+  } else if (sw.axis === "x") {
+    const w = W();
+    const pos = -slide / w; // how far toward the next workspace (negative: the previous)
+    const by = vx < -FLING ? Math.max(0, Math.ceil(pos - 0.01)) || 1 : vx > FLING ? Math.min(0, Math.floor(pos + 0.01)) || -1 : Math.round(pos);
+    const next = Math.max(0, Math.min(workspaces.length - 1, cur + Math.max(-1, Math.min(1, by))));
+    // The workspaces' offset is now relative to the new one.
+    slide = slide + (next - cur) * w;
+    document.body.classList.add("live");
+    cur = next;
+    render();
+    requestAnimationFrame(() => {
+      document.body.classList.remove("live");
+      slide = 0;
+      if (!overview()) focusTop();
+      normalizeWorkspaces();
+      render();
+    });
+  } else render();
+}
+
+// ---------------------------------------------------------------- the OSD
+let osdTimer = null;
+function osd(iconHtml, level, label) {
+  const o = $("osd");
+  o.innerHTML = iconHtml;
+  if (level !== null && level !== undefined) {
+    const bar = el("div", `level ${level > 1 ? "over" : ""}`);
+    const fill = el("i");
+    fill.style.width = `${Math.min(100, level * 100)}%`;
+    bar.append(fill);
+    o.append(bar);
+  }
+  if (label) o.append(el("span", "label", label));
+  o.classList.add("shown");
+  clearTimeout(osdTimer);
+  osdTimer = setTimeout(() => o.classList.remove("shown"), 1500);
+}
+
+// ---------------------------------------------------------------- prefs → the page
+function applyPrefs() {
+  const root = document.documentElement.style;
+  const accent = ACCENTS[prefs.accent] ?? prefs.accent ?? ACCENTS.blue;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-fg", prefs.accent === "yellow" ? "#000" : "#fff");
+  const wp = prefs.wallpaper === "custom" && prefs.wallpaperUrl ? `url("${prefs.wallpaperUrl.replace(/"/g, "%22")}")` : WALLPAPERS[prefs.wallpaper] ?? WALLPAPERS.adwaita;
+  root.setProperty("--wallpaper", wp);
+  const b = document.body.classList;
+  b.toggle("dock-always", prefs.dock === "always");
+  b.toggle("dock-auto", prefs.dock === "auto");
+  dashSig = "";
+  buildBindings();
+  dateMenu?.tick();
+  quick?.refresh();
+  render();
+}
+// The auto-hiding dock: shown at the bottom edge, hidden once the pointer leaves it.
+$("dock-edge").addEventListener("pointerenter", () => document.body.classList.add("dock-shown"));
+$("dash").addEventListener("pointerleave", () => { if (!appDrag) setTimeout(() => { if (!$("dash").matches(":hover")) document.body.classList.remove("dock-shown"); }, 400); });
+
+// ---------------------------------------------------------------- start
+quick = mountQuick({
+  shell, get prefs() { return prefs; }, toast,
+  actions: { screenshot, settings: (page) => settings?.open(page), lock },
+  onOpen: () => { dateMenu?.close(); if (overview()) setView(0); },
+});
+$("tray-slot").replaceWith(quick.indicators);
+dateMenu = mountDateMenu({
+  shell, get prefs() { return prefs; }, toast,
+  onOpen: () => { quick?.close(); if (overview()) setView(0); },
+});
+$("clock-slot").replaceWith(dateMenu.clock);
+// Settings load when first opened.
+settings = {
+  _mod: null,
+  async load() {
+    this._mod ??= (await import("./settings.js")).mountSettings({
+      shell, helper, get prefs() { return prefs; }, setPref, toast, quick, ACTIONS, keysOf, normalizeCombo,
+      record: (fn) => { recorder = fn; updateShortcuts(); }, stopRecording: () => { recorder = null; updateShortcuts(); },
+      favorites: () => favorites ?? [], setFavorites, appById, appIconEl, apps: () => apps,
+      workspaces: () => workspaces.map((w, i) => ({ ...w, label: wsName(w, i), count: itemsOn(w.id).length })),
+      renameWorkspace: (id, name) => { const w = wsById(id); if (w) { w.name = name; normalizeWorkspaces(); render(); } },
+      WALLPAPERS, ACCENTS,
+    });
+    return this._mod;
+  },
+  async open(page) { (await this.load()).open(page); },
+  isOpen() { return this._mod?.isOpen() ?? false; },
+  search(q) { return this._mod?.search(q) ?? SETTINGS_INDEX.filter((p) => `${p.title} ${p.keywords} settings`.toLowerCase().includes(q)); },
+};
+// Until settings.js loads, what search finds there.
+const SETTINGS_INDEX = [
+  { page: "wifi", title: "Wi-Fi", icon: "wifi", keywords: "network wireless internet vpn wired ethernet" },
+  { page: "bluetooth", title: "Bluetooth", icon: "bluetooth", keywords: "devices pair headphones mouse keyboard" },
+  { page: "sound", title: "Sound", icon: "volume", keywords: "audio volume speakers microphone output input" },
+  { page: "power", title: "Power", icon: "power", keywords: "battery brightness screen blank suspend" },
+  { page: "appearance", title: "Appearance", icon: "appearance", keywords: "wallpaper background accent color dock theme" },
+  { page: "multitasking", title: "Multitasking", icon: "multitasking", keywords: "workspaces hot corner edge tiling super key switcher" },
+  { page: "keyboard", title: "Keyboard Shortcuts", icon: "keyboard", keywords: "keys hotkeys shortcuts accelerators bindings custom" },
+  { page: "apps", title: "Apps", icon: "apps", keywords: "dash pinned favorites terminal default browser homepage" },
+  { page: "notifications", title: "Notifications", icon: "bell", keywords: "do not disturb banners" },
+  { page: "privacy", title: "Screen Lock", icon: "lock", keywords: "privacy lock idle blank screen" },
+  { page: "datetime", title: "Date & Time", icon: "info", keywords: "clock 24-hour seconds weekday calendar" },
+  { page: "about", title: "About", icon: "info", keywords: "system plutonium version helper" },
+].map((p) => ({ ...p, detail: "Settings" }));
+
+// For poking at it from DevTools.
+globalThis.gnome = { get shell() { return shell; }, get dateMenu() { return dateMenu; }, items, get workspaces() { return workspaces; }, get cur() { return cur; }, prefs: () => prefs };
+if (shell) {
+  shell.addEventListener("touchpadswipe", (e) => {
+    const { phase, fingers, dx = 0, dy = 0 } = e.detail ?? {};
+    if (fingers < 3) return;
+    if (phase === "begin") swipeBegin();
+    else if (phase === "update") { if (!swipe) swipeBegin(); swipeUpdate(dx, dy); }
+    else if (phase === "end") swipeEnd();
+  });
+  shell.addEventListener("systemkey", (e) => {
+    const { service, state, key } = e.detail ?? {};
+    if (service === "audio" && state) {
+      if (key === "mic-mute") osd(icon(state.input?.muted ? "mic-muted" : "mic"), null, state.input?.muted ? "Microphone off" : "Microphone on");
+      else osd(volumeIcon(state.volume, state.muted), state.muted ? 0 : state.volume);
+    } else if (service === "power" && state?.brightness?.available) osd(icon("brightness"), state.brightness.value);
+  });
+  shell.system.session.addEventListener("change", (e) => { if (e.detail?.locked) superTap.used = true; });
+  // Something dropped here from another shell or display: this workspace's (or, in the overview, the one it's dropped on).
+  addEventListener("dragover", (e) => { if (shell.itemFromDrop(e)) e.preventDefault(); });
+  addEventListener("drop", (e) => {
+    const it = shell.itemFromDrop(e);
+    if (!it) return;
+    e.preventDefault();
+    const t = overview() ? dropTargetAt(e.clientX, e.clientY) : null;
+    const wsId = t?.ws ?? curWs().id;
+    const w = it.windowId && shell.windows.get(it.windowId);
+    const tab = it.tabId && shell.tabs.get(it.tabId);
+    if (w) { claim(w, "w", wsId); pendingFocus = `w:${w.id}`; }
+    if (tab) { claim(tab, "t", wsId); pendingFocus = `t:${tab.id}`; }
+    sync();
+  });
+  shell.apps().then((list) => {
+    apps = list;
+    favorites ??= defaultFavorites();
+    dashSig = "";
+    render();
+    if (overviewTarget === 2 || searching) renderGrid();
+  }).catch(() => { favorites ??= [WEB, AGENT]; render(); });
+  await shell.ready;
+  listed = true;
+  applyPrefs();
+  sync();
+  normalizeWorkspaces();
+  render();
+  // GNOME starts in the overview when nothing is open.
+  if (items.size === 0) setView(1);
+  else focusTop();
+} else {
+  favorites ??= [WEB, AGENT];
+  applyPrefs();
+  toast(`helper unreachable (${helper})`);
+}
+</script>
+</body>
+</html>

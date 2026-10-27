@@ -1,6 +1,6 @@
 # Shells as installed packages
 
-The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (niri, plain, t3) are copied there on the first `plutonium run`. From then on the folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
+The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (niri, gnome, plain, t3) are copied there on the first `plutonium run`. From then on the folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
 
 - A shell that is just a web page is served by the session's helper.
 - A shell with a server (T3 Code) says how to run it, and the helper runs and supervises it.
@@ -85,7 +85,7 @@ The launcher passes every origin that's on to the browser and the helper, as bef
 
 ## Lifecycle
 
-**Installing.** `plutonium shells install`, and the first `plutonium run`, copy the checkout's `shells/<name>` into `$PLUTO_HOME/shells/<name>`. Each becomes a git repository with one commit, `shipped: <name> <version>`. Its branches `main` (yours) and `shipped` both start there. The first run also writes `shells.json`: T3 then plain if T3 Code is built, else plain. niri is installed, off. A later run installs shells the checkout ships that you don't have yet.
+**Installing.** `plutonium shells install`, and the first `plutonium run`, copy the checkout's `shells/<name>` into `$PLUTO_HOME/shells/<name>`. Each becomes a git repository with one commit, `shipped: <name> <version>`. Its branches `main` (yours) and `shipped` both start there. The first run also writes `shells.json`: T3 then plain if T3 Code is built, else plain. niri and gnome are installed, off. A later run installs shells the checkout ships that you don't have yet.
 
 **Updating.** `plutonium shells update [name…] [--from <checkout>]` merges the checkout's version into yours:
 1. Your uncommitted changes are committed.
