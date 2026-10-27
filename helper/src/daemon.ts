@@ -40,7 +40,7 @@ import {
   type NativeWindowEntry,
 } from "./relay.ts";
 import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
-import { comboKeys, commitRuns, textKeys } from "./keys.ts";
+import { comboKeys, commitRuns, typingRuns } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
@@ -276,6 +276,8 @@ const TYPE_BATCH_GAP_MS = 25;
 // After a Tab or Enter with keys after it: LibreOffice Calc loses a key that
 // comes while it commits a cell.
 const COMMIT_GAP_MS = 80;
+// Before and after keys under a temporary keymap (Plutonium.setWindowKeymap).
+const KEYMAP_GAP_MS = 50;
 
 // The uid owning the local end of a loopback TCP connection, from the kernel's
 // socket table (the peer is on this host: we only listen on 127.0.0.1).
@@ -1401,7 +1403,7 @@ export class Daemon {
       desktop.mouse(windowId, event).catch((error: Error) => {
         throw new HttpError(409, error.message);
       });
-    const keys = (events: ReturnType<typeof textKeys>) =>
+    const keys = (events: ReturnType<typeof comboKeys>) =>
       desktop.keys(windowId, events).catch((error: Error) => {
         throw new HttpError(409, error.message);
       });
@@ -1449,9 +1451,10 @@ export class Daemon {
       }
       case "type": {
         if (typeof body.text !== "string") throw new HttpError(400, "text is required.");
-        let events;
+        const layout = await desktop.keymap();
+        let runs;
         try {
-          events = textKeys(body.text);
+          runs = typingRuns(body.text, layout);
         } catch (error) {
           throw new HttpError(400, (error as Error).message);
         }
@@ -1461,13 +1464,30 @@ export class Daemon {
         // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
         // what fills a field.
         // And a pause after each Tab or Enter, while the app commits.
+        // Characters the layout lacks go in under a temporary keymap, with a
+        // pause each side for the app (and Xwayland) to take it.
         let first = true;
-        for (const run of commitRuns(events)) {
-          if (!first) await sleep(COMMIT_GAP_MS);
-          first = false;
-          for (let i = 0; i < run.length; i += TYPE_BATCH) {
-            if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
-            await keys(run.slice(i, i + TYPE_BATCH));
+        for (const { keymap, events } of runs) {
+          if (keymap) {
+            await desktop.setWindowKeymap(windowId, keymap).catch((error: Error) => {
+              throw new HttpError(409, error.message);
+            });
+            await sleep(KEYMAP_GAP_MS);
+          }
+          try {
+            for (const run of commitRuns(events)) {
+              if (!first) await sleep(COMMIT_GAP_MS);
+              first = false;
+              for (let i = 0; i < run.length; i += TYPE_BATCH) {
+                if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
+                await keys(run.slice(i, i + TYPE_BATCH));
+              }
+            }
+          } finally {
+            if (keymap) {
+              await sleep(KEYMAP_GAP_MS);
+              await desktop.setWindowKeymap(windowId).catch(() => {});
+            }
           }
         }
         break;
@@ -1477,9 +1497,10 @@ export class Daemon {
         if (!combos.every((combo) => typeof combo === "string" && combo)) {
           throw new HttpError(400, "keys must be a key combination or a list of them.");
         }
+        const layout = await desktop.keymap();
         let events;
         try {
-          events = (combos as string[]).flatMap(comboKeys);
+          events = (combos as string[]).flatMap((combo) => comboKeys(combo, layout));
         } catch (error) {
           throw new HttpError(400, (error as Error).message);
         }

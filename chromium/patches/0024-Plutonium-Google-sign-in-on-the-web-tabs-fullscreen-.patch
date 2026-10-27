@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 13:44:11 +1300
-Subject: [PATCH 24/76] Plutonium: Google sign-in on the web; tabs fullscreen
+Subject: [PATCH 24/77] Plutonium: Google sign-in on the web; tabs fullscreen
  outside the shells
 
 EXO-SIGNIN: in shell mode Mirror account consistency is off. Under Mirror,

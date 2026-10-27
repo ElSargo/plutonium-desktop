@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 08:36:22 +1300
-Subject: [PATCH 61/76] Plutonium: zwp_text_input_v3 in Exo, for GTK 4, Qt 6
+Subject: [PATCH 61/77] Plutonium: zwp_text_input_v3 in Exo, for GTK 4, Qt 6
  and foot
 
 Exo had only text-input-v1, which GTK 4, Qt 6 and foot don't speak, so
