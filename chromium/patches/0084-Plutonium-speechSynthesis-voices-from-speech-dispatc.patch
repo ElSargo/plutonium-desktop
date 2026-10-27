@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Wed, 28 Oct 2026 08:40:48 +1300
+Subject: [PATCH 84/84] Plutonium: speechSynthesis voices from
+ speech-dispatcher
+
+A ChromeOS build's platform TTS is ARC's (TtsPlatformImplChromeOs), and
+its other voices are TTS extensions, so with neither speechSynthesis
+has no voices. Linux Chromium speaks through speech-dispatcher
+(tts_linux.cc, libspeechd dlopen()ed, behind --enable-speech-dispatcher).
+Build tts_linux.cc for ChromeOS too, and use it when ARC's TTS isn't
+there: content's TtsPlatform falls back to it instead of NOTREACHED().
+TTS extensions' voices are listed as before.
+---
+ chrome/browser/chrome_content_browser_client.cc |  7 ++++++-
+ content/browser/BUILD.gn                        |  4 ++++
+ content/browser/speech/tts_platform_impl.cc     | 12 +-----------
+ content/browser/speech/tts_platform_impl.h      |  2 +-
+ 4 files changed, 12 insertions(+), 13 deletions(-)
+
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index a988f740ac..802a2d3e2b 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4700,7 +4700,12 @@ content::TtsPlatform* ChromeContentBrowserClient::GetTtsPlatform() {
+       TtsExtensionEngine::GetInstance());
+ #endif
+ #if BUILDFLAG(IS_CHROMEOS)
+-  return TtsPlatformImplChromeOs::GetInstance();
++  // Plutonium: ARC's voices only when ARC is there to speak them; else the
++  // desktop session's speech-dispatcher (content's tts_linux.cc).
++  if (TtsPlatformImplChromeOs::GetInstance()->PlatformImplSupported()) {
++    return TtsPlatformImplChromeOs::GetInstance();
++  }
++  return nullptr;
+ #else
+   return nullptr;
+ #endif
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 7e121dff72..c6a07d132f 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -2577,6 +2577,10 @@ source_set("browser") {
+       "//third_party/speech-dispatcher",
+       "//ui/linux:linux_ui",
+     ]
++  } else if (is_chromeos) {
++    # Plutonium: speech-dispatcher's voices, from the desktop session's.
++    sources += [ "speech/tts_linux.cc" ]
++    deps += [ "//third_party/speech-dispatcher" ]
+   }
+ 
+   # ChromeOS also defines linux but their memory-monitors conflict.
+diff --git a/content/browser/speech/tts_platform_impl.cc b/content/browser/speech/tts_platform_impl.cc
+index 2a2c89228d..4839b3bc1a 100644
+--- a/content/browser/speech/tts_platform_impl.cc
++++ b/content/browser/speech/tts_platform_impl.cc
+@@ -21,18 +21,8 @@ TtsPlatform* TtsPlatform::GetInstance() {
+     return result;
+ #endif
+ 
+-#if BUILDFLAG(IS_CHROMEOS)
+-  // On Chrome OS, the platform TTS definition is provided by the content
+-  // client.
+-  //
+-  // If this code is reached in production it implies that somebody is
+-  // trying to do TTS on a platform where the content client implementation
+-  // is not provided, that's probably not intended. It's not important
+-  // if this is hit in something like a content-only unit test.
+-  NOTREACHED();
+-#else
++  // Plutonium: on ChromeOS too, speech-dispatcher's (tts_linux.cc).
+   return TtsPlatformImpl::GetInstance();
+-#endif
+ }
+ 
+ void TtsPlatformImpl::LoadBuiltInTtsEngine(BrowserContext* browser_context) {}
+diff --git a/content/browser/speech/tts_platform_impl.h b/content/browser/speech/tts_platform_impl.h
+index e5e686ad50..f36bf1e6ce 100644
+--- a/content/browser/speech/tts_platform_impl.h
++++ b/content/browser/speech/tts_platform_impl.h
+@@ -15,7 +15,7 @@
+ 
+ namespace content {
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ // Overrides the library path captured when the Linux TTS singleton is created.
+ // Must be called before TtsPlatform::GetInstance().
+ CONTENT_EXPORT base::AutoReset<std::string>

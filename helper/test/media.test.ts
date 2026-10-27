@@ -65,12 +65,15 @@ describe("media service", () => {
     addPlayer(bus, "org.mpris.MediaPlayer2.spotify", "Spotify", "Playing", "Song Two", log);
     // A proxy for another player: not shown.
     addPlayer(bus, "org.mpris.MediaPlayer2.playerctld", "playerctld", "Playing", "Song Two", log);
+    // The browser's own MPRIS player: "browser" already.
+    addPlayer(bus, "org.mpris.MediaPlayer2.chromium.instance4242", "Chromium", "Playing", "A video", log);
     media = new MediaService({
       address: bus.address,
       browser: {
         session: async () => null,
         action: async (action) => void log.push(`browser ${action}`),
         onChange: (listener) => (browserListener = listener),
+        pid: async () => 4242,
       },
     });
     await media.start((state) => states.push(state as MediaState));
@@ -111,6 +114,17 @@ describe("media service", () => {
     assert.equal(log.at(-1), "org.mpris.MediaPlayer2.mpv Next");
     await assert.rejects(media.call("play-pause", { player: "nope" }), { status: 400 });
     await assert.rejects(media.call("shuffle", {}), { status: 404 });
+  });
+
+  test("the browser's own MPRIS player isn't listed twice; another Chromium's is", async () => {
+    assert.ok(!(await media.state()).players.some((player) => player.id.endsWith(".instance4242")));
+    addPlayer(bus, "org.mpris.MediaPlayer2.chromium.instance77", "Chromium", "Paused", "Elsewhere", log);
+    bus.signal("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameOwnerChanged", "sss", [
+      "org.mpris.MediaPlayer2.chromium.instance77", "", ":1.298",
+    ]);
+    await until(states, (state) => state.players.some((player) => player.id.endsWith(".instance77")));
+    bus.dropService("org.mpris.MediaPlayer2.chromium.instance77");
+    await until(states, (state) => !state.players.some((player) => player.id.endsWith(".instance77")));
   });
 
   test("a player that comes and goes", async () => {

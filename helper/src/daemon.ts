@@ -446,6 +446,7 @@ export class Daemon {
             await this.desktop.mediaSessionAction(action);
           },
           onChange: (listener) => this.desktop?.mediaListeners.add(listener),
+          pid: async () => (await this.desktop?.browserPid()) ?? null,
         },
       }),
     );
