@@ -52,6 +52,8 @@ Pressing a slot's key:
 4. shown and focused: back to where you were before (the chat, unfolded, or the panel as it was);
 5. several copies: pressing again cycles through them.
 
+Just after switching threads, step 3 doesn't apply: the switch gave the composer the keyboard, so a slot's thing already showing in the new thread is taken as focused and its key hides it (step 4). Typing or clicking in the thread ends that (patch 0035). Going back (step 4) never shows the slot's own thing again: if it was showing when the slot's key was first pressed, the slot is put away.
+
 A group slot raises its last-used member, and pressing again cycles. Super+Shift+Alt+N (to be decided) opens a fuzzy picker of the group, with its members not open yet and "add the current tab". The `"rest"` group is everything in its scope no other slot claims.
 
 They are all T3 keybinding commands, so `keybindings.json` can change them. They are shell shortcuts too: they reach T3 while an app or tab has the keyboard. Alt+1…9 stays with apps (Firefox, terminals and editors use it).

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sun, 18 Oct 2026 11:41:28 +1300
-Subject: [PATCH 10/34] Plutonium: panel apps cross-fade on resize, and their
+Subject: [PATCH 10/35] Plutonium: panel apps cross-fade on resize, and their
  maximize button maximizes the panel
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
