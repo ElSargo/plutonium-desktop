@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 19:41:21 +1300
+Subject: [PATCH 77/81] Plutonium: a tab dragged partly off the screen
+ overflows instead of laying out again
+
+The embedded page is a main frame, so the visible viewport FrameVisualProperties
+carry is its visual viewport. SurfaceEmbed sent the visible part of the <embed>
+(as for an iframe), so a tab dragged half off the screen shrank its
+innerWidth and visualViewport and laid out again to fit. Send the element's
+own size instead: a tab overflows, as a native window does.
+---
+ .../renderer/surface_embed_web_plugin.cc             | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.cc b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+index eb6a0c54ef..0088dc3f6d 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.cc
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+@@ -393,11 +393,6 @@ void SurfaceEmbedWebPlugin::SynchronizeVisualProperties(
+       ancestor_widget->PinchGestureActiveInMainFrame();
+   pending_visual_properties.screen_infos = ancestor_widget->GetScreenInfos();
+ 
+-  // For separate WebContents acting like an iframe, the "visible viewport" is
+-  // the portion of the plugin that is visible within the plugin bounds.
+-  pending_visual_properties.visible_viewport_size =
+-      gfx::Size(last_clip_rect_.width(), last_clip_rect_.height());
+-
+   const std::vector<gfx::Rect>& viewport_segments =
+       ancestor_widget->ViewportSegments();
+   pending_visual_properties.root_widget_viewport_segments.assign(
+@@ -416,6 +411,13 @@ void SurfaceEmbedWebPlugin::SynchronizeVisualProperties(
+                                          ? last_window_rect_.size()
+                                          : last_unobscured_rect_.size();
+   pending_visual_properties.local_frame_size = local_frame_size;
++  // EXO-TABS: the embedded page is a main frame, so the visible viewport is
++  // its visual viewport (innerWidth, visualViewport, what fixed elements fit
++  // in). A tab is a window: dragged partly off the screen or clipped by its
++  // container it overflows, as a native window does, instead of laying out
++  // again to fit what's left visible. (Upstream used the visible part of the
++  // plugin, as for an iframe.)
++  pending_visual_properties.visible_viewport_size = local_frame_size;
+   // How much smaller the page is drawn than it lays out.
+   const float scale =
+       local_frame_size.width() > 0

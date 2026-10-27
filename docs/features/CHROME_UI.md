@@ -59,6 +59,10 @@ Plutonium's own keys (Super+Tab, Super+F, Super+Escape, Ctrl+Alt+F1…F12, Ctrl+
 
 The URL Chrome shows at the bottom left when the pointer is over a link is off in shell mode, as in kiosk mode.
 
+## Fullscreen
+
+The shell window is always fullscreen, as a kiosk app is: it can't leave fullscreen, shows no exit instructions or exit button, and has no immersive top-edge reveal. Only the shells' own windows are held so. Other browser windows in shell mode (the backup browser, a popup, an app window) enter and leave fullscreen as usual, with Chrome's exit bubble.
+
 ## Verified
 
 On Xvfb (slot 6 of a worktree, niri at startup and the plain shell behind it), with real X input through Ash (xdotool), 2026-10-19:

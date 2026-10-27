@@ -475,6 +475,20 @@ export class Desktop {
     await this.cdp.send("Plutonium.setWindowAgentFocus", { id, focused });
   }
 
+  /**
+   * Names an untagged window's origin (the thread that started its client),
+   * for the browser and every shell, when the browser couldn't read the
+   * client's environment. False if it didn't take: the browser read it
+   * itself, it was named already, or the browser has no such command.
+   */
+  async setWindowOriginTag(id: number, tag: string): Promise<boolean> {
+    try {
+      return ((await this.cdp.send("Plutonium.setWindowOriginTag", { id, tag })) as { ok?: boolean }).ok === true;
+    } catch {
+      return false;
+    }
+  }
+
   async closeWindow(id: number): Promise<void> {
     await this.cdp.send("Plutonium.closeWindow", { id });
   }

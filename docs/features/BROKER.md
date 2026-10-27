@@ -10,6 +10,7 @@ How a shell page finds native windows and gets the right to show them, and who e
 | `requestGrant(id)` | a grant for window `id`, for `<native-window grant=…>` elements in this document; rejects `NotAllowedError` if there's no such window |
 | `revokeGrant(grant)` | revokes a grant this document holds: its elements detach and fire `windowclose` |
 | `showOnDesktop(id)`, `close(id)`, `snapshot(id)` | pop out, ask the app to close, PNG |
+| `getHelperUrl()` | the session's helper, e.g. `"http://127.0.0.1:3780"` (the launcher's `--plutonium-helper-url`); `""` if the session didn't say |
 | `windowadded` / `windowchanged` / `windowremoved` | lifecycle; `event.windowId`, `event.entry` |
 | `windowfocusrequest` | the shells overlay asks this shell to show a window |
 | `grantrevoked` | a grant this document holds stopped working: `event.grant`, `event.windowId`. Fired after `revokeGrant()`, and when the window closes (just before its `windowremoved`). Elements using it have detached already |

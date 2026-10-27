@@ -1,0 +1,328 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 22:09:53 +1300
+Subject: [PATCH 80/81] Plutonium: the native window cross-fade runs on the
+ compositor thread
+
+The old frame's opacity was stepped from the main thread each frame, so
+a busy shell page made the fade stutter. Fade it with a cc opacity
+animation on its effect node instead (as LinkHighlightImpl does). The
+main thread drops the frame when the animation finishes, or when it
+should have. A resize during the fade holds the frame where it had got
+to. Without threaded animation it is stepped as before.
+---
+ .../core/html/html_native_window_element.cc   | 168 +++++++++++++++++-
+ .../core/html/html_native_window_element.h    |  18 ++
+ 2 files changed, 179 insertions(+), 7 deletions(-)
+
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
+index 9c1fd68582..16e5a0793f 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.cc
++++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
+@@ -8,7 +8,11 @@
+ #include <cmath>
+ #include <utility>
+ 
++#include "cc/animation/animation_id_provider.h"
++#include "cc/animation/animation_timeline.h"
++#include "cc/animation/keyframe_model.h"
+ #include "cc/layers/surface_layer.h"
++#include "cc/trees/target_property.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "components/viz/common/surfaces/local_surface_id.h"
+ #include "components/viz/common/surfaces/surface_id.h"
+@@ -31,11 +35,16 @@
+ #include "third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h"
+ #include "third_party/blink/renderer/core/html_names.h"
+ #include "third_party/blink/renderer/core/layout/layout_native_window.h"
++#include "third_party/blink/renderer/core/animation/document_timeline.h"
++#include "third_party/blink/renderer/platform/animation/compositor_animation.h"
++#include "third_party/blink/renderer/platform/animation/compositor_animation_delegate.h"
+ #include "third_party/blink/renderer/platform/animation/timing_function.h"
+ #include "third_party/blink/renderer/platform/graphics/paint/effect_paint_property_node.h"
+ #include "third_party/blink/renderer/platform/graphics/paint/property_tree_state.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
++#include "ui/gfx/animation/keyframe/keyframed_animation_curve.h"
+ #include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/geometry/vector2d_conversions.h"
+ 
+@@ -91,10 +100,81 @@ class HTMLNativeWindowElement::FadeFrameCallback final : public FrameCallback {
+   Member<HTMLNativeWindowElement> element_;
+ };
+ 
++// EXO-CROSSFADE: runs the old frame's fade on the compositor thread, as an
++// opacity animation on its effect node (as LinkHighlightImpl does), so a busy
++// page doesn't make it stutter. Not garbage collected: the compositor's
++// delegate pointer must not outlive it, and the element it reports to may be
++// gone.
++class HTMLNativeWindowElement::FadeAnimator final
++    : public CompositorAnimationDelegate {
++ public:
++  FadeAnimator(HTMLNativeWindowElement* element,
++               CompositorElementId element_id)
++      : element_(element), animation_(CompositorAnimation::Create()) {
++    animation_->SetAnimationDelegate(this);
++    animation_->AttachElement(element_id);
++  }
++  ~FadeAnimator() override {
++    if (animation_->IsElementAttached()) {
++      animation_->DetachElement();
++    }
++    animation_->SetAnimationDelegate(nullptr);
++  }
++
++  // Attaches to |document|'s compositor timeline; false if there is none
++  // (no threaded animation).
++  bool AttachTimeline(Document& document) {
++    if (animation_->CcAnimation()->animation_timeline()) {
++      return true;
++    }
++    if (!document.GetFrame() || !document.GetPage()) {
++      return false;
++    }
++    cc::AnimationTimeline* timeline =
++        document.Timeline().EnsureCompositorTimeline();
++    if (!timeline) {
++      return false;
++    }
++    document.AttachCompositorTimeline(timeline);
++    if (!timeline->animation_host()) {
++      return false;
++    }
++    timeline->AttachAnimation(animation_->CcAnimation());
++    return true;
++  }
++
++  void Add(std::unique_ptr<cc::KeyframeModel> model) {
++    animation_->AddKeyframeModel(std::move(model));
++  }
++  void Remove(int keyframe_model_id) {
++    animation_->RemoveKeyframeModel(keyframe_model_id);
++  }
++
++  // CompositorAnimationDelegate:
++  void NotifyAnimationStarted(base::TimeDelta, int) override {}
++  void NotifyAnimationFinished(base::TimeDelta, int group) override {
++    if (element_) {
++      element_->OnFadeAnimationEnded(group);
++    }
++  }
++  void NotifyAnimationAborted(base::TimeDelta, int group) override {
++    if (element_) {
++      element_->OnFadeAnimationEnded(group);
++    }
++  }
++
++ private:
++  WeakPersistent<HTMLNativeWindowElement> element_;
++  std::unique_ptr<CompositorAnimation> animation_;
++};
++
+ HTMLNativeWindowElement::HTMLNativeWindowElement(Document& document)
+     : HTMLElement(html_names::kNativeWindowTag, document),
+       host_(document.GetExecutionContext()),
+-      client_receiver_(this, document.GetExecutionContext()) {}
++      client_receiver_(this, document.GetExecutionContext()),
++      fade_element_id_(CompositorElementIdFromUniqueObjectId(
++          NewUniqueObjectId(),
++          CompositorElementIdNamespace::kPrimaryEffect)) {}
+ 
+ HTMLNativeWindowElement::~HTMLNativeWindowElement() = default;
+ 
+@@ -349,6 +429,11 @@ void HTMLNativeWindowElement::StartResize(const gfx::Size& size,
+     // Resized again before the app caught up, or while fading: keep the
+     // frame from before the first resize, where its fade had got to.
+     fade_->from_opacity = FadeOpacity();
++    if (fade_->keyframe_model_id) {
++      fade_animator_->Remove(fade_->keyframe_model_id);
++      fade_->keyframe_model_id = 0;
++      fade_->group_id = 0;
++    }
+     fade_->fade_start = base::TimeTicks();
+     fade_->hold_start = now;
+     return;
+@@ -375,6 +460,9 @@ void HTMLNativeWindowElement::EndFade() {
+   if (!fade_) {
+     return;
+   }
++  if (fade_->keyframe_model_id) {
++    fade_animator_->Remove(fade_->keyframe_model_id);
++  }
+   fade_.reset();
+   fade_effect_ = nullptr;
+   if (auto* view = GetDocument().View()) {
+@@ -409,14 +497,69 @@ float HTMLNativeWindowElement::FadeOpacity() {
+   return fade_->from_opacity * static_cast<float>(1.0 - progress);
+ }
+ 
++void HTMLNativeWindowElement::StartFadeOut(base::TimeTicks now) {
++  DCHECK(fade_);
++  fade_->fade_start = now;
++  ++fade_generation_;
++  const base::TimeDelta duration = CrossfadeDuration();
++  if (duration.is_zero()) {
++    return;
++  }
++  if (!fade_animator_) {
++    fade_animator_ = std::make_unique<FadeAnimator>(this, fade_element_id_);
++  }
++  if (!fade_animator_->AttachTimeline(GetDocument())) {
++    // Stepped from here each frame instead (OnFadeFrame).
++    return;
++  }
++  auto curve = gfx::KeyframedFloatAnimationCurve::Create();
++  curve->AddKeyframe(gfx::FloatKeyframe::Create(
++      base::TimeDelta(), fade_->from_opacity, CrossfadeEasing().CloneToCC()));
++  curve->AddKeyframe(gfx::FloatKeyframe::Create(duration, 0.f, nullptr));
++  auto model = cc::KeyframeModel::Create(
++      std::move(curve), cc::AnimationIdProvider::NextKeyframeModelId(),
++      cc::AnimationIdProvider::NextGroupId(),
++      cc::KeyframeModel::TargetPropertyId(cc::TargetProperty::OPACITY));
++  fade_->keyframe_model_id = model->id();
++  fade_->group_id = model->group();
++  fade_animator_->Add(std::move(model));
++  // The effect node's own opacity is where the animation ends, so the frame
++  // doesn't flash back before EndFade() removes it. The compositor drops the
++  // frame once the animation finishes; in case it never starts (the frame
++  // not composited), end the fade when it should have.
++  GetDocument()
++      .GetTaskRunner(TaskType::kInternalDefault)
++      ->PostDelayedTask(FROM_HERE,
++                        BindOnce(&HTMLNativeWindowElement::OnFadeTimeout,
++                                 WrapWeakPersistent(this), fade_generation_),
++                        duration + base::Milliseconds(100));
++  InvalidateFadePaint();
++}
++
++void HTMLNativeWindowElement::OnFadeAnimationEnded(int group_id) {
++  if (!fade_ || !fade_->keyframe_model_id || fade_->group_id != group_id) {
++    return;
++  }
++  // The compositor is done with the keyframe model; nothing to remove.
++  fade_->keyframe_model_id = 0;
++  EndFade();
++}
++
++void HTMLNativeWindowElement::OnFadeTimeout(uint64_t generation) {
++  if (fade_ && fade_->keyframe_model_id && generation == fade_generation_) {
++    EndFade();
++  }
++}
++
+ void HTMLNativeWindowElement::OnFadeFrame() {
+   fade_frame_requested_ = false;
+   const base::TimeTicks now = base::TimeTicks::Now();
+   if (fade_ && fade_->fade_start.is_null() &&
+       now - fade_->hold_start >= kMaxFadeHold) {
+-    fade_->fade_start = now;
++    StartFadeOut(now);
+   }
+-  if (fade_ && !fade_->fade_start.is_null() &&
++  // Stepped from here when it isn't fading on the compositor.
++  if (fade_ && !fade_->keyframe_model_id && !fade_->fade_start.is_null() &&
+       now - fade_->fade_start >= CrossfadeDuration()) {
+     EndFade();
+   }
+@@ -429,9 +572,12 @@ void HTMLNativeWindowElement::InvalidateFadePaint() {
+   }
+   // Until the fade is over and the app has drawn at its size (or the wait
+   // for it is over: its frame goes back to object-fit).
++  const bool stretch_over =
++      base::TimeTicks::Now() - size_requested_ >
++      kMaxFadeHold + base::Milliseconds(50);
++  const bool compositor_fading = fade_ && fade_->keyframe_model_id;
+   if (fade_frame_requested_ || (!fade_ && last_sent_size_.IsEmpty()) ||
+-      (!fade_ && base::TimeTicks::Now() - size_requested_ >
+-                     kMaxFadeHold + base::Milliseconds(50))) {
++      ((!fade_ || compositor_fading) && stretch_over)) {
+     return;
+   }
+   fade_frame_requested_ = true;
+@@ -444,7 +590,15 @@ const EffectPaintPropertyNode& HTMLNativeWindowElement::UpdateFadeEffect(
+     const PropertyTreeState& parent) {
+   EffectPaintPropertyNode::State state;
+   state.local_transform_space = &parent.Transform();
+-  state.opacity = FadeOpacity();
++  // While the compositor fades it, the node keeps the opacity the fade ends
++  // at (see StartFadeOut()).
++  state.opacity = fade_ && fade_->keyframe_model_id ? 0.f : FadeOpacity();
++  state.compositor_element_id = fade_element_id_;
++  // EffectPaintPropertyNode::Update() doesn't look at changes in the
++  // compositing reasons: always composited, so the animation has a node to
++  // run on (as LinkHighlightImpl does).
++  state.direct_compositing_reasons = {
++      CompositingReason::kActiveOpacityAnimation};
+   if (fade_effect_) {
+     PropertyChanged(GetDocument(),
+                     fade_effect_->Update(parent.Effect(), std::move(state)));
+@@ -552,7 +706,7 @@ void HTMLNativeWindowElement::OnInfoChanged(
+   // EXO-CROSSFADE: the app drew at a new size; fade the old frame out.
+   if (fade_ && fade_->fade_start.is_null() &&
+       WindowSizeInPixels() != fade_->frame.geometry_size) {
+-    fade_->fade_start = base::TimeTicks::Now();
++    StartFadeOut(base::TimeTicks::Now());
+     InvalidateFadePaint();
+   }
+   UpdateSurfaceLayer();
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.h b/third_party/blink/renderer/core/html/html_native_window_element.h
+index 8eab46a778..739daea64c 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.h
++++ b/third_party/blink/renderer/core/html/html_native_window_element.h
+@@ -5,6 +5,7 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_NATIVE_WINDOW_ELEMENT_H_
+ #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_NATIVE_WINDOW_ELEMENT_H_
+ 
++#include <memory>
+ #include <optional>
+ 
+ #include "base/memory/scoped_refptr.h"
+@@ -16,6 +17,7 @@
+ #include "third_party/blink/renderer/core/core_export.h"
+ #include "third_party/blink/renderer/core/html/html_element.h"
+ #include "third_party/blink/renderer/platform/mojo/heap_mojo_receiver.h"
++#include "third_party/blink/renderer/platform/graphics/compositor_element_id.h"
+ #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/vector2d.h"
+@@ -161,13 +163,20 @@ class CORE_EXPORT HTMLNativeWindowElement final
+ 
+   // EXO-CROSSFADE.
+   class FadeFrameCallback;
++  class FadeAnimator;
+   base::TimeDelta CrossfadeDuration() const;
+   const TimingFunction& CrossfadeEasing();
+   // The page is about to ask for a content box of |size| (pixels), from the
+   // box |shown| it showed the window in.
+   void StartResize(const gfx::Size& size, const gfx::Size& shown);
+   void EndFade();
++  // The old frame starts fading out: on the compositor thread if it can.
++  void StartFadeOut(base::TimeTicks now);
+   void OnFadeFrame();
++  // The compositor's fade animation is over (or was aborted), or the time it
++  // should have taken is (in case it never started: the frame not composited).
++  void OnFadeAnimationEnded(int group_id);
++  void OnFadeTimeout(uint64_t generation);
+   float FadeOpacity();
+   // Repaints each frame while a frame is stretched or fading.
+   void InvalidateFadePaint();
+@@ -212,9 +221,18 @@ class CORE_EXPORT HTMLNativeWindowElement final
+     // resize during a fade holds the frame where the fade had got to).
+     base::TimeTicks fade_start;
+     float from_opacity = 1.f;
++    // The compositor's opacity animation fading it (its keyframe model and
++    // group; 0 when it fades from the main thread, or isn't fading).
++    int keyframe_model_id = 0;
++    int group_id = 0;
+   };
+   std::optional<Fade> fade_;
+   Member<EffectPaintPropertyNode> fade_effect_;
++  // The fade effect's element id, for the compositor's opacity animation.
++  CompositorElementId fade_element_id_;
++  std::unique_ptr<FadeAnimator> fade_animator_;
++  // Counts fade-outs, so a timeout knows whether its fade is still running.
++  uint64_t fade_generation_ = 0;
+   bool fade_frame_requested_ = false;
+   // When a resize was last asked for (continuous resizes don't fade).
+   base::TimeTicks last_resize_;

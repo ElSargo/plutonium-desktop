@@ -53,8 +53,8 @@
   and Super+Shift+F is fullscreen as in niri. Print, Ctrl+Print and
   Alt+Print take screenshots as in niri; Super+Shift+S, Super+Ctrl+Shift+S
   and Super+Alt+Shift+S do the same on keyboards without a Print key. The
-  helper is
-  http://127.0.0.1:3780 unless the page URL says ?helper=<origin>.
+  helper is the page URL's ?helper=<origin>, else the one the browser names
+  (windowBroker.getHelperUrl()), else http://127.0.0.1:3780.
 -->
 <style>
   :root {
@@ -251,7 +251,11 @@ const CONFIG = {
 const TAG = "niri:desktop";
 
 const params = new URLSearchParams(location.search);
-const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+// The session's helper: ?helper=, else what the launcher told the browser, else the default port.
+const helper =
+  params.get("helper") ||
+  (await navigator.windowBroker?.getHelperUrl?.().catch(() => "")) ||
+  "http://127.0.0.1:3780";
 // Several displays: this page's output (see the comment at the top).
 const OUTPUT_PREFIX = "niri:output/";
 const LAYOUT_KEY = params.get("display") ? `niri-shell.layout.${params.get("display")}` : "niri-shell.layout";

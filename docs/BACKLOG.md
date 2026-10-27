@@ -109,8 +109,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   KWin may take Super combinations. S
 - [ ] **A popped-out foot looked more translucent than its alpha** (DRM,
   2026-10-17). Not investigated. S
-- [ ] **Shell mode locks every browser window in fullscreen**, not just the
-  shell's (as kiosk does). Scope it to the shell window if needed. S
+- [x] **Shell mode locks every browser window in fullscreen**, not just the
+  shell's (as kiosk does). Scope it to the shell window if needed. S · Done
+  2026-10-27 (`features/CHROME_UI.md`, "Fullscreen"): only the shells'
+  windows are held fullscreen without exit UI; other windows behave as usual.
 - [x] **A way out of a DRM session other than the kill switch.** Done
   (`features/SEAT.md`): Ctrl+Alt+Backspace, and VT switching with
   Ctrl+Alt+Fn. Ash is a logind session controller.
@@ -166,10 +168,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   attribution (`features/AGENT_CONTROL.md`, "Which windows are a thread's").
   The live run's window was never seen in a log, so whether it was mapped
   isn't known: the next run's helper log says.
-- [ ] **The browser can't name an untagged window's origin itself.** S · The
+- [x] **The browser can't name an untagged window's origin itself.** S · The
   tag the helper finds by pid is used by the helper only. The shells' panels
   rely on a shell calling `setWindowOriginTag`. A DevTools command
   (`Plutonium.setWindowOriginTag`) would let the helper name it once for all.
+  Done 2026-10-27 (`features/SHELLS.md`): the helper calls it as the window
+  arrives.
 - [ ] **One LibreOffice for every thread.** M · A second start of the
   Flatpak LibreOffice hands its arguments to whichever instance owns
   `org.libreoffice.LibreOfficeIpc0` on the session bus, in any session, and
@@ -283,9 +287,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   UI gets it. Add a warning field to each instance in the list (e.g. near or
   at a limit, and when it resets), not the full usage data. Asked for
   2026-10-23.
-- [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
+- [x] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
-  the browser.
+  the browser. Done 2026-10-27 (`features/BROKER.md`): the browser hands a
+  shell the launcher's `--plutonium-helper-url` (`windowBroker.getHelperUrl()`);
+  the bundled shells use it when the URL has no `?helper=`. T3's web app still
+  reads `?plutoniumHelper=`.
 - [x] **Helper: no tests.** M · Unit tests for the resolver, relay and
   thread scoping; an end-to-end run against a fake shell.
   `cd helper && npm test` (`DEVELOPING.md`, "Helper tests"): also the X
@@ -375,10 +382,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   shadow, outside the geometry, where `<native-window>` clips the surface, so
   they never get a press. Let presses within a few pixels outside the
   content box reach the app (floating windows), or tell apps they're tiled.
-- [ ] **Cross-fade on the compositor thread.** S · The old frame's opacity is
+- [x] **Cross-fade on the compositor thread.** S · The old frame's opacity is
   stepped from the main thread each frame; a busy shell page makes it stutter.
   A cc opacity animation on its effect node (as LinkHighlightImpl does) would
-  not.
+  not. Done 2026-10-27 (`features/WINDOW_SIZING.md`, "Cross-fade").
 - [ ] **T3 browser features still missing.** M · The panel's zoom buttons
   (zoom itself works, `TAB_FEATURES.md`), color scheme, mute,
   element picker, screenshots to file, recording, PiP windows, DevTools
