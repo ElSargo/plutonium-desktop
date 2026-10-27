@@ -14,19 +14,19 @@ comes again without one: the helper adds characters the layout lacks to spare
 keys of the user's keymap for type_window, and password auto-type can do the
 same.
 ---
- chrome/browser/devtools/cros_protocol.pdl     | 28 +++++++++-
- .../devtools/protocol/plutonium_handler.cc    | 34 ++++++++++++
+ chrome/browser/devtools/cros_protocol.pdl     | 28 ++++++++-
+ .../devtools/protocol/plutonium_handler.cc    | 34 +++++++++++
  .../devtools/protocol/plutonium_handler.h     |  7 +++
- components/exo/embedded_windows.cc            | 42 +++++++++++++++
+ components/exo/embedded_windows.cc            | 42 ++++++++++++++
  components/exo/embedded_windows.h             | 16 ++++++
- components/exo/keyboard.cc                    | 12 +++++
+ components/exo/keyboard.cc                    | 12 ++++
  components/exo/keyboard.h                     |  1 +
  components/exo/seat.cc                        | 11 ++++
  components/exo/seat.h                         |  4 ++
  components/exo/seat_observer.h                |  4 ++
- components/exo/xkb_tracker.cc                 | 53 +++++++++++++++++++
+ components/exo/xkb_tracker.cc                 | 57 +++++++++++++++++++
  components/exo/xkb_tracker.h                  | 14 +++++
- 12 files changed, 224 insertions(+), 2 deletions(-)
+ 12 files changed, 228 insertions(+), 2 deletions(-)
 
 diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
 index ab392b29c6..3cf4b3025e 100644
@@ -344,19 +344,22 @@ index 5fb13a165a..d28c8c89ba 100644
    virtual bool HasKeyboardFocus(const Surface* surface) const;
  
 diff --git a/components/exo/xkb_tracker.cc b/components/exo/xkb_tracker.cc
-index 4f72c98f51..a627cbce08 100644
+index 4f72c98f51..b95d5e3938 100644
 --- a/components/exo/xkb_tracker.cc
 +++ b/components/exo/xkb_tracker.cc
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,11 @@
  
  #include "components/exo/xkb_tracker.h"
  
-+#include <iterator>
++#include <algorithm>
++#include <array>
++
++#include "base/containers/span.h"
 +
  #if BUILDFLAG(USE_XKBCOMMON)
  #include "components/exo/keyboard_modifiers.h"
  #include "ui/events/ozone/layout/xkb/xkb_keyboard_layout_engine.h"
-@@ -22,6 +24,57 @@ XkbTracker::XkbTracker() = default;
+@@ -22,6 +27,58 @@ XkbTracker::XkbTracker() = default;
  
  XkbTracker::~XkbTracker() = default;
  
@@ -381,13 +384,14 @@ index 4f72c98f51..a627cbce08 100644
 +        continue;
 +      }
 +      // The first way to reach the level with only shift and AltGr.
-+      xkb_mod_mask_t masks[8];
++      std::array<xkb_mod_mask_t, 8> masks;
 +      const size_t count = xkb_keymap_key_get_mods_for_level(
-+          keymap, key, 0, level, masks, std::size(masks));
-+      for (size_t i = 0; i < count; ++i) {
-+        const int flags = xkb_modifier_converter_.UiFlagsFromMask(masks[i]) &
++          keymap, key, 0, level, masks.data(), masks.size());
++      for (xkb_mod_mask_t mask :
++           base::span(masks).first(std::min(count, masks.size()))) {
++        const int flags = xkb_modifier_converter_.UiFlagsFromMask(mask) &
 +                          (ui::EF_SHIFT_DOWN | ui::EF_ALTGR_DOWN);
-+        if (xkb_modifier_converter_.MaskFromUiFlags(flags) == masks[i]) {
++        if (xkb_modifier_converter_.MaskFromUiFlags(flags) == mask) {
 +          chars.push_back({key, flags, character});
 +          break;
 +        }
