@@ -484,11 +484,16 @@ t3_pnpm() { if command -v pnpm > /dev/null; then pnpm "$@"; else corepack pnpm "
 # T3 Code that Plutonium didn't start: the T3 Code desktop app, a "t3" CLI
 # server, a boot service. Ours carry PLUTONIUM_T3=<this checkout>.
 t3_ours() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep -qxF "PLUTONIUM_T3=$ROOT"; }
-# The processes using T3 Code's database, and the server it says is running.
+# The processes writing T3 Code's database, and the server it says is running.
+# A reader (sqlite's mode=ro, like the agent-button receiver) is no T3 Code.
 t3_pids() {
-  local state=$T3_HOME/userdata/server-runtime.json pid
+  local state=$T3_HOME/userdata/server-runtime.json pid fd flags
   # state.sqlite (T3 before 0.1) or statev2.sqlite.
-  find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state*.sqlite" 2>/dev/null | cut -d/ -f3
+  for fd in $(find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state*.sqlite" 2>/dev/null); do
+    flags=$(sed -n 's/^flags:\s*//p' "${fd%/fd/*}/fdinfo/${fd##*/}" 2>/dev/null)
+    # The access mode is the low octal digit: 0 is O_RDONLY.
+    [[ -n $flags && $((8#$flags & 3)) -eq 0 ]] || echo "$fd" | cut -d/ -f3
+  done
   pid=$(grep -o '"pid":[0-9]*' "$state" 2>/dev/null | cut -d: -f2)
   [[ -n $pid && -d /proc/$pid ]] && echo "$pid"
   true
