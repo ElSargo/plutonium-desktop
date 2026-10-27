@@ -368,10 +368,12 @@ export class PlutoniumShell extends EventTarget {
     // detail {phase: "begin" | "update" | "end", fingers, dx, dy, x, y}, dx and
     // dy the fingers' movement since the last one. None on X11, or before
     // Chromium patch 0074.
-    // On DRM the browser's swipe begin and end don't arrive (only updates), so a
-    // swipe begins at its first update (or when the finger count changes) and
-    // ends once updates stop for SWIPE_END_MS.
+    // Before patch 0076 the browser's swipe begin and end didn't arrive (only
+    // updates), so until an end has come from it, a swipe begins at its first
+    // update (or when the finger count changes) and ends once updates stop for
+    // SWIPE_END_MS.
     let swipe = null;
+    let browserEnds = false;
     const sendSwipe = (detail) => this.dispatchEvent(new CustomEvent("touchpadswipe", { detail }));
     const endSwipe = () => {
       if (!swipe) return;
@@ -381,7 +383,11 @@ export class PlutoniumShell extends EventTarget {
     };
     this.broker.addEventListener("touchpadswipe", (event) => {
       const detail = event.detail ?? {};
-      if (detail.phase === "end") return endSwipe();
+      if (detail.phase === "end") {
+        browserEnds = true;
+        return endSwipe();
+      }
+      if (detail.phase === "begin") endSwipe();
       if (swipe && swipe.fingers !== detail.fingers) endSwipe();
       if (!swipe) {
         swipe = { fingers: detail.fingers, x: detail.x, y: detail.y, timer: 0 };
@@ -391,7 +397,7 @@ export class PlutoniumShell extends EventTarget {
       swipe.x = detail.x;
       swipe.y = detail.y;
       clearTimeout(swipe.timer);
-      swipe.timer = setTimeout(endSwipe, SWIPE_END_MS);
+      if (!browserEnds) swipe.timer = setTimeout(endSwipe, SWIPE_END_MS);
       sendSwipe(detail);
     });
     // The browser's shells overlay asks this shell to show an item.
@@ -4331,7 +4337,7 @@ class CaptureIndicator {
 // clicking it runs its default action.
 /** How old a notification a page that has just connected still pops up. */
 const RECENT_NOTIFICATION_MS = 30_000;
-/** A touchpad swipe has ended once no update has come for this long. */
+/** A touchpad swipe has ended once no update has come for this long (when the browser doesn't say). */
 const SWIPE_END_MS = 150;
 
 class NotificationPopups {

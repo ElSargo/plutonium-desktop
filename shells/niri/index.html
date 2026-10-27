@@ -902,6 +902,7 @@ function focusItem(key) {
 }
 
 function commit() {
+  stopSettle(true);
   normalize();
   render();
 }
@@ -933,6 +934,13 @@ const actions = {
     const col = tiledCol();
     if (col) col.active = clamp(col.active + d, 0, col.items.length - 1);
     else actions.focusColumn(d);
+  },
+  // niri's focus-window-or-workspace: within the column, then on to the next workspace.
+  focusWindowOrWorkspace(d) {
+    const col = tiledCol();
+    const to = col ? col.active + d : -1;
+    if (col && to >= 0 && to < col.items.length) col.active = to;
+    else actions.focusWorkspaceDelta(d);
   },
   moveColumn(d) {
     const ws = curWs();
@@ -1274,8 +1282,8 @@ bind("Super+KeyO", "Open the Overview", () => actions.toggleOverview(), { repeat
 bind("Super+KeyQ", "Close Focused Window", () => actions.closeWindow(), { repeat: false, hotkey: true });
 bind(["Super+ArrowLeft", "Super+KeyH"], "Focus Column to the Left", () => actions.focusColumn(-1), { hotkey: true });
 bind(["Super+ArrowRight", "Super+KeyL"], "Focus Column to the Right", () => actions.focusColumn(1), { hotkey: true });
-bind(["Super+ArrowDown", "Super+KeyJ"], "Focus Window Down", () => actions.focusWindow(1));
-bind(["Super+ArrowUp", "Super+KeyK"], "Focus Window Up", () => actions.focusWindow(-1));
+bind(["Super+ArrowDown", "Super+KeyJ"], "Focus Window or Workspace Down", () => actions.focusWindowOrWorkspace(1));
+bind(["Super+ArrowUp", "Super+KeyK"], "Focus Window or Workspace Up", () => actions.focusWindowOrWorkspace(-1));
 bind(["Super+Ctrl+ArrowLeft", "Super+Ctrl+KeyH"], "Move Column Left", () => actions.moveColumn(-1), { hotkey: true });
 bind(["Super+Ctrl+ArrowRight", "Super+Ctrl+KeyL"], "Move Column Right", () => actions.moveColumn(1), { hotkey: true });
 bind(["Super+Ctrl+ArrowDown", "Super+Ctrl+KeyJ"], "Move Window Down", () => actions.moveWindow(1));
@@ -1741,7 +1749,10 @@ function bindPointer(hit, key) {
 let gesture = null;
 let gestureTimer = 0;
 function gestureBegin() {
-  gesture = { axis: null, sumX: 0, sumY: 0, rawY: 0, samples: [], ws: curWs() };
+  // A swipe catches the view where the last one's settling has got it to.
+  const caught = settling;
+  stopSettle(false);
+  gesture = { axis: null, sumX: 0, sumY: 0, rawY: gestureY, samples: [], ws: curWs(), caught };
 }
 // The view moves by (dx, dy) layout pixels (positive: right, down).
 function gestureUpdate(dx, dy) {
@@ -1777,19 +1788,70 @@ function gestureEnd() {
   const gs = gesture;
   gesture = null;
   clearTimeout(gestureTimer);
-  if (!gs?.axis) return false;
+  if (!gs?.axis) {
+    // Caught and let go without moving: it settles on from there.
+    const c = gs?.caught;
+    if (c) settle(c.get(), c.to, 0, c.set, c.get);
+    return false;
+  }
   // Its speed over the last 100 ms, in layout pixels a millisecond.
   const span = gs.samples.length > 1 ? gs.samples.at(-1)[0] - gs.samples[0][0] : 0;
   const v = span > 0 ? gs.samples.slice(1).reduce((s, [, d]) => s + d, 0) / span : 0;
-  document.body.classList.remove("noanim");
-  if (gs.axis === "x") snapView(gs.ws, gs.ws.viewX + v * 150);
-  else {
+  // It settles with a spring that starts at the swipe's speed, as niri's does,
+  // rather than a transition that starts at rest.
+  if (gs.axis === "x") {
+    const from = gs.ws.viewX;
+    snapView(gs.ws, from + v * 150);
+    const ws = gs.ws, to = ws.viewX;
+    ws.viewX = from;
+    settle(from, to, v, (x) => { ws.viewX = x; }, () => ws.viewX);
+  } else {
     const n = Math.round(-(gestureY - v * 150) / wsSpacing());
+    const was = layout.cur;
     layout.cur = clamp(layout.cur + n, 0, layout.workspaces.length - 1);
-    gestureY = 0;
+    // The same place, from the new current workspace.
+    const from = gestureY + (layout.cur - was) * wsSpacing();
+    gestureY = from;
+    settle(from, 0, -v, (y) => { gestureY = y; }, () => gestureY);
   }
-  commit();
+  normalize();
+  render();
   return true;
+}
+
+// The settling after a swipe: a critically damped spring (niri's stiffness
+// 1000) from `from` to `to`, starting at `v` pixels a millisecond, drawn a frame
+// at a time with the transitions off. Anything else that commits ends it at its
+// target, the transitions taking it from wherever it's got to. `get` reads
+// the value back, for a swipe that catches it.
+let settling = null;
+function settle(from, to, v, set, get) {
+  stopSettle(false);
+  const w = Math.sqrt(1000) / 1000; // a millisecond
+  const x0 = from - to, t0 = performance.now();
+  const s = { to, set, get, frame: 0 };
+  settling = s;
+  document.body.classList.add("noanim");
+  const step = (now) => {
+    if (settling !== s) return;
+    const t = now - t0;
+    const x = (x0 + (v + w * x0) * t) * Math.exp(-w * t);
+    if (t > 50 && Math.abs(x) < 0.5) return stopSettle(true);
+    set(to + x);
+    render();
+    s.frame = requestAnimationFrame(step);
+  };
+  s.frame = requestAnimationFrame(step);
+}
+// Ends the settling: at its target, or where it's got to.
+function stopSettle(atTarget) {
+  const s = settling;
+  if (!s) return;
+  settling = null;
+  cancelAnimationFrame(s.frame);
+  if (atTarget) s.set(s.to);
+  if (!gesture) document.body.classList.remove("noanim");
+  if (atTarget) render();
 }
 
 // The view nearest `target` that starts or ends at a column's edge (centers a
