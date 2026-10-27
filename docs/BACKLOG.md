@@ -265,9 +265,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **Incognito agent tabs on the desktop.** `profileId: "incognito"`
   was ignored for desktop-rendered tabs (shared storage). Now a throwaway
   off-the-record profile per tab (Chromium patch 0045).
-- [ ] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
-  reports `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
-  cursor off by the zoom. Not seen yet.
+- [x] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
+  reported `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
+  cursor off by the zoom. Now it reports the tab's `zoom` state (T3 patch,
+  `previewBridge.ts`). Not checked live on a zoomed tab yet.
 - [x] **Agents and popups.** M · Window snapshots draw the window's open
   menus (and say where they are); agent clicks and hovers reach them, and a
   press outside closes them (patch 0060; `features/AGENT_CONTROL.md`,
@@ -276,10 +277,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   menus and tooltips showed over the shell (and other threads) while no
   page showed the window. Now they show only at the element showing the
   window (`WINDOW_SIZING.md`, "Popups").
-- [ ] **Agent typing beyond a US layout.** S · Map text through the
-  session's keymap (xkb) instead of assuming US keycodes. Characters the
-  layout lacks need the temporary keymap that password auto-type needs too
-  (`PASSWORDS.md`, "Native windows"); build it once for both.
+- [x] **Agent typing beyond a US layout.** S · `type_window` and
+  `press_window` map text through the session's keymap (`Plutonium.getKeymap`,
+  with AltGr), and characters it lacks go on spare keys (F13–F24) of a
+  temporary keymap for the window's client (`Plutonium.setWindowKeymap`),
+  which password auto-type can use too (Chromium patch "agents type through
+  the session's keymap"; `AGENT_CONTROL.md`, "Keyboard layouts"). Checked live
+  with Alacritty (Wayland, "é€ß→😀" on a US layout); not on other layouts
+  (no way to pick one yet) or X11 apps.
 - [x] **Usage-limit warnings in `orchestrator_capabilities`.** S · Agents
   choosing a provider instance for a new thread or child task can't see
   which ones are close to their limits. T3 already tracks session and weekly

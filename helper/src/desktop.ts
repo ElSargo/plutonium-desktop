@@ -10,6 +10,7 @@
 import { type BrowserCdp, type CdpEvent, CdpError } from "./cdp.ts";
 import type { BrowserSession } from "./services/media.ts";
 import type { BrowserIdle } from "./services/session.ts";
+import { type Layout, type TypedChar, layoutOf } from "./keys.ts";
 
 /** A browser tab (Plutonium.Tab). */
 export interface DesktopTab {
@@ -517,6 +518,25 @@ export class Desktop {
 
   async keys(id: number, events: readonly WindowKeyEvent[]): Promise<void> {
     await this.cdp.send("Plutonium.dispatchWindowKeyEvents", { id, events });
+  }
+
+  /** The session's keymap (keys.ts), or undefined from a browser without Plutonium.getKeymap. */
+  async keymap(): Promise<Layout | undefined> {
+    try {
+      const { keymap, chars } = (await this.cdp.send("Plutonium.getKeymap")) as {
+        keymap: string;
+        chars: TypedChar[];
+      };
+      return chars.length > 0 ? layoutOf(keymap, chars) : undefined;
+    } catch (error) {
+      if (error instanceof CdpError && /wasn't found|not found/i.test(error.message)) return undefined;
+      throw error;
+    }
+  }
+
+  /** Window `id`'s app gets `keymap` (XKB text) in place of the session's; undefined: the session's again. */
+  async setWindowKeymap(id: number, keymap?: string): Promise<void> {
+    await this.cdp.send("Plutonium.setWindowKeymap", keymap === undefined ? { id } : { id, keymap });
   }
 
   /**

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 17:41:03 +1300
-Subject: [PATCH 68/81] Plutonium: the hardware keys go to the helper's desktop
+Subject: [PATCH 68/82] Plutonium: the hardware keys go to the helper's desktop
  services; the browser's media session in the Plutonium domain
 
 In shell mode, Ash's volume, mic mute, brightness and media key accelerators
