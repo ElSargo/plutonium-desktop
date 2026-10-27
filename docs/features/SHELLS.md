@@ -25,7 +25,7 @@ plutonium run --x11 plain t3
 
 **Super+Tab** shows the next shell and **Super+Shift+Tab** the previous one. These are stand-ins until the overlay (step 3) exists.
 
-`SHELLS` is `<name>=<url>|<name>=<url>`. The launchers pass it to the browser as `--plutonium-shells`, now with `--plutonium-shells-exact`: the list is the whole list, `!` before shells that are off ([SHELL_PACKAGES.md](SHELL_PACKAGES.md)). They also add its origins to the helper's `--shell-origin`, which now takes a comma-separated list. Each URL has to name the session's helper: `?helper=` for the plain shell, `?plutoniumHelper=` for T3.
+`SHELLS` is `<name>=<url>|<name>=<url>`. The launchers pass it to the browser as `--plutonium-shells`, now with `--plutonium-shells-exact`: the list is the whole list, `!` before shells that are off ([SHELL_PACKAGES.md](SHELL_PACKAGES.md)). They also add its origins to the helper's `--shell-origin`, which now takes a comma-separated list. Each URL names the session's helper: `?helper=` for the plain shell, `?plutoniumHelper=` for T3. A page can also ask the browser, `await navigator.windowBroker.getHelperUrl()` (the launcher's `--plutonium-helper-url`); the bundled shells take `?helper=`, then that, then port 3780.
 
 ### How it works
 
@@ -64,7 +64,7 @@ Every window and tab carries a list of tags (`tags` on `NativeWindowEntry` and `
   - for a window, the `PLUTONIUM_THREAD_ID` of its client process, or of its nearest ancestor that has one; the browser reads it from `/proc` before it announces the window;
   - for a tab, the tag it was created with.
   A tab that a page opens starts with all of its opener's tags.
-- **When the browser can't read the environment** (Ash in a container with its own user namespace, as in all our test setups), the window arrives with no tags. The shell library asks the helper (on the host) for the pid's thread and names the origin once, with `setWindowOriginTag`. From then on it's fixed like any other origin. A browser on the host reads it itself.
+- **When the browser can't read the environment** (Ash in a container with its own user namespace, as in all our test setups), the window arrives with no tags. The helper names it as the window arrives: it finds the pid's thread and calls the DevTools command `Plutonium.setWindowOriginTag`, once for every shell. The shell library still asks the helper and names it with `setWindowOriginTag` for a window that is still untagged (a helper from before, or one that missed it). From then on it's fixed like any other origin. A browser on the host reads it itself.
 - **Shells add and remove the others** with `updateWindowTags(id, add, remove)` and `updateTabTags(…)`. So does the browser's overlay. Removing the origin does nothing. The helper and agents can't change tags.
 - **A thread's id is its tag.** The helper gives an agent every window and tab that carries its thread's tag: the ones its processes started, plus the ones a shell added to the thread.
 

@@ -9,8 +9,9 @@
   <native-window>, browser tabs (SurfaceEmbed <embed>s) and the helper's shell
   library. Threads are local (named lists), apps launch through the helper, web
   pages open as tabs tagged with the thread, and an agent is Claude Code in a
-  terminal app of the thread, with the helper's MCP server. The helper is http://127.0.0.1:3780
-  unless the page URL says ?helper=<origin>.
+  terminal app of the thread, with the helper's MCP server. The helper is the page URL's
+  ?helper=<origin>, else the one the browser names (windowBroker.getHelperUrl()), else
+  http://127.0.0.1:3780.
 
   A thread's id is its tag (plain:thread/<id>). The shell describes its threads
   to the browser (setGroups), so other shells and the browser's overlay can
@@ -165,7 +166,11 @@
 <dialog id="snapshot"><img alt="Window snapshot"><form method="dialog"><button>Close</button></form></dialog>
 <script type="module">
 const params = new URLSearchParams(location.search);
-const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+// The session's helper: ?helper=, else what the launcher told the browser, else the default port.
+const helper =
+  params.get("helper") ||
+  (await navigator.windowBroker?.getHelperUrl?.().catch(() => "")) ||
+  "http://127.0.0.1:3780";
 const $ = (id) => document.getElementById(id);
 // Several displays: what each display's page shows is its own (the threads are shared).
 const perDisplay = (key) => (params.get("display") ? `${key}.${params.get("display")}` : key);

@@ -86,11 +86,12 @@ my-shell/
 
 Add it from the switcher: **Add a shell…**, then **Install from a folder, git or address…**, then give it `~/my-shell` or a git URL. It's copied into `~/.pluto/shells/my-shell`, served at `http://my-shell.localhost:8770/`, and that origin gets shell rights. If your shell needs its own server, the manifest says how to run it, and Plutonium supervises it (`"server"`, [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)). A page you serve yourself can be added by its address.
 
-The page gets `navigator.windowBroker`, `<native-window>` and the tab API, and `?helper=` naming the session's helper. It loads the helper's library for threads, launching and the agent bridge:
+The page gets `navigator.windowBroker`, `<native-window>` and the tab API, and `?helper=` naming the session's helper (the browser names it too: `await navigator.windowBroker.getHelperUrl()`). It loads the helper's library for threads, launching and the agent bridge:
 
 ```html
 <script type="module">
-const helper = new URLSearchParams(location.search).get("helper");   // the session adds ?helper=
+const helper = new URLSearchParams(location.search).get("helper")    // the session adds ?helper=
+  || await navigator.windowBroker.getHelperUrl();                   // and the browser knows it
 const { connect } = await import(`${helper}/v1/shell.js`);
 const shell = connect({                               // connecting tells Plutonium the shell came up
   onFocus: (w) => { show(w.id); return true; },       // an agent asked to show a window

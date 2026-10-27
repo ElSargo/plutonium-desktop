@@ -666,6 +666,9 @@ export class Daemon {
       `plutoniumd: ${what}: no tags from the browser; ` +
         (threadId ? `thread ${threadId} (${how})` : `no thread: ${how}`),
     );
+    // The browser couldn't read its client's environment (Ash in a container
+    // with its own user namespace): name it there, once for every shell.
+    if (threadId && window.pid > 0) void this.desktop?.setWindowOriginTag(window.id, threadId);
   }
 
   /**

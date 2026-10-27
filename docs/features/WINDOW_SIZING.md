@@ -33,6 +33,8 @@ Before this, a resize showed the old frame unstretched until the app redrew, lea
 
 `crossfade="MS"` (0018; `crossfade-easing` and the rules below, 0020) adds niri's cross-fade. On a resize the page makes, the frame from before it, stretched to the box, stays on top until the app has answered (or 300 ms passed). Then it fades out over MS milliseconds, eased by `crossfade-easing` (a CSS easing function; by default `cubic-bezier(.25, 1, .5, 1)`, close to niri's default spring). The old frame is the window's surface at the old size, kept alive in viz by its exact id.
 
+The fade runs on the compositor thread: an opacity animation (cc keyframe model) on the old frame's effect node, as Blink's link highlight does, so a busy page doesn't make it stutter. The page's main thread only starts it, and drops the frame when the compositor says it finished (or when it should have, in case it never started). A resize during the fade stops the animation and holds the frame at the opacity it had got to. Without threaded animation the page steps the opacity each frame, as before.
+
 What doesn't fade:
 - **Small resizes:** 10 pixels or less either way, which niri doesn't animate.
 - **Continuous resizes:** less than 100 ms apart (a drag). The app's frame is stretched live, as Hyprland and niri show an interactive resize.

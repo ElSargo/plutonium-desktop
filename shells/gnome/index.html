@@ -505,7 +505,11 @@ import { mountQuick } from "./quick.js";
 import { mountDateMenu } from "./datemenu.js";
 
 const params = new URLSearchParams(location.search);
-const helper = params.get("helper") ?? "http://127.0.0.1:3780";
+// The session's helper: ?helper=, else what the launcher told the browser, else the default port.
+const helper =
+  params.get("helper") ||
+  (await navigator.windowBroker?.getHelperUrl?.().catch(() => "")) ||
+  "http://127.0.0.1:3780";
 const display = params.get("display") ?? "";
 const $ = (id) => document.getElementById(id);
 // Each workspace is a thread, tagged with its id. A second display's page

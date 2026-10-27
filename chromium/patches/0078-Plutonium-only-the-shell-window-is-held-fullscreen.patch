@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 22:09:52 +1300
+Subject: [PATCH 78/81] Plutonium: only the shell window is held fullscreen
+
+Shell mode held every browser window in fullscreen, as kiosk mode does,
+with no exit bubble, exit button or immersive reveal. Scope it to the
+shells' own windows: the backup browser, popups and app windows enter and
+leave fullscreen as usual.
+---
+ chrome/browser/plutonium_shell.cc                  |  8 ++++++++
+ chrome/browser/plutonium_shell.h                   |  5 +++++
+ .../exclusive_access/exclusive_access_manager.cc   |  4 +++-
+ .../ui/exclusive_access/fullscreen_controller.cc   | 14 ++++++++++----
+ .../ui/views/frame/browser_frame_view_chromeos.cc  |  5 +++--
+ chrome/browser/ui/views/frame/browser_view.cc      | 11 +++++++----
+ .../fullscreen_control/fullscreen_control_host.cc  | 11 ++++++-----
+ 7 files changed, 42 insertions(+), 16 deletions(-)
+
+diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
+index 61f955f0b2..9ce0dd6395 100644
+--- a/chrome/browser/plutonium_shell.cc
++++ b/chrome/browser/plutonium_shell.cc
+@@ -1371,6 +1371,14 @@ bool IsShellBrowser(BrowserWindowInterface* browser) {
+          browser->GetType() == BrowserWindowInterface::TYPE_APP;
+ }
+ 
++bool IsShellWindowContents(content::WebContents* contents) {
++  if (!IsShellMode() || !contents) {
++    return false;
++  }
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  return !shells || shells->GetShellFor(contents).has_value();
++}
++
+ bool IsCommandAllowedInShell(int command_id) {
+   switch (command_id) {
+     case IDC_DEV_TOOLS:
+diff --git a/chrome/browser/plutonium_shell.h b/chrome/browser/plutonium_shell.h
+index 7e266789cb..30df8b2aab 100644
+--- a/chrome/browser/plutonium_shell.h
++++ b/chrome/browser/plutonium_shell.h
+@@ -86,6 +86,11 @@ bool IsShellBrowser(BrowserWindowInterface* browser);
+ // window), Ctrl+W (close the shell), Ctrl+P, Ctrl+S, F5 and the like do
+ // nothing, and the key is the page's alone.
+ bool IsCommandAllowedInShell(int command_id);
++// Whether |contents| is a shell's page in its own window (in shell mode;
++// before the shells are set up, any page in shell mode). Kiosk-style
++// fullscreen, always on and without exit instructions, is the shell
++// window's only: other browser windows leave fullscreen as usual.
++bool IsShellWindowContents(content::WebContents* contents);
+ 
+ // In shell mode, opens the shell URL at startup (as --app=<url> with
+ // --start-fullscreen). Call before the startup browser is created.
+diff --git a/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc b/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
+index 8e92cda791..9f110b8791 100644
+--- a/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
++++ b/chrome/browser/ui/exclusive_access/exclusive_access_manager.cc
+@@ -101,7 +101,9 @@ ExclusiveAccessManager::GetExclusiveAccessExitBubbleType() const {
+   // want to show exit instructions for browser mode fullscreen.
+   bool app_mode = false;
+ #if !BUILDFLAG(IS_MAC)  // App mode (kiosk) is not available on Mac yet.
+-  app_mode = IsRunningInAppMode() || plutonium_shell::IsShellMode();
++  app_mode = IsRunningInAppMode() ||
++             plutonium_shell::IsShellWindowContents(
++                 exclusive_access_context_->GetWebContentsForExclusiveAccess());
+ #endif
+ 
+   if (fullscreen_controller_.IsWindowFullscreenForTabOrPending()) {
+diff --git a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
+index 9fd943eeb3..179ebe27fc 100644
+--- a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
++++ b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
+@@ -408,7 +408,9 @@ void FullscreenController::WindowFullscreenStateChanged() {
+     NotifyTabExclusiveAccessLost();
+   } else {
+     toggled_into_fullscreen_ = true;
+-    if (!IsRunningInAppMode() && !plutonium_shell::IsShellMode()) {
++    if (!IsRunningInAppMode() &&
++        !plutonium_shell::IsShellWindowContents(
++            exclusive_access_context->GetWebContentsForExclusiveAccess())) {
+       exclusive_access_manager()->UpdateBubble(base::NullCallback(),
+                                                /*force_update=*/true);
+     }
+@@ -652,9 +654,13 @@ void FullscreenController::EnterFullscreenModeInternal(
+ }
+ 
+ void FullscreenController::ExitFullscreenModeInternal() {
+-  // In kiosk mode and in Plutonium's shell mode (EXO-BOOT), we always want to
+-  // be fullscreen.
+-  if (IsRunningInAppMode() || plutonium_shell::IsShellMode()) {
++  // In kiosk mode and in Plutonium's shell window (EXO-BOOT), we always want
++  // to be fullscreen.
++  if (IsRunningInAppMode() ||
++      plutonium_shell::IsShellWindowContents(
++          exclusive_access_manager()
++              ->context()
++              ->GetWebContentsForExclusiveAccess())) {
+     return;
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc b/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
+index a3e5d427e1..b3794319ff 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
+@@ -810,9 +810,10 @@ void BrowserFrameViewChromeOS::OnAppRegistryCacheWillBeDestroyed(
+ }
+ 
+ bool BrowserFrameViewChromeOS::ShouldEnableImmersiveModeController() const {
+-  // Do not support immersive mode in kiosk, nor in Plutonium's shell mode
++  // Do not support immersive mode in kiosk, nor in Plutonium's shell window
+   // (EXO-BOOT): the shell has the whole screen, without a top-edge reveal.
+-  if (chromeos::IsKioskSession() || plutonium_shell::IsShellMode()) {
++  if (chromeos::IsKioskSession() ||
++      plutonium_shell::IsShellBrowser(GetBrowserView()->browser())) {
+     return false;
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 68b901b356..1f887ff32d 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -521,9 +521,10 @@ bool WidgetHasChildModalDialog(views::Widget* parent_widget) {
+ // Returns whether immmersive fullscreen should replace fullscreen. This
+ // should only occur for "browser-fullscreen" for tabbed-typed windows (not
+ // for tab-fullscreen and not for app/popup type windows).
+-bool ShouldUseImmersiveFullscreenForUrl(ExclusiveAccessBubbleType type) {
++bool ShouldUseImmersiveFullscreenForUrl(ExclusiveAccessBubbleType type,
++                                        BrowserWindowInterface* browser) {
+   // Kiosk mode needs the whole screen, and so does the Plutonium shell.
+-  if (IsRunningInAppMode() || plutonium_shell::IsShellMode()) {
++  if (IsRunningInAppMode() || plutonium_shell::IsShellBrowser(browser)) {
+     return false;
+   }
+   // An empty URL signifies browser fullscreen. Immersive is used for browser
+@@ -789,8 +790,10 @@ class BrowserView::ExclusiveAccessContextImpl
+       // crbug.com/741069).
+       // Immersive mode logic for downloads is handled by the download
+       // controller.
+-      should_close_bubble |= ShouldUseImmersiveFullscreenForUrl(params.type) &&
+-                             !chromeos::IsManagedGuestSession();
++      should_close_bubble |=
++          ShouldUseImmersiveFullscreenForUrl(params.type,
++                                             browser_view_->browser()) &&
++          !chromeos::IsManagedGuestSession();
+ #endif
+     }
+ 
+diff --git a/chrome/browser/ui/views/fullscreen_control/fullscreen_control_host.cc b/chrome/browser/ui/views/fullscreen_control/fullscreen_control_host.cc
+index c7b26d9d25..0155939252 100644
+--- a/chrome/browser/ui/views/fullscreen_control/fullscreen_control_host.cc
++++ b/chrome/browser/ui/views/fullscreen_control/fullscreen_control_host.cc
+@@ -65,15 +65,16 @@ constexpr base::TimeDelta kTouchPopupTimeout = base::Seconds(10);
+ // Time to wait before showing the popup when the escape key is held.
+ constexpr base::TimeDelta kKeyPressPopupDelay = base::Seconds(1);
+ 
+-bool IsExitUiEnabled() {
++bool IsExitUiEnabled(BrowserView* browser_view) {
+ #if BUILDFLAG(IS_MAC)
+   // Exit UI is unnecessary, since Mac uses the OS fullscreen such that window
+   // menu and controls reveal when the cursor is moved to the top.
+   return false;
+ #else
+   // Kiosk mode is a fullscreen experience, which makes the exit UI
+-  // inappropriate. So is Plutonium's shell mode (EXO-BOOT).
+-  return !IsRunningInAppMode() && !plutonium_shell::IsShellMode();
++  // inappropriate. So is Plutonium's shell window (EXO-BOOT).
++  return !IsRunningInAppMode() &&
++         !plutonium_shell::IsShellBrowser(browser_view->browser());
+ #endif
+ }
+ 
+@@ -166,7 +167,7 @@ void FullscreenControlHost::OnKeyEvent(const ui::KeyEvent& event) {
+ }
+ 
+ void FullscreenControlHost::OnMouseEvent(const ui::MouseEvent& event) {
+-  if (!IsExitUiEnabled()) {
++  if (!IsExitUiEnabled(browser_view_)) {
+     return;
+   }
+ 
+@@ -228,7 +229,7 @@ void FullscreenControlHost::OnTouchEvent(const ui::TouchEvent& event) {
+ }
+ 
+ void FullscreenControlHost::OnGestureEvent(const ui::GestureEvent& event) {
+-  if (!IsExitUiEnabled()) {
++  if (!IsExitUiEnabled(browser_view_)) {
+     return;
+   }
+ 
