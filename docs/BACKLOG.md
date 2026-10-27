@@ -272,13 +272,19 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   session's keymap (xkb) instead of assuming US keycodes. Characters the
   layout lacks need the temporary keymap that password auto-type needs too
   (`PASSWORDS.md`, "Native windows"); build it once for both.
-- [ ] **Usage-limit warnings in `orchestrator_capabilities`.** S · Agents
+- [x] **Usage-limit warnings in `orchestrator_capabilities`.** S · Agents
   choosing a provider instance for a new thread or child task can't see
   which ones are close to their limits. T3 already tracks session and weekly
   usage per Claude instance (`provider/claudeUsageLimits.ts`), but only the
   UI gets it. Add a warning field to each instance in the list (e.g. near or
   at a limit, and when it resets), not the full usage data. Asked for
   2026-10-23.
+  Done 2026-10-27 (T3 patch 0038): `usageWarning` {level `near_limit`
+  (80% or more) | `at_limit`, window, usedPercent, resetsAt, message} on an
+  instance whose window is near or at its limit (the most used one; at the
+  limit, the one that frees last). Windows past their reset are ignored. From
+  any provider's `usageLimits`, so Codex's too. The tool's description says
+  to prefer another instance.
 - [ ] **Bridge: the page learns the helper's URL by convention** (port 3780,
   or `?helper=` / `?plutoniumHelper=`). S · Could come from the launcher or
   the browser.
@@ -527,14 +533,28 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
 - [ ] **Printing: Save as PDF through the file picker.** S · The print
   dialog still has a path field (`~/Downloads/<title>.pdf`); the picker now
   exists (`fileChooser`, `save` mode).
-- [ ] **T3 Code's agents get the tab tools.** S–M · T3 gives its agents only
+- [x] **T3 Code's agents get the tab tools.** S–M · T3 gives its agents only
   the helper's window tools (`WINDOW_TOOLS`), so `print_tab`, `choose_files`,
   `answer_permission`, `request_permission`, `list_downloads` and
   `find_in_tab` don't reach them (T3 repo).
-- [ ] **T3 Code forgets a thread's permission grants on archive and delete**
+  Done 2026-10-27 (T3 patch 0036, `features/AGENT_CONTROL.md`, "In T3
+  Code"): those, `cancel_print`, `list_printers`, `download_action`, and
+  `tab_requests` (a tab's `pending` and state, since T3 agents have no
+  `list_tabs`), on T3's `tabId` (default: the tab preview tools would act
+  on). The server maps it to the browser's tab id (`Plutonium.getTabs` on
+  the tab's connection). Unit-tested against a fake helper; not yet run by
+  an agent on a live session.
+- [x] **T3 Code forgets a thread's permission grants on archive and delete**
   (`shell.forgetThreadPermissions(thread)`). S · T3 repo. Also
   `grantPermissions` from the frontend server's relay (`serverTabs.ts`),
   which still acknowledges it without asking.
+  Done 2026-10-27 (T3 patch 0037, `features/TAB_FEATURES.md`): the server
+  watches `thread.archived` and `thread.deleted` (any client or agent) and
+  calls the helper's `POST /v1/threads/<tag>/permissions/forget`; the helper
+  has a shell page run it (bridge op `forget_thread_permissions`), or the next
+  page to connect. The server relay's `Browser.grantPermissions` now asks over
+  its tab, as the thread relay does (helper tests). Not yet checked in a live
+  session with real grants.
 - [ ] **Camera request in tabs still not right** (low priority). S–M · In
   the 2026-10-24 retest, after the container got the cameras, everything
   else passed but the camera's dialog still wasn't right. Ask the user what

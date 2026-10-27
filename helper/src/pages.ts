@@ -18,7 +18,7 @@ import { listenWebSocket, type WebSocketConnection, type WebSocketEndpoint } fro
 const BROWSER_CONTEXT_ID = "plutonium-thread";
 const IDLE_MS = 10 * 60_000;
 /** How long a refused Browser.grantPermissions is refused again without asking. */
-const REFUSAL_MEMORY_MS = 5_000;
+export const REFUSAL_MEMORY_MS = 5_000;
 const debug = process.env.PLUTONIUM_DEBUG_PAGES ? (...args: unknown[]) => console.log("pages:", ...args) : () => {};
 
 /** Browser-level commands that only need acknowledging: the browser is the user's. */
@@ -65,6 +65,17 @@ const CDP_PERMISSIONS: Readonly<Record<string, string | null>> = {
   displayCapture: null,
   nfc: null,
 };
+
+/** Browser.grantPermissions' permissions as the prompt names them, each once (none it needn't ask for). */
+export function promptPermissions(names: unknown): string[] {
+  const permissions: string[] = [];
+  for (const name of Array.isArray(names) ? names : []) {
+    const mapped = typeof name === "string" ? CDP_PERMISSIONS[name] : undefined;
+    if (mapped === undefined) throw new Error(`Unknown permission: ${String(name)}`);
+    if (mapped && !permissions.includes(mapped)) permissions.push(mapped);
+  }
+  return permissions;
+}
 
 interface CdpCommand {
   readonly id: number;
@@ -264,13 +275,7 @@ class ThreadRelay {
    * It resolves once the user allows them, in the thread or everywhere.
    */
   private async grantPermissions(params: Record<string, unknown>): Promise<unknown> {
-    const names = Array.isArray(params.permissions) ? params.permissions : [];
-    const permissions: string[] = [];
-    for (const name of names) {
-      const mapped = typeof name === "string" ? CDP_PERMISSIONS[name] : undefined;
-      if (mapped === undefined) throw new Error(`Unknown permission: ${String(name)}`);
-      if (mapped && !permissions.includes(mapped)) permissions.push(mapped);
-    }
+    const permissions = promptPermissions(params.permissions);
     if (!permissions.length) return {};
     const origin = typeof params.origin === "string" && params.origin ? params.origin : undefined;
     const originOf = (url: string) => {

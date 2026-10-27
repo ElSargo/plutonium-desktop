@@ -166,11 +166,12 @@ Patches "tabs' permission prompts ask the shell" and "per-thread permission gran
   - The helper adds `by: "agent"` to an agent's call. Agents call it with the `request_permission` tool.
   - Playwright's `Browser.grantPermissions` in the thread relay (`pages.ts`) maps DevTools' names (`videoCapture` → `camera`, ...) and asks over a tab of the thread (one at that origin if there is one). It returns once the user allows, and fails if they don't. Playwright sends the command again after a failure, so a refusal is remembered for 5 s rather than asked twice.
   - `Browser.resetPermissions` is acknowledged and does nothing: the thread's grants are the user's.
-  - The frontend server's relay (`serverTabs.ts`) still acknowledges `grantPermissions` without asking.
+  - The frontend server's relay (`serverTabs.ts`) asks the same way, over the server's tab itself (`ServerTabs.onRequestPermissions`, the tab command with `by: "agent"`), with the same 5 s memory of a refusal. A hidden page (a recording's encoder) can't ask, so its `grantPermissions` fails. Before 2026-10-27 that relay acknowledged it without asking.
 - **Listing and revoking.**
   - The tab commands `permissions` (the tab's thread's decisions, plus Chrome's own for its origin) and `permission-revoke {scope, origin?, permission?}` replace `shell.permissions()` and `revokePermission()`. In the library they are `shell.tabPermissions(tabId)` and `shell.revokePermission(tabId, {...})`.
   - For any thread: the broker's new `permissionCommand("list" | "revoke", argsJson)` (`WindowBroker.RunPermissionCommand`), as `shell.threadPermissions({thread?, origin?})` and `shell.revokeThreadPermissions(thread, {origin?, permission?})`.
-  - **Archive and delete:** the browser doesn't know about threads' lifecycles, so a shell calls `shell.forgetThreadPermissions(thread)` when it archives or deletes a thread. T3 Code doesn't yet (it lives in its own repo). The plain shell can't delete threads.
+  - **Archive and delete:** the browser doesn't know about threads' lifecycles, so a shell calls `shell.forgetThreadPermissions(thread)` when it archives or deletes a thread. The plain shell can't delete threads.
+  - **T3 Code** (T3 patch 0037) forgets on every `thread.archived` and `thread.deleted` event, whoever archived it (the user or an agent): its server calls the helper's `POST /v1/threads/<tag>/permissions/forget`. Only a shell page's broker can revoke, so the helper sends the bridge op `forget_thread_permissions` to a shell page, which calls `forgetThreadPermissions`. With no page connected it answers `{queued: true}`, and the next page to connect does it. A settled thread keeps its grants.
 - **The library's prompt** is a popover at the top left of the tab's element. It has the site, the list of permissions, the scopes (this thread first, with the thread's label), Block, Allow and × (not now; Escape too). It ignores clicks for its first 400 ms. `connect({permissions: false})` leaves requests to the fallback, and a function draws them itself.
 
 **Verified** on an X11 session in slot 23, with a test page on 127.0.0.1 and `--use-fake-device-for-media-stream`.
@@ -414,7 +415,7 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `list_printers`.
 - `print_tab {tab_id, printer?, save_to?, copies?, duplex?, color?, paper?, landscape?, scale?, margins?, background?, header_footer?, page_ranges?}`: `POST /v1/threads/<t>/tabs/<id>/print`. No approval (Decision 8). If the tab has a print waiting (`pending.print`), it answers it `"done"`, so the shell's dialog closes and `window.print()` returns.
 - `cancel_print`: answers it `"cancel"`.
-- T3 Code gives its agents only the native-window tools (`WINDOW_TOOLS`), so its agents don't get these yet.
+- T3 Code's agents get them too (T3 patch 0036): see "In T3 Code" in `AGENT_CONTROL.md`.
 
 **Not built.** Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
 

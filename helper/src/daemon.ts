@@ -60,7 +60,7 @@ import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { plutoHome, ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
-import { HELPER_PAGE, ServerTabs } from "./serverTabs.ts";
+import { HELPER_PAGE, type PermissionAnswer, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import {
   explainPid,
@@ -400,6 +400,8 @@ export class Daemon {
    * user namespace, Flatpak's), the helper can, and knows what it started.
    */
   private readonly pidThreads = new Map<number, { pid: number; threadId: string | undefined }>();
+  /** Threads whose permission grants the next shell page to connect forgets (forgetThreadPermissions()). */
+  private readonly threadsToForget = new Set<string>();
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -1274,6 +1276,33 @@ export class Daemon {
   // are in snapshot_window's pixels (the window's DIPs times its scale).
 
   /**
+   * Forgets thread `thread`'s permission grants (the browser keeps them per
+   * thread until a shell revokes them). Only a shell page's broker can, so a
+   * page does it (`shell.forgetThreadPermissions`); with none connected, the
+   * next page to connect does.
+   */
+  private async forgetThreadPermissions(thread: string): Promise<{ revoked?: number; queued?: boolean }> {
+    try {
+      const result = await this.relay.json<{ revoked?: number } | null>("forget_thread_permissions", { thread });
+      return { revoked: result?.revoked ?? 0 };
+    } catch (error) {
+      if (!(error instanceof RelayError) || (error.status !== 503 && error.status !== 504)) throw error;
+      this.threadsToForget.add(thread);
+      return { queued: true };
+    }
+  }
+
+  private forgetPendingThreadPermissions(): void {
+    const threads = [...this.threadsToForget];
+    this.threadsToForget.clear();
+    for (const thread of threads) {
+      void this.forgetThreadPermissions(thread).catch((error: Error) =>
+        console.warn(`plutoniumd: can't forget ${thread}'s permissions: ${error.message}`),
+      );
+    }
+  }
+
+  /**
    * The server's tabs no shell page shows: the helper opens them itself
    * (serverTabs.ts, "open"), straight from the browser, so the server needn't
    * wait for a page. Without the Plutonium domain the server waits as before.
@@ -1307,6 +1336,12 @@ export class Daemon {
     serverTabs.onClose = (_key, browserTabId) => {
       void desktop.tabCommand(browserTabId, "close").catch(() => {});
     };
+    serverTabs.onRequestPermissions = async (browserTabId, permissions, origin) =>
+      (await desktop.tabCommand(browserTabId, "permission-request", {
+        permissions,
+        ...(origin ? { origin } : {}),
+        by: "agent",
+      })) as PermissionAnswer | null;
     // The user closed one: the server's tab is gone.
     desktop.changeListeners.add(() => {
       for (const { key, browserTabId } of serverTabs.pageTabs(HELPER_PAGE)) {
@@ -1756,6 +1791,7 @@ export class Daemon {
           url.searchParams.get("visible") !== "0",
           url.searchParams.get("display") ?? "",
         );
+        this.forgetPendingThreadPermissions();
         return;
       }
       const visibility = path.match(/^\/v1\/shell\/pages\/([\w-]+)\/visibility$/);
@@ -2065,6 +2101,11 @@ export class Daemon {
         } catch (error) {
           return sendJson(response, 200, { content: [{ type: "text", text: (error as Error).message }], isError: true });
         }
+      }
+      // EXO-TAB-PERMISSIONS: a frontend archived or deleted a thread (T3 Code's server).
+      const forget = path.match(/^\/v1\/threads\/([^/]+)\/permissions\/forget$/);
+      if (method === "POST" && forget) {
+        return sendJson(response, 200, await this.forgetThreadPermissions(decodeURIComponent(forget[1]!)));
       }
       // The hardware keys (volume, brightness, media) Ash hands over in shell mode.
       if (method === "POST" && path === "/v1/system/key") {

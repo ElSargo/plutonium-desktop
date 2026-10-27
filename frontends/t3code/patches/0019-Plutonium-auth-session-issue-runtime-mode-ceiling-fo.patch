@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 11:42:14 +1300
-Subject: [PATCH 19/35] Plutonium: auth session issue --runtime-mode-ceiling,
+Subject: [PATCH 19/38] Plutonium: auth session issue --runtime-mode-ceiling,
  for MCP clients that launch threads
 
 An mcp-client session issued from the CLI was capped at approval-required, so a headless orchestrator (Plutonium's agent tool tests) could not launch full-access threads on a test session's server.

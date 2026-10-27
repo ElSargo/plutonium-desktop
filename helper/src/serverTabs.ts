@@ -35,10 +35,15 @@
 // browser's DevTools (cdp.ts). Of the browser's own commands it adds only
 // Plutonium.getTabs, answered with that tab alone: the server reads whether a
 // shell shows it (`embedded`) for preview_status's `visible`.
+//
+// Browser.grantPermissions asks the user, as the thread relay's does
+// (pages.ts): the prompt a page's request gets, marked as the agent's, over
+// this tab. It succeeds once the user allows, and fails if they don't.
 import type { Socket } from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
 import { type BrowserCdp, type CdpEvent } from "./cdp.ts";
+import { promptPermissions, REFUSAL_MEMORY_MS } from "./pages.ts";
 
 export interface ServerTabKey {
   readonly threadId: string;
@@ -61,6 +66,8 @@ interface RelayTarget {
   readonly version: () => Promise<Record<string, unknown>>;
   /** The browser's Plutonium.Tab for the page (whether a shell shows it: `embedded`). */
   readonly tab: () => Promise<unknown>;
+  /** Browser.grantPermissions: asks the user over the tab. */
+  readonly grantPermissions: (params: Record<string, unknown>) => Promise<unknown>;
 }
 
 interface RelayConnection {
@@ -95,7 +102,7 @@ const PAGE_SESSION_ID = "plutonium-tab-page";
 /** Browser-level commands that only need acknowledging for a page the shell owns. */
 const ACKNOWLEDGED = new Set([
   "Target.setDiscoverTargets",
-  "Browser.grantPermissions",
+  // Revoking is the user's, as in the thread relay (pages.ts).
   "Browser.resetPermissions",
   "Browser.cancelDownload",
   // Downloads go where the user's do: the browser's download behaviour is
@@ -130,6 +137,8 @@ function createRelay(target: RelayTarget, write: (message: string) => void): Rel
     switch (command.method) {
       case "Browser.getVersion":
         return target.version();
+      case "Browser.grantPermissions":
+        return target.grantPermissions(command.params ?? {});
       // Plutonium's own: only this tab, so the server can tell whether it is on screen.
       case "Plutonium.getTabs":
         return { tabs: [await target.tab()] };
@@ -246,6 +255,14 @@ interface AttachedTab {
   sessionId: string | null;
   /** Its child sessions (frames, workers), by real session id. */
   readonly children: Set<string>;
+  /** The last grantPermissions the user refused, and when. */
+  refused: { key: string; at: number } | null;
+}
+
+/** The user's answer to a permission request (the tab command `permission-request`). */
+export interface PermissionAnswer {
+  readonly answer?: string;
+  readonly scope?: string;
 }
 
 export interface Pointer extends ServerTabKey {
@@ -268,6 +285,12 @@ export class ServerTabs {
   onOpen: (key: ServerTabKey, tag: string, incognito: boolean) => void = () => {};
   /** The server's tab `key` closed; it was the helper's (HELPER_PAGE). */
   onClose: (key: ServerTabKey, browserTabId: number) => void = () => {};
+  /** Asks the user for `permissions` over browser tab `browserTabId`, marked as an agent's. */
+  onRequestPermissions: (
+    browserTabId: number,
+    permissions: string[],
+    origin: string | undefined,
+  ) => Promise<PermissionAnswer | null> = () => Promise.reject(new Error("There is no browser to ask the user in."));
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -309,7 +332,7 @@ export class ServerTabs {
     }
     if (current) this.detach(key);
     if (current && replace && helpers) this.onClose(key, current.info.browserTabId);
-    this.tabs.set(keyOf(key), { key, info, relay: null, session: null, sessionId: null, children: new Set() });
+    this.tabs.set(keyOf(key), { key, info, relay: null, session: null, sessionId: null, children: new Set(), refused: null });
     this.emit({ type: "attached", ...key });
     return info.browserTabId;
   }
@@ -391,6 +414,7 @@ export class ServerTabs {
           if (!found) throw new Error("The browser has no such tab.");
           return found;
         },
+        grantPermissions: (params) => this.grantPermissions(tab, params),
         version: () => {
           this.version ??= this.cdp.send("Browser.getVersion").then((value) => value as Record<string, unknown>);
           this.version.catch(() => {
@@ -410,6 +434,25 @@ export class ServerTabs {
     // Its events start with the page session.
     void this.pageSession(tab).catch(() => {});
     return relay;
+  }
+
+  /** EXO-TAB-PERMISSIONS: the server can't grant a permission itself; the user is asked over the tab. */
+  private async grantPermissions(tab: AttachedTab, params: Record<string, unknown>): Promise<unknown> {
+    const permissions = promptPermissions(params.permissions);
+    if (!permissions.length) return {};
+    if (tab.info.page === SCRATCH_PAGE) throw new Error("A hidden page can't ask the user for permissions.");
+    const origin = typeof params.origin === "string" && params.origin ? params.origin : undefined;
+    // Playwright sends the command again when it fails: the user isn't asked twice.
+    const key = JSON.stringify([permissions, origin ?? ""]);
+    if (tab.refused?.key === key && Date.now() - tab.refused.at < REFUSAL_MEMORY_MS) {
+      throw new Error(`The user didn't allow ${permissions.join(", ")}.`);
+    }
+    const result = await this.onRequestPermissions(tab.info.browserTabId, permissions, origin);
+    if (result?.answer !== "allow") {
+      tab.refused = { key, at: Date.now() };
+      throw new Error(`The user didn't allow ${permissions.join(", ")} (${result?.answer ?? "no answer"}).`);
+    }
+    return {};
   }
 
   private browserEvent({ method, params, sessionId }: CdpEvent): void {
