@@ -278,8 +278,9 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   with AltGr), and characters it lacks go on spare keys (F13–F24) of a
   temporary keymap for the window's client (`Plutonium.setWindowKeymap`),
   which password auto-type can use too (Chromium patch "agents type through
-  the session's keymap"; `AGENT_CONTROL.md`, "Keyboard layouts"). Checked
-  only on the US layout live: no way to pick another layout yet.
+  the session's keymap"; `AGENT_CONTROL.md`, "Keyboard layouts"). Checked live
+  with Alacritty (Wayland, "é€ß→😀" on a US layout); not on other layouts
+  (no way to pick one yet) or X11 apps.
 - [x] **Usage-limit warnings in `orchestrator_capabilities`.** S · Agents
   choosing a provider instance for a new thread or child task can't see
   which ones are close to their limits. T3 already tracks session and weekly
