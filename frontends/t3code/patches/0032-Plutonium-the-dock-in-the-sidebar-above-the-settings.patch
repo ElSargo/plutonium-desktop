@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 11:45:56 +1300
-Subject: [PATCH 32/33] Plutonium: the dock in the sidebar, above the settings
+Subject: [PATCH 32/34] Plutonium: the dock in the sidebar, above the settings
  row
 
 One button per slot, wrapping to the sidebar's width: the slot's icon (the

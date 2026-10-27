@@ -1,6 +1,6 @@
 # The dock in T3 Code
 
-**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below).
+**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope").
 
 T3 works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a tray in the sidebar's footer, it makes T3 a desktop without changing how its chat works.
 
@@ -67,7 +67,7 @@ They are all T3 keybinding commands, so `keybindings.json` can change them. They
 A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, the site's own icon: an open tab's, then the one T3 remembers, then the site's `/favicon.ico`; no third-party icon service) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
 
 - **Click:** what Super+N does. Clicking the one that shows goes back, or puts it away (panel hidden, drawer closed) when there's nowhere remembered to go back to. The click doesn't take the keyboard.
-- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (an address and the prefix its tabs start with), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere: apps only); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
+- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (an address and the prefix its tabs start with), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere; the terminal is always the thread's); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
 - **Panel tabs** in the dock show their slot's number.
 
 ChatView publishes the active thread's context (`publishDockContext`) for the sidebar, which is outside it.
@@ -82,7 +82,7 @@ ChatView publishes the active thread's context (`publishDockContext`) for the si
 
 An agent reaches its own thread's and its own project's windows and tabs. Global ones need permission, asked the way passwords are (an Ash prompt, so no agent can answer it): once, for this thread, or always for this app or site. T3's server passes the caller's thread with each forwarded tool call (patch 0017); it would pass the tags the thread may reach, and the helper's check takes a set. T3's `preview_*` tools get the same rule in the server. Grants go with the thread's permissions (`forgetThreadPermissions`).
 
-Until that's built, project- and global-scoped windows are out of every agent's reach (their tag names no thread).
+Until that's built, project- and global-scoped windows are out of every agent's reach (their tag names no thread). A site's tab in a scope carries the tag of the thread showing it, so that thread's agent reaches it, and the thread it was opened in, whose tag is its origin.
 
 ## The tray
 
@@ -90,9 +90,9 @@ The sidebar's footer gets a row: the clock and date on the left; network, volume
 
 ## Steps
 
-1. Slots for the terminal, apps and sites; run, raise, minimise; split and fold; Super+Shift+N and the tab menu. Sites only in the thread scope (T3's browser tabs are per thread on the server).
+1. Slots for the terminal, apps and sites; run, raise, minimise; split and fold; Super+Shift+N and the tab menu. Sites only in the thread scope (T3's browser tabs are per thread on the server). Sites in project and global scope followed (patch 0034).
 2. Templates, `dock.json`, project overrides, an app's folder for project scope (the helper's `/v1/apps/launch` takes a `cwd`).
-3. Groups, `"rest"`, the group picker; sites in project and global scope.
+3. Groups, `"rest"`, the group picker.
 4. Agents' reach and the permission prompt.
 5. The folded chat's strip.
 6. The tray (independent of the rest).
@@ -103,7 +103,7 @@ The sidebar's footer gets a row: the clock and date on the left; network, volume
 - Keybinding commands `dock.slot.N`, `dock.slotOther.N`, `dock.assign.N`, `dock.toggleLayout`; their defaults have `when: "plutoniumShell"`, a new context that is true in the Plutonium shell only, so Cmd+1 on a Mac stays T3's.
 - The terminal fold: the drawer takes the chat column (`fill`), the conversation is hidden.
 - Fixed on the way: a browser tab's page or an app's window given the keyboard lost it to the composer a frame later, when the shell window's `focus` event followed. `shouldRefocusComposerOnWindowFocus` now leaves `EMBED` and `NATIVE-WINDOW` alone, as it did `IFRAME` and `WEBVIEW`.
-- Not yet: sites in project or global scope (a site slot uses the thread's tabs whatever its scope), the folded chat's strip.
+- Not yet: the folded chat's strip. (Sites in project or global scope: below.)
 
 Verified on Xvfb (slot 14, its own T3 data, keys as synthetic events in the page, so not through Ash):
 
@@ -120,3 +120,24 @@ Verified on Xvfb (slot 14, its own T3 data, keys as synthetic events in the page
 | Super+Shift+4 on the tab: slot 4 is "Example Domain", a site | ✅ |
 | Tab menu: "In the dock (Super+3)", the nine slots with 3 checked, "Remove from the dock" | ✅ |
 | On DRM, through Ash: Super+N from inside an app, and typing into it after | not yet |
+
+## Sites in a scope (patch 0034, 2026-10-27)
+
+T3's browser tabs belong to one thread on the server, so a site kept per project or everywhere can't be one tab every thread lists. It is one browser tab that moves:
+- The slot's tab carries its scope's tag (`t3:project/<id>`, `t3:global`), as an app's windows do. The dock opens it with that tag as its origin; a thread's own tab gets the tag added when its slot's scope changes (the editor or the tab menu's **Keep it**). Super+Shift+N on a tab keeps the scope its tags say.
+- Pressing the slot: the scope's tab, if this thread shows it; else it comes here from the thread showing it (that thread's preview tab closes, the browser tab stays, that thread's tag comes off) and is imported as a new preview tab; else a new one opens. The button is "running" while the tab exists anywhere in the scope, "showing" when it shows here.
+- Closing its preview tab closes it, wherever it was opened.
+- The server opens a tab of its own for each new preview (patch 0017); a tab the page brings from elsewhere (an import, or the dock's) now replaces that one (`showServerTab(..., { replace: true })`, the helper's `ServerTabs.attach`). Before, the helper's blank tab won and the brought tab was closed, so importing from Elsewhere lost the tab too.
+
+Verified on Xvfb (slot 14), through the dock's buttons in the page:
+
+| Check | |
+|---|---|
+| Editor: a site's **Kept** offers this thread, this project, everywhere, with the scope's hint | ✅ |
+| Everywhere, thread A: a `t3:global` tab opens and shows; the helper's own tab closes; the button is "showing" | ✅ |
+| A new thread: the button is "running"; pressing it moves the same tab there (A's tag off, the new thread's on), A's panel loses it | ✅ |
+| Back in A: the same tab comes back | ✅ |
+| Closing it in the panel closes the tab; the button goes idle | ✅ |
+| This project, from A's own example.com tabs: they get `t3:project/<id>`; the other thread of the project takes the newest; closing it there closes it | ✅ |
+| On DRM, an agent driving a moved tab | not yet |
+

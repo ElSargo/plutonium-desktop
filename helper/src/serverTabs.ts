@@ -291,15 +291,24 @@ export class ServerTabs {
    * The shell shows `key` with the page `info.targetId`; the server may drive
    * it. Several shell pages can show the server's tabs (several shells run at
    * once): the first page's tab is the one, and the browser tab id returned is
-   * the one every page should show.
+   * the one every page should show. With `replace` (a tab the page brought
+   * from elsewhere), the page's tab wins over one the helper opened itself,
+   * which closes.
    */
-  attach(key: ServerTabKey, info: ServerTabInfo, pageConnected: (page: string) => boolean): number {
+  attach(
+    key: ServerTabKey,
+    info: ServerTabInfo,
+    pageConnected: (page: string) => boolean,
+    replace = false,
+  ): number {
     const current = this.tabs.get(keyOf(key));
     if (current?.info.targetId === info.targetId) return current.info.browserTabId;
-    if (current && current.info.page !== info.page && pageConnected(current.info.page)) {
+    const helpers = current?.info.page === HELPER_PAGE && info.page !== HELPER_PAGE;
+    if (current && current.info.page !== info.page && pageConnected(current.info.page) && !(replace && helpers)) {
       return current.info.browserTabId;
     }
     if (current) this.detach(key);
+    if (current && replace && helpers) this.onClose(key, current.info.browserTabId);
     this.tabs.set(keyOf(key), { key, info, relay: null, session: null, sessionId: null, children: new Set() });
     this.emit({ type: "attached", ...key });
     return info.browserTabId;

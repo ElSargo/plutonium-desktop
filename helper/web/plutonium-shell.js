@@ -758,9 +758,9 @@ export class PlutoniumShell extends EventTarget {
    * the server's tab already, and then every page shows that one.
    * @returns {Promise<number>}
    */
-  async showServerTab(browserTabId, { threadId, tabId }) {
+  async showServerTab(browserTabId, { threadId, tabId }, { replace = false } = {}) {
     if (!this.tabsAvailable) throw new Error("this Chromium has no browser tabs");
-    const shown = { threadId, tabId, browserTabId, targetId: await this._targetId(browserTabId) };
+    const shown = { threadId, tabId, browserTabId, targetId: await this._targetId(browserTabId), replace };
     this._serverTabs.set(serverTabKey(shown), shown);
     // Otherwise the request stream announces it once it opens.
     if (this._events?.readyState !== EventSource.OPEN) return browserTabId;
@@ -809,6 +809,7 @@ export class PlutoniumShell extends EventTarget {
         targetId: shown.targetId,
         url: tab?.url ?? "",
         title: tab?.title ?? "",
+        replace: shown.replace === true,
       }),
     });
     const body = await response.json().catch(() => ({}));

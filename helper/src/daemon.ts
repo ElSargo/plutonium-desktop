@@ -1850,7 +1850,7 @@ export class Daemon {
       }
       if (method === "POST" && (path === "/v1/shell/server-tabs" || path === "/v1/shell/server-tabs/detach")) {
         if (!this.serverTabs) throw new HttpError(409, "This helper has no DevTools port (--cdp-port).");
-        const { page, threadId, tabId, targetId, browserTabId, url, title } = await readJson(request);
+        const { page, threadId, tabId, targetId, browserTabId, url, title, replace } = await readJson(request);
         if (typeof threadId !== "string" || !threadId || typeof tabId !== "string" || !tabId) {
           throw new HttpError(400, "threadId and tabId are required.");
         }
@@ -1868,6 +1868,7 @@ export class Daemon {
           { threadId, tabId },
           { targetId, browserTabId, page, url: () => shown.url, title: () => shown.title },
           (other) => other === HELPER_PAGE || this.relay.has(other),
+          replace === true,
         );
         return sendJson(response, 200, { browserTabId: shownTabId });
       }

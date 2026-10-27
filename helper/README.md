@@ -157,6 +157,7 @@ await shell.snapshotTab(id);
 // Server-driven tabs: the frontend's server drives a tab this page shows for it. Resolves to the
 // browser tab to show (another shell page's, if it shows that server tab already).
 const shownId = await shell.showServerTab(tab.id, { threadId, tabId });  // the server's names
+await shell.showServerTab(tab.id, { threadId, tabId }, { replace: true });  // a tab brought from elsewhere: it, not the helper's own
 await shell.releaseServerTab({ threadId, tabId });
 shell.addEventListener("agentpointer", (event) => drawCursor(event.detail));  // {threadId, tabId, phase, x, y}
 

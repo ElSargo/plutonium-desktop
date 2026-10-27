@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 11:58:21 +1300
-Subject: [PATCH 06/33] Plutonium: panel tab keys, new browser tab, app
+Subject: [PATCH 06/34] Plutonium: panel tab keys, new browser tab, app
  launcher
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

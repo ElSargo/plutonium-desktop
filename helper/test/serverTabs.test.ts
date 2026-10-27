@@ -130,3 +130,25 @@ test("the server's open asks for an incognito tab only when it says so", () => {
     ["b", "thread:t", true],
   ]);
 });
+
+test("a tab a page brought from elsewhere replaces the one the helper opened, which closes", () => {
+  const tabs = new ServerTabs(fakeCdp);
+  const closed: number[] = [];
+  tabs.onClose = (_key, browserTabId) => closed.push(browserTabId);
+  const key = { threadId: "t", tabId: "a" };
+  const info = (page: string, browserTabId: number) => ({
+    targetId: `target-${browserTabId}`,
+    browserTabId,
+    page,
+    url: () => "",
+    title: () => "",
+  });
+  tabs.attach(key, info("plutoniumd", 7), () => true);
+  // A page's own new tab shows the helper's instead.
+  assert.equal(tabs.attach(key, info("shell", 8), () => true), 7);
+  assert.deepEqual(closed, []);
+  assert.equal(tabs.attach(key, info("shell", 6), () => true, true), 6);
+  assert.deepEqual(closed, [7]);
+  // Not another page's, though.
+  assert.equal(tabs.attach(key, info("other", 9), () => true, true), 6);
+});
