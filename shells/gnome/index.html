@@ -38,6 +38,8 @@
                  radial-gradient(circle at 20% 85%, #7a4fb3 0, transparent 40%),
                  linear-gradient(135deg, #1b2a4e, #1a3f7a 50%, #2b1d4f);
     --ease: cubic-bezier(.25, 1, .5, 1); --dur: .25s;
+    /* GNOME's overview: 250 ms, ease-out-quad. */
+    --ov-ease: cubic-bezier(.25, .46, .45, .94);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -60,7 +62,7 @@
   .round { width: 34px; height: 34px; border-radius: 99px; display: grid; place-items: center; }
   .round:hover:not(:disabled) { background: #ffffff1f; }
   #kbd-sink { position: fixed; width: 1px; height: 1px; left: -10px; top: -10px; outline: none; }
-  body.live .win, body.live .wscard, body.live #dash, body.live #ov-top, body.live #shade, body.live #grid { transition: none !important; }
+  body.live .win, body.live .wscard, body.live #dash, body.live #ov-top, body.live #shade, body.live #grid, body.live #thumbs, body.live #ov-chrome .cap, body.live #ov-chrome .cap-icon { transition: none !important; }
 
   /* Top bar. */
   #topbar {
@@ -85,15 +87,16 @@
 
   /* The desktop. */
   #desk { position: fixed; inset: var(--bar-h) 0 0; overflow: hidden; background: var(--wallpaper) center / cover; }
-  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease); }
+  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ov-ease); }
   #hotcorner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 1001; }
   #cards { position: absolute; inset: 0; pointer-events: none; }
   .wscard {
     position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 16px; opacity: 0;
     background: var(--wallpaper) center / cover; box-shadow: 0 4px 24px #0008;
-    transition: transform var(--dur) var(--ease), opacity var(--dur) var(--ease);
+    transition: transform var(--dur) var(--ov-ease), opacity var(--dur) var(--ov-ease), box-shadow .15s;
   }
   body.overview .wscard { pointer-events: auto; }
+  .wscard.drop { box-shadow: 0 4px 24px #0008, 0 0 0 calc(3px / var(--s, 1)) var(--accent); }
   #windows { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
   body.ovdragging #windows { z-index: 5; }
   body.searching #windows, body.searching #cards, body.searching #ov-chrome { opacity: 0; pointer-events: none !important; }
@@ -110,7 +113,7 @@
   .win {
     position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 12px;
     background: var(--win-bg); box-shadow: 0 2px 6px #0003, 0 8px 28px #0004;
-    transition: transform var(--dur) var(--ease), box-shadow .2s, opacity var(--dur) var(--ease), scale var(--dur) var(--ease);
+    transition: transform var(--dur) var(--ov-ease), box-shadow .2s, opacity var(--dur) var(--ov-ease), scale var(--dur) var(--ease);
   }
   .win.dragging, .win.resizing { transition: box-shadow .2s; }
   .win.hidden { opacity: 0; pointer-events: none; }
@@ -169,28 +172,37 @@
 
   /* The overview. */
   #ov-chrome { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
-  #ov-chrome .cap { pointer-events: auto; position: absolute; border-radius: 12px; opacity: 0; transition: opacity .15s; }
-  body.overview.settled #ov-chrome .cap { opacity: 1; }
-  #ov-chrome .cap:hover { box-shadow: 0 0 0 4px #ffffff70; }
+  /* A caption per window, always there and on the window: in the overview its
+     icon scales and fades in with the spread, as GNOME's (windowPreview.js,
+     _updateIconScale); the title and close button show on hover once settled. */
+  #ov-chrome .cap {
+    position: absolute; pointer-events: none;
+    transition: left var(--dur) var(--ov-ease), top var(--dur) var(--ov-ease), width var(--dur) var(--ov-ease), height var(--dur) var(--ov-ease);
+  }
+  body.overview.settled #ov-chrome .cap { pointer-events: auto; }
+  body.overview .win.ov-hover { box-shadow: 0 0 0 calc(5px / var(--s, 1)) #ffffff70, 0 8px 28px #0006; }
   #ov-chrome .cap .cap-icon {
-    position: absolute; left: 50%; bottom: -22px; width: 44px; height: 44px; margin-left: -22px; display: grid; place-items: center;
+    position: absolute; left: 50%; bottom: -19px; width: 64px; height: 64px; margin-left: -32px; display: grid; place-items: center;
+    transform-origin: 50% 70%; transform: scale(var(--spread, 0)); opacity: var(--spread, 0);
+    transition: transform var(--dur) var(--ov-ease), opacity var(--dur) var(--ov-ease);
+    filter: drop-shadow(0 1px 3px #0008);
   }
-  #ov-chrome .cap .cap-icon img, #ov-chrome .cap .cap-icon .letter { width: 40px; height: 40px; }
+  #ov-chrome .cap .cap-icon img, #ov-chrome .cap .cap-icon .letter, #ov-chrome .cap .cap-icon .glyph { width: 56px; height: 56px; }
   #ov-chrome .cap .cap-title {
-    position: absolute; left: 50%; bottom: -54px; transform: translateX(-50%); max-width: 100%; padding: 3px 10px; border-radius: 99px;
-    background: #000a; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity .15s;
+    position: absolute; left: 50%; top: calc(100% + 23px); transform: translateX(-50%); max-width: 100%; padding: 3px 10px; border-radius: 99px;
+    background: #000a; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity .2s;
   }
-  #ov-chrome .cap:hover .cap-title { opacity: 1; }
+  body.overview.settled #ov-chrome .cap:hover .cap-title { opacity: 1; }
   #ov-chrome .cap .cap-close {
     position: absolute; right: -12px; top: -12px; width: 28px; height: 28px; border-radius: 99px; background: #3a3a3a;
-    display: grid; place-items: center; opacity: 0; transition: opacity .15s; box-shadow: 0 2px 6px #0006;
+    display: grid; place-items: center; opacity: 0; transition: opacity .2s; box-shadow: 0 2px 6px #0006;
   }
   #ov-chrome .cap .cap-close:hover { background: #4a4a4a; }
-  #ov-chrome .cap:hover .cap-close { opacity: 1; }
+  body.overview.settled #ov-chrome .cap:hover .cap-close { opacity: 1; }
   #ov-chrome .cap.dragging { opacity: 0 !important; }
   #ov-top {
     position: absolute; top: 0; left: 0; right: 0; display: grid; justify-items: center; gap: 12px; padding-top: 14px;
-    opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease);
+    opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ov-ease);
   }
   body.overview #search, body.overview .thumb { pointer-events: auto; }
   #search {
@@ -199,20 +211,24 @@
   }
   #search:focus { box-shadow: 0 0 0 2px var(--accent); }
   #search::placeholder { color: #ffffffa0; }
-  #thumbs { display: flex; gap: 10px; height: 58px; transition: opacity .2s; }
-  body.apps #thumbs, body.searching #thumbs { opacity: 0; pointer-events: none; }
+  #thumbs { display: flex; gap: 10px; height: var(--thumb-h, 58px); transition: opacity var(--dur) var(--ov-ease), transform var(--dur) var(--ov-ease); }
   .thumb {
     position: relative; height: 100%; border-radius: 8px; overflow: hidden; background: var(--wallpaper) center / cover;
     box-shadow: 0 1px 4px #0006; outline: 2px solid transparent; outline-offset: 2px;
   }
   .thumb.cur { outline-color: #fff; }
   .thumb.drop { outline-color: var(--accent); }
-  .thumb .tw { position: absolute; border-radius: 2px; background: #ffffffd0; box-shadow: 0 0 0 1px #0004; display: grid; place-items: center; overflow: hidden; }
-  .thumb .tw img, .thumb .tw .letter { width: 14px; height: 14px; font-size: 8px; border-radius: 3px; }
+  .thumb .tw { position: absolute; border-radius: 2px; box-shadow: 0 1px 3px #0006; display: flex; flex-direction: column; overflow: hidden; }
+  .thumb .tw .thb { flex: none; background: var(--hb-bg); }
+  .thumb .tw canvas { flex: 1; min-height: 0; width: 100%; display: block; }
+  .thumb .tw.noshot { background: #00000059; align-items: center; justify-content: center; }
+  .thumb .tw.noshot .thb { align-self: stretch; }
+  .thumb .tw img, .thumb .tw .letter, .thumb .tw .glyph { width: 14px; height: 14px; font-size: 8px; border-radius: 3px; flex: none; }
+  .thumb .tw.noshot .thb + * { margin-block: auto; }
   .thumb .tname { position: absolute; left: 4px; bottom: 2px; font-size: 10px; font-weight: 700; text-shadow: 0 1px 2px #000; }
   #dash {
     position: absolute; bottom: 12px; left: 50%; transform: translate(-50%, 150%); display: flex; align-items: center; gap: 4px;
-    padding: 6px; border-radius: 22px; background: #2e2e2ee6; transition: transform var(--dur) var(--ease); z-index: 950;
+    padding: 6px; border-radius: 22px; background: #2e2e2ee6; transition: transform var(--dur) var(--ov-ease); z-index: 950;
     box-shadow: 0 2px 12px #0006;
   }
   body.overview #dash, body.dock-always #dash, body.dock-shown #dash { transform: translate(-50%, 0); }
@@ -238,20 +254,47 @@
   .glyph.settings { background: linear-gradient(#8e8d93, #56555b); }
   #show-apps .ic { width: 60%; height: 60%; }
   body.apps #show-apps { background: #ffffff2a; }
+  /* The app grid: pages side by side, one shown (iconGrid.js); search results: a list. */
   #grid {
-    position: absolute; inset: 72px 8% 110px; display: grid; gap: 8px 4px; align-content: start;
-    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); overflow-y: auto; scrollbar-width: none;
-    opacity: 0; pointer-events: none; transform: scale(.94); transition: opacity .2s, transform .2s var(--ease);
+    position: absolute; left: 0; right: 0; opacity: 0; pointer-events: none; overflow: hidden;
+    transition: opacity var(--dur) var(--ov-ease), transform var(--dur) var(--ov-ease);
+    /* Rastered while hidden (cc draws a layer that may animate its opacity), so
+       opening it never shows tiles not drawn yet. */
+    will-change: opacity, transform;
   }
-  body.apps #grid, body.searching #grid { opacity: 1; pointer-events: auto; transform: none; }
-  #grid > button {
-    height: 124px; border-radius: 16px; display: flex; flex-direction: column; align-items: center;
+  body.apps #grid, body.searching #grid { pointer-events: auto; }
+  #grid .pages { position: absolute; left: 0; top: 0; right: 0; bottom: 34px; display: flex; transition: transform .3s cubic-bezier(.215, .61, .355, 1); }
+  #grid .page {
+    flex: 0 0 100%; height: 100%; padding: 0 10%; display: grid;
+    grid-template-columns: repeat(var(--cols), 1fr); grid-template-rows: repeat(var(--rows), 1fr); place-items: center;
+  }
+  #grid .dots { position: absolute; left: 0; right: 0; bottom: 6px; height: 22px; display: flex; justify-content: center; gap: 4px; }
+  #grid .dots button { width: 22px; height: 22px; border-radius: 99px; display: grid; place-items: center; }
+  #grid .dots button::after { content: ""; width: 8px; height: 8px; border-radius: 99px; background: #fff; opacity: .35; transition: opacity .2s; }
+  #grid .dots button:hover::after { opacity: .6; }
+  #grid .dots button.cur::after { opacity: 1; }
+  #grid .pg {
+    position: absolute; top: calc(50% - 17px - 24px); width: 48px; height: 48px; border-radius: 99px; display: grid; place-items: center;
+    background: #ffffff14; transition: opacity .2s; z-index: 1;
+  }
+  #grid .pg:hover { background: #ffffff2a; }
+  #grid .pg .ic { width: 22px; height: 22px; }
+  #grid .pg.prev { left: 3%; } #grid .pg.prev .ic { transform: scaleX(-1); }
+  #grid .pg.next { right: 3%; }
+  #grid .pg.off { opacity: 0; pointer-events: none; }
+  #grid .results {
+    position: absolute; inset: 0 8%; display: grid; gap: 8px 4px; align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); overflow-y: auto; scrollbar-width: none;
+  }
+  #grid .tile {
+    width: 100%; max-width: 160px; height: 124px; border-radius: 16px; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 8px; padding: 6px; font-size: 13px; text-align: center;
   }
-  #grid > button:hover, #grid > button.sel { background: #ffffff1f; }
-  #grid > button img, #grid > button .letter, #grid > button .glyph { width: 64px; height: 64px; }
-  #grid > button span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #grid > button small { color: #ffffff90; font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -6px; }
+  #grid .page .tile { height: auto; max-height: 100%; aspect-ratio: auto; padding: 12px 6px; }
+  #grid .tile:hover, #grid .tile.sel { background: #ffffff1f; }
+  #grid .tile img, #grid .tile .letter, #grid .tile .glyph { width: var(--icon, 64px); height: var(--icon, 64px); flex: none; }
+  #grid .tile span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #grid .tile small { color: #ffffff90; font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -6px; }
   #grid .section { grid-column: 1 / -1; font-weight: 700; color: #ffffffb0; padding: 8px 12px 0; }
   #grid .none { grid-column: 1 / -1; text-align: center; color: #ffffffb0; padding-top: 40px; }
   #drag-ghost { position: fixed; z-index: 3000; pointer-events: none; width: 56px; height: 56px; transform: translate(-50%, -50%); opacity: .9; }
@@ -1062,38 +1105,94 @@ const overview = () => view > 0.5;
 
 const lerp = (a, b, t) => a + (b - a) * t;
 
-/** The overview's geometry: the workspace cards and where each window goes in them. */
-function overviewLayout() {
+// The overview's geometry, after GNOME's ControlsManagerLayout: the search
+// entry at the top, the thumbnails under it, the workspaces between them and
+// the dash. In the app grid the workspaces shrink to a row above the grid
+// (15% of the height, all of them side by side), the thumbnails fade out,
+// and the grid comes up from below.
+const OV_SEARCH = 50; // the search entry and the space above it
+function ovMetrics() {
   const w = W(), h = H();
-  const top = 116, bottom = Number(prefs.dockIconSize) + 16 + 12 + 26;
-  let ch = h - top - bottom;
-  let cw = ch * (w / h);
-  if (cw > w * 0.8) { cw = w * 0.8; ch = cw * (h / w); }
-  const gap = Math.max(24, (w - cw) / 2 - 64);
-  const k = cw / w;
-  const cards = workspaces.map((ws, i) => ({ ws, x: (w - cw) / 2 + (i - cur) * (cw + gap) + slide * (cw + gap) / w, y: top, w: cw, h: ch, k }));
-  const slots = new Map();
-  for (const card of cards) {
-    const shown = itemsOn(card.ws.id).sort((a, b) => a.id - b.id);
-    const n = shown.length;
-    if (!n) continue;
-    const pad = 18;
-    const area = { x: card.x + pad, y: card.y + pad, w: card.w - 2 * pad, h: card.h - 2 * pad - 40 };
-    const cols = Math.max(1, Math.round(Math.sqrt(n * (area.w / area.h) / 1.4)));
-    const rows = Math.ceil(n / cols);
-    const cellW = area.w / cols, cellH = area.h / rows;
-    shown.forEach((item, i) => {
-      const r = Math.floor(i / cols);
-      const inRow = r === rows - 1 ? n - r * cols : cols;
-      const c = i % cols;
-      const g = rectOf(item);
-      const s = Math.min((cellW - 28) / g.w, (cellH - 48) / g.h, 1);
-      const x = area.x + (cols - inRow) * cellW / 2 + c * cellW + (cellW - g.w * s) / 2;
-      const y = area.y + r * cellH + (cellH - 30 - g.h * s) / 2;
-      slots.set(item.key, { x, y, s, w: g.w * s, h: g.h * s });
-    });
+  const sp = Math.round(h * 0.02);
+  const dashH = Number(prefs.dockIconSize) + 16 + 12 + 12;
+  const thumbH = Math.round(Math.max(40, Math.min(72, h * 0.06)));
+  const thumbY = OV_SEARCH + Math.max(10, Math.round(sp * 0.6));
+  // Room under the thumbnails for their outline.
+  const pickY = thumbY + thumbH + Math.max(20, sp);
+  const pickH = h - pickY - dashH - sp;
+  const smallY = OV_SEARCH + sp;
+  const smallH = Math.round(h * 0.15);
+  const gridY = smallY + smallH + sp;
+  const gridH = h - gridY - dashH - sp;
+  return { w, h, sp, thumbH, thumbY, pickY, pickH, smallY, smallH, gridY, gridH };
+}
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// GNOME's inactive workspaces are a little smaller.
+const inactiveScale = (i, pos) => lerp(0.94, 1, 1 - Math.min(1, Math.abs(i - pos)));
+const scaleBox = (b, k) => ({ x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k });
+
+/** The windows of a workspace spread out in its box, none overlapping: where each goes and its scale. */
+function spread(list, box, out) {
+  const n = list.length;
+  if (!n) return;
+  const pad = 18 * box.w / W() + 6;
+  const area = { x: box.x + pad, y: box.y + pad, w: box.w - 2 * pad, h: box.h - 2 * pad - 40 };
+  const cols = Math.max(1, Math.round(Math.sqrt(n * (area.w / area.h) / 1.4)));
+  const rows = Math.ceil(n / cols);
+  const cellW = area.w / cols, cellH = area.h / rows;
+  list.forEach((item, i) => {
+    const r = Math.floor(i / cols);
+    const inRow = r === rows - 1 ? n - r * cols : cols;
+    const c = i % cols;
+    const g = rectOf(item);
+    let s = Math.max(0.01, Math.min((cellW - 28) / g.w, (cellH - 48) / g.h, 1));
+    let x = area.x + (cols - inRow) * cellW / 2 + c * cellW + (cellW - g.w * s) / 2;
+    let y = area.y + r * cellH + (cellH - 30 - g.h * s) / 2;
+    // The window under the pointer grows by 5px a side, as GNOME's.
+    if (item.key === ovHover) {
+      const k = (g.w * s + 10) / (g.w * s);
+      x -= g.w * s * (k - 1) / 2; y -= g.h * s * (k - 1) / 2; s *= k;
+    }
+    out.set(item.key, { x, y, s, w: g.w * s, h: g.h * s });
+  });
+}
+
+/**
+ * Where the workspaces and windows are in a state: 0 the desktop, 1 the
+ * overview (windows spread), 2 the app grid (windows where they are on the
+ * desktop, in small workspaces).
+ */
+function stateLayout(state, m) {
+  const { w, h } = m;
+  const n = workspaces.length;
+  const pos = cur - slide / w; // the workspace in the middle, between two while sliding
+  let cards;
+  if (state === 0) cards = workspaces.map((ws, i) => ({ x: (i - cur) * w + slide, y: 0, w, h }));
+  else if (state === 1) {
+    let ch = m.pickH, cw = ch * (w / h);
+    if (cw > w * 0.85) { cw = w * 0.85; ch = cw * (h / w); }
+    const y = m.pickY + (m.pickH - ch) / 2;
+    const gap = clamp((w - cw) / 2 - cw * 0.4, 24, 80);
+    cards = workspaces.map((ws, i) => scaleBox({ x: (w - cw) / 2 + (i - pos) * (cw + gap), y, w: cw, h: ch }, inactiveScale(i, pos)));
+  } else {
+    const gap = 24;
+    let cw = (w - gap * (n + 1)) / n, ch = cw * (h / w), x0 = gap;
+    if (ch > m.smallH) { ch = m.smallH; cw = ch * (w / h); x0 = gap + Math.max(0, (w - gap * (n + 1) - cw * n) / 2); }
+    const y = m.smallY + (m.smallH - ch) / 2;
+    cards = workspaces.map((ws, i) => scaleBox({ x: x0 + i * (cw + gap), y, w: cw, h: ch }, inactiveScale(i, pos)));
   }
-  return { cards, slots };
+  const wins = new Map();
+  workspaces.forEach((ws, i) => {
+    const box = cards[i];
+    if (state === 1) { spread(itemsOn(ws.id).sort((a, b) => a.id - b.id), box, wins); return; }
+    const k = box.w / w;
+    for (const item of itemsOn(ws.id)) {
+      const r = rectOf(item);
+      wins.set(item.key, { x: box.x + r.x * k, y: box.y + r.y * k, s: k, w: r.w * k, h: r.h * k });
+    }
+  });
+  return { cards, wins };
 }
 
 function render() {
@@ -1104,27 +1203,33 @@ function render() {
   b.toggle("apps", overviewTarget === 2 && !searching);
   b.toggle("searching", searching);
   b.toggle("settled", !live && Math.abs(p - overviewTarget) < 0.01 && overviewTarget === 1);
-  const w = W();
-  const ov = p > 0.001 ? overviewLayout() : null;
+  const w = W(), h = H();
+  const m = ovMetrics();
+  // Between two states: `from` and `to`, `f` of the way.
+  const from = Math.min(1, Math.floor(p)), to = from + 1, f = p - from;
+  const A = stateLayout(from, m);
+  const B = p > 0.001 ? stateLayout(to, m) : A;
+  const spreadness = p <= 1 ? p : 2 - p; // how much the windows are spread (minimized ones shown)
   const t = Math.min(p, 1);
-  const fade = Math.max(0, p - 1); // toward the app grid
+  const capRects = new Map();
   for (const item of items.values()) {
     size(item);
-    const i = wsIndex(item.ws);
-    const r = rectOf(item);
-    const nx = r.x + (i - cur) * w + slide, ny = r.y;
-    let x = nx, y = ny, s = 1, o = item.hidden ? 0 : 1;
-    const slot = ov?.slots.get(item.key);
-    if (slot) {
-      x = lerp(nx, slot.x, t); y = lerp(ny, slot.y, t); s = lerp(1, slot.s, t);
-      o = item.hidden ? t : 1;
-      if (fade) { o *= 1 - fade; s *= 1 - fade * 0.15; }
+    const a = A.wins.get(item.key), z = B.wins.get(item.key);
+    let x = 0, y = 0, s = 1, o = item.hidden ? 0 : 1;
+    if (a && z) {
+      x = lerp(a.x, z.x, f); y = lerp(a.y, z.y, f); s = lerp(a.s, z.s, f);
+      if (item.hidden) o = spreadness;
+    } else {
+      const r = rectOf(item);
+      x = r.x + (wsIndex(item.ws) - cur) * w + slide; y = r.y;
     }
-    if (drag?.item === item || ovDrag?.item === item) {
-      if (ovDrag?.item === item && ovDrag.started) { x = ovDrag.x; y = ovDrag.y; s = ovDrag.s; o = 1; }
-    }
+    if (ovDrag?.item === item && ovDrag.started) { x = ovDrag.x; y = ovDrag.y; s = ovDrag.s; o = 1; }
+    if (a && z) { const r = rectOf(item); capRects.set(item.key, { x, y, w: r.w * s, h: r.h * s }); }
     item.el.style.transform = `translate(${x}px, ${y}px) scale(${s})`;
     item.el.style.opacity = String(o);
+    // The outline of the window under the pointer is the window's own, so it moves and grows with it.
+    item.el.style.setProperty("--s", String(s));
+    item.el.classList.toggle("ov-hover", overviewTarget === 1 && ovHover === item.key && !ovDrag?.started);
   }
   // The workspace cards: the desktop itself shrinking into its card.
   const cardsEl = $("cards");
@@ -1133,19 +1238,37 @@ function render() {
   workspaces.forEach((ws, i) => {
     const card = cardsEl.children[i];
     card.dataset.ws = String(ws.id);
-    const full = { x: (i - cur) * w + slide, y: 0, w, h: H() };
-    const c = ov?.cards[i] ?? full;
-    const x = lerp(full.x, c.x, t), y = lerp(full.y, c.y, t), sc = lerp(1, c.w / w, t);
+    const a = A.cards[i], z = B.cards[i];
+    const x = lerp(a.x, z.x, f), y = lerp(a.y, z.y, f), sc = lerp(a.w, z.w, f) / w;
     card.style.width = `${w}px`;
-    card.style.height = `${H()}px`;
+    card.style.height = `${h}px`;
     card.style.transform = `translate(${x}px, ${y}px) scale(${sc})`;
-    card.style.opacity = String(p <= 0.001 ? 0 : Math.min(1, t * 3) * (1 - fade));
-    card.style.borderRadius = `${16 / Math.max(sc, 0.1)}px`;
+    card.style.opacity = String(p <= 0.001 ? 0 : Math.min(1, p * 3));
+    card.style.borderRadius = `${(p > 1.5 ? 10 : 16) / Math.max(sc, 0.05)}px`;
+    card.style.setProperty("--s", String(sc));
+    card.classList.toggle("drop", ovDrop?.ws === ws.id);
   });
-  $("shade").style.opacity = String(Math.min(1, t) * 0.55);
+  $("shade").style.opacity = String(t * 0.55);
   $("ov-top").style.opacity = String(t);
+  // The thumbnails: under the search entry; toward the app grid they fade, shrink and drop.
+  const g = Math.max(0, p - 1); // toward the app grid
+  const ovTop = $("ov-top");
+  ovTop.style.setProperty("--thumb-h", `${m.thumbH}px`);
+  ovTop.style.gap = `${m.thumbY - OV_SEARCH}px`;
+  const thumbs = $("thumbs");
+  thumbs.style.opacity = String(searching ? 0 : 1 - g);
+  thumbs.style.transform = `translateY(${g * m.thumbH / 2}px) scale(${1 - g / 2})`;
+  thumbs.style.pointerEvents = searching || g > 0.5 ? "none" : "";
+  // The app grid comes up from below; search results take the space under the search entry.
+  const grid = $("grid");
+  const gridTop = searching ? OV_SEARCH + m.sp : lerp(h, m.gridY, g);
+  Object.assign(grid.style, {
+    top: `${m.gridY}px`, height: `${searching ? m.gridY + m.gridH - OV_SEARCH - m.sp : m.gridH}px`,
+    transform: `translateY(${gridTop - m.gridY}px)`,
+    opacity: String(searching ? 1 : g),
+  });
   $("dash").style.setProperty("--p", String(t));
-  renderCaptions(ov);
+  renderCaptions(capRects, searching ? 0 : spreadness);
   renderThumbs();
   renderIndicator();
   renderDash();
@@ -1156,19 +1279,24 @@ function makeCard() {
   const card = el("div", "wscard");
   card.addEventListener("click", () => {
     const i = wsIndex(Number(card.dataset.ws));
-    if (i === cur) setView(0);
-    else switchTo(i);
+    // As GNOME's: the current workspace (or any, from the app grid) leaves the overview.
+    const leave = i === cur || overviewTarget === 2;
+    switchTo(i);
+    if (leave) setView(0);
   });
   card.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(wsById(Number(card.dataset.ws)), { x: e.clientX, y: e.clientY }); });
   return card;
 }
 
 // In the overview: a click target over each window, its app's icon, its title and a close button.
-function renderCaptions(ov) {
+// They move with the windows (the same transition), and grow with the one under the pointer.
+let ovHover = null;
+function renderCaptions(slots, spread) {
   const layer = $("ov-chrome");
-  if (!ov || overviewTarget !== 1) { if (layer.childElementCount) layer.replaceChildren(); return; }
+  layer.style.setProperty("--spread", String(spread));
+  if (overviewTarget !== 1) ovHover = null;
   const have = new Map([...layer.children].map((c) => [c.dataset.key, c]));
-  for (const [key, slot] of ov.slots) {
+  for (const [key, slot] of slots) {
     const item = items.get(key);
     let cap = have.get(key);
     have.delete(key);
@@ -1179,6 +1307,8 @@ function renderCaptions(ov) {
       ic.append(appIconEl(appOf(item)));
       cap.append(ic, el("div", "cap-title"), button("cap-close", { icon: "close", title: "Close", onClick: (e) => { e.stopPropagation(); closeItem(items.get(key)); } }));
       cap.addEventListener("pointerdown", (e) => ovPointerDown(e, key));
+      cap.addEventListener("pointerenter", () => { if (!ovDrag) { ovHover = key; render(); } });
+      cap.addEventListener("pointerleave", () => { if (ovHover === key) { ovHover = null; render(); } });
       cap.addEventListener("auxclick", (e) => { if (e.button === 1) closeItem(items.get(key)); });
       cap.addEventListener("contextmenu", (e) => { e.preventDefault(); windowMenu(items.get(key), { x: e.clientX, y: e.clientY }); });
       layer.append(cap);
@@ -1186,6 +1316,7 @@ function renderCaptions(ov) {
     cap.querySelector(".cap-title").textContent = titleOf(item);
     Object.assign(cap.style, { left: `${slot.x}px`, top: `${slot.y}px`, width: `${slot.w}px`, height: `${slot.h}px` });
     cap.classList.toggle("dragging", ovDrag?.item?.key === key && ovDrag.started);
+    cap.classList.toggle("hover", ovHover === key);
   }
   for (const c of have.values()) c.remove();
 }
@@ -1194,7 +1325,7 @@ function renderCaptions(ov) {
 function renderThumbs() {
   const box = $("thumbs");
   if (!overview()) { if (box.childElementCount) box.replaceChildren(); return; }
-  const th = 58, tw = th * (W() / H());
+  const th = ovMetrics().thumbH, tw = th * (W() / H());
   const k = th / H();
   box.replaceChildren(...workspaces.map((ws, i) => {
     const t = el("div", `thumb ${i === cur ? "cur" : ""} ${ovDrop?.ws === ws.id ? "drop" : ""}`);
@@ -1205,7 +1336,11 @@ function renderThumbs() {
       const r = rectOf(item);
       const m = el("div", "tw");
       Object.assign(m.style, { left: `${r.x * k}px`, top: `${r.y * k}px`, width: `${r.w * k}px`, height: `${r.h * k}px` });
-      m.append(appIconEl(appOf(item)));
+      // The window's own picture under its header bar, its icon until there is one.
+      if (hbH(item)) { const hb = el("div", "thb"); hb.style.height = `${hbH(item) * k}px`; m.append(hb); }
+      const shot = shotOf(item);
+      if (shot.drawn) m.append(shot.canvas);
+      else { m.classList.add("noshot"); m.append(appIconEl(appOf(item))); }
       t.append(m);
     }
     if (ws.name) t.append(el("span", "tname", ws.name));
@@ -1213,6 +1348,47 @@ function renderThumbs() {
     t.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(ws, { x: e.clientX, y: e.clientY }); });
     return t;
   }));
+}
+
+// Window pictures for the thumbnails: the broker's snapshot of the window's
+// (or tab's) surface, which leaves its size alone, drawn on a canvas kept per
+// window. Retaken every second while the overview shows the thumbnails.
+const shots = new Map(); // item key → { canvas, drawn, at, busy }
+const shotOf = (item) => {
+  let shot = shots.get(item.key);
+  if (!shot) { shot = { canvas: el("canvas"), drawn: false, at: 0, busy: false }; shots.set(item.key, shot); }
+  return shot;
+};
+async function takeShot(item) {
+  const shot = shotOf(item);
+  if (shot.busy) return;
+  shot.busy = true;
+  try {
+    const blob = await (item.kind === "w" ? shell.snapshot(item.id) : shell.snapshotTab(item.id));
+    const r = rectOf(item);
+    // Twice the thumbnail's device pixels, for a sharp downscale.
+    const k = (ovMetrics().thumbH / H()) * devicePixelRatio * 2;
+    const w = Math.max(1, Math.round(r.w * k)), h = Math.max(1, Math.round((r.h - hbH(item)) * k));
+    const bitmap = await createImageBitmap(blob, { resizeWidth: w, resizeHeight: h, resizeQuality: "medium" });
+    Object.assign(shot.canvas, { width: bitmap.width, height: bitmap.height });
+    shot.canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close();
+    if (!shot.drawn) { shot.drawn = true; renderThumbs(); }
+  } catch {
+    // Gone, or not drawn anywhere yet: its icon stays.
+  } finally {
+    shot.at = Date.now();
+    shot.busy = false;
+  }
+}
+let shotTimer = null;
+function shotTick() {
+  clearTimeout(shotTimer);
+  shotTimer = null;
+  for (const key of shots.keys()) if (!items.has(key)) shots.delete(key);
+  if (!shell || overviewTarget !== 1 || document.visibilityState !== "visible") return;
+  for (const item of items.values()) if (!item.hidden && Date.now() - shotOf(item).at > 900) takeShot(item);
+  shotTimer = setTimeout(shotTick, 1000);
 }
 
 // The top bar's Activities button: a dot per workspace, the current one long.
@@ -1239,6 +1415,7 @@ function setView(target, { from } = {}) {
   if (target === 0) { searching = false; $("search").value = ""; }
   document.body.classList.remove("live");
   closeMenu();
+  if (target === 1 && !shotTimer) shotTick();
   if (target > 0) {
     quick?.close(); dateMenu?.close();
     if (was === 0) { $("search").value = ""; searching = false; }
@@ -1329,11 +1506,13 @@ function ovPointerDown(e, key) {
 }
 /** What's under the pointer for a drop: a workspace (its thumbnail or card), or the gap between two thumbnails. */
 function dropTargetAt(x, y) {
-  for (const t of $("thumbs").children) {
+  if (searching) return null;
+  // In the app grid the thumbnails are gone; the workspaces are the row above the grid.
+  const thumbs = overviewTarget === 2 ? [] : [...$("thumbs").children];
+  for (const t of thumbs) {
     const r = t.getBoundingClientRect();
     if (x >= r.left && x <= r.right && y >= r.top - 8 && y <= r.bottom + 8) return { ws: Number(t.dataset.ws) };
   }
-  const thumbs = [...$("thumbs").children];
   for (let i = 1; i < thumbs.length; i++) {
     const a = thumbs[i - 1].getBoundingClientRect(), b = thumbs[i].getBoundingClientRect();
     if (x > a.right && x < b.left && y >= a.top && y <= a.bottom) return { newAt: i };
@@ -1593,7 +1772,8 @@ function renderDash() {
   show.title = "Show Apps";
   show.innerHTML = icon("grid");
   show.addEventListener("mousedown", (e) => e.preventDefault());
-  show.onclick = toggleApps;
+  // As GNOME's: from the app grid, back to the windows.
+  show.onclick = () => setView(overviewTarget === 2 ? 1 : 2);
   dash.replaceChildren(...children, el("div", "sep"), show);
 }
 
@@ -1655,13 +1835,12 @@ function appPointerDown(e, id, btn, from) {
       btn.setPointerCapture?.(ev.pointerId);
       appDrag = { id, from, over: null };
       g = ghost();
-      if (from === "grid" && overviewTarget === 2) setView(1);
     }
     g.style.left = `${ev.clientX}px`;
     g.style.top = `${ev.clientY}px`;
     appDrag.over = dashSlotAt(ev.clientX, ev.clientY);
     const t = overview() ? dropTargetAt(ev.clientX, ev.clientY) : null;
-    if ((t?.ws ?? null) !== (ovDrop?.ws ?? null)) { ovDrop = t; renderThumbs(); }
+    if ((t?.ws ?? null) !== (ovDrop?.ws ?? null)) { ovDrop = t; render(); }
     renderDash();
   };
   const up = (ev) => {
@@ -1724,37 +1903,72 @@ function matches(query) {
   };
   return all.map((app) => [score(app), app]).filter(([s]) => s >= 0).sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).map(([, app]) => app);
 }
-function renderGrid() {
+// GNOME's page shapes (rows × columns); a page takes the one closest to its area's.
+const GRID_MODES = [[8, 3], [6, 4], [4, 6], [3, 8]];
+let gridPage = 0;
+let gridShape = { rows: 3, cols: 8, per: 24 };
+let gridSig = "";
+let appsVersion = 0;
+function gridMode() {
+  const m = ovMetrics();
+  const w = m.w * 0.8, h = m.gridH - 34;
+  const [rows, cols] = GRID_MODES.reduce((best, mode) => (Math.abs(w / h - mode[1] / mode[0]) < Math.abs(w / h - best[1] / best[0]) ? mode : best));
+  const cell = Math.min(w / cols, h / rows);
+  return { rows, cols, per: rows * cols, icon: Math.round(clamp(cell - 64, 40, 96)) };
+}
+/** The grid (pages of apps) or, while searching, the results. Kept as it is unless what it shows changed. */
+function renderGrid({ force = false } = {}) {
   const query = $("search").value.trim();
+  const shape = gridMode();
+  const sig = query ? `q:${query}:${items.size}` : `${shape.rows}x${shape.cols}:${shape.icon}:${appsVersion}`;
+  if (sig === gridSig && !force) return;
+  gridSig = sig;
+  gridShape = shape;
   const grid = $("grid");
   const out = [];
   gridList = [];
-  const add = (b, run) => { const i = gridList.length; gridList.push(run); b.addEventListener("mouseenter", () => { gridSel = i; markSel(); }); out.push(b); };
   const tile = (iconEl, label, sub, run, extra) => {
-    const b = el("button");
+    const b = el("button", "tile");
     b.append(iconEl, el("span", "", label));
     if (sub) b.append(el("small", "", sub));
     b.addEventListener("mousedown", (e) => e.preventDefault());
     b.addEventListener("click", run);
     extra?.(b);
-    add(b, run);
+    const i = gridList.length;
+    gridList.push(run);
+    b.addEventListener("mouseenter", () => { gridSel = i; markSel(); });
+    return b;
   };
-  const list = matches(query);
-  if (query) out.push(el("div", "section", "Applications"));
-  for (const app of query ? list.slice(0, 18) : list) {
-    tile(appIconEl(app), app.name, null, () => launchAppId(app.id), (b) => {
-      b.title = app.comment || app.name;
-      b.addEventListener("contextmenu", (e) => { e.preventDefault(); appMenu(app.id, { x: e.clientX, y: e.clientY }); });
-      b.addEventListener("pointerdown", (e) => appPointerDown(e, app.id, b, "grid"));
-    });
-  }
-  if (query) {
-    if (!list.length) out.pop();
+  const appTile = (app) => tile(appIconEl(app), app.name, null, () => launchAppId(app.id), (b) => {
+    b.title = app.comment || app.name;
+    b.addEventListener("contextmenu", (e) => { e.preventDefault(); appMenu(app.id, { x: e.clientX, y: e.clientY }); });
+    b.addEventListener("pointerdown", (e) => appPointerDown(e, app.id, b, "grid"));
+  });
+  if (!query) {
+    const list = matches("");
+    const pages = el("div", "pages");
+    for (let i = 0; i < Math.max(1, Math.ceil(list.length / shape.per)); i++) {
+      const page = el("div", "page");
+      page.append(...list.slice(i * shape.per, (i + 1) * shape.per).map(appTile));
+      pages.append(page);
+    }
+    if (!list.length) pages.firstChild.append(el("div", "none", "No apps found"));
+    const dots = el("div", "dots");
+    for (let i = 0; i < pages.childElementCount; i++) dots.append(button("", { title: `Page ${i + 1}`, onClick: () => goToPage(i) }));
+    const arrow = (cls, d) => button(`pg ${cls}`, { icon: "chevron", title: d < 0 ? "Previous page" : "Next page", onClick: () => goToPage(gridPage + d) });
+    grid.style.setProperty("--rows", shape.rows);
+    grid.style.setProperty("--cols", shape.cols);
+    grid.style.setProperty("--icon", `${shape.icon}px`);
+    grid.replaceChildren(pages, dots, arrow("prev", -1), arrow("next", 1));
+    goToPage(Math.min(gridPage, pages.childElementCount - 1), { animate: false });
+  } else {
+    const list = matches(query);
+    if (list.length) out.push(el("div", "section", "Applications"), ...list.slice(0, 18).map(appTile));
     const q = query.toLowerCase();
     const wins = [...items.values()].filter((it) => titleOf(it).toLowerCase().includes(q) || appOf(it).name.toLowerCase().includes(q));
     if (wins.length) {
       out.push(el("div", "section", "Open Windows"));
-      for (const it of wins.slice(0, 12)) tile(appIconEl(appOf(it)), titleOf(it), wsName(wsById(it.ws) ?? curWs()), () => { setView(0); focusItem(it.key); });
+      for (const it of wins.slice(0, 12)) out.push(tile(appIconEl(appOf(it)), titleOf(it), wsName(wsById(it.ws) ?? curWs()), () => { setView(0); focusItem(it.key); }));
     }
     const pages = settings?.search(q) ?? [];
     if (pages.length) {
@@ -1763,23 +1977,52 @@ function renderGrid() {
         const g = el("span", "glyph web");
         g.innerHTML = icon(p.icon);
         g.style.background = "linear-gradient(#77767b, #4a4a4f)";
-        tile(g, p.title, p.detail, () => { setView(0); settings.open(p.page); });
+        out.push(tile(g, p.title, p.detail, () => { setView(0); settings.open(p.page); }));
       }
     }
     out.push(el("div", "section", "Web"));
     const g = el("span", "glyph web");
     g.innerHTML = icon("web");
-    tile(g, looksLikeAddress(query) ? `Open ${query}` : `Search the web for “${query}”`, null, () => openTab(toUrl(query)));
+    out.push(tile(g, looksLikeAddress(query) ? `Open ${query}` : `Search the web for “${query}”`, null, () => openTab(toUrl(query))));
+    const results = el("div", "results");
+    results.append(...out);
+    grid.style.removeProperty("--icon");
+    grid.replaceChildren(results);
   }
-  if (!gridList.length) out.push(el("div", "none", apps.length ? "No results" : "No apps found"));
-  grid.replaceChildren(...out);
-  gridSel = 0;
+  gridSel = query ? 0 : gridPage * gridShape.per;
   markSel();
 }
+/** Shows page `i` of the grid, sliding to it (300 ms, ease-out-cubic, as GNOME). */
+function goToPage(i, { animate = true } = {}) {
+  const pages = $("grid").querySelector(".pages");
+  if (!pages) return;
+  const n = pages.childElementCount;
+  gridPage = clamp(i, 0, n - 1);
+  if (!animate) pages.style.transition = "none";
+  pages.style.transform = `translateX(${-gridPage * 100}%)`;
+  if (!animate) { pages.offsetWidth; pages.style.transition = ""; }
+  [...$("grid").querySelectorAll(".dots button")].forEach((d, k) => d.classList.toggle("cur", k === gridPage));
+  $("grid").querySelector(".pg.prev").classList.toggle("off", gridPage === 0);
+  $("grid").querySelector(".pg.next").classList.toggle("off", gridPage >= n - 1);
+  $("grid").querySelector(".dots").hidden = n < 2;
+}
+// The wheel or a sideways swipe over the grid turns its pages, one per gesture.
+let pageWheel = { acc: 0, lock: 0 };
+$("grid").addEventListener("wheel", (e) => {
+  if (searching || !$("grid").querySelector(".pages")) return;
+  e.preventDefault();
+  if (Date.now() < pageWheel.lock) return;
+  const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  pageWheel.acc = Math.sign(d) === Math.sign(pageWheel.acc) ? pageWheel.acc + d : d;
+  if (Math.abs(pageWheel.acc) < 40 && e.deltaMode === 0) return;
+  goToPage(gridPage + Math.sign(pageWheel.acc));
+  pageWheel = { acc: 0, lock: Date.now() + 350 };
+}, { passive: false });
 function markSel() {
-  const buttons = [...$("grid").querySelectorAll(":scope > button")];
+  const buttons = [...$("grid").querySelectorAll("button.tile")];
   buttons.forEach((b, i) => b.classList.toggle("sel", i === gridSel && (searching || keyNav)));
-  buttons[gridSel]?.scrollIntoView({ block: "nearest" });
+  if (searching) buttons[gridSel]?.scrollIntoView({ block: "nearest" });
+  else if (keyNav && Math.floor(gridSel / gridShape.per) !== gridPage) goToPage(Math.floor(gridSel / gridShape.per));
 }
 let keyNav = false;
 $("search").addEventListener("input", () => {
@@ -1789,7 +2032,7 @@ $("search").addEventListener("input", () => {
 });
 $("search").addEventListener("keydown", (e) => {
   const n = gridList.length;
-  const cols = Math.max(1, Math.floor($("grid").clientWidth / 132));
+  const cols = searching ? Math.max(1, Math.floor(($("grid").querySelector(".results")?.clientWidth ?? 0) / 132)) : gridShape.cols;
   const move = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols, Tab: e.shiftKey ? -1 : 1 }[e.key];
   if (move && (searching || overviewTarget === 2) && n) {
     e.preventDefault();
@@ -2207,6 +2450,7 @@ addEventListener("blur", () => { superTap.down = false; if (switcher) commitSwit
 document.addEventListener("visibilitychange", () => {
   superTap.down = false;
   if (document.visibilityState === "visible" && !overview()) { sync(); const it = items.get(focused); if (it && it.ws === curWs().id && !it.hidden) giveKeyboard(it); else focusTop(); }
+  shotTick();
 });
 
 // Super+D: everything on this workspace minimized, and back.
@@ -2381,7 +2625,7 @@ const SETTINGS_INDEX = [
 ].map((p) => ({ ...p, detail: "Settings" }));
 
 // For poking at it from DevTools.
-globalThis.gnome = { get shell() { return shell; }, get dateMenu() { return dateMenu; }, items, get workspaces() { return workspaces; }, get cur() { return cur; }, prefs: () => prefs };
+globalThis.gnome = { get shell() { return shell; }, get dateMenu() { return dateMenu; }, items, get workspaces() { return workspaces; }, get cur() { return cur; }, prefs: () => prefs, takeShot };
 if (shell) {
   shell.addEventListener("touchpadswipe", (e) => {
     const { phase, fingers, dx = 0, dy = 0 } = e.detail ?? {};
@@ -2414,10 +2658,11 @@ if (shell) {
   });
   shell.apps().then((list) => {
     apps = list;
+    appsVersion++;
+    renderGrid();
     favorites ??= defaultFavorites();
     dashSig = "";
     render();
-    if (overviewTarget === 2 || searching) renderGrid();
   }).catch(() => { favorites ??= [WEB, AGENT]; render(); });
   await shell.ready;
   listed = true;
