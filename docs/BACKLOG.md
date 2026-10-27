@@ -216,10 +216,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `preview_status`: `visible:false`). Only a recording the user starts in
   the panel embeds a tab nobody looks at, and counts as `visible` while it
   runs.
-- [ ] **A path drag on a hidden tab times out.** S · On a tab no page shows
+- [x] **A path drag on a hidden tab times out.** S · On a tab no page shows
   (`preview_open {open:false}`), `preview_drag` with a path timed out after
   15 s while `preview_press` and `preview_click` worked; the same drag on
-  the tab shown worked (X11 test session, 2026-10-26).
+  the tab shown worked (X11 test session, 2026-10-26). Done 2026-10-27: T3
+  waits for each 8 px move to reach the page, which takes the tab's next
+  frame, and a hidden tab hardly draws (5 s a move here). The helper keeps a
+  server tab awake from its first `Input.*` until 60 s without one, as the
+  agents' relay does (`AGENT_CONTROL.md`, "Tabs").
 - [x] **`preview_press` and `preview_drag` say nothing back.** S · They
   return `done` ("Pressed Tab.").
 - [x] **Calc test runs start in crash recovery.** S · `run.sh` kills the
@@ -513,20 +517,22 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `~/Downloads/<thread>/`.
   `list_downloads` for agents. (Done 2026-10-23, patch "downloads for the
   shells' tabs"; `TAB_FEATURES.md`, "Downloads".)
-- [ ] **Playwright's download events in the relays.** S–M · Pass
+- [x] **Playwright's download events in the relays.** S–M · Pass
   `Browser.downloadWillBegin` and `downloadProgress` for a relayed tab's
   downloads (from `Plutonium.downloadAdded/Changed`), and link the finished
   file where `setDownloadBehavior` asked for it (`<downloadPath>/<guid>`), so
-  `waitForEvent("download")` and `download.path()` work.
+  `waitForEvent("download")` and `download.path()` work. Done 2026-10-27
+  (`helper/src/relayDownloads.ts`; `TAB_FEATURES.md`, "Downloads", "Agents").
 - [x] **Find in page.** S–M · `FindTabHelper`, `findrequest`, `find`,
   `stopFind`, `findresult`, and the library's find bar.
 - [x] **Printing from tabs.** M–L · `PrintViewManager`, `printrequest`,
   `printToPdf` for the shell's preview, host printers and jobs through the
   helper (CUPS); agents may print. Chrome's preview over the shell's window as the fallback.
   Done 2026-10-24 (`TAB_FEATURES.md`, "Printing", "As built").
-- [ ] **Printing: Save as PDF through the file picker.** S · The print
+- [x] **Printing: Save as PDF through the file picker.** S · The print
   dialog still has a path field (`~/Downloads/<title>.pdf`); the picker now
-  exists (`fileChooser`, `save` mode).
+  exists (`fileChooser`, `save` mode). Done 2026-10-27 (`TAB_FEATURES.md`,
+  "Printing", "As built", "Library").
 - [ ] **T3 Code's agents get the tab tools.** S–M · T3 gives its agents only
   the helper's window tools (`WINDOW_TOOLS`), so `print_tab`, `choose_files`,
   `answer_permission`, `request_permission`, `list_downloads` and

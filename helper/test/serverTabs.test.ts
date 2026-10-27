@@ -152,3 +152,109 @@ test("a tab a page brought from elsewhere replaces the one the helper opened, wh
   // Not another page's, though.
   assert.equal(tabs.attach(key, info("other", 9), () => true, true), 6);
 });
+
+/** FakeCdp whose events the test sends. */
+class EventCdp extends FakeCdp {
+  private listener: ((event: { method: string; params: unknown; sessionId?: string }) => void) | null = null;
+  override addEventListener(listener?: (event: { method: string; params: unknown }) => void): void {
+    this.listener = listener ?? null;
+  }
+  fire(method: string, params: unknown): void {
+    this.listener?.({ method, params });
+  }
+}
+
+describe("the relay's downloads", () => {
+  const key = { threadId: "thread-1", tabId: "tab-1" };
+  const relayed = () => {
+    const cdp = new EventCdp();
+    const tabs = new ServerTabs(cdp as unknown as BrowserCdp);
+    const socket = new FakeSocket();
+    tabs.serve(socket as unknown as Socket);
+    tabs.attach(key, { targetId: "shown", browserTabId: 2, page: "shell", url: () => "", title: () => "" }, () => true);
+    let id = 0;
+    const command = (method: string, params: Record<string, unknown> = {}) =>
+      socket.command({ type: "cdp", ...key, message: JSON.stringify({ id: ++id, method, params }) });
+    const messages = () =>
+      socket.events
+        .filter((event) => event["type"] === "cdp")
+        .map((event) => JSON.parse(String(event["message"])) as Record<string, unknown>);
+    const download = (method: string, fields: Record<string, unknown>) =>
+      cdp.fire(method, {
+        downloadJson: JSON.stringify({ id: 5, tabId: 2, url: "http://x/a.txt", filename: "", path: "", receivedBytes: 0, totalBytes: 3, state: "in-progress", ...fields }),
+      });
+    return { cdp, tabs, command, messages, download };
+  };
+
+  test("Playwright's events for the tab's download, and the file linked where it asked", async () => {
+    const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const folder = await mkdtemp(join(tmpdir(), "relay-downloads-"));
+    const file = join(folder, "a.txt");
+    await writeFile(file, "abc");
+    const { command, messages, download } = relayed();
+    command("Target.setAutoAttach", { autoAttach: true });
+    command("Browser.setDownloadBehavior", {
+      behavior: "allowAndName",
+      downloadPath: join(folder, "artifacts"),
+      eventsEnabled: true,
+    });
+    await settle();
+    download("Plutonium.downloadAdded", {});
+    // Another tab's: nothing.
+    download("Plutonium.downloadAdded", { id: 6, tabId: 1, filename: "b.txt" });
+    download("Plutonium.downloadChanged", { filename: "a.txt", path: file, receivedBytes: 1 });
+    download("Plutonium.downloadChanged", { filename: "a.txt", path: file, receivedBytes: 3, state: "complete" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const events = messages().filter((message) => String(message["method"]).startsWith("Browser.download"));
+    const guid = (events[0]?.["params"] as { guid: string }).guid;
+    assert.deepEqual(events, [
+      { method: "Browser.downloadWillBegin", params: { frameId: "shown", guid, url: "http://x/a.txt", suggestedFilename: "a.txt" } },
+      { method: "Browser.downloadProgress", params: { guid, totalBytes: 3, receivedBytes: 1, state: "inProgress" } },
+      { method: "Browser.downloadProgress", params: { guid, totalBytes: 3, receivedBytes: 3, state: "completed" } },
+    ]);
+    assert.equal(await readFile(join(folder, "artifacts", guid), "utf8"), "abc");
+  });
+
+  test("no events unless asked; cancelDownload cancels it in the browser", async () => {
+    const { cdp, command, messages, download } = relayed();
+    command("Target.setAutoAttach", { autoAttach: true });
+    await settle();
+    download("Plutonium.downloadAdded", { filename: "a.txt" });
+    await settle();
+    assert.equal(messages().filter((message) => message["method"] === "Browser.downloadWillBegin").length, 0);
+    command("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: "/tmp/x", eventsEnabled: true });
+    await settle();
+    download("Plutonium.downloadAdded", { id: 7, filename: "a.txt" });
+    await settle();
+    const begun = messages().find((message) => message["method"] === "Browser.downloadWillBegin");
+    command("Browser.cancelDownload", { guid: (begun?.["params"] as { guid: string }).guid });
+    await settle();
+    assert.deepEqual(cdp.sent.at(-1), { method: "Plutonium.downloadCommand", params: { id: 7, command: "cancel" } });
+  });
+});
+
+test("the server's input keeps a tab no page shows drawing, until it is let go", async () => {
+  const cdp = new FakeCdp();
+  const tabs = new ServerTabs(cdp as unknown as BrowserCdp);
+  const awake: Array<[number, boolean]> = [];
+  tabs.keepAwake = async (id, value) => void awake.push([id, value]);
+  const socket = new FakeSocket();
+  tabs.serve(socket as unknown as Socket);
+  const key = { threadId: "t", tabId: "a" };
+  tabs.attach(key, { targetId: "shown", browserTabId: 2, page: "shell", url: () => "", title: () => "" }, () => true);
+  const send = (id: number, method: string) =>
+    socket.command({ type: "cdp", ...key, message: JSON.stringify({ id, method, sessionId: "plutonium-tab-page" }) });
+  send(1, "Runtime.evaluate");
+  await settle();
+  assert.deepEqual(awake, []);
+  send(2, "Input.dispatchMouseEvent");
+  send(3, "Input.dispatchMouseEvent");
+  await settle();
+  assert.deepEqual(awake, [[2, true]]);
+  // The move went to the page after it woke.
+  assert.ok(cdp.methods().includes("Input.dispatchMouseEvent"));
+  tabs.detach(key);
+  assert.deepEqual(awake, [[2, true], [2, false]]);
+});

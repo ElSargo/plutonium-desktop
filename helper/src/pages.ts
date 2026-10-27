@@ -13,6 +13,7 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 
 import type { BrowserCdp, CdpEvent } from "./cdp.ts";
 import type { Desktop, DesktopTab } from "./desktop.ts";
+import { RelayDownloads } from "./relayDownloads.ts";
 import { listenWebSocket, type WebSocketConnection, type WebSocketEndpoint } from "./websocket.ts";
 
 const BROWSER_CONTEXT_ID = "plutonium-thread";
@@ -28,8 +29,6 @@ const ACKNOWLEDGED = new Set([
   // Revoking is the user's: Playwright resets a context's permissions as it
   // closes, and the thread's grants outlive the connection.
   "Browser.resetPermissions",
-  "Browser.cancelDownload",
-  "Browser.setDownloadBehavior",
   "Browser.close",
 ]);
 
@@ -98,6 +97,8 @@ class ThreadRelay {
   private autoAttach = false;
   private readonly pages = new Map<string, RelayPage>();
   private readonly browserSessions = new Set<string>();
+  /** The connection's downloads, for Playwright's download events. */
+  private downloads: RelayDownloads | null = null;
   /** The last grantPermissions the user refused, and when (see grantPermissions()). */
   private refused: { key: string; at: number } | null = null;
   private sequence = 0;
@@ -246,6 +247,13 @@ class ThreadRelay {
       }
       case "Browser.grantPermissions":
         return this.grantPermissions(params);
+      // Downloads go where the user's do; Playwright gets the events and a link (relayDownloads.ts).
+      case "Browser.setDownloadBehavior":
+        this.downloads?.setBehavior(params);
+        return {};
+      case "Browser.cancelDownload":
+        await this.downloads?.cancel(params);
+        return {};
       case "Target.closeTarget": {
         const tab = this.threadTabs().find((entry) => entry.targetId === params.targetId);
         if (!tab) return { success: false };
@@ -340,7 +348,9 @@ class ThreadRelay {
   }
 
   /** An event from the real browser: the page's or its children's go to Playwright. */
-  browserEvent({ method, params, sessionId }: CdpEvent): void {
+  browserEvent(event: CdpEvent): void {
+    const { method, params, sessionId } = event;
+    if (this.connection) this.downloads?.browserEvent(event);
     if (!sessionId || !this.connection) {
       // A real session ended from the browser's side (the tab closed or crashed).
       if (method === "Target.detachedFromTarget") {
@@ -363,10 +373,16 @@ class ThreadRelay {
 
   connected(connection: WebSocketConnection): void {
     this.connection = connection;
+    this.downloads = new RelayDownloads(
+      (method, params) => this.send({ method, params }),
+      (tabId) => [...this.pages.values()].find((page) => page.tabId === tabId && page.sessions.size)?.targetId,
+      (id) => this.desktop.downloadCommand(id, "cancel"),
+    );
   }
 
   disconnected(): void {
     this.connection = null;
+    this.downloads = null;
     this.autoAttach = false;
     for (const page of this.pages.values()) this.releaseReal(page);
     this.pages.clear();

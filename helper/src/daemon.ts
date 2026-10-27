@@ -519,6 +519,8 @@ export class Daemon {
           ? this.relay.notifyAll("pointer", { ...pointer })
           : this.relay.notify(page, "pointer", { ...pointer });
       serverTabs.onOrphaned = (key) => this.relay.notifyAll("server_tab_orphaned", { ...key });
+      const desktop = this.desktop;
+      if (desktop) serverTabs.keepAwake = (browserTabId, awake) => desktop.setTabAwake(browserTabId, awake);
       if (this.desktop) this.openServerTabs(serverTabs, this.desktop);
     }
     {

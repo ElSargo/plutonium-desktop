@@ -2103,14 +2103,16 @@ PlutoniumShell.prototype.printPdf = async function (pdf, options = {}) {
 
 /**
  * Saves `pdf` on the host: at `path` (absolute or "~/..."), else in ~/Downloads, named
- * after `title`. An existing file isn't overwritten: the name gets " (1)", " (2)", ...
+ * after `title`. An existing file isn't overwritten unless `overwrite` (the dialog's
+ * file picker asked): the name gets " (1)", " (2)", ...
  * @param {Blob} pdf
  * @returns {Promise<{ path: string }>}
  */
-PlutoniumShell.prototype.savePdf = async function (pdf, { path = "", title = "" } = {}) {
+PlutoniumShell.prototype.savePdf = async function (pdf, { path = "", title = "", overwrite = false } = {}) {
   const query = new URLSearchParams();
   if (path) query.set("path", path);
   if (title) query.set("title", title);
+  if (overwrite) query.set("overwrite", "1");
   const response = await fetch(`${HELPER}/v1/print/save?${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/pdf" },
@@ -2192,7 +2194,6 @@ class PrintDialog {
         <h2>Print</h2>
         <div class="pages"></div>
         <label class="field">Destination <select name="destination"><option value="">Save as PDF</option></select></label>
-        <label class="field" data-for="pdf">Save to <input name="path" spellcheck="false"></label>
         <label class="field">Pages <select name="pages"><option value="all">All</option><option value="custom">Custom</option></select></label>
         <label class="field" hidden data-for="custom">Ranges <input name="ranges" placeholder="1-3, 5" spellcheck="false"></label>
         <label class="field" data-for="printer">Copies <input name="copies" type="number" min="1" max="999" value="1"></label>
@@ -2215,7 +2216,7 @@ class PrintDialog {
     this.note = element.querySelector(".note");
     this.status = element.querySelector(".status");
     this.form.paper.value = us ? "letter" : "a4";
-    this.form.path.value = `~/Downloads/${fileNameOf(this.title)}`;
+    this.defaultPdfPath = `~/Downloads/${fileNameOf(this.title)}`;
     if (this.app) {
       // The app lays out its pages: only what it asks of the printer, and its paper.
       element.classList.add("app");
@@ -2266,7 +2267,7 @@ class PrintDialog {
     try {
       const { available, printers, error, defaultPdfPath } = await this.shell.printers(this.title);
       if (this.closed) return;
-      if (defaultPdfPath && !this._pathEdited) this.form.path.value = defaultPdfPath;
+      if (defaultPdfPath) this.defaultPdfPath = defaultPdfPath;
       const select = this.form.destination;
       for (const printer of printers) {
         const option = document.createElement("option");
@@ -2286,12 +2287,11 @@ class PrintDialog {
   }
 
   _changed(target) {
-    if (target === this.form.path) this._pathEdited = true;
     if (target === this.form.destination) return this._showDestination();
     if (target === this.form.pages) {
       this.form.querySelector('[data-for="custom"]').hidden = this.form.pages.value !== "custom";
     }
-    if (["copies", "duplex", "color", "path"].includes(target.name) || this.app) return;
+    if (["copies", "duplex", "color"].includes(target.name) || this.app) return;
     clearTimeout(this._timer);
     this._timer = setTimeout(() => this._render(), 300);
   }
@@ -2299,8 +2299,7 @@ class PrintDialog {
   _showDestination() {
     const printing = !!this.form.destination.value;
     for (const field of this.form.querySelectorAll('[data-for="printer"]')) field.hidden = !printing;
-    this.form.querySelector('[data-for="pdf"]').hidden = printing;
-    this.form.go.textContent = printing ? "Print" : "Save";
+    this.form.go.textContent = printing ? "Print" : "Save…";
   }
 
   /** @returns {PdfOptions} */
@@ -2370,8 +2369,17 @@ class PrintDialog {
     this.form.go.disabled = true;
     const printer = this.form.destination.value;
     this._error("");
+    // Save as PDF: where, from the file picker first.
+    const path = printer ? "" : await this._choosePdfPath();
+    if (this.closed) return;
+    if (!printer && !path) {
+      this.busy = false;
+      this.form.go.disabled = false;
+      this.form.go.focus({ preventScroll: true });
+      return;
+    }
     this.status.textContent = printer ? "Printing…" : "Saving…";
-    if (this.app) return this._answerApp(printer);
+    if (this.app) return this._answerApp(printer, path);
     try {
       const pdf = await this._pdfNow();
       let message;
@@ -2386,8 +2394,9 @@ class PrintDialog {
         });
         message = `Sent to ${this.form.destination.selectedOptions[0]?.textContent ?? printer}`;
       } else {
-        const { path } = await this.shell.savePdf(pdf, { path: this.form.path.value.trim(), title: this.title });
-        message = `Saved ${path}`;
+        // The picker asked before replacing a file.
+        const saved = await this.shell.savePdf(pdf, { path, title: this.title, overwrite: true });
+        message = `Saved ${saved.path}`;
       }
       const tabId = this.request.tabId;
       await this.request.answer("done");
@@ -2403,7 +2412,7 @@ class PrintDialog {
 
   // An app's dialog answers the settings; the app then sends the document, which the
   // helper prints or saves.
-  async _answerApp(printer) {
+  async _answerApp(printer, path) {
     const form = this.form;
     const ranges = form.pages.value === "custom" ? form.ranges.value.trim() : "";
     if (ranges && !/^\s*\d+(\s*-\s*\d+)?(\s*,\s*\d+(\s*-\s*\d+)?)*\s*$/.test(ranges)) {
@@ -2415,7 +2424,7 @@ class PrintDialog {
     const copies = Math.floor(Number(form.copies.value));
     await this.request.answer({
       printer,
-      path: printer ? undefined : form.path.value.trim(),
+      path: printer ? undefined : path,
       copies: copies >= 1 ? copies : 1,
       duplex: form.duplex.value,
       color: form.color.value === "1",
@@ -2424,6 +2433,41 @@ class PrintDialog {
       pageRanges: ranges,
     });
     this.close();
+  }
+
+  // Save as PDF's file: the library's file picker in save mode, over the tab (or app)
+  // as this dialog is, starting where the last PDF went (else ~/Downloads) with the
+  // page's title. Resolves to the path, or "" if cancelled.
+  _choosePdfPath() {
+    const fallback = this.defaultPdfPath;
+    const slash = fallback.lastIndexOf("/");
+    return new Promise((resolve) => {
+      const controller = new AbortController();
+      const picker = new FileChooser(this.shell, {
+        kind: "fileChooser",
+        tabId: this.request.tabId,
+        tab: this.request.tab,
+        source: this.request.source,
+        detail: {
+          mode: "save",
+          title: "Save as PDF",
+          origin: this.title,
+          currentName: fallback.slice(slash + 1),
+          currentFolder: this.shell._lastPdfFolder || fallback.slice(0, slash),
+          filters: [{ name: "PDF", patterns: ["*.pdf"], mimeTypes: ["application/pdf"] }],
+        },
+        signal: controller.signal,
+        answer: async (answer) => {
+          const chosen = answer?.paths?.[0] ?? "";
+          if (chosen) this.shell._lastPdfFolder = chosen.slice(0, chosen.lastIndexOf("/")) || "/";
+          this._picker = null;
+          resolve(chosen);
+          return true;
+        },
+      });
+      this._picker = { controller, resolve };
+      picker.open();
+    });
   }
 
   cancel() {
@@ -2435,6 +2479,11 @@ class PrintDialog {
   close() {
     if (this.closed) return;
     this.closed = true;
+    if (this._picker) {
+      this._picker.controller.abort();
+      this._picker.resolve("");
+      this._picker = null;
+    }
     clearTimeout(this._timer);
     window.removeEventListener("resize", this._onResize);
     this.element.remove();

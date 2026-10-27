@@ -39,6 +39,7 @@ import type { Socket } from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
 import { type BrowserCdp, type CdpEvent } from "./cdp.ts";
+import { RelayDownloads } from "./relayDownloads.ts";
 
 export interface ServerTabKey {
   readonly threadId: string;
@@ -56,6 +57,10 @@ interface RelayTarget {
   /** Sends a command to the tab's page, or to one of its child sessions (iframes, workers). */
   readonly send: (method: string, params: Record<string, unknown>, sessionId: string | undefined) => Promise<unknown>;
   readonly targetId: string;
+  /** The browser's id for the tab (-1 for a scratch page). */
+  readonly browserTabId: number;
+  /** Cancels download `id` in the browser. */
+  readonly cancelDownload: (id: number) => Promise<void>;
   readonly url: () => string;
   readonly title: () => string;
   readonly version: () => Promise<Record<string, unknown>>;
@@ -68,6 +73,8 @@ interface RelayConnection {
   readonly receive: (raw: string) => void;
   /** One event from the page (`sessionId` undefined) or a child session. */
   readonly event: (method: string, params: unknown, sessionId: string | undefined) => void;
+  /** Every event of the real browser's own connection (the downloads come from there). */
+  readonly browserEvent: (event: CdpEvent) => void;
 }
 
 interface CdpCommand {
@@ -97,10 +104,6 @@ const ACKNOWLEDGED = new Set([
   "Target.setDiscoverTargets",
   "Browser.grantPermissions",
   "Browser.resetPermissions",
-  "Browser.cancelDownload",
-  // Downloads go where the user's do: the browser's download behaviour is
-  // the whole browser's, not this tab's.
-  "Browser.setDownloadBehavior",
 ]);
 
 function createRelay(target: RelayTarget, write: (message: string) => void): RelayConnection {
@@ -115,6 +118,14 @@ function createRelay(target: RelayTarget, write: (message: string) => void): Rel
     sessions.set(sessionId, kind);
     return sessionId;
   };
+  // Downloads go where the user's do: the browser's download behaviour is
+  // the whole browser's, not this tab's. The server gets Playwright's events
+  // for this tab's, and a link where it asked (relayDownloads.ts).
+  const downloads = new RelayDownloads(
+    (method, params) => attached && send({ method, params }),
+    (tabId) => (attached && tabId === target.browserTabId && tabId >= 0 ? target.targetId : undefined),
+    target.cancelDownload,
+  );
   const targetInfo = () => ({
     targetId: target.targetId,
     type: "page",
@@ -130,6 +141,12 @@ function createRelay(target: RelayTarget, write: (message: string) => void): Rel
     switch (command.method) {
       case "Browser.getVersion":
         return target.version();
+      case "Browser.setDownloadBehavior":
+        downloads.setBehavior(command.params ?? {});
+        return {};
+      case "Browser.cancelDownload":
+        await downloads.cancel(command.params ?? {});
+        return {};
       // Plutonium's own: only this tab, so the server can tell whether it is on screen.
       case "Plutonium.getTabs":
         return { tabs: [await target.tab()] };
@@ -220,6 +237,7 @@ function createRelay(target: RelayTarget, write: (message: string) => void): Rel
       }
       for (const [id, kind] of sessions) if (kind === "page") send({ method, params, sessionId: id });
     },
+    browserEvent: (event) => downloads.browserEvent(event),
   };
 }
 
@@ -246,7 +264,12 @@ interface AttachedTab {
   sessionId: string | null;
   /** Its child sessions (frames, workers), by real session id. */
   readonly children: Set<string>;
+  /** While the server's input keeps the tab drawing (keepAwake): the timer that lets it sleep. */
+  awake: ReturnType<typeof setTimeout> | null;
 }
+
+/** How long a tab the server sent input to stays at full frame rate. */
+const AWAKE_MS = 60_000;
 
 export interface Pointer extends ServerTabKey {
   readonly phase: "move" | "click";
@@ -268,6 +291,8 @@ export class ServerTabs {
   onOpen: (key: ServerTabKey, tag: string, incognito: boolean) => void = () => {};
   /** The server's tab `key` closed; it was the helper's (HELPER_PAGE). */
   onClose: (key: ServerTabKey, browserTabId: number) => void = () => {};
+  /** Keeps browser tab `browserTabId` drawing at full rate while no page shows it (Desktop.setTabAwake). */
+  keepAwake: (browserTabId: number, awake: boolean) => Promise<void> = async () => {};
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -309,7 +334,15 @@ export class ServerTabs {
     }
     if (current) this.detach(key);
     if (current && replace && helpers) this.onClose(key, current.info.browserTabId);
-    this.tabs.set(keyOf(key), { key, info, relay: null, session: null, sessionId: null, children: new Set() });
+    this.tabs.set(keyOf(key), {
+      key,
+      info,
+      relay: null,
+      session: null,
+      sessionId: null,
+      children: new Set(),
+      awake: null,
+    });
     this.emit({ type: "attached", ...key });
     return info.browserTabId;
   }
@@ -345,6 +378,7 @@ export class ServerTabs {
 
   /** Lets go of the real session; the next server connection starts afresh. */
   private release(tab: AttachedTab): void {
+    this.sleep(tab);
     tab.relay = null;
     const session = tab.session;
     tab.session = null;
@@ -374,15 +408,42 @@ export class ServerTabs {
     return session;
   }
 
+  /**
+   * The server's input reaches a page with its next frame, and a tab no page
+   * shows draws one a second: a path drag's moves (one per 8 px) took a
+   * second each. From the first input until AWAKE_MS without any, the tab
+   * draws at full rate.
+   */
+  private async wake(tab: AttachedTab): Promise<void> {
+    if (tab.info.browserTabId < 0) return;
+    const asleep = tab.awake === null;
+    if (tab.awake) clearTimeout(tab.awake);
+    tab.awake = setTimeout(() => this.sleep(tab), AWAKE_MS);
+    tab.awake.unref();
+    if (asleep) await this.keepAwake(tab.info.browserTabId, true).catch(() => {});
+  }
+
+  private sleep(tab: AttachedTab): void {
+    if (tab.awake === null) return;
+    clearTimeout(tab.awake);
+    tab.awake = null;
+    void this.keepAwake(tab.info.browserTabId, false).catch(() => {});
+  }
+
   private relayFor(tab: AttachedTab): RelayConnection {
     if (tab.relay) return tab.relay;
     const relay = createRelay(
       {
         send: async (method, params, child) => {
           if (child !== undefined && !tab.children.has(child)) throw new Error(`No session ${child} in this tab.`);
+          if (child === undefined && method.startsWith("Input.")) await this.wake(tab);
           return this.cdp.send(method, params, child ?? (await this.pageSession(tab)));
         },
         targetId: tab.info.targetId,
+        browserTabId: tab.info.browserTabId,
+        cancelDownload: async (id) => {
+          await this.cdp.send("Plutonium.downloadCommand", { id, command: "cancel" });
+        },
         url: () => tab.info.url(),
         title: () => tab.info.title(),
         tab: async () => {
@@ -412,7 +473,9 @@ export class ServerTabs {
     return relay;
   }
 
-  private browserEvent({ method, params, sessionId }: CdpEvent): void {
+  private browserEvent(event: CdpEvent): void {
+    const { method, params, sessionId } = event;
+    for (const tab of this.tabs.values()) tab.relay?.browserEvent(event);
     if (!sessionId) {
       // A page session ended from the browser's side (the tab crashed or closed).
       if (method === "Target.detachedFromTarget") {
