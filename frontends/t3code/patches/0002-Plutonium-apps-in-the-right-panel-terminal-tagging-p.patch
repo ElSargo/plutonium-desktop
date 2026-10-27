@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 08:38:42 +1300
-Subject: [PATCH 02/32] Plutonium: apps in the right panel, terminal tagging,
+Subject: [PATCH 02/33] Plutonium: apps in the right panel, terminal tagging,
  pop out
 
 Thread terminals are tagged like agents, so GUI apps started there belong to the thread. Native windows move from the sidebar into the right panel: an Apps surface lists them and each opens as a tab, with a button that pops it out to the desktop.

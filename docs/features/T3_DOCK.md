@@ -64,10 +64,10 @@ They are all T3 keybinding commands, so `keybindings.json` can change them. They
 
 ## The dock in the sidebar
 
-A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, a globe for a site) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
+A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, the site's own icon: an open tab's, then the one T3 remembers, then the site's `/favicon.ico`; no third-party icon service) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
 
 - **Click:** what Super+N does. Clicking the one that shows goes back, or puts it away (panel hidden, drawer closed) when there's nowhere remembered to go back to. The click doesn't take the keyboard.
-- **Right click:** put the panel's tab or the terminal there; keep an app in each thread, each project or everywhere; beside the chat or fold the chat away; clear.
+- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (an address and the prefix its tabs start with), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere: apps only); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
 - **Panel tabs** in the dock show their slot's number.
 
 ChatView publishes the active thread's context (`publishDockContext`) for the sidebar, which is outside it.
