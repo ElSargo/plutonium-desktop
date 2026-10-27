@@ -61,7 +61,7 @@ The URL Chrome shows at the bottom left when the pointer is over a link is off i
 
 ## Fullscreen
 
-The shell window is always fullscreen, as a kiosk app is: it can't leave fullscreen, shows no exit instructions or exit button, and has no immersive top-edge reveal. Only the shells' own windows are held so. Other browser windows in shell mode (the backup browser, a popup, an app window) enter and leave fullscreen as usual, with Chrome's exit bubble.
+The shell window is always fullscreen, as a kiosk app is: it can't leave fullscreen, shows no exit instructions or exit button, and has no immersive top-edge reveal. Only the shells' own windows are held so. Other browser windows in shell mode (the backup browser, a popup, an app window) enter and leave fullscreen as usual (checked on X11: a page's own fullscreen in another window, and DevTools' window state). Chrome's exit bubble didn't show for such a window on X11; it isn't clear yet whether that's Xvfb's or shell mode's.
 
 ## Verified
 
