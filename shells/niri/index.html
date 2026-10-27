@@ -30,7 +30,7 @@
     browser doesn't pass swipes on. Four fingers open and close the overview. Super+middle-drag, and a
     drag on a workspace in the overview, drag the view the same way.
   - The bar's minimap (minimap.js) shows the workspaces and the focused
-    one's columns, with app icons.
+    one's columns, with app icons, and follows swipes 1:1.
   - Super+Shift+/ lists the binds (also shown at startup).
 
   Windows and tabs are the shell's when tagged niri:desktop: everything
@@ -267,8 +267,10 @@ const MIN = 60;
 const W = () => innerWidth;
 // The bar's height (bar.js): the layout is what's under it.
 let barHeight = 0;
-// The bar's minimap (minimap.js): { update() }, once it's there.
+// The bar's minimap (minimap.js): { update(), move() }, once it's there.
 let minimap = null;
+// A frame of a swipe or its settling: only the view moved (see renderMotion()).
+let motionFrame = false;
 const H = () => innerHeight - barHeight;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const focusColor = CONFIG.border.on ? CONFIG.border.active : CONFIG.focusRing.active;
@@ -806,8 +808,15 @@ function render() {
     ? "This page is not the Plutonium shell (no window broker)."
     : `Workspace ${layout.cur + 1} · Super+T terminal · Super+D run · Super+Shift+/ hotkeys`;
   syncKeyboard();
+  // A swipe's frames: the minimap only moves, and the layout is saved once it ends.
+  if (motionFrame) { minimap?.move(); return; }
   save();
   minimap?.update();
+}
+// render() for a frame where only the views moved (a swipe, its settling).
+function renderMotion() {
+  motionFrame = true;
+  try { render(); } finally { motionFrame = false; }
 }
 
 // A tab's page dialog (alert, confirm, prompt), drawn over its tile.
@@ -1781,7 +1790,7 @@ function gestureUpdate(dx, dy) {
     const over = gs.rawY > max ? gs.rawY - max : gs.rawY < min ? gs.rawY - min : 0;
     gestureY = clamp(gs.rawY, min, max) + over / (1 + Math.abs(over) / 100);
   }
-  render();
+  renderMotion();
 }
 // Ends the swipe (or drag): snaps. False if it never moved (a click).
 function gestureEnd() {
@@ -1838,7 +1847,7 @@ function settle(from, to, v, set, get) {
     const x = (x0 + (v + w * x0) * t) * Math.exp(-w * t);
     if (t > 50 && Math.abs(x) < 0.5) return stopSettle(true);
     set(to + x);
-    render();
+    renderMotion();
     s.frame = requestAnimationFrame(step);
   };
   s.frame = requestAnimationFrame(step);
@@ -2307,12 +2316,15 @@ try {
       bar.left.append(slot);
       minimap = mountMinimap(shell, slot, {
         workspaces: () => layout.workspaces.map((ws, wi) => ({
-          id: ws.id, index: wi, current: wi === layout.cur, empty: isEmpty(ws), viewX: Math.round(ws.viewX),
+          id: ws.id, index: wi, current: wi === layout.cur, empty: isEmpty(ws),
           columns: ws.columns.map((col, ci) => ({ x: colX(ws, ci), w: colWidth(col), tabbed: col.tabbed, active: col.active, items: [...col.items] })),
           floating: ws.floating.map((f) => f.key),
         })),
         focused: () => focusedKey(),
         screen: () => ({ width: W(), height: H(), gap: g }),
+        // Cheap, for every frame of a swipe: the workspace on screen (between
+        // two mid-swipe) and each workspace's view.
+        position: () => ({ ws: layout.cur - gestureY / wsSpacing(), views: layout.workspaces.map((ws) => ws.viewX) }),
         focus: (key) => { overview = false; updateShortcuts(); focusItem(key); refocus(); commit(); },
         focusWorkspace: (i) => { actions.focusWorkspace(i); commit(); },
         focusColumn: (d) => { actions.focusColumn(d); commit(); },
