@@ -362,12 +362,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   message center's web notifications; the helper's notifications service
   shows them (the site as app), a click runs the page's handler and shows its
   tab.
-- [ ] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
+- [x] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
   page's media session on D-Bus for media keys and desktop widgets; ours go
-  to Ash's media controls.
-- [ ] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
+  to Ash's media controls. Done 2026-10-28 (`LINUX_COMPAT.md`, patch 0083):
+  `use_mpris` on for ChromeOS; the helper skips that player.
+- [x] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
   empty (ChromeOS's voices are TTS extensions); Linux Chromium uses
-  speech-dispatcher.
+  speech-dispatcher. Done 2026-10-28 (`LINUX_COMPAT.md`, patch 0084):
+  `tts_linux.cc` on ChromeOS, `--enable-speech-dispatcher` when the host has
+  its socket.
 - [x] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
   setting, not the desktop's (the portal's `color-scheme`). Done 2026-10-27
   (`LINUX_COMPAT.md`): the portal's setting, else GNOME's dconf key, watched
@@ -787,7 +790,7 @@ shell find it.
   indicators in niri and plain.
 - [x] **Media.** S · MPRIS players (now playing, play/pause, next), and the
   media keys. Done 2026-10-26: `services/media.ts`; the browser's own media
-  session through the Plutonium domain (no MPRIS in a ChromeOS build). Not
+  session through the Plutonium domain (it's on MPRIS too since 0083). Not
   yet: a tab's artwork, seeking.
 - [x] **Notifications.** Done 2026-10-26: the helper as
   `org.freedesktop.Notifications`, `shell.system.notifications`, the

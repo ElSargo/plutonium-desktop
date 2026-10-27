@@ -207,12 +207,14 @@ What's playing, and play/pause, next and previous.
 - **Host:** MPRIS on the session bus (mpv with its mpris script, Spotify,
   Firefox, VLC, …), watched through `NameOwnerChanged` and
   `PropertiesChanged`; `playerctld` is left out (it mirrors another player).
-  **The browser's tabs:** Plutonium's Chromium is a ChromeOS build, which has
-  no MPRIS. Its active media session (a tab or a shell page playing) comes
-  through the Plutonium DevTools domain instead (`getMediaSession`,
+  **The browser's tabs:** its active media session (a tab or a shell page
+  playing) comes through the Plutonium DevTools domain (`getMediaSession`,
   `mediaSessionAction`, the `mediaSessionChanged` event; patch "the hardware
   keys go to the helper…"), as the player `"browser"`, named after the site,
-  with `tab` the shells' tab playing. No artwork for it yet.
+  with `tab` the shells' tab playing. No artwork for it yet. The browser is
+  also on MPRIS (patch 0083, `LINUX_COMPAT.md`) for other desktops; that
+  player (`chromium.instance<pid>`, the pid from `SystemInfo.getProcessInfo`)
+  is left out here, as it's the same session.
 - **Tested:** `helper/test/media.test.ts` against fake players on the fake
   bus: the order, the actions, a player coming and going, the browser's
   session. On this computer: a real `mpv` (with `mpvScripts.mpris`) listed and
