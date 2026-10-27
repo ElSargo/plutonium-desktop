@@ -321,7 +321,7 @@ The doc's earlier plan had the helper move each file into place after it complet
 - `list_downloads`: the thread's downloads (its own, and those of tabs now in the thread) with their paths (`GET /v1/threads/<t>/downloads`).
 - `download_action {download_id, action}`: pause, resume, cancel, open, show, discard, remove (`POST /v1/threads/<t>/downloads/<id>/<action>`). Open and show are the helper's own. Not `keep`: a dangerous file is the user's decision. The browser refuses it from `Plutonium.downloadCommand` too (not tried: the helper refuses it first).
 - The Plutonium domain has `getDownloads`, `downloadCommand` and `downloadAdded`, `downloadChanged`, `downloadRemoved` (JSON strings, as above).
-- Not built: Playwright's download events (`Browser.downloadWillBegin`, `downloadProgress`) in the relays. It's a `BACKLOG.md` item of its own.
+- **Playwright's download events** (2026-10-27; `helper/src/relayDownloads.ts`). Both relays (the agents' `pages.ts`, the frontend server's `serverTabs.ts`) still only take note of `Browser.setDownloadBehavior`: the file goes where the user's would. With `eventsEnabled` and `allow` or `allowAndName`, a download that starts afterwards from one of the connection's pages gets `Browser.downloadWillBegin {frameId: <the page's target id>, guid, url, suggestedFilename}` once the browser knows the name, then `Browser.downloadProgress` (`inProgress`, then `completed`, or `canceled` for cancelled and interrupted), made from `Plutonium.downloadAdded/Changed`. Before `completed`, `<downloadPath>/<guid>` becomes a symlink to the file, so `waitForEvent("download")`, `download.path()` and `saveAs()` work, and `download.delete()` or Playwright's clean-up only remove the link. `Browser.cancelDownload {guid}` cancels it in the browser. Not covered: a download whose link opened a new tab (it has the new tab's id, which isn't the connection's page), downloads that began before the connection, and `deny` (the user's downloads aren't refused; no events).
 
 **Verified** (X11, container session, slot 24):
 
@@ -338,6 +338,7 @@ The doc's earlier plan had the helper move each file into place after it complet
 | An agent's tab (`open_tab` on a download URL) downloads into the thread's folder and stays open | ✓ |
 | The library's list and toast | ✓ |
 | A dangerous file's keep and discard | not tried (no file type here that Chrome's local checks flag on a user gesture) |
+| Playwright through the agents' relay (2026-10-27, X11 slot 15): `waitForEvent("download")` on a link click gives the suggested name and URL; `download.path()` reads the file through the link; `saveAs()` copies it; `cancel()` on a slow one cancels it in the browser (`failure()` "canceled"). The server's relay: unit tests (`test/serverTabs.test.ts`) | ✓ |
 
 **Container paths.** When this was tested, the container's `$HOME` was `$DATA_DIR/container-home`, so `~/Downloads` wasn't the host's and the helper couldn't open those files. The open and show test used a folder under `$DATA_DIR`. The same-path home mount (Decision 5, built with file pickers) fixes this in a recreated container; open and show on `~/Downloads` there is still to check by hand. `HOST=1` never had the problem.
 
@@ -402,7 +403,8 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `shell.printToPdf(tabId, {paper, landscape, scale, margins, background, headerFooter, pageRanges}) → Blob`. `paper` is one of `PAPER_SIZES` (letter, legal, tabloid, a3, a4, a5); `margins` is default, none or minimum; `scale` 1 is 100%.
 - `shell.printers(title?) → {available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}`.
 - `shell.printPdf(pdf, {printer, copies, duplex: "none" | "long-edge" | "short-edge", color, title}) → {job}`.
-- `shell.savePdf(pdf, {path, title}) → {path}`. It doesn't overwrite: the name gets " (1)", " (2)" and so on. The design's "Save as PDF through the file picker" isn't wired yet (a `BACKLOG.md` item; the picker exists now). The dialog has a path field, by default `~/Downloads/<title>.pdf`.
+- `shell.savePdf(pdf, {path, title, overwrite}) → {path}`. Without `overwrite` it doesn't replace a file: the name gets " (1)", " (2)" and so on.
+- **Save as PDF through the file picker** (2026-10-27). The dialog has no path field. Its button reads "Save…" and opens the library's file picker (`FileChooser`, `save` mode, titled "Save as PDF", a PDF filter) over the tab, as the dialog is, starting in the folder the last PDF went to (else `~/Downloads`, the helper's `defaultPdfPath`) with `<title>.pdf`. The picker asks before replacing a file, so the save then overwrites (`overwrite: true`). Cancelling the picker goes back to the print dialog. The Print portal's dialog for apps does the same, and answers the chosen path (not tried with an app). Closing the print dialog (the page or app went away) closes its picker. Agents' `print_tab {save_to}` is unchanged.
 - **The dialog**, over the tab's element: the PDF as its preview (Chrome's PDF viewer, in an iframe, re-made 300 ms after a setting changes), the page count, and the destination (the host's printers, or Save as PDF). Then pages (all or ranges), copies, layout, paper (Letter for en-US and similar locales, else A4), margins, scale, two-sided, colour, headers and footers, and background graphics. Escape or Cancel answers `"cancel"`. After printing or saving it answers `"done"`, and shows a toast ("Sent to …", "Saved …").
 
 **Helper** (`src/printing.ts`). It uses the host's CUPS client tools, `lpstat -l -p -d` and `lp`, so the user's default printer and server (`~/.cups/client.conf`, `$CUPS_SERVER`) apply.
@@ -416,7 +418,7 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 - `cancel_print`: answers it `"cancel"`.
 - T3 Code gives its agents only the native-window tools (`WINDOW_TOOLS`), so its agents don't get these yet.
 
-**Not built.** Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes). Saving through the file picker.
+**Not built.** Printer options beyond copies, two-sided and colour (trays, quality, a printer's own paper sizes).
 
 **Verified** on Xvfb (slot 26, the plain shell, a local test page), 2026-10-23/24, with stand-ins for `lpstat` and `lp` (this machine has no CUPS):
 
@@ -432,6 +434,7 @@ The patch "Plutonium: printing in tabs goes to the shell" (`plutonium_print.{h,c
 | An agent (`POST …/print`, A4, pages 1-2, 3 copies, short edge) while the shell's dialog was open: the job sent, a 2-page A4 PDF; the request answered, the dialog closed | ✓ |
 | MCP `list_printers`, `print_tab {save_to, landscape}` (a 5-page landscape PDF), `cancel_print` on a waiting `window.print()` | ✓ |
 | `npm test`-style `test/printing.test.ts`: lpstat parsing, lp arguments, saving without overwriting | ✓ |
+| Save as PDF through the picker (2026-10-27, X11 slot 15, the plain shell, `window.print()`): "Save…" opens the picker over the dialog ("Save as PDF", the title as the name with its stem selected, the PDF filter, `~/Downloads`); its Cancel goes back to the dialog; Save in another folder writes the PDF; the next print starts in that folder, asks "already exists", and Replace overwrites it | ✓ |
 
 **For a person to check:**
 - A real printer through CUPS: the job prints, and two-sided and black-and-white take effect.

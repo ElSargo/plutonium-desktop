@@ -154,6 +154,8 @@ export class Desktop {
   private readonly tabMap = new Map<number, DesktopTab>();
   private readonly windowMap = new Map<number, DesktopWindow>();
   private readonly downloadMap = new Map<number, DesktopDownload>();
+  /** setTabAwake's holds, by tab id. */
+  private readonly awakeTabs = new Map<number, number>();
   /** Screencast listeners, by window id. */
   private readonly frameListeners = new Map<number, Set<(frame: ScreencastFrame | null) => void>>();
   /** Tabs or windows came, changed or went. */
@@ -179,6 +181,7 @@ export class Desktop {
       this.tabMap.clear();
       this.windowMap.clear();
       this.downloadMap.clear();
+      this.awakeTabs.clear();
       for (const listeners of this.frameListeners.values()) for (const listener of listeners) listener(null);
       this.frameListeners.clear();
     });
@@ -222,6 +225,7 @@ export class Desktop {
       }
       case "Plutonium.tabRemoved":
         this.tabMap.delete(value.id as number);
+        this.awakeTabs.delete(value.id as number);
         break;
       case "Plutonium.windowAdded":
       case "Plutonium.windowChanged": {
@@ -430,9 +434,24 @@ export class Desktop {
     await this.cdp.send("Plutonium.answerTabDialog", { id, accept, promptText });
   }
 
-  /** Keeps tab `id` rendering at full rate while no page shows it. */
+  /**
+   * Keeps tab `id` rendering at full rate while no page shows it. Counted:
+   * the browser's flag is one per DevTools connection, and the agents' pages
+   * and the frontend server's relay can both hold a tab awake.
+   */
   async setTabAwake(id: number, awake: boolean): Promise<void> {
-    await this.cdp.send("Plutonium.setTabAwake", { id, awake });
+    const holds = (this.awakeTabs.get(id) ?? 0) + (awake ? 1 : -1);
+    if (holds < 0) return;
+    if (holds) this.awakeTabs.set(id, holds);
+    else this.awakeTabs.delete(id);
+    if (holds !== (awake ? 1 : 0)) return;
+    try {
+      await this.cdp.send("Plutonium.setTabAwake", { id, awake });
+    } catch (error) {
+      // Not held after all (no such tab, or the browser went).
+      if (awake && this.awakeTabs.get(id) === 1) this.awakeTabs.delete(id);
+      throw error;
+    }
   }
 
   async captureTab(id: number, format: "png" | "jpeg" = "png", quality?: number): Promise<Capture> {
@@ -545,7 +564,7 @@ export interface CaptureSourceList {
   readonly tabs: readonly { id: number; title: string; url: string; tags: string[] }[];
 }
 
-function parseDownload(json: unknown): DesktopDownload | undefined {
+export function parseDownload(json: unknown): DesktopDownload | undefined {
   if (typeof json !== "string") return undefined;
   try {
     const download = JSON.parse(json) as DesktopDownload;
