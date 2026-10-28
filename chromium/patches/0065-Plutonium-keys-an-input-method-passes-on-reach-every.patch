@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 09:27:55 +1300
-Subject: [PATCH 65/90] Plutonium: keys an input method passes on reach every
+Subject: [PATCH 65/92] Plutonium: keys an input method passes on reach every
  app
 
 With an input method engine, which answers asynchronously, the keys it

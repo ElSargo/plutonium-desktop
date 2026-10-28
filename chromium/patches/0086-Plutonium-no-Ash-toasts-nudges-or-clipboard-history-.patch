@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 09:00:51 +1300
-Subject: [PATCH 86/90] Plutonium: no Ash toasts, nudges or clipboard history,
+Subject: [PATCH 86/92] Plutonium: no Ash toasts, nudges or clipboard history,
  no Chrome toasts or clipboard bubble over the shell
 
 EXO-CHROME (docs/features/CHROME_UI.md, "Popups"). In shell mode a web

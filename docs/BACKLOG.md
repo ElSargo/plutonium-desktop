@@ -256,16 +256,19 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   opened in the panel during the run), the side panel's cursor on a narrow tab
   (blocked by the next item), a drag while the display is paused (blocked by
   the one after; on DRM it's a VT switch, the orchestrator's).
-- [ ] **A snapshot after `preview_resize` on a shown tab times out.** M ·
+- [x] **A snapshot after `preview_resize` on a shown tab times out.** M ·
   With the tab in the side panel or the floating preview, the first
-  `preview_snapshot` after `preview_resize` (390×844 or 1024×768) times out at
-  15 s and is left `stuck`; clicks after work. 5 of 5 on the X11 session
+  `preview_snapshot` after `preview_resize` (390×844 or 1024×768) timed out at
+  15 s and was left `stuck`; clicks after worked. 5 of 5 on the X11 session
   (slot 26, 2026-10-28); it passed on 2026-10-24 (`excalidraw-spiral-sized`).
-  On a tab no page shows, the snapshot works but the page stays 1280×800: the
-  resize doesn't reach it. Raw `Page.captureScreenshot` and
-  `requestAnimationFrame` answered at once meanwhile, so it's T3's snapshot
-  path or the shown tab's fixed size; not found yet
-  (`agent-tests/scenarios/tab-narrow-panel.md`).
+  Done 2026-10-29 (Chromium patch 0092): raw `Page.captureScreenshot` hung
+  too. When a tab moved to another `<embed>`, its renderer's surface id from
+  the old one reached the new plugin late, and `UpdateFromChild` took its
+  child sequence number across embed tokens. The plugin then stayed one ahead
+  of the renderer, so the copy DevTools asks for (the view's current id)
+  never came. The plugin now ignores ids from another embedding. Verified on
+  X11 slot 28 (`runs/20261029-004552-tab-narrow-panel`). The "hidden tab stays
+  1280×800" half didn't reproduce there: a hidden tab took 390×844.
 - [ ] **Mouse moves on a hidden tab are slow on the X11 session.** M · On
   Excalidraw (hidden, X11 slot 26, GPU RADV): 20 raw `Input.dispatchMouseEvent`
   moves without a button in 0.3 s, with the pen down 8 s; a minute later 19 s

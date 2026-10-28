@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 08:42:46 +1300
-Subject: [PATCH 87/90] Plutonium: a floating native window keeps its
+Subject: [PATCH 87/92] Plutonium: a floating native window keeps its
  client-side resize edges
 
 EXO-EMBED: <native-window floating> tells the browser (NativeWindowHost::

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 29 Oct 2026 00:42:05 +1300
+Subject: [PATCH 92/92] Plutonium: a tab's <embed> ignores surface ids from its
+ last embedding
+
+A tab moving between <embed>s could have its renderer's id from the last
+one reach the new plugin after the new plugin's first id; merging it took
+that embedding's child sequence number, so the plugin stayed one ahead of
+the renderer for good. The tab's surface then never activated at the
+embedder's id (each resize waited out the sync deadline) and DevTools
+screenshots, which copy the view's current id, never returned.
+---
+ .../renderer/surface_embed_web_plugin.cc             | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.cc b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+index 182dd2e62e..8312c5ddce 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.cc
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+@@ -537,6 +537,18 @@ void SurfaceEmbedWebPlugin::SetFrameSinkId(
+ 
+ void SurfaceEmbedWebPlugin::UpdateLocalSurfaceIdFromChild(
+     const ::viz::LocalSurfaceId& local_surface_id) {
++  // EXO-TABS: a tab moves between <embed>s (the panel, the floating preview,
++  // the background), and an id its renderer allocated under the last one can
++  // arrive after this one's first. Merging it would take that embedding's
++  // child sequence number, which the renderer drops when it adopts this
++  // embed token: every id allocated here after would stay one ahead of what
++  // it submits, so the surface never activates and copies of it (DevTools
++  // screenshots) wait forever.
++  if (local_surface_id.embed_token() !=
++      parent_local_surface_id_allocator_->GetCurrentLocalSurfaceId()
++          .embed_token()) {
++    return;
++  }
+   if (!parent_local_surface_id_allocator_->UpdateFromChild(local_surface_id)) {
+     return;
+   }
