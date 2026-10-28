@@ -1397,6 +1397,21 @@ export class Daemon {
         .catch((error: Error) => console.warn(`plutoniumd: can't open the server's tab: ${error.message}`))
         .finally(() => opening.delete(id));
     };
+    // The server's own recordings of its tabs (T3's preview_recording_*) as captures.
+    serverTabs.onCaptureStart = async (browserTabId) => {
+      const thread = desktop.tab(browserTabId)?.tags[0];
+      const { captureId } = (await desktop.captureCommand("register", {
+        source: { type: "tab", id: browserTabId },
+        consumer: { kind: "agent", name: "An agent", ...(thread ? { thread } : {}) },
+      })) as { captureId: number };
+      return captureId;
+    };
+    serverTabs.onCaptureStop = (captureId) => {
+      void desktop.captureCommand("stop", { id: captureId }).catch(() => {});
+    };
+    desktop.captureListeners.add((type, capture) => {
+      if (type === "stop") serverTabs.captureStopped(capture.id);
+    });
     serverTabs.onClose = (_key, browserTabId) => {
       void desktop.tabCommand(browserTabId, "close").catch(() => {});
     };

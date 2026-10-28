@@ -14,6 +14,9 @@
 //                    {type: "open", threadId, tabId, tag, incognito?} (Plutonium's own)
 //                    {type: "close", threadId, tabId}       (Plutonium's own)
 //                    {type: "scratch", threadId, tabId}     (Plutonium's own)
+//                    {type: "recording", threadId, tabId, phase: "start" | "stop"}
+//   helper → server  {type: "recording", threadId, tabId,    (Plutonium's own)
+//                     phase: "started" | "refused" | "ended", message?}
 // (threadId and tabId are the server's names for the tab.)
 //
 // "open": the server has a tab no shell page shows (none is open, or none
@@ -28,6 +31,13 @@
 // which T3 Code would otherwise run in a headless browser of its own). The
 // helper opens a hidden page, in no window and no shell, and attaches it as
 // the page SCRATCH_PAGE; "close" or the server's disconnect closes it.
+// "recording": the server records the tab its own way (T3 Code's
+// preview_recording_*: screencast frames into an encoder on a scratch page).
+// "start" registers it as a capture with no node (onCaptureStart), so every
+// shell sees it and can stop it; the helper answers "started", or "refused"
+// with why (the recording switch is off). "stop" ends the capture. When a
+// shell, the switch or the tab going ends it first, the helper says "ended",
+// and the server stops recording (docs/features/CAPTURE.md, "Agents").
 //
 // Each tab's CDP connection only reaches that tab's page: the relay below
 // presents it as a browser with one page, the way T3 Code's desktop app does
@@ -277,6 +287,8 @@ interface AttachedTab {
   awake: ReturnType<typeof setTimeout> | null;
   /** The last grantPermissions the user refused, and when. */
   refused: { key: string; at: number } | null;
+  /** The capture of the server's recording of it ("recording"), once registered. */
+  captureId: number | null;
 }
 
 /** The user's answer to a permission request (the tab command `permission-request`). */
@@ -316,6 +328,11 @@ export class ServerTabs {
     permissions: string[],
     origin: string | undefined,
   ) => Promise<PermissionAnswer | null> = () => Promise.reject(new Error("There is no browser to ask the user in."));
+  /** Registers the server's recording of browser tab `browserTabId` as a capture; its id. */
+  onCaptureStart: (browserTabId: number) => Promise<number> = () =>
+    Promise.reject(new Error("Recording needs Plutonium's browser."));
+  /** Ends capture `captureId` (the server stopped recording). */
+  onCaptureStop: (captureId: number) => void = () => {};
 
   constructor(cdp: BrowserCdp) {
     this.cdp = cdp;
@@ -366,6 +383,7 @@ export class ServerTabs {
       children: new Set(),
       awake: null,
       refused: null,
+      captureId: null,
     });
     this.emit({ type: "attached", ...key });
     return info.browserTabId;
@@ -377,7 +395,51 @@ export class ServerTabs {
     if (!tab || (page !== undefined && tab.info.page !== page)) return;
     this.tabs.delete(keyOf(key));
     this.release(tab);
+    this.endCapture(tab, "The tab went away.");
     this.emit({ type: "detached", ...key });
+  }
+
+  /** Capture `captureId` stopped (a shell, the switch, or its source): the server's recording ends. */
+  captureStopped(captureId: number): void {
+    for (const tab of this.tabs.values()) {
+      if (tab.captureId !== captureId) continue;
+      tab.captureId = null;
+      this.emit({
+        type: "recording",
+        ...tab.key,
+        phase: "ended",
+        message: "The recording was stopped (by the user, the recording switch, or its tab closing).",
+      });
+    }
+  }
+
+  /** The server's recording of `tab` ends here: its capture stops, and the server hears why. */
+  private endCapture(tab: AttachedTab, message: string): void {
+    if (tab.captureId === null) return;
+    this.onCaptureStop(tab.captureId);
+    tab.captureId = null;
+    this.emit({ type: "recording", ...tab.key, phase: "ended", message });
+  }
+
+  private async startCapture(tab: AttachedTab): Promise<void> {
+    const refuse = (message: string) => this.emit({ type: "recording", ...tab.key, phase: "refused", message });
+    if (tab.captureId !== null) {
+      this.emit({ type: "recording", ...tab.key, phase: "started" });
+      return;
+    }
+    if (tab.info.browserTabId < 0) return refuse("Only a tab can be recorded.");
+    let captureId: number;
+    try {
+      captureId = await this.onCaptureStart(tab.info.browserTabId);
+    } catch (cause) {
+      return refuse(cause instanceof Error ? cause.message : String(cause));
+    }
+    // It went meanwhile, or the server asked twice.
+    if (this.tabs.get(keyOf(tab.key)) !== tab || tab.captureId !== null) {
+      this.onCaptureStop(captureId);
+      if (this.tabs.get(keyOf(tab.key)) !== tab) return refuse("The tab went away.");
+    } else tab.captureId = captureId;
+    this.emit({ type: "recording", ...tab.key, phase: "started" });
   }
 
   /** Every tab shell page `page` showed (it disconnected). */
@@ -574,6 +636,11 @@ export class ServerTabs {
       if (this.server !== socket) return;
       this.server = null;
       for (const tab of [...this.tabs.values()]) {
+        // Its recordings went with it.
+        if (tab.captureId !== null) {
+          this.onCaptureStop(tab.captureId);
+          tab.captureId = null;
+        }
         if (tab.info.page === SCRATCH_PAGE) this.closeScratch(tab);
         else this.release(tab);
       }
@@ -642,6 +709,10 @@ export class ServerTabs {
       if (!tab) void this.openScratch(key);
       return;
     }
+    if (command.type === "recording" && command.phase === "start" && !tab) {
+      this.emit({ type: "recording", ...key, phase: "refused", message: "No shell shows the tab." });
+      return;
+    }
     if (!tab) return;
     switch (command.type) {
       case "close":
@@ -658,6 +729,13 @@ export class ServerTabs {
         return;
       case "release":
         this.release(tab);
+        return;
+      case "recording":
+        if (command.phase === "start") void this.startCapture(tab);
+        else if (command.phase === "stop" && tab.captureId !== null) {
+          this.onCaptureStop(tab.captureId);
+          tab.captureId = null;
+        }
         return;
       case "pointer":
         if ((command.phase === "move" || command.phase === "click") && Number.isFinite(command.x) && Number.isFinite(command.y)) {

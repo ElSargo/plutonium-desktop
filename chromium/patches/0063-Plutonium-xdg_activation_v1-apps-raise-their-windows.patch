@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 09:17:25 +1300
-Subject: [PATCH 63/90] Plutonium: xdg_activation_v1, apps raise their windows
+Subject: [PATCH 63/91] Plutonium: xdg_activation_v1, apps raise their windows
  through the shell
 
 Apps raise each other's windows with xdg_activation_v1: a terminal opens
