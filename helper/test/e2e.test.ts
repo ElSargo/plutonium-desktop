@@ -203,6 +203,7 @@ describe("helper end to end", () => {
       socketPath,
       // No X servers here.
       xDisplays: { statePath: join(dir, "x-displays.json"), satellite: "" },
+      threadBuses: false,
     });
     await daemon.start();
     // A process thread A started, whose window an older browser reports untagged.

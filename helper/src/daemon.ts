@@ -62,8 +62,10 @@ import { plutoHome, ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, type PermissionAnswer, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
+import { ThreadBuses } from "./threadBus.ts";
 import {
   explainPid,
+  findExecutable,
   rememberLaunch,
   SHOW_VARIABLE,
   showsForPids,
@@ -87,6 +89,8 @@ export interface DaemonOptions {
   readonly cdpPort?: number | undefined;
   /** Where the threads' X servers go (tests use their own). */
   readonly xDisplays?: XDisplayOptions;
+  /** Whether each thread's apps get their own session bus (threadBus.ts; default unless PLUTONIUM_THREAD_BUS=0). */
+  readonly threadBuses?: boolean;
   /** The installed shells: the static ones are served on their own port (shells.ts). */
   readonly shells?: ShellPackages;
   readonly shellsPort?: number;
@@ -411,7 +415,12 @@ export class Daemon {
     // it), the helper has PLUTONIUM_SHOW=1, and would pass it on: everything
     // agents start, and every X window, would be shown.
     delete process.env[SHOW_VARIABLE];
-    this.threads = new Threads(options.waylandDisplay, options.socketPath, options.xDisplays);
+    const activate = findExecutable("systemd-socket-activate");
+    const buses =
+      (options.threadBuses ?? process.env.PLUTONIUM_THREAD_BUS !== "0") && activate && process.platform === "linux"
+        ? new ThreadBuses({ dir: join(dirname(options.socketPath), "buses"), activate })
+        : undefined;
+    this.threads = new Threads(options.waylandDisplay, options.socketPath, options.xDisplays, buses);
     this.terminals = new Terminals(() => ({
       ...process.env,
       // Typed in by the user: what it starts is shown.

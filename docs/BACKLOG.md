@@ -174,14 +174,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   (`Plutonium.setWindowOriginTag`) would let the helper name it once for all.
   Done 2026-10-27 (`features/SHELLS.md`): the helper calls it as the window
   arrives.
-- [ ] **One LibreOffice for every thread.** M · A second start of the
+- [x] **One LibreOffice for every thread.** M · A second start of the
   Flatpak LibreOffice hands its arguments to whichever instance owns
   `org.libreoffice.LibreOfficeIpc0` on the session bus, in any session, and
   exits 0. The window opens in that instance's session and thread. If the
   owner doesn't answer, the new one waits on D-Bus with no window (seen
   2026-10-24 between test slots). `-env:UserInstallation` doesn't separate
   them; a private session bus does. `launch_app` could say who has it, or
-  give each thread's LibreOffice its own bus.
+  give each thread's LibreOffice its own bus. Done 2026-10-28 (`features/AGENT_CONTROL.md`, "Each thread's own bus"): each thread's processes get a session bus proxy that gives the names they own a suffix of the thread's, and LibreOffice a profile per thread, copied from the user's.
 - [x] **`read_window` crashed LibreOffice Calc.** S · `GetAll` on an
   element includes `Locale`, which aborts Calc on its defunct cell and input
   line objects. The reader skips defunct elements and never asks for
