@@ -16,7 +16,9 @@ TTS extensions' voices are listed as before.
  content/browser/BUILD.gn                        |  4 ++++
  content/browser/speech/tts_platform_impl.cc     | 12 +-----------
  content/browser/speech/tts_platform_impl.h      |  2 +-
- 4 files changed, 12 insertions(+), 13 deletions(-)
+ content/public/common/content_switches.cc       |  2 +-
+ content/public/common/content_switches.h        |  3 ++-
+ 6 files changed, 15 insertions(+), 15 deletions(-)
 
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
 index a988f740ac..802a2d3e2b 100644
@@ -88,3 +90,30 @@ index e5e686ad50..f36bf1e6ce 100644
  // Overrides the library path captured when the Linux TTS singleton is created.
  // Must be called before TtsPlatform::GetInstance().
  CONTENT_EXPORT base::AutoReset<std::string>
+diff --git a/content/public/common/content_switches.cc b/content/public/common/content_switches.cc
+index c5dbb4130b..fa01bf91e9 100644
+--- a/content/public/common/content_switches.cc
++++ b/content/public/common/content_switches.cc
+@@ -942,7 +942,7 @@ const char kPreventResizingContentsForTesting[] =
+     "prevent-resizing-contents-for-testing";
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ // Allows sending text-to-speech requests to speech-dispatcher, a common
+ // Linux speech service. Because it's buggy, the user must explicitly
+ // enable it so that visiting a random webpage can't cause instability.
+diff --git a/content/public/common/content_switches.h b/content/public/common/content_switches.h
+index d3bc2ede84..8ce47279b9 100644
+--- a/content/public/common/content_switches.h
++++ b/content/public/common/content_switches.h
+@@ -257,7 +257,8 @@ CONTENT_EXPORT extern const char kJavalessRenderers[];
+ CONTENT_EXPORT extern const char kPreventResizingContentsForTesting[];
+ #endif
+ 
+-#if BUILDFLAG(IS_LINUX)
++// Plutonium: and ChromeOS (tts_linux.cc).
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ CONTENT_EXPORT extern const char kEnableSpeechDispatcher[];
+ #endif
+ 
