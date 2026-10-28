@@ -336,6 +336,11 @@ export class Desktop {
     return ((await this.cdp.send("Plutonium.setDisplaysOff", { off })) as { applied: boolean }).applied;
   }
 
+  /** EXO-LOCK: whether an inhibitor holds idle off, for Wayland apps' ext_idle_notify_v1. */
+  async setIdleInhibited(inhibited: boolean): Promise<void> {
+    await this.cdp.send("Plutonium.setIdleInhibited", { inhibited });
+  }
+
   /** Clicks a web notification (or one of its buttons), or closes it as the user would. */
   async notificationAction(id: string, action: "click" | "close", button?: number): Promise<void> {
     await this.cdp.send("Plutonium.notificationAction", { id, action, ...(button !== undefined ? { button } : {}) });

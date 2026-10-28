@@ -1,0 +1,497 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 23:09:54 +1300
+Subject: [PATCH 83/85] Plutonium: ext_idle_notify_v1, apps hear when the user
+ is idle
+
+Discord's and chat apps' away status, and swayidle, need it. Version
+2: a notification goes idle after its timeout without a key, pointer or
+touch (Ash's UserActivityDetector) and resumes at the next one. Those
+made with get_idle_notification are also held off while something
+inhibits idle, and count again from when it stopped; the helper's
+session service knows every inhibitor (the shells', apps' over D-Bus
+and the portal, the browser's wake locks, zwp_idle_inhibit) and says
+whether there are any with the new Plutonium.setIdleInhibited, which
+goes back to false when its client goes. As in wlroots, an inhibitor
+coming while idle leaves the notification idle.
+---
+ chrome/browser/devtools/cros_protocol.pdl     |   8 +
+ .../devtools/protocol/plutonium_handler.cc    |  13 +-
+ .../devtools/protocol/plutonium_handler.h     |   3 +
+ components/exo/BUILD.gn                       |   2 +
+ components/exo/session_idle.cc                |  36 ++++
+ components/exo/session_idle.h                 |  49 +++++
+ components/exo/wayland/BUILD.gn               |   3 +
+ components/exo/wayland/ext_idle_notify.cc     | 185 ++++++++++++++++++
+ components/exo/wayland/ext_idle_notify.h      |  28 +++
+ components/exo/wayland/server.cc              |   5 +
+ 10 files changed, 331 insertions(+), 1 deletion(-)
+ create mode 100644 components/exo/session_idle.cc
+ create mode 100644 components/exo/session_idle.h
+ create mode 100644 components/exo/wayland/ext_idle_notify.cc
+ create mode 100644 components/exo/wayland/ext_idle_notify.h
+
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index 2d0e8c9c5d..c5cfba5e35 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -482,6 +482,14 @@ experimental domain Plutonium
+       # False where it can't (an X11 session).
+       boolean applied
+ 
++  # Whether something holds idle off (any of the session service's
++  # inhibitors), for Wayland apps' ext_idle_notify_v1: while it does, they
++  # aren't told the user is idle, and idle counts again from when it stops.
++  # Taken back when the client that said so goes.
++  command setIdleInhibited
++    parameters
++      boolean inhibited
++
+   event lockChanged
+     parameters
+       boolean locked
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+index 06b835ff45..f4784b1421 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.cc
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -18,6 +18,7 @@
+ #include "chrome/browser/plutonium_shells.h"
+ #include "chrome/browser/plutonium_tab_requests.h"
+ #include "components/exo/embedded_windows.h"
++#include "components/exo/session_idle.h"
+ #include "components/prefs/pref_service.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/web_contents.h"
+@@ -180,7 +181,11 @@ PlutoniumHandler::PlutoniumHandler(protocol::UberDispatcher* dispatcher)
+   Plutonium::Dispatcher::wire(dispatcher, this);
+ }
+ 
+-PlutoniumHandler::~PlutoniumHandler() = default;
++PlutoniumHandler::~PlutoniumHandler() {
++  if (idle_inhibited_) {
++    exo::SessionIdle::Get()->SetInhibited(false);
++  }
++}
+ 
+ Response PlutoniumHandler::Enable() {
+   if (enabled_) {
+@@ -974,6 +979,12 @@ Response PlutoniumHandler::SetDisplaysOff(bool off, bool* applied) {
+   return Response::Success();
+ }
+ 
++Response PlutoniumHandler::SetIdleInhibited(bool inhibited) {
++  idle_inhibited_ = inhibited;
++  exo::SessionIdle::Get()->SetInhibited(inhibited);
++  return Response::Success();
++}
++
+ void PlutoniumHandler::OnLockChanged(bool locked) {
+   frontend_->LockChanged(locked);
+ }
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+index d52f16ea8a..586a72c7aa 100644
+--- a/chrome/browser/devtools/protocol/plutonium_handler.h
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -143,6 +143,7 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+       bool* displays_off,
+       std::unique_ptr<protocol::Array<std::string>>* wake_locks) override;
+   protocol::Response SetDisplaysOff(bool off, bool* applied) override;
++  protocol::Response SetIdleInhibited(bool inhibited) override;
+   protocol::Response NotificationAction(const std::string& id,
+                                         const std::string& action,
+                                         std::optional<int> button) override;
+@@ -195,6 +196,8 @@ class PlutoniumHandler : public protocol::Plutonium::Backend,
+ 
+   std::unique_ptr<protocol::Plutonium::Frontend> frontend_;
+   bool enabled_ = false;
++  // EXO-LOCK: whether this client said idle is inhibited (SetIdleInhibited()).
++  bool idle_inhibited_ = false;
+   base::ScopedObservation<ExoWindowBroker, ExoWindowBroker::Observer>
+       broker_observation_{this};
+   base::ScopedObservation<PlutoniumTabs, PlutoniumTabs::Observer>
+diff --git a/components/exo/BUILD.gn b/components/exo/BUILD.gn
+index 75daf597d5..698577bd76 100644
+--- a/components/exo/BUILD.gn
++++ b/components/exo/BUILD.gn
+@@ -108,6 +108,8 @@ static_library("exo") {
+     "surface_observer.h",
+     "embedded_windows.cc",
+     "embedded_windows.h",
++    "session_idle.cc",
++    "session_idle.h",
+     "surface_tree_host.cc",
+     "surface_tree_host.h",
+     "text_input.cc",
+diff --git a/components/exo/session_idle.cc b/components/exo/session_idle.cc
+new file mode 100644
+index 0000000000..811d600356
+--- /dev/null
++++ b/components/exo/session_idle.cc
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/session_idle.h"
++
++namespace exo {
++
++// static
++SessionIdle* SessionIdle::Get() {
++  static base::NoDestructor<SessionIdle> instance;
++  return instance.get();
++}
++
++SessionIdle::SessionIdle() = default;
++SessionIdle::~SessionIdle() = default;
++
++void SessionIdle::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void SessionIdle::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void SessionIdle::SetInhibited(bool inhibited) {
++  if (inhibited_ == inhibited) {
++    return;
++  }
++  inhibited_ = inhibited;
++  for (Observer& observer : observers_) {
++    observer.OnIdleInhibitedChanged(inhibited);
++  }
++}
++
++}  // namespace exo
+diff --git a/components/exo/session_idle.h b/components/exo/session_idle.h
+new file mode 100644
+index 0000000000..67c6a7e7b5
+--- /dev/null
++++ b/components/exo/session_idle.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_SESSION_IDLE_H_
++#define COMPONENTS_EXO_SESSION_IDLE_H_
++
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++
++namespace exo {
++
++// PLUTONIUM (EXO-LOCK): whether something holds the session's idle off, for
++// ext_idle_notify_v1 (wayland/ext_idle_notify.h). The helper's session
++// service knows every inhibitor (the shells', apps' over D-Bus and the
++// portal, the browser's wake locks, Wayland apps' zwp_idle_inhibit) and says
++// when there are some and when the last one goes (Plutonium.setIdleInhibited).
++class SessionIdle {
++ public:
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnIdleInhibitedChanged(bool inhibited) = 0;
++  };
++
++  static SessionIdle* Get();
++
++  SessionIdle(const SessionIdle&) = delete;
++  SessionIdle& operator=(const SessionIdle&) = delete;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  bool inhibited() const { return inhibited_; }
++  void SetInhibited(bool inhibited);
++
++ private:
++  friend class base::NoDestructor<SessionIdle>;
++
++  SessionIdle();
++  ~SessionIdle();
++
++  bool inhibited_ = false;
++  base::ObserverList<Observer> observers_;
++};
++
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_SESSION_IDLE_H_
+diff --git a/components/exo/wayland/BUILD.gn b/components/exo/wayland/BUILD.gn
+index f0affe94b2..40decb67d8 100644
+--- a/components/exo/wayland/BUILD.gn
++++ b/components/exo/wayland/BUILD.gn
+@@ -20,6 +20,8 @@ source_set("wayland") {
+     "client_tracker.h",
+     "content_type.cc",
+     "content_type.h",
++    "ext_idle_notify.cc",
++    "ext_idle_notify.h",
+     "ext_image_copy_capture.cc",
+     "ext_image_copy_capture.h",
+     "org_kde_kwin_server_decoration.cc",
+@@ -181,6 +183,7 @@ source_set("wayland") {
+     "//third_party/wayland-protocols:fractional_scale_protocol",
+     "//third_party/wayland-protocols:gaming_input_protocol",
+     "//third_party/wayland-protocols:idle_inhibit_protocol",
++    "//third_party/wayland-protocols:idle_notify_protocol",
+     "//third_party/wayland-protocols:input_timestamps_protocol",
+     "//third_party/wayland-protocols:keyboard_configuration_protocol",
+     "//third_party/wayland-protocols:keyboard_extension_protocol",
+diff --git a/components/exo/wayland/ext_idle_notify.cc b/components/exo/wayland/ext_idle_notify.cc
+new file mode 100644
+index 0000000000..5f5c5d7375
+--- /dev/null
++++ b/components/exo/wayland/ext_idle_notify.cc
+@@ -0,0 +1,185 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/ext_idle_notify.h"
++
++#include <ext-idle-notify-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <algorithm>
++#include <memory>
++
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "components/exo/session_idle.h"
++#include "components/exo/wayland/server_util.h"
++#include "ui/base/user_activity/user_activity_detector.h"
++#include "ui/base/user_activity/user_activity_observer.h"
++
++namespace exo {
++namespace wayland {
++
++namespace {
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_idle_notification_v1 interface:
++
++// Idle once there's been no activity for |timeout| since it was made or the
++// user last did something, and (if it obeys inhibitors) since the last
++// inhibitor went. As wlroots does, an inhibitor that comes while it's idle
++// leaves it idle; only activity resumes it.
++class IdleNotification : public ui::UserActivityObserver,
++                         public SessionIdle::Observer {
++ public:
++  IdleNotification(wl_resource* resource,
++                   base::TimeDelta timeout,
++                   bool obey_inhibitors)
++      : resource_(resource),
++        timeout_(timeout),
++        obey_inhibitors_(obey_inhibitors),
++        since_(base::TimeTicks::Now()) {
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      detector->AddObserver(this);
++    }
++    SessionIdle::Get()->AddObserver(this);
++    Update();
++  }
++  IdleNotification(const IdleNotification&) = delete;
++  IdleNotification& operator=(const IdleNotification&) = delete;
++  ~IdleNotification() override {
++    SessionIdle::Get()->RemoveObserver(this);
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      detector->RemoveObserver(this);
++    }
++  }
++
++  // ui::UserActivityObserver:
++  void OnUserActivity(const ui::Event* event) override {
++    since_ = base::TimeTicks::Now();
++    if (idle_) {
++      idle_ = false;
++      ext_idle_notification_v1_send_resumed(resource_);
++      wl_client_flush(wl_resource_get_client(resource_));
++    }
++    Update();
++  }
++
++  // SessionIdle::Observer:
++  void OnIdleInhibitedChanged(bool inhibited) override {
++    if (!obey_inhibitors_) {
++      return;
++    }
++    if (!inhibited) {
++      since_ = base::TimeTicks::Now();
++    }
++    Update();
++  }
++
++ private:
++  // Goes idle if it's time, else waits until it might be. The detector
++  // notifies observers at most every 200 ms, so its last activity time is
++  // looked at too.
++  void Update() {
++    timer_.Stop();
++    if (idle_ || (obey_inhibitors_ && SessionIdle::Get()->inhibited())) {
++      return;
++    }
++    base::TimeTicks last = since_;
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      last = std::max(last, detector->last_activity_time());
++    }
++    base::TimeDelta left = last + timeout_ - base::TimeTicks::Now();
++    if (left.is_positive()) {
++      timer_.Start(FROM_HERE, left,
++                   base::BindOnce(&IdleNotification::Update,
++                                  base::Unretained(this)));
++      return;
++    }
++    idle_ = true;
++    ext_idle_notification_v1_send_idled(resource_);
++    wl_client_flush(wl_resource_get_client(resource_));
++  }
++
++  const raw_ptr<wl_resource> resource_;
++  const base::TimeDelta timeout_;
++  const bool obey_inhibitors_;
++  base::TimeTicks since_;
++  bool idle_ = false;
++  base::OneShotTimer timer_;
++};
++
++void idle_notification_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct ext_idle_notification_v1_interface
++    idle_notification_implementation = {idle_notification_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_idle_notifier_v1 interface:
++
++void CreateNotification(wl_client* client,
++                        wl_resource* resource,
++                        uint32_t id,
++                        uint32_t timeout,
++                        bool obey_inhibitors) {
++  wl_resource* notification_resource =
++      wl_resource_create(client, &ext_idle_notification_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!notification_resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  // Exo has one seat, so the seat isn't looked at.
++  SetImplementation(notification_resource, &idle_notification_implementation,
++                    std::make_unique<IdleNotification>(
++                        notification_resource, base::Milliseconds(timeout),
++                        obey_inhibitors));
++}
++
++void idle_notifier_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void idle_notifier_get_idle_notification(wl_client* client,
++                                         wl_resource* resource,
++                                         uint32_t id,
++                                         uint32_t timeout,
++                                         wl_resource* seat) {
++  CreateNotification(client, resource, id, timeout, /*obey_inhibitors=*/true);
++}
++
++void idle_notifier_get_input_idle_notification(wl_client* client,
++                                               wl_resource* resource,
++                                               uint32_t id,
++                                               uint32_t timeout,
++                                               wl_resource* seat) {
++  CreateNotification(client, resource, id, timeout, /*obey_inhibitors=*/false);
++}
++
++constexpr struct ext_idle_notifier_v1_interface idle_notifier_implementation =
++    {idle_notifier_destroy, idle_notifier_get_idle_notification,
++     idle_notifier_get_input_idle_notification};
++
++}  // namespace
++
++void bind_idle_notifier(wl_client* client,
++                        void* data,
++                        uint32_t version,
++                        uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_idle_notifier_v1_interface, std::min(version, 2u), id);
++  if (!resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  wl_resource_set_implementation(resource, &idle_notifier_implementation,
++                                 data, nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/ext_idle_notify.h b/components/exo/wayland/ext_idle_notify.h
+new file mode 100644
+index 0000000000..9311dd2947
+--- /dev/null
++++ b/components/exo/wayland/ext_idle_notify.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
++#define COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM: ext_idle_notify_v1, version 2: tells clients when the user has
++// been idle for a while (Discord's and chat apps' away status, swayidle).
++// Activity is Ash's (ui::UserActivityDetector: a key, the pointer, a touch);
++// inhibitors are the session's (SessionIdle, from the helper), which hold
++// get_idle_notification's objects off but not get_input_idle_notification's.
++void bind_idle_notifier(wl_client* client,
++                        void* data,
++                        uint32_t version,
++                        uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
+diff --git a/components/exo/wayland/server.cc b/components/exo/wayland/server.cc
+index 40f7c26e97..6e42987bc5 100644
+--- a/components/exo/wayland/server.cc
++++ b/components/exo/wayland/server.cc
+@@ -8,6 +8,7 @@
+ #include <content-type-v1-server-protocol.h>
+ #include <cursor-shape-v1-server-protocol.h>
+ #include <cursor-shapes-unstable-v1-server-protocol.h>
++#include <ext-idle-notify-v1-server-protocol.h>
+ #include <extended-drag-unstable-v1-server-protocol.h>
+ #include <gaming-input-unstable-v2-server-protocol.h>
+ #include <grp.h>
+@@ -57,6 +58,7 @@
+ #include "components/exo/security_delegate.h"
+ #include "components/exo/wayland/client_tracker.h"
+ #include "components/exo/wayland/content_type.h"
++#include "components/exo/wayland/ext_idle_notify.h"
+ #include "components/exo/wayland/ext_image_copy_capture.h"
+ #include "components/exo/wayland/org_kde_kwin_server_decoration.h"
+ #include "components/exo/wayland/overlay_prioritizer.h"
+@@ -352,6 +354,9 @@ void Server::Initialize() {
+                    /*version=*/1, display_, bind_extended_drag);
+   wl_global_create(wl_display_.get(), &zwp_idle_inhibit_manager_v1_interface,
+                    /*version=*/1, display_, bind_zwp_idle_inhibit_manager);
++  // PLUTONIUM: ext_idle_notify_v1 (ext_idle_notify.h).
++  wl_global_create(wl_display_.get(), &ext_idle_notifier_v1_interface,
++                   /*version=*/2, display_, bind_idle_notifier);
+ 
+   ui_controls_holder_ = std::make_unique<UiControls>(this);
+ 

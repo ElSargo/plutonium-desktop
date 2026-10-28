@@ -100,8 +100,9 @@ export function mountMinimap(shell, container, niri) {
     if (kind === "w") {
       const window = shell.windows.get(Number(raw));
       const name = window?.appId || window?.title || "?";
-      return { id: window?.appId ? `app:${window.appId}` : "", label: name, title: window?.title || name,
-        load: () => shell.appIcon(window.appId).catch(() => null) };
+      const id = window?.appId ? `app:${window.appId}` : window?.iconName || window?.icon ? `window:${window.id}` : "";
+      return { id, label: name, title: window?.title || name,
+        load: () => shell.windowIcon(window).catch(() => null) };
     }
     const tab = shell.tabs?.get(Number(raw));
     let origin = "";
