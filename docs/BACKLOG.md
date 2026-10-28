@@ -148,10 +148,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   (`features/AGENT_CONTROL.md`).
 - [x] **Bridge: MCP for Codex and other T3 providers.** T3's own MCP server
   offers the helper's window tools to every provider.
-- [ ] **Remote clients see native windows.** M · A T3 client away from the
-  desktop has no Apps panel content. The helper has window screencasts
-  (`Plutonium.startWindowScreencast`) and input; T3 would stream them
-  (`/api/window-stream`) and draw them in the Apps panel.
+- [x] **Remote clients see native windows.** M · A T3 client away from the
+  desktop has the Apps panel: T3's server streams the windows' frames from
+  the helper (`/api/window-stream`) and sends pointer and keys back
+  (`features/REMOTE_WINDOWS.md`).
 - [x] **Agents had to guess program names for `launch_app`.** `find_apps`
   lists the launcher's apps with an argv for `launch_app`, where each is
   installed from, and matching programs on PATH; a program not on PATH

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 17:59:18 +1300
-Subject: [PATCH 17/40] Plutonium: agents drive windows and tabs
+Subject: [PATCH 17/41] Plutonium: agents drive windows and tabs
 
 - T3's MCP server offers native window tools (launch_app, list_windows,
   snapshot_window, click_window, type_window, press_window, scroll_window,
