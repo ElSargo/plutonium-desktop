@@ -30,7 +30,14 @@ import { A11yError, Accessibility } from "./a11y.ts";
 import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { BrowserCdp } from "./cdp.ts";
-import { Desktop, type DesktopDownload, type DesktopTab, type DesktopWindow } from "./desktop.ts";
+import {
+  Desktop,
+  type DesktopDownload,
+  type DesktopTab,
+  type DesktopWindow,
+  type WindowKeyEvent,
+  type WindowMouseEvent,
+} from "./desktop.ts";
 import { type GpuReport, probeGpu } from "./gpu.ts";
 import {
   type BrowserTabEntry,
@@ -63,6 +70,7 @@ import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from ".
 import { HELPER_PAGE, type PermissionAnswer, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
 import { ThreadBuses } from "./threadBus.ts";
+import { streamWindow } from "./windowStream.ts";
 import {
   explainPid,
   findExecutable,
@@ -387,6 +395,8 @@ export class Daemon {
   private readonly reportedWindows = new Map<string, Set<number>>();
   /** Windows kept awake after input, with the timer that lets them sleep. */
   private readonly awakeWindows = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Windows streamed to a frontend's remote clients, with how many streams each. */
+  private readonly streamedWindows = new Map<number, number>();
   /** The sizes agents hold windows at, and which they're working in (for the shells). */
   readonly agentWindows = new AgentWindows();
   /** Windows as accessibility trees (read_window, act_window). */
@@ -1385,11 +1395,23 @@ export class Daemon {
     const expiry = setTimeout(() => {
       this.awakeWindows.delete(windowId);
       this.lastInput.delete(windowId);
-      void desktop.setWindowAwake(windowId, false).catch(() => {});
+      if (!this.streamedWindows.has(windowId)) void desktop.setWindowAwake(windowId, false).catch(() => {});
       void desktop.setWindowAgentFocus(windowId, false).catch(() => {});
     }, AWAKE_MS);
     expiry.unref();
     this.awakeWindows.set(windowId, expiry);
+  }
+
+  /** Keeps a window drawing at full rate while any stream of it is open. */
+  private streamAwake(desktop: Desktop, windowId: number, on: boolean): void {
+    const count = (this.streamedWindows.get(windowId) ?? 0) + (on ? 1 : -1);
+    if (count > 0) this.streamedWindows.set(windowId, count);
+    else this.streamedWindows.delete(windowId);
+    if (on && count === 1) void desktop.setWindowAwake(windowId, true).catch(() => {});
+    // An agent's input keeps it awake by itself (keepAwake).
+    if (count === 0 && !this.awakeWindows.has(windowId)) {
+      void desktop.setWindowAwake(windowId, false).catch(() => {});
+    }
   }
 
   async windowInput(threadId: string, windowId: number, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2250,6 +2272,37 @@ export class Daemon {
           }
           if (what === "print") return sendJson(response, 200, await this.printTab(threadId, tabId, body));
           if (what === "page") return sendJson(response, 200, await this.pageAction(threadId, tabId, body));
+        }
+      }
+      // The user's own view of windows from elsewhere (a frontend's server
+      // streams them to its remote clients): every window, its frames, input.
+      if (method === "GET" && path === "/v1/windows") {
+        return sendJson(response, 200, await this.allWindows());
+      }
+      const userWindow = path.match(/^\/v1\/windows\/(\d+)\/(stream|mouse|keys)$/);
+      if (userWindow) {
+        const desktop = await this.requireDirect("Streaming windows");
+        const windowId = Number(userWindow[1]);
+        if (!desktop.window(windowId)) throw new HttpError(404, `No window ${windowId}.`);
+        if (method === "GET" && userWindow[2] === "stream") {
+          const size = (name: string) => Number(url.searchParams.get(name)) || undefined;
+          return streamWindow(
+            desktop,
+            windowId,
+            { quality: size("quality"), maxWidth: size("maxWidth"), maxHeight: size("maxHeight") },
+            response,
+            (on) => this.streamAwake(desktop, windowId, on),
+          );
+        }
+        if (method === "POST" && userWindow[2] === "mouse") {
+          await desktop.mouse(windowId, (await readJson(request)) as unknown as WindowMouseEvent);
+          return void response.writeHead(204).end();
+        }
+        if (method === "POST" && userWindow[2] === "keys") {
+          const { events } = await readJson(request);
+          if (!Array.isArray(events)) throw new HttpError(400, "Give events.");
+          await desktop.keys(windowId, events as WindowKeyEvent[]);
+          return void response.writeHead(204).end();
         }
       }
       const windows = path.match(/^\/v1\/threads\/([^/]+)\/windows$/);
