@@ -13,11 +13,12 @@ with SystemMediaControlsLinux as on Linux. Ash still handles the
 hardware media keys itself.
 ---
  components/dbus/BUILD.gn                                   | 3 +++
+ components/dbus/thread_linux/dbus_thread_linux.h           | 5 ++---
  .../system_media_controls/linux/buildflags/buildflags.gni  | 3 ++-
  content/browser/media/media_keys_listener_manager_impl.cc  | 2 +-
  content/public/browser/BUILD.gn                            | 1 +
  content/public/browser/media_keys_listener_manager.cc      | 7 ++++---
- 5 files changed, 11 insertions(+), 5 deletions(-)
+ 6 files changed, 13 insertions(+), 8 deletions(-)
 
 diff --git a/components/dbus/BUILD.gn b/components/dbus/BUILD.gn
 index 20c0538f64..3119059bf2 100644
@@ -33,6 +34,22 @@ index 20c0538f64..3119059bf2 100644
    }
  }
  
+diff --git a/components/dbus/thread_linux/dbus_thread_linux.h b/components/dbus/thread_linux/dbus_thread_linux.h
+index 99b78bba6f..99e8165a76 100644
+--- a/components/dbus/thread_linux/dbus_thread_linux.h
++++ b/components/dbus/thread_linux/dbus_thread_linux.h
+@@ -10,9 +10,8 @@
+ #include "base/memory/scoped_refptr.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_CHROMEOS)
+-#error On ChromeOS, use DBusThreadManager instead.
+-#endif
++// Plutonium: ChromeOS uses it too, for the desktop session's bus (MPRIS),
++// which DBusThreadManager (the system bus) doesn't have.
+ 
+ namespace dbus {
+ class Bus;
 diff --git a/components/system_media_controls/linux/buildflags/buildflags.gni b/components/system_media_controls/linux/buildflags/buildflags.gni
 index 539eea3c1f..d2e0774f8e 100644
 --- a/components/system_media_controls/linux/buildflags/buildflags.gni
