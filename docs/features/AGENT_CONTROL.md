@@ -178,6 +178,8 @@ All tools act on the calling thread's windows and tabs only.
 | A `click_window` outside the open menu | ✅ `popup_done`, no button event to the window; result `popups: "closed"` |
 | Writer (Flatpak, private bus): `click_window` on Format, `hover_window` on Text, `click_window` on Bold | ✅ the menu (past the window's bottom: a 1000×867 image) and its submenu in the snapshots, two popups listed; Bold on after the click |
 | Format → Character…; Escape in the dialog; Escape in the welcome dialog | ✅ `new window #9 ("Character", 982×615)`; `window #8 closed`; `window #7 closed` |
+| Calc (Flatpak, X11 slot 26, agent tool tests 2026-10-28): Insert ▸ Chart 20 s after `launch_app` at 1280×800 | ❌ before: the wizard held at 1280×800 (windows that came within 60 s of a launch were held at its size, dialogs too); ✅ after: held only until the agent's first input to the thread's windows, so the wizard keeps its own size |
+| `close_window` on the untitled document | ❌ before: waited 3 s, `{closed: false}`, no word of the "Save Document?" box; ✅ after: 0.4 s, `newWindows: ["new window #4 (\"Save Document?\", 506×198)"]` (it stops waiting when the thread gets a new window, and reports changes as the other actions do) |
 
 ## Limits
 

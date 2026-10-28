@@ -861,7 +861,8 @@ export class Daemon {
     console.log(`plutoniumd: launched pid ${pid} in thread ${threadId}: ${JSON.stringify(argv)}`);
     const holds = agent !== undefined && (agent.size !== undefined || !show);
     // Windows that come after the wait (a slow first start, the main window
-    // after a splash) are held too.
+    // after a splash) are held too, until the agent starts working in the
+    // app: the dialogs it opens then keep their own size.
     if (before && holds) void this.holdLate(threadId, before, agent.size, Date.now() + Math.max(waitMs, 0) + LATE_WINDOWS_MS);
     if (!before || waitMs <= 0) return { pid, windows: [] };
     const deadline = Date.now() + waitMs;
@@ -954,7 +955,10 @@ export class Daemon {
     return (await this.allWindows()).filter((entry) => ids.has(entry.id));
   }
 
-  /** Holds the thread's windows new since `before` that aren't held yet, until `until`. */
+  /**
+   * Holds the thread's windows new since `before` that aren't held yet, until
+   * `until` or the agent's first input to one of the thread's windows.
+   */
   private async holdLate(
     threadId: string,
     before: ReadonlySet<number>,
@@ -962,9 +966,14 @@ export class Daemon {
     until: number,
   ): Promise<void> {
     const seen = new Set(before);
+    const started = Date.now();
     while (Date.now() < until) {
       await sleep(500);
-      const fresh = (await this.threadWindows(threadId).catch(() => [])).filter((entry) => !seen.has(entry.id));
+      const windows = await this.threadWindows(threadId).catch(() => []);
+      // 2026-10-28: Calc's chart wizard, opened 20 s after launch, was held
+      // at the main window's 1280×800.
+      if (windows.some((entry) => (this.lastInput.get(entry.id) ?? 0) > started)) return;
+      const fresh = windows.filter((entry) => !seen.has(entry.id));
       if (fresh.length === 0) continue;
       for (const entry of fresh) seen.add(entry.id);
       const unheld = fresh.filter((entry) => !this.agentWindows.get(entry.id));
@@ -1004,15 +1013,23 @@ export class Daemon {
   }
 
   /** Asks the app to close the window; waits up to `waitMs` for it to go. */
+  /**
+   * Asks the app to close the window; waits up to `waitMs` for it to go, or
+   * for the app to open a window of the thread's instead (a "Save changes?"
+   * box, which withWindowChanges names).
+   */
   async close(threadId: string, windowId: number, waitMs = 3_000): Promise<{ closed: boolean }> {
     await this.ownedWindow(threadId, windowId);
+    const before = new Set((await this.threadWindows(threadId)).map((entry) => entry.id));
     const desktop = await this.direct();
     if (desktop) await desktop.closeWindow(windowId);
     else await this.ask(threadId, "close", { windowId });
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       await sleep(150);
-      if (!(await this.allWindows()).some((entry) => entry.id === windowId)) return { closed: true };
+      const windows = await this.threadWindows(threadId);
+      if (!windows.some((entry) => entry.id === windowId)) return { closed: true };
+      if (windows.some((entry) => !before.has(entry.id))) break;
     }
     return { closed: false };
   }
@@ -2386,7 +2403,11 @@ export class Daemon {
           return sendJson(response, 200, await this.focus(threadId, windowId, displayOf(body.display)));
         }
         if (method === "POST" && action[3] === "close") {
-          return sendJson(response, 200, await this.close(threadId, windowId));
+          return sendJson(
+            response,
+            200,
+            await this.withWindowChanges(threadId, windowId, "close", () => this.close(threadId, windowId)),
+          );
         }
         if (method === "GET" && action[3] === "a11y") {
           const text = await this.readWindow(

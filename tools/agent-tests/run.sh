@@ -16,6 +16,9 @@
 #     --capture | --no-capture
 #                      record the screen from KMS (default: on for the test session,
 #                      off for the live desktop, where it would record the user's screen)
+#     --x11            the checkout's X11 session (plutonium run --x11, its slot's Xvfb):
+#                      no VT switch and no screen lock; the screen is a frame of the Xvfb
+#                      every 2 s (screen/<epoch>.jpg) instead of a KMS recording
 #
 # Writes logs/agent-tests/<run>/ in the main checkout and prints its path:
 #   meta.json        scenario, session, thread, times, outcome
@@ -28,7 +31,7 @@
 #   coredumps.txt    processes that crashed meanwhile
 set -eo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-checkout=$(cd "$HERE/../.." && pwd) model= instance=claudeAgent timeout_min= show= capture= scenario=
+checkout=$(cd "$HERE/../.." && pwd) model= instance=claudeAgent timeout_min= show= capture= x11= scenario=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --checkout) checkout=$(cd "$2" && pwd); shift ;;
@@ -38,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --show) show=1 ;;
     --capture) capture=1 ;;
     --no-capture) capture=0 ;;
+    --x11) x11=1 ;;
     -h|--help) sed -n '2,/^set -eo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) scenario=$(realpath "$1") ;;
@@ -79,7 +83,7 @@ echo "run $run: $name on $([[ -n $live ]] && echo "the live desktop" || echo "sl
 # A test session needs the screen (only the VT on screen has the display and
 # input, and the recording is of the screen), so runs on test sessions take
 # turns, and each brings its own to the front (session.sh front).
-if [[ -z $live ]]; then
+if [[ -z $live && -z $x11 ]]; then
   exec 9> "$DATA_DIR/agent-tests-screen.lock"
   flock -n 9 || { echo "waiting for the screen (another test session's run)"; flock 9; }
   "$HERE/session.sh" --name "$(basename "$checkout")" front > /dev/null
@@ -102,7 +106,16 @@ for mode in drm x11; do session_vars "$mode"; logfiles+=("$LOGS/helper-$SOCKET.l
 for f in "${logfiles[@]}"; do offsets[$f]=$(stat -c %s "$f" 2>/dev/null || echo 0); done
 
 started=$(date +%s)
-if [[ $capture == 1 ]]; then
+if [[ $capture == 1 && -n $x11 ]]; then
+  [[ -z $live ]] || die "--x11 records the slot's Xvfb; not on the live desktop"
+  mkdir -p "$out/screen"
+  # Xvfb runs in the container; its socket is in the shared /tmp/.X11-unix.
+  (while :; do
+    in_container env DISPLAY="$PRIVATE_XDISP" import -silent -window root -quality 60 "$out/screen/$(date +%s).jpg" 2>/dev/null
+    sleep 2
+  done) &
+  ffpid=$!
+elif [[ $capture == 1 ]]; then
   FF=${FF:-$(command -v ffmpeg || echo "$(nix build --no-link --print-out-paths 'nixpkgs#ffmpeg-headless.bin' 2>/dev/null)/bin/ffmpeg")}
   date +%s.%N > "$out/.screen-start"
   sudo -n "$FF" -loglevel error -y -device /dev/dri/card1 -f kmsgrab -framerate 4 -i - \
@@ -112,6 +125,7 @@ if [[ $capture == 1 ]]; then
 fi
 stop_capture() {
   [[ -n ${ffpid:-} ]] || return 0
+  if [[ -n $x11 ]]; then kill "$ffpid" 2>/dev/null || true; wait "$ffpid" 2>/dev/null || true; ffpid=; return 0; fi
   sudo -n pkill -INT -P "$ffpid" 2>/dev/null || sudo -n kill -INT "$ffpid" 2>/dev/null || true
   wait "$ffpid" 2>/dev/null || true
   sudo -n chown "$(id -u):$(id -g)" "$out/screen.mkv" 2>/dev/null || true
@@ -131,6 +145,7 @@ echo "thread $thread"
 
 if [[ -n $show ]]; then
   env_id=$(cat "$T3_HOME/userdata/environment-id")
+  [[ -n $x11 ]] && export CDP=127.0.0.1:$((9223 + 100 * SLOT))
   "$checkout/bin/plutonium" cdp eval "127.0.0.1:$T3_PORT" \
     "history.pushState({}, '', '/$env_id/${thread}'); dispatchEvent(new PopStateEvent('popstate')); location.pathname" ||
     echo "warning: couldn't open the thread in the shell" >&2

@@ -303,7 +303,8 @@ const TOOLS = [
     name: "close_window",
     description:
       "Ask one of this thread's windows to close, as its close button would. The app may refuse or ask the user first; " +
-      "the result says whether the window went away.",
+      "the result says whether the window went away (closed), and names a window the app opened instead, such as a " +
+      '"Save changes?" box (newWindows), which you can then read and answer.',
     inputSchema: windowIdSchema,
   },
   {

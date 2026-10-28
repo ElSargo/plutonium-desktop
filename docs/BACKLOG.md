@@ -244,11 +244,39 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   out the running navigate.
 - [x] **A snapshot's `[active]` means focused; nothing says so.** S · It
   reads `[focused]`, and `preview_snapshot`'s description says so.
-- [ ] **Agent tool paths no run has reached yet.** S · Scenarios to write: a
-  stuck action (a long drag while the session's display is paused); the side
-  panel open on a resized tab (its cursor, the narrow viewport); in Calc, a
-  menu and a hover with the window shown and hidden, `act_window` `select` on
-  the chart type list, the untitled "discard?" box, and a stale ref.
+- [ ] **Agent tool paths no run has reached yet.** S · Scenarios written
+  (2026-10-28): `calc-menus-chart-type`, `tab-narrow-panel`,
+  `stuck-drag-paused`, run on the X11 session of a worktree slot
+  (`run.sh --x11`). Reached: Calc's menus and submenus with the window hidden
+  (nothing on screen), the untitled "Save Document?" box (two helper bugs
+  fixed: dialogs held at the launch size, `close_window` not naming the box),
+  a stuck drag (its timeout and `stuck` status right). Still unreached: a
+  hover and `act_window` `select` and a stale ref (testers click; LibreOffice
+  opens submenus on click), Calc with its window shown (needs the window
+  opened in the panel during the run), the side panel's cursor on a narrow tab
+  (blocked by the next item), a drag while the display is paused (blocked by
+  the one after; on DRM it's a VT switch, the orchestrator's).
+- [ ] **A snapshot after `preview_resize` on a shown tab times out.** M ·
+  With the tab in the side panel or the floating preview, the first
+  `preview_snapshot` after `preview_resize` (390×844 or 1024×768) times out at
+  15 s and is left `stuck`; clicks after work. 5 of 5 on the X11 session
+  (slot 26, 2026-10-28); it passed on 2026-10-24 (`excalidraw-spiral-sized`).
+  On a tab no page shows, the snapshot works but the page stays 1280×800: the
+  resize doesn't reach it. Raw `Page.captureScreenshot` and
+  `requestAnimationFrame` answered at once meanwhile, so it's T3's snapshot
+  path or the shown tab's fixed size; not found yet
+  (`agent-tests/scenarios/tab-narrow-panel.md`).
+- [ ] **Mouse moves on a hidden tab are slow on the X11 session.** M · On
+  Excalidraw (hidden, X11 slot 26, GPU RADV): 20 raw `Input.dispatchMouseEvent`
+  moves without a button in 0.3 s, with the pen down 8 s; a minute later 19 s
+  and 10 s, held awake (`Plutonium.setTabAwake`), while the page's
+  `requestAnimationFrame` ran at 60 fps. A 490-point `preview_drag` times out
+  after 60 s with no pause at all. The 2026-10-27 check (slot 15) dragged 139
+  moves in 3.9 s (`agent-tests/scenarios/stuck-drag-paused.md`).
+- [ ] **The T3 shell page can come up as "T3 Code could not load".** S · On
+  an X11 session's first start in a fresh slot, the page loaded while the T3
+  server was still starting (the helper ran `npm ci` first) and stayed on the
+  error until reloaded by hand.
 - [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
   `preview_drag` drags along a path of points; snapshot images are in click
   coordinates on desktop tabs without flashing on screen; the panel's and the
