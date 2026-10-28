@@ -528,6 +528,34 @@ const TOOLS = [
     inputSchema: tabIdSchema,
   },
   {
+    name: "start_recording",
+    description:
+      "Record one of this thread's windows or browser tabs to a video file (WebM), even if the user isn't looking " +
+      "at it, until stop_recording. Give window_id or tab_id. The user sees the recording in their shell and can " +
+      "stop it; it fails if they switched recording off. Returns its recording_id and the file's path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        window_id: { type: "integer", description: "A window id from list_windows." },
+        tab_id: { type: "integer", description: "Or a tab id from list_tabs or open_tab." },
+        path: { type: "string", description: "An absolute path for the .webm file (default: one in the temp folder)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "stop_recording",
+    description:
+      "Stop a recording start_recording began (default: this thread's newest) and finish its file. Returns the " +
+      "path, its length in seconds and size, and `ended` if it had already stopped (the user stopped it, or the " +
+      "window closed).",
+    inputSchema: {
+      type: "object",
+      properties: { recording_id: { type: "integer", description: "A recording_id from start_recording." } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "read_tab",
     description:
       "Read the page in one of this thread's tabs as an accessibility tree (YAML): roles, names, text, and a ref " +
@@ -694,6 +722,8 @@ export const WINDOW_TOOLS = new Set([
   "focus_window",
   "list_displays",
   "close_window",
+  "start_recording",
+  "stop_recording",
 ]);
 
 /** The tools of `set` ("windows": WINDOW_TOOLS), or all of them. */
@@ -996,6 +1026,23 @@ export async function callTool(
       if (!response.popups) return [image];
       return [image, { type: "text", text: JSON.stringify({ popups: JSON.parse(response.popups) }) }];
     }
+    case "start_recording":
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/recordings`, {
+          window_id: args.window_id,
+          tab_id: args.tab_id,
+          path: args.path,
+        }),
+      );
+    case "stop_recording": {
+      const id = args.recording_id;
+      if (id !== undefined && (typeof id !== "number" || !Number.isInteger(id))) {
+        throw new Error("recording_id must be an integer.");
+      }
+      return text(
+        await helperJson(socket, "POST", `/v1/threads/${thread}/recordings${id === undefined ? "" : `/${id}`}/stop`),
+      );
+    }
     case "focus_window":
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/focus`, displayArg()));
     case "list_displays":
@@ -1034,7 +1081,8 @@ async function handle(message: JsonRpcMessage): Promise<unknown> {
           "accessibility tree, focus_window to show one to the user and close_window to close it. " +
           "Use open_tab to open web pages in real browser tabs (the user's browser profile), read_tab to read a page " +
           "with element refs, click_tab, type_tab, press_tab, select_tab and evaluate_tab to use it, snapshot_tab to " +
-          "see it, and navigate_tab, tab_action, focus_tab and close_tab. You work in the background: the user's own " +
+          "see it, and navigate_tab, tab_action, focus_tab and close_tab. start_recording and stop_recording record a " +
+          "window or tab to a video file. You work in the background: the user's own " +
           "pointer and keyboard aren't moved. What you open waits in the thread without interrupting the user; pass " +
           "focus: true (or run a command as PLUTONIUM_SHOW=1 <command>) only when they asked to see it.",
       };

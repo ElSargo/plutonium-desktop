@@ -11,15 +11,15 @@ sources:  output · window (parked or not) · tab · a region of any of these
                  │ PipeWire node          │ MediaStream / PNG         │ PNG, later video
                  ▼                        ▼                           ▼
    native apps through the portal  shell pages (trusted)      agents (MCP, own thread)
-   OBS, Discord, Zoom, Firefox     picker, screenshots,       snapshot_* today,
-                                   recording, thumbnails      recording later
+   OBS, Discord, Zoom, Firefox     picker, screenshots,       snapshot_*,
+                                   recording, thumbnails      start_recording
 ```
 
 ## What exists
 
 - **Window snapshots** (patch 0005): a viz `CopyOutputRequest` on the window's surface, cropped to the window. It works while the window is parked, because parked windows keep drawing (patch 0010).
 - **Tab frames** (patch 0007): a `FrameSinkVideoCapturer` on a hidden tab's view.
-- **Agents** take PNGs of their thread's windows and tabs (`snapshot_window`, `snapshot_tab`). T3's browser panel reports recording as unsupported (`startScreencast` in its patch 0005).
+- **Agents** take PNGs of their thread's windows and tabs (`snapshot_window`, `snapshot_tab`), and record them (`start_recording`, Agents below).
 
 Built since (below): the portal backend (ScreenCast, Screenshot, GlobalShortcuts), PipeWire output, a shell API, and getDisplayMedia from tabs through the shell's picker.
 
@@ -105,8 +105,9 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 ## Agents
 
 - Agents capture only their thread's windows and tabs, with no dialogs.
-- Recording over MCP comes later, built on the same capture session, with output to a file. Each recording goes to every shell as `capturestart`, so the user can still see it and stop it.
-- If recording is switched off globally, the tools return an error that says so.
+- **Recording** (`start_recording {window_id | tab_id, path?}`, `stop_recording {recording_id?}`; `helper/src/recordings.ts`): the helper's "start" capture command, as the portal's, with the consumer `{kind: "agent", thread, name}`. So it goes to every shell as `capturestart` and any shell can stop it. The helper writes the PipeWire node to a WebM file with GStreamer on the host (`gst-launch-1.0 -e pipewiresrc path=<node> keepalive-time=500 ! videoconvert ! vp8enc ! webmmux ! filesink`; without GStreamer, start says what to install). Stop sends the encoder EOS and stops the capture. A capture a shell stops (or the switch, or the source closing) ends the encoder; `stop_recording` still returns the file, with `ended` saying why. Frames come with damage, and the last one is repeated every 0.5 s while the source is still. The file is in `$TMPDIR/plutonium-recordings` unless `path` says.
+- If recording is switched off globally, start fails with the switch's error.
+- **T3 Code** offers `start_recording` and `stop_recording` for windows. Its `preview_recording_start`/`stop` for its preview tabs stay its own recorder: CDP screencast frames into a MediaRecorder in a hidden page of Plutonium's browser (the helper's "scratch" page), with the agent's pointer and clicks drawn in, and the file handed over as a T3 attachment. That recorder is no capture: shells don't see it, and the recording switch doesn't refuse it (BACKLOG).
 
 ## Apps
 
@@ -141,7 +142,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 - **A shell's MediaStream of a window** comes from the window's own frame sink, the one its Exo surface tree submits to (patch 0054: the DesktopMediaID is the surface's host window, and `AuraWindowVideoCaptureDevice` captures a non-root window that embeds a client's sink from that sink). So it's the whole window, also where it's partly off the screen or held at a capture size bigger than it (Chromium's own window capture, a subtree of the screen's frame, is clipped to the screen). Frames come while the surface is drawn somewhere, on the screen or in a shell that shows it: a parked window that nothing shows gives none. PipeWire captures, which use the window's own copies, cover that case (below). Client-side shadows are in the frame.
 - **A shell's MediaStream:** the "stream" command registers a desktop stream id for the shell document (`DesktopStreamsRegistry`), and the library calls `getUserMedia({video: {mandatory: {chromeMediaSource: "desktop", chromeMediaSourceId}}})`. Chrome's own capture devices do the rest: an output is its root window, a window is its widget's aura window (a subtree capture of the root's frame: `MakeWindowCapturable()` keeps it drawn while parked at zero opacity), a tab is its `WebContents`. `DesktopCaptureAccessHandler` hands the capture its `MediaStreamUI`, wrapped (`WrapStreamUI()`), so the capture starts and stops with the stream and `stopCapture()` really stops it; Chrome's "is sharing your screen" notification is left out, since the shells show it. A region is cropped in the library (`MediaStreamTrackProcessor`, `VideoFrame.visibleRect`).
 - **PipeWire** (`chrome/browser/plutonium_pipewire.{h,cc}`, `PlutoniumScreencast`): the "start" command, for the portal.
-  - Frames: for an output or a tab, a `FrameSinkVideoCapturer` on the same targets, ARGB in shared memory. For a window, its own copies as it draws (`plutonium_agent::WindowScreencast`, as agents' screencasts, at most 30 a second): a window's subtree of the screen's frame only covers what fits on the screen, so this is what lets OBS record a parked window, or one held at 1080p on a smaller screen.
+  - Frames: for an output or a tab, a `FrameSinkVideoCapturer` on the same targets, ARGB in shared memory. A tab's is a hidden capture with no size (the page keeps its own), and a navigation to another site, which gives the page a new view, gets a new capturer on that view. For a window, its own copies as it draws (`plutonium_agent::WindowScreencast`, as agents' screencasts, at most 30 a second): a window's subtree of the screen's frame only covers what fits on the screen, so this is what lets OBS record a parked window, or one held at 1080p on a smaller screen.
   - Each frame is copied into a PipeWire buffer (MemFd, else MemPtr; BGRx or BGRA) of a driver stream (`PW_STREAM_FLAG_DRIVER`, `pw_stream_trigger_process()` per frame), at the source's size when it started, letterboxed after. Frames come with damage: a still screen sends none after the first.
   - Cursor: hidden, embedded (a capturer overlay with the cursor image), or metadata (`SPA_META_Cursor`, the image only when it changes). A window's capture has none (the pointer isn't over a window off the screen).
   - libpipewire is `dlopen()`ed, with no configuration (`config.name=null`; it loads the protocol, client-node and adapter modules itself): the images have `libpipewire-0.3-0t64`, `libpipewire-0.3-modules` and `libspa-0.2-modules`, not PipeWire's `client.conf`.

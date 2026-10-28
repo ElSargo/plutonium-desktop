@@ -46,6 +46,7 @@ import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
 import { Appearance } from "./appearance.ts";
 import { Portal } from "./portal.ts";
+import { Recordings, type RecordingSource } from "./recordings.ts";
 import { saveScreenshot } from "./screenshots.ts";
 import { DesktopServices, mayUse, ServiceError } from "./services.ts";
 import { NativeError, ShellNative } from "./shellNative.ts";
@@ -393,6 +394,8 @@ export class Daemon {
   readonly a11y = new Accessibility();
   /** EXO-CAPTURE: the desktop portal's ScreenCast and Screenshot backend (portal.ts). */
   private portal: Portal | null = null;
+  /** EXO-CAPTURE: agents' recordings (start_recording, stop_recording). */
+  private recordings: Recordings | null = null;
   private appearance: Appearance | null = null;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
@@ -1290,6 +1293,39 @@ export class Daemon {
     return reply.data;
   }
 
+  /** EXO-CAPTURE: records the thread's window or tab ({window_id} or {tab_id}, path?) to a file. */
+  async startRecording(threadId: string, body: Record<string, unknown>) {
+    await this.requireDirect("Recording");
+    if (!this.recordings) throw new HttpError(501, "Recording needs the browser.");
+    const windowId = body.window_id;
+    const tabId = body.tab_id;
+    let source: RecordingSource;
+    if (typeof windowId === "number" && tabId === undefined) {
+      await this.ownedWindow(threadId, windowId);
+      source = { type: "window", id: windowId };
+    } else if (typeof tabId === "number" && windowId === undefined) {
+      await this.ownedTab(threadId, tabId);
+      source = { type: "tab", id: tabId };
+    } else {
+      throw new HttpError(400, "Give window_id or tab_id.");
+    }
+    if (body.path !== undefined && typeof body.path !== "string") throw new HttpError(400, "path must be a string.");
+    try {
+      return await this.recordings.start(threadId, source, body.path || undefined);
+    } catch (error) {
+      throw new HttpError(409, (error as Error).message);
+    }
+  }
+
+  async stopRecording(threadId: string, id: number | undefined) {
+    if (!this.recordings) throw new HttpError(501, "Recording needs the browser.");
+    try {
+      return await this.recordings.stop(threadId, id);
+    } catch (error) {
+      throw new HttpError(404, (error as Error).message);
+    }
+  }
+
   // Driving windows: mouse and keys from agents, straight into the app. Points
   // are in snapshot_window's pixels (the window's DIPs times its scale).
 
@@ -2139,6 +2175,21 @@ export class Daemon {
           return sendJson(response, 200, { content: [{ type: "text", text: (error as Error).message }], isError: true });
         }
       }
+      // EXO-CAPTURE: an agent records one of its thread's windows or tabs.
+      const recordings = path.match(/^\/v1\/threads\/([^/]+)\/recordings(?:\/(\d+)\/stop|\/stop)?$/);
+      if (recordings) {
+        const threadId = decodeURIComponent(recordings[1]!);
+        if (method === "GET" && !path.endsWith("/stop")) {
+          return sendJson(response, 200, this.recordings?.list(threadId) ?? []);
+        }
+        if (method === "POST") {
+          const body = await readJson(request);
+          if (path.endsWith("/stop")) {
+            return sendJson(response, 200, await this.stopRecording(threadId, recordings[2] ? Number(recordings[2]) : undefined));
+          }
+          return sendJson(response, 200, await this.startRecording(threadId, body));
+        }
+      }
       // EXO-TAB-PERMISSIONS: a frontend archived or deleted a thread (T3 Code's server).
       const forget = path.match(/^\/v1\/threads\/([^/]+)\/permissions\/forget$/);
       if (method === "POST" && forget) {
@@ -2594,6 +2645,12 @@ export class Daemon {
       void appearance.start();
       void desktop.available(true);
     }
+    if (this.desktop) {
+      const desktop = this.desktop;
+      const recordings = new Recordings({ captureCommand: (command, args) => desktop.captureCommand(command, args) });
+      desktop.captureListeners.add((type, capture) => recordings.onCapture(type, capture));
+      this.recordings = recordings;
+    }
     // EXO-CAPTURE: apps' screen captures and screenshots, through the browser.
     if (this.desktop && process.env.PLUTONIUM_PORTAL !== "0") {
       const portal = new Portal({
@@ -2621,6 +2678,7 @@ export class Daemon {
     this.services.stop();
     this.native?.stopAll();
     this.portal?.stop();
+    this.recordings?.stopAll();
     this.appearance?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();

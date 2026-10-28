@@ -22,6 +22,7 @@ From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the
 | optional: `foot` | the terminal the shells open (Super+T) |
 | optional: `xwayland-satellite`, `systemd-socket-activate` | X11 apps (each thread gets a rootless Xwayland) |
 | optional: pnpm (or corepack, included with Node 24) | the T3 Code frontend |
+| optional: GStreamer (`gst-launch-1.0`, its base and good plugins, PipeWire's plugin) | agents' recordings (`start_recording`): `gstreamer1-plugins-good` and `pipewire-gstreamer` on Fedora, `gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-pipewire` on Ubuntu |
 
 ```
 # Fedora (its plain nodejs is Node 22)
