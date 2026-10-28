@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Fri, 16 Oct 2026 09:10:39 +1300
-Subject: [PATCH 03/42] Plutonium: per-thread Xwayland for X11 apps
+Subject: [PATCH 03/43] Plutonium: per-thread Xwayland for X11 apps
 
 Agents and terminals get DISPLAY for a rootless Xwayland per thread (xwayland-satellite, socket-activated on first X client), so X11 apps land in Exo tagged with the thread instead of on the host desktop.
 

@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 29 Oct 2026 08:58:51 +1300
+Subject: [PATCH 93/93] Plutonium: a page painting where nothing may draw it
+ doesn't let viz slow it
+
+A tab kept awake while no page shows it (Plutonium.setTabAwake, a capture
+that keeps it hidden) paints, but nothing draws its frames, and viz sends a
+frame sink one BeginFrame a second once more than three of its frames go
+undrawn (ThrottleUndrawnFrames). A page that redraws on input, such as
+Excalidraw's pen, then took a frame a second per mouse move. The same holds
+for a page with DevTools' focus emulation (Playwright turns it on), which
+counts as visible but is drawn no more.
+
+WebViewImpl::UpdateMayThrottleIfUndrawnFrames() sets
+may_throttle_if_undrawn_frames to false on the page's widgets while its
+visibility is kHiddenButPainting or focus emulation is on, and new widgets
+take it, as Exo's KeepDrawing does for windows and Document
+Picture-in-Picture does for its opener.
+
+A navigation that changes process gives the page a provisional main frame
+whose widget isn't in the frame tree when DevTools restores focus emulation
+there, so DidAttachLocalMainFrame() hands it the page's answer too
+(Playwright navigates the tab it attached to).
+---
+ .../renderer/core/exported/web_view_impl.cc   | 25 +++++++++++++++++++
+ .../renderer/core/exported/web_view_impl.h    | 13 ++++++++++
+ .../core/frame/web_frame_widget_impl.cc       | 10 +++++++-
+ .../inspector/inspector_emulation_agent.cc    |  2 ++
+ .../renderer/core/page/focus_controller.h     |  2 ++
+ 5 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.cc b/third_party/blink/renderer/core/exported/web_view_impl.cc
+index 210e182a80..fa0eb010b2 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_view_impl.cc
+@@ -2176,6 +2176,12 @@ void WebViewImpl::DidAttachLocalMainFrame() {
+     MainFrameImpl()->FrameWidgetImpl()->SetBackgroundColor(BackgroundColor());
+     MainFrameImpl()->FrameWidgetImpl()->SetPrefersReducedMotion(
+         web_preferences_.prefers_reduced_motion);
++    // Plutonium: a provisional main frame's widget isn't in the frame tree
++    // when DevTools restores focus emulation into the new page
++    // (UpdateMayThrottleIfUndrawnFrames()), so it takes the page's answer here.
++    if (!may_throttle_if_undrawn_frames_) {
++      MainFrameImpl()->FrameWidgetImpl()->SetMayThrottleIfUndrawnFrames(false);
++    }
+     MainFrameImpl()->FrameWidgetImpl()->SetPageScaleStateAndLimits(
+         viewport.Scale(), viewport.IsPinchGestureActive(),
+         MinimumPageScaleFactor(), MaximumPageScaleFactor());
+@@ -4332,6 +4338,7 @@ void WebViewImpl::SetVisibilityState(
+     bool is_initial_state) {
+   DCHECK(GetPage());
+   GetPage()->SetVisibilityState(visibility_state, is_initial_state);
++  UpdateMayThrottleIfUndrawnFrames();
+   // Do not throttle if the page should be painting.
+   bool is_visible =
+       visibility_state == mojom::blink::PageVisibilityState::kVisible;
+@@ -4355,6 +4362,24 @@ mojom::blink::PageVisibilityState WebViewImpl::GetVisibilityState() {
+   return GetPage()->GetVisibilityState();
+ }
+ 
++void WebViewImpl::UpdateMayThrottleIfUndrawnFrames() {
++  Page* page = GetPage();
++  if (!page) {
++    return;
++  }
++  const bool may_throttle =
++      page->GetVisibilityState() !=
++          mojom::blink::PageVisibilityState::kHiddenButPainting &&
++      !page->GetFocusController().IsFocusEmulationEnabled();
++  if (may_throttle == may_throttle_if_undrawn_frames_) {
++    return;
++  }
++  may_throttle_if_undrawn_frames_ = may_throttle;
++  ForEachFrameWidgetControlledByView(*this, [&](WebFrameWidgetImpl* widget) {
++    widget->SetMayThrottleIfUndrawnFrames(may_throttle);
++  });
++}
++
+ LocalFrame* WebViewImpl::FocusedLocalFrameInWidget() const {
+   if (!MainFrameImpl()) {
+     return nullptr;
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.h b/third_party/blink/renderer/core/exported/web_view_impl.h
+index 1c4e22e2d7..93d2ea532a 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.h
++++ b/third_party/blink/renderer/core/exported/web_view_impl.h
+@@ -449,6 +449,16 @@ class CORE_EXPORT WebViewImpl final : public WebView,
+                           bool is_initial_state) override;
+   mojom::blink::PageVisibilityState GetVisibilityState() override;
+ 
++  // Plutonium: a page that paints while maybe nothing draws its frames (a
++  // capture that keeps it hidden, as Plutonium.setTabAwake makes, or
++  // DevTools' focus emulation, which Playwright turns on) asks viz not to
++  // slow it to a frame a second once three of its frames go undrawn. Called
++  // when either changes; MayThrottleIfUndrawnFrames() is for new widgets.
++  void UpdateMayThrottleIfUndrawnFrames();
++  bool MayThrottleIfUndrawnFrames() const {
++    return may_throttle_if_undrawn_frames_;
++  }
++
+   void SetPageLifecycleStateFromNewPageCommit(
+       mojom::blink::PageVisibilityState visibility,
+       mojom::blink::PagehideDispatch pagehide_dispatch) override;
+@@ -936,6 +946,9 @@ class CORE_EXPORT WebViewImpl final : public WebView,
+   // and clear.
+   const bool does_composite_;
+ 
++  // Plutonium: UpdateMayThrottleIfUndrawnFrames().
++  bool may_throttle_if_undrawn_frames_ = true;
++
+   bool matches_heuristics_for_gpu_rasterization_ = false;
+ 
+   std::unique_ptr<FullscreenController> fullscreen_controller_;
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+index 1ed2bccc4f..3458764555 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+@@ -2816,6 +2816,12 @@ void WebFrameWidgetImpl::InitializeCompositingInternal(
+                             ->widget_base_.get()
+                       : nullptr);
+ 
++  // Plutonium: WebViewImpl::UpdateMayThrottleIfUndrawnFrames(), for a widget
++  // made after the page asked.
++  if (!View()->MayThrottleIfUndrawnFrames()) {
++    SetMayThrottleIfUndrawnFrames(false);
++  }
++
+   probe::DidInitializeFrameWidget(local_root_->GetFrame());
+   local_root_->GetFrame()->NotifyFrameWidgetCreated();
+ 
+@@ -5864,7 +5870,9 @@ void WebFrameWidgetImpl::ApplyLocalSurfaceIdUpdate(
+ 
+ void WebFrameWidgetImpl::SetMayThrottleIfUndrawnFrames(
+     bool may_throttle_if_undrawn_frames) {
+-  if (!View()->does_composite())
++  // Plutonium: also before compositing starts
++  // (WebViewImpl::UpdateMayThrottleIfUndrawnFrames()).
++  if (!View()->does_composite() || !widget_base_->LayerTreeHost())
+     return;
+   widget_base_->LayerTreeHost()->SetMayThrottleIfUndrawnFrames(
+       may_throttle_if_undrawn_frames);
+diff --git a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
+index fc5ceb18c1..a18d0eb053 100644
+--- a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
++++ b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
+@@ -608,6 +608,8 @@ protocol::Response InspectorEmulationAgent::setFocusEmulationEnabled(
+   emulate_focus_.Set(enabled);
+   if (const Page* page = GetWebViewImpl()->GetPage()) {
+     page->GetFocusController().SetFocusEmulationEnabled(enabled);
++    // Plutonium: a page with emulated focus paints as if shown.
++    GetWebViewImpl()->UpdateMayThrottleIfUndrawnFrames();
+   }
+   return response;
+ }
+diff --git a/third_party/blink/renderer/core/page/focus_controller.h b/third_party/blink/renderer/core/page/focus_controller.h
+index 6fbafdf0c1..fee5ac1dde 100644
+--- a/third_party/blink/renderer/core/page/focus_controller.h
++++ b/third_party/blink/renderer/core/page/focus_controller.h
+@@ -127,6 +127,8 @@ class CORE_EXPORT FocusController final
+   bool IsFocused() const { return is_focused_ || is_emulating_focus_; }
+ 
+   void SetFocusEmulationEnabled(bool);
++  // Plutonium: for WebViewImpl::UpdateMayThrottleIfUndrawnFrames().
++  bool IsFocusEmulationEnabled() const { return is_emulating_focus_; }
+ 
+   void UpdateFocusOnNavigationCommit(Frame*, bool was_focused);
+ 

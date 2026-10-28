@@ -269,17 +269,39 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   never came. The plugin now ignores ids from another embedding. Verified on
   X11 slot 28 (`runs/20261029-004552-tab-narrow-panel`). The "hidden tab stays
   1280×800" half didn't reproduce there: a hidden tab took 390×844.
-- [ ] **Mouse moves on a hidden tab are slow on the X11 session.** M · On
+- [x] **Mouse moves on a hidden tab are slow on the X11 session.** M · On
   Excalidraw (hidden, X11 slot 26, GPU RADV): 20 raw `Input.dispatchMouseEvent`
   moves without a button in 0.3 s, with the pen down 8 s; a minute later 19 s
   and 10 s, held awake (`Plutonium.setTabAwake`), while the page's
   `requestAnimationFrame` ran at 60 fps. A 490-point `preview_drag` times out
-  after 60 s with no pause at all. The 2026-10-27 check (slot 15) dragged 139
-  moves in 3.9 s (`agent-tests/scenarios/stuck-drag-paused.md`).
-- [ ] **The T3 shell page can come up as "T3 Code could not load".** S · On
+  after 60 s with no pause at all. Done 2026-10-29 (Chromium patch 0093):
+  nothing draws an awake hidden tab's frames, and viz sends a frame sink one
+  BeginFrame a second once more than three go undrawn
+  (`ThrottleUndrawnFrames`), so a page that redraws on each move (the pen)
+  got a frame a second, and so did everything once it kept redrawing. A page
+  that is hidden but painting, or has DevTools' focus emulation (Playwright's),
+  now sets `may_throttle_if_undrawn_frames` to false on its widgets, as
+  `KeepDrawing()` does for windows; a main frame a navigation swaps in takes
+  it too (Playwright navigates the tab after it attaches, so focus emulation
+  is restored into a page whose widget isn't in the frame tree yet). Slot 29:
+  20 raw pen moves 10.9 s before, 0.35 s after; Playwright's attach-then-navigate,
+  ~500 ms a move before, 490 moves in 8.3 s after; T3's 490-point
+  `preview_drag` 15 s (`runs/20261029-104229-stuck-drag-paused`)
+  (`AGENT_CONTROL.md`, "Tabs").
+- [ ] **`preview_status` times out while the display is paused.** S · In
+  `runs/20261029-104446-stuck-drag-paused` (X11 slot 29), with the Xvfb
+  stopped, `preview_status` took 16 s and failed ("timed out after 15000ms"),
+  and a snapshot 22 s. The status should come from the server's own state,
+  not wait on a tab that draws no frames.
+- [x] **The T3 shell page can come up as "T3 Code could not load".** S · On
   an X11 session's first start in a fresh slot, the page loaded while the T3
   server was still starting (the helper ran `npm ci` first) and stayed on the
-  error until reloaded by hand.
+  error until reloaded by hand. Done 2026-10-29 (T3 patch 0043): the error is
+  the boot's `import("./main")` failing, which nothing retried; it now polls
+  the server and reloads once it answers, up to five times per failure streak.
+  The race itself didn't reproduce in a fresh slot (slot 29); with the main
+  chunk blocked over DevTools, the page came back by itself 3 s after it was
+  unblocked.
 - [x] **Agents drawing in tabs** (`excalidraw-cloud` run 2026-10-24).
   `preview_drag` drags along a path of points; snapshot images are in click
   coordinates on desktop tabs without flashing on screen; the panel's and the

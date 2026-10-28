@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 09:13:12 +1300
-Subject: [PATCH 62/92] Plutonium: an input method composes and commits into
+Subject: [PATCH 62/93] Plutonium: an input method composes and commits into
  embedded windows
 
 EXO-EMBED stopped the propagation of every key for an embedded window, so
