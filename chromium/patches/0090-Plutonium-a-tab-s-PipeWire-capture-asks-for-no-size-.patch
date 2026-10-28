@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 20:49:01 +1300
-Subject: [PATCH 90/90] Plutonium: a tab's PipeWire capture asks for no size
+Subject: [PATCH 90/91] Plutonium: a tab's PipeWire capture asks for no size
  and follows navigations
 
 EXO-CAPTURE, PlutoniumScreencast for a tab (the portal's tab captures, an

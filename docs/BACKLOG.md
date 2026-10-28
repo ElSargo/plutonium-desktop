@@ -697,10 +697,12 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   dialogs. It goes to every shell as `capturestart` and honours the global switch.
   Built: `start_recording`/`stop_recording` (the helper's for windows and tabs, T3 Code's for windows), GStreamer on
   the host writing the PipeWire node to WebM (CAPTURE.md, "Agents").
-- [ ] **T3's preview recordings as captures.** S · T3's `preview_recording_*` record its tabs
+- [x] **T3's preview recordings as captures.** S · T3's `preview_recording_*` record its tabs
   their own way (screencast frames into a hidden page's MediaRecorder, with the agent's pointer):
   shells don't see them and the recording switch doesn't refuse them. Register them as
-  captures, or refuse them when recording is off.
+  captures, or refuse them when recording is off. Built: the helper registers them (capture
+  command `register`, no node) when T3's server says so on the server-tabs channel
+  (CAPTURE.md, "Agents").
 - [ ] **Discord screen-share audio.** S to test, M to fix · If Discord wants a
   per-app node, publish one from the shared window's pid (as venmic does).
 - [ ] **dmabuf for Ash's PipeWire nodes.** M · Built (linear GBM buffers written

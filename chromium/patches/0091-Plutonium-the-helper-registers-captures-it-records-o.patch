@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <oliversargisonb@gmail.com>
+Date: Wed, 28 Oct 2026 23:36:36 +1300
+Subject: [PATCH 91/91] Plutonium: the helper registers captures it records
+ outside Ash
+
+The capture command "register" (the helper's only) adds a capture with
+no PipeWire node, of a window, tab or output, for a consumer that records
+it some other way: T3 Code's preview recordings encode a tab's screencast
+themselves. It goes to every shell as capturestart, any shell's stop ends
+it (the helper hears capturestop), and the recording switch refuses it and
+ends it.
+---
+ chrome/browser/plutonium_capture.cc | 51 +++++++++++++++++++++++++++++
+ chrome/browser/plutonium_capture.h  |  3 ++
+ 2 files changed, 54 insertions(+)
+
+diff --git a/chrome/browser/plutonium_capture.cc b/chrome/browser/plutonium_capture.cc
+index 213d8e5dac..8a92b0da8b 100644
+--- a/chrome/browser/plutonium_capture.cc
++++ b/chrome/browser/plutonium_capture.cc
+@@ -673,6 +673,26 @@ void PlutoniumCapture::RunCommand(const std::string& command,
+     StartScreencast(args, std::move(callback));
+     return;
+   }
++  // The helper's: a capture something else records (T3 Code's preview
++  // recordings encode a tab's screencast themselves). No node: it's only
++  // registered, so shells see it and can stop it, and the switch refuses it.
++  if (command == "register") {
++    if (frame) {
++      std::move(callback).Run(false, "Only for the helper");
++      return;
++    }
++    if (!recording_allowed()) {
++      std::move(callback).Run(false, kRecordingOff);
++      return;
++    }
++    base::expected<base::Value, std::string> registered = Register(args);
++    if (!registered.has_value()) {
++      std::move(callback).Run(false, registered.error());
++      return;
++    }
++    std::move(callback).Run(true, ToJson(registered.value()));
++    return;
++  }
+   base::expected<base::Value, std::string> result =
+       RunShellCommand(command, args, frame, taker);
+   if (!result.has_value()) {
+@@ -767,6 +787,37 @@ base::expected<base::Value, std::string> PlutoniumCapture::RunShellCommand(
+   return base::unexpected("No such command: " + command);
+ }
+ 
++base::expected<base::Value, std::string> PlutoniumCapture::Register(
++    const base::DictValue& args) {
++  const base::Value* source_value = args.Find("source");
++  std::optional<Source> source =
++      source_value ? Source::FromValue(*source_value) : std::nullopt;
++  if (!source) {
++    return base::unexpected("Which source?");
++  }
++  if (ToMediaId(*source).is_null()) {
++    return base::unexpected(kNoSource);
++  }
++  auto capture = std::make_unique<Capture>();
++  capture->kind = "external";
++  capture->source = *source;
++  if (const base::DictValue* consumer = args.FindDict("consumer")) {
++    capture->consumer = consumer->Clone();
++  }
++  if (!capture->consumer.FindString("kind")) {
++    capture->consumer.Set("kind", "app");
++  }
++  if (!capture->consumer.FindString("name")) {
++    capture->consumer.Set("name", "An app");
++  }
++  const std::string* cursor = args.FindString("cursor");
++  capture->cursor = cursor ? *cursor : "embedded";
++  const int32_t id = Add(std::move(capture));
++  // Its "stop" only tells the helper, through capturestop.
++  OnStreamStarted(id, base::RepeatingClosure());
++  return base::Value(base::DictValue().Set("captureId", id));
++}
++
+ base::expected<base::DictValue, std::string> PlutoniumCapture::RegisterStream(
+     const base::DictValue& args,
+     content::RenderFrameHost* frame) {
+diff --git a/chrome/browser/plutonium_capture.h b/chrome/browser/plutonium_capture.h
+index c596176f53..dc24ee4c9c 100644
+--- a/chrome/browser/plutonium_capture.h
++++ b/chrome/browser/plutonium_capture.h
+@@ -301,6 +301,9 @@ class PlutoniumCapture : public PlutoniumShells::Observer,
+                          CommandCallback callback,
+                          uint32_t node_id,
+                          const gfx::Size& size);
++  // "register": a capture recorded outside Ash, with no node.
++  base::expected<base::Value, std::string> Register(
++      const base::DictValue& args);
+   base::expected<base::DictValue, std::string> RegisterStream(
+       const base::DictValue& args,
+       content::RenderFrameHost* frame);

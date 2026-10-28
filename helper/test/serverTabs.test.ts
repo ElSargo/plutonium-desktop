@@ -296,3 +296,74 @@ test("the server's input keeps a tab no page shows drawing, until it is let go",
   tabs.detach(key);
   assert.deepEqual(awake, [[2, true], [2, false]]);
 });
+
+describe("the server's recordings as captures", () => {
+  const key = { threadId: "thread-1", tabId: "tab-1" };
+  const recording = () => {
+    const { tabs, socket } = serving();
+    const started: number[] = [];
+    const stopped: number[] = [];
+    let refusal: string | null = null;
+    tabs.onCaptureStart = async (browserTabId) => {
+      if (refusal) throw new Error(refusal);
+      started.push(browserTabId);
+      return 40 + started.length;
+    };
+    tabs.onCaptureStop = (captureId) => stopped.push(captureId);
+    tabs.attach(key, { targetId: "shown", browserTabId: 7, page: "page-1", url: () => "", title: () => "" }, () => true);
+    socket.events.length = 0;
+    return { tabs, socket, started, stopped, refuse: (message: string) => (refusal = message) };
+  };
+
+  test("start registers the tab's capture and stop ends it", async () => {
+    const { socket, started, stopped } = recording();
+    socket.command({ type: "recording", ...key, phase: "start" });
+    await settle();
+    assert.deepEqual(started, [7]);
+    assert.deepEqual(socket.events, [{ type: "recording", ...key, phase: "started" }]);
+    socket.command({ type: "recording", ...key, phase: "stop" });
+    await settle();
+    assert.deepEqual(stopped, [41]);
+  });
+
+  test("a refused capture refuses the recording, with why", async () => {
+    const { socket, refuse } = recording();
+    refuse("Recording is switched off");
+    socket.command({ type: "recording", ...key, phase: "start" });
+    await settle();
+    assert.deepEqual(socket.events, [{ type: "recording", ...key, phase: "refused", message: "Recording is switched off" }]);
+  });
+
+  test("a tab no shell shows can't be recorded", async () => {
+    const { socket } = recording();
+    socket.command({ type: "recording", threadId: "thread-1", tabId: "other", phase: "start" });
+    await settle();
+    assert.equal(socket.events[0]?.phase, "refused");
+  });
+
+  test("a shell's stop ends the server's recording", async () => {
+    const { tabs, socket, stopped } = recording();
+    socket.command({ type: "recording", ...key, phase: "start" });
+    await settle();
+    tabs.captureStopped(41);
+    assert.equal(socket.events.at(-1)?.phase, "ended");
+    // Already stopped: the server's stop has nothing to end.
+    socket.command({ type: "recording", ...key, phase: "stop" });
+    await settle();
+    assert.deepEqual(stopped, []);
+  });
+
+  test("the tab going, or the server, ends the capture", async () => {
+    const first = recording();
+    first.socket.command({ type: "recording", ...key, phase: "start" });
+    await settle();
+    first.tabs.detach(key);
+    assert.deepEqual(first.stopped, [41]);
+    assert.equal(first.socket.events.find((event) => event.type === "recording" && event.phase === "ended")?.message, "The tab went away.");
+    const second = recording();
+    second.socket.command({ type: "recording", ...key, phase: "start" });
+    await settle();
+    second.socket.destroy();
+    assert.deepEqual(second.stopped, [41]);
+  });
+});
