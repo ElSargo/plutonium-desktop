@@ -63,6 +63,26 @@ The URL Chrome shows at the bottom left when the pointer is over a link is off i
 
 The shell window is always fullscreen, as a kiosk app is: it can't leave fullscreen, shows no exit instructions or exit button, and has no immersive top-edge reveal. Only the shells' own windows are held so. Other browser windows in shell mode (the backup browser, a popup, an app window) enter and leave fullscreen as usual (checked on X11: a page's own fullscreen in another window, and DevTools' window state). Chrome's exit bubble didn't show for such a window on X11; it isn't clear yet whether that's Xvfb's or shell mode's.
 
+## Popups
+
+Chrome's and Ash's own toasts, nudges and bubbles don't show over the shell (patch "no Ash toasts, nudges or clipboard history, no Chrome toasts or clipboard bubble over the shell", and the earlier ones named below):
+
+| Popup | In shell mode |
+|---|---|
+| Ash's toasts (`ToastManagerImpl::Show`): "Copied to clipboard", capture mode's "Text copied", the system features' | Not shown; the text is logged at `VLOG(1)` (`EXO-CHROME toast not shown`) |
+| Ash's anchored nudges (education bubbles for clipboard history, capture mode, the camera, the shelf) | Not shown |
+| Ash's clipboard nudges ("Press Search+V…") | Not shown (patch "no clipboard history nudges in shell mode") |
+| Ash's clipboard history menu | Never opens: Search+V reaches the page, and `ShowMenu()` refuses its other ways in |
+| Chrome's toasts in a shell's window ("Link copied", "Image copied", "Link to highlight copied", from the shell's context menu) | Not shown (`ToastController::CanShowToast`); other browser windows keep theirs |
+| The clipboard permission bubble ("wants to see text and images copied to the clipboard") on a shell page | No bubble: a shell document has clipboard read-write and sanitized write. It already reaches every window and tab through the broker. Tabs ask the shell as for any permission (`TAB_FEATURES.md`) |
+| Screenshot and recording keys, capture mode's bar | Ash's accelerators for them are off in shell mode (Keys, above). Capture requests go to the shell (`CAPTURE.md`); Ash's picker and indicator only show as its fallback, when no shell answers |
+| "Screenshot taken" and Ash's other notifications | The message center never shows in shell mode (kiosk blocks it). Web notifications go to the helper's notifications service (patch 0071) |
+| A folder upload's "Upload N files to this site?" | Asked by the library's picker; Chrome's dialog is skipped for a folder a shell or agent chose (`TAB_FEATURES.md`, "Folder uploads"). It still shows behind the Files app picker, the fallback |
+
+None of the dropped toasts or nudges says something the user needs in shell mode: they're about ChromeOS features that have no UI here (the shelf, clipboard history, capture mode, phone hub and the like) or confirm a copy the user just made.
+
+Checked on Xvfb (slot 22, T3 Code), 2026-10-28: before the patch, `navigator.clipboard.readText()` on T3 Code showed Chrome's clipboard bubble at the top left; after it, `clipboard-read` is `granted`, a write then read returns the text, and nothing shows. The toasts and nudges weren't triggered live (nothing reachable in shell mode showed one on Xvfb); they're off by code.
+
 ## Verified
 
 On Xvfb (slot 6 of a worktree, niri at startup and the plain shell behind it), with real X input through Ash (xdotool), 2026-10-19:
@@ -94,7 +114,6 @@ Not tested: the status bubble, a real game with the keys, a shell page's own tex
 ## Not done
 
 - Tooltips (`title`) are still Ash's.
-- Ash's clipboard nudges ("Press Search+V…", after copying and pasting) don't show in shell mode (patch "no clipboard history nudges in shell mode"). Search+V itself still opens Ash's clipboard history.
-- A shell page's own `alert()` and permission prompts are still Chrome's dialogs and bubbles.
+- A shell page's own `alert()` and its permission prompts other than the clipboard's are still Chrome's dialogs and bubbles.
 - T3 Code doesn't draw the menus itself yet.
 - On an X11 session, a context menu can wait for the next input event: Chrome reads the clipboard's formats before building the menu, and with `--use-system-clipboard` that read waits on X (seen once in four right-clicks). Not seen to matter on DRM, where there's no X clipboard (not tested).

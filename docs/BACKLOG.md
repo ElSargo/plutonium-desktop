@@ -427,6 +427,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   and file pickers; the system clipboard read before a context menu stalls
   an X11 session's menu until the next X event (seen once in four on
   Xvfb).
+- [x] **Chrome's and Ash's own popups over the shell** (`CHROME_UI.md`,
+  "Popups"). S–M · Clipboard (the "copied" toasts, clipboard history, the
+  clipboard permission bubble), screenshots and capture mode, the folder
+  upload confirmation, and any other toast, nudge or bubble Chrome or Ash
+  shows over the desktop in shell mode. Off, or through the shell where
+  the user needs what it says. Done 2026-10-28 (patch "no Ash toasts,
+  nudges or clipboard history, …"); screenshots and the folder upload
+  were already covered. The toasts themselves weren't triggered live.
 - [x] **Tabs don't survive a browser restart.** M · Session restore.
   Done 2026-10-26 (patch 0056, `TABS.md`, "Surviving a restart"): addresses
   and tags, through a clean stop and a kill -9; not history. Also

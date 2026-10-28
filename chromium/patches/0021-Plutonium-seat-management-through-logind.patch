@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 07:37:49 +1300
-Subject: [PATCH 21/85] Plutonium: seat management through logind
+Subject: [PATCH 21/86] Plutonium: seat management through logind
 
 With --plutonium-logind-session=<id>, Ash is the controller of that logind
 session (TakeControl), the way compositors started from a VT are. DRM and
