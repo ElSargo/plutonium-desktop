@@ -7,6 +7,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
+import type { ThreadBuses } from "./threadBus.ts";
 
 export const THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
 /** Where a thread's processes find the helper (its Unix socket). */
@@ -221,9 +222,12 @@ export class Threads {
   private readonly statePath: string;
   private adoptedCheck: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
+  /** The threads' own session buses (threadBus.ts), if they get them. */
+  private readonly buses: ThreadBuses | undefined;
 
-  constructor(waylandDisplay: string, helperSocket: string, xOptions: XDisplayOptions = {}) {
+  constructor(waylandDisplay: string, helperSocket: string, xOptions: XDisplayOptions = {}, buses?: ThreadBuses) {
     this.waylandDisplay = waylandDisplay;
+    this.buses = buses;
     this.helperSocket = helperSocket;
     this.xOptions = xOptions;
     this.xFiles = new XFiles(xOptions);
@@ -237,6 +241,7 @@ export class Threads {
    */
   environment(threadId: string, { show = false } = {}): Record<string, string> {
     const xDisplay = this.xDisplay(threadId);
+    const bus = this.buses?.environment(threadId, THREAD_ID_VARIABLE) ?? {};
     return {
       ...this.openerVariables,
       [THREAD_ID_VARIABLE]: threadId,
@@ -258,6 +263,9 @@ export class Threads {
       // X11-only apps (e.g. games on GLFW) get the thread's own X server
       // rather than the host desktop's.
       ...(xDisplay ? { DISPLAY: xDisplay } : {}),
+      // Single-instance apps (LibreOffice, GApplications) get an instance per
+      // thread rather than handing their arguments to another thread's.
+      ...bus,
     };
   }
 
