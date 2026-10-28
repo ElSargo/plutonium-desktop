@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <oliversargisonb@gmail.com>
 Date: Mon, 26 Oct 2026 18:58:47 +1300
-Subject: [PATCH 69/91] Plutonium: a Wayland client's overlay priority hint
+Subject: [PATCH 69/92] Plutonium: a Wayland client's overlay priority hint
  doesn't crash Ash
 
 Exo's overlay_prioritizer lets any client set a surface's overlay

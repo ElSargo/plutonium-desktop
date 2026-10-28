@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 10:19:57 +1300
-Subject: [PATCH 75/91] Plutonium: unlocking after the window that was active
+Subject: [PATCH 75/92] Plutonium: unlocking after the window that was active
  went away doesn't crash
 
 The lock gives focus back to the window that had it, through a WindowTracker.

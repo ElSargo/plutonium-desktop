@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 08:40:48 +1300
-Subject: [PATCH 89/91] Plutonium: speechSynthesis voices from
+Subject: [PATCH 89/92] Plutonium: speechSynthesis voices from
  speech-dispatcher
 
 A ChromeOS build's platform TTS is ARC's (TtsPlatformImplChromeOs), and
