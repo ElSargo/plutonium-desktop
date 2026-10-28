@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 25 Oct 2026 18:51:35 +1300
-Subject: [PATCH 51/87] Plutonium: a detached input device's settings update
+Subject: [PATCH 51/88] Plutonium: a detached input device's settings update
  runs on the UI thread
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

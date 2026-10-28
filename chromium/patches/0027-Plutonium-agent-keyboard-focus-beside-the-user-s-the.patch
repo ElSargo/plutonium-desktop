@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Tue, 20 Oct 2026 15:28:30 +1300
-Subject: [PATCH 27/87] Plutonium: agent keyboard focus beside the user's; the
+Subject: [PATCH 27/88] Plutonium: agent keyboard focus beside the user's; the
  compositor decorates every window
 
 EXO-AGENT: a client can keyboard-focus a window for an agent while the

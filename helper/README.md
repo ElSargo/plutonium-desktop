@@ -188,6 +188,8 @@ Windows: `list_windows`, `launch_app {argv, cwd?, wait_seconds?, focus?}`, `snap
 
 Tabs: `list_tabs`, `open_tab`, `snapshot_tab`, `navigate_tab`, `tab_action`, `answer_dialog`, `choose_files {paths}` (a pending file picker), `focus_tab`, `close_tab`, `list_printers`, `print_tab {printer?, save_to?, copies?, duplex?, color?, paper?, landscape?, scale?, margins?, background?, header_footer?, page_ranges?}` (finishes a print the page waits on), `cancel_print`, and (Playwright) `read_tab {tab_id}` (the page as an accessibility tree with `[ref=eN]`), `click_tab`, `hover_tab`, `type_tab {text, submit?, slowly?}`, `press_tab {key}`, `select_tab {values}`, `scroll_tab`, `evaluate_tab {expression}` and `wait_for_tab {text? | text_gone? | selector? | load?}`, each element by `ref` or `selector`.
 
+Recording: `start_recording {window_id | tab_id, path?}` and `stop_recording {recording_id?}`. A PipeWire capture of the window or tab with the agent as its consumer (every shell gets it as `capturestart` and can stop it; the recording switch refuses it), written to WebM by `gst-launch-1.0` (pipewiresrc, VP8). The file is in `$TMPDIR/plutonium-recordings` unless `path` says. Routes: `POST /v1/threads/:thread/recordings`, `POST …/recordings[/:id]/stop`, `GET …/recordings`.
+
 What an agent launches or opens waits in its thread unless it passes `focus: true` (`launch_app`, `open_tab`). See [docs/features/AGENT_CONTROL.md](../docs/features/AGENT_CONTROL.md).
 
 For example, Claude Code:

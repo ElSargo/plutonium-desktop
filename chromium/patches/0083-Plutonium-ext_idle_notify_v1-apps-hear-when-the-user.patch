@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 23:09:54 +1300
-Subject: [PATCH 83/87] Plutonium: ext_idle_notify_v1, apps hear when the user
+Subject: [PATCH 83/88] Plutonium: ext_idle_notify_v1, apps hear when the user
  is idle
 
 Discord's and chat apps' away status, and swayidle, need it. Version

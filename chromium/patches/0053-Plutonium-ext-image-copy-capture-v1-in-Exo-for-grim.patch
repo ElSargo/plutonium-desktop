@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 25 Oct 2026 18:59:23 +1300
-Subject: [PATCH 53/87] Plutonium: ext-image-copy-capture-v1 in Exo, for grim
+Subject: [PATCH 53/88] Plutonium: ext-image-copy-capture-v1 in Exo, for grim
 
 EXO-CAPTURE: ext-image-copy-capture-v1 with ext-image-capture-source-v1's
 output sources. Each frame is a copy of the output's root layer written
