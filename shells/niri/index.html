@@ -691,6 +691,13 @@ function applyPlacement({ tile, x, y, w, h }) {
   tile.el.style.height = `${h}px`;
 }
 
+// A floating window keeps its client-side shadow and resize edges (a press
+// just outside it reaches them; the app's resize request is niri's
+// interactive resize). A tiled one is told it's tiled and drops them.
+function setFloating(tile, floating) {
+  if (tile.kind === "w" && tile.content.floating !== floating) tile.content.floating = floating;
+}
+
 function styleTile(tile, active) {
   const s = tile.el.style;
   const b = CONFIG.border.on ? CONFIG.border.width : 0;
@@ -753,6 +760,7 @@ function render() {
           placeTile(tile, sx, top + g, w, H() - 2 * g);
           tile.el.classList.toggle("hidden", ii !== col.active);
           tile.el.classList.remove("floating");
+          setFloating(tile, false);
           tile.el.style.zIndex = "";
           styleTile(tile, key === focus);
         });
@@ -775,6 +783,7 @@ function render() {
           const tile = tileFor(key);
           placeTile(tile, sx, top + y, w, hs[ii]);
           tile.el.classList.remove("hidden", "floating");
+          setFloating(tile, false);
           tile.el.style.zIndex = "";
           styleTile(tile, key === focus);
           y += hs[ii] + g;
@@ -787,6 +796,7 @@ function render() {
       placeTile(tile, f.x, top + f.y, f.w, f.h);
       tile.el.classList.remove("hidden");
       tile.el.classList.add("floating");
+      setFloating(tile, true);
       tile.el.style.zIndex = String(2 + ws.floating.indexOf(f));
       styleTile(tile, f.key === focus);
     });

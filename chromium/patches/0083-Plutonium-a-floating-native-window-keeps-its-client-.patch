@@ -1,0 +1,535 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Wed, 28 Oct 2026 08:42:46 +1300
+Subject: [PATCH 83/83] Plutonium: a floating native window keeps its
+ client-side resize edges
+
+EXO-EMBED: <native-window floating> tells the browser (NativeWindowHost::
+SetFloating) the page shows the window floating rather than tiled. The
+driving element's flag goes to Exo (EmbeddedWindows::SetFloating()), which
+then no longer sends the parked window the xdg_toplevel tiled states, so a
+client with client-side decorations (GTK 4) keeps its shadow and the resize
+edges in it. The element clips the shadow, so those edges got no press:
+now, within kResizeEdgeMargin CSS pixels outside a floating element's
+content box, the input router asks the renderer
+(ForeignFrameSinkDelegate::NearResizeEdge()), and the renderer gives the
+press to the window when what was hit is the element or one of its
+ancestors, i.e. nothing of the page's covers the point. The app then asks
+for an interactive resize, which the page gets as before (windowrequest).
+Tiled windows (the default) are told they're tiled, as before.
+---
+ chrome/browser/exo_embedder.cc                | 49 +++++++++++++++++++
+ chrome/browser/exo_embedder.h                 |  2 +
+ components/exo/embedded_windows.cc            |  6 +++
+ components/exo/embedded_windows.h             |  3 ++
+ components/exo/shell_surface_base.cc          | 10 ++++
+ components/exo/shell_surface_base.h           |  6 +++
+ components/exo/shell_surface_unittest.cc      | 32 ++++++++++++
+ components/exo/wayland/xdg_shell.cc           |  2 +
+ .../render_widget_host_input_event_router.cc  |  8 +++
+ .../render_widget_host_input_event_router.h   |  6 +++
+ ...widget_host_input_event_router_unittest.cc | 29 +++++++++++
+ .../mojom/native_window/native_window.mojom   | 11 +++++
+ .../core/frame/web_frame_widget_impl.cc       | 30 ++++++++++++
+ .../core/html/html_attribute_names.json5      |  1 +
+ .../core/html/html_native_window_element.cc   | 33 +++++++++++++
+ .../core/html/html_native_window_element.h    |  8 +++
+ .../core/html/html_native_window_element.idl  |  4 ++
+ 17 files changed, 240 insertions(+)
+
+diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
+index 131061e8ca..3df905e95c 100644
+--- a/chrome/browser/exo_embedder.cc
++++ b/chrome/browser/exo_embedder.cc
+@@ -522,12 +522,48 @@ class NativeWindowHostImpl
+     return plutonium_shell::IsVisibleShell(
+         content::WebContents::FromRenderFrameHost(&render_frame_host()));
+   }
++  // Tells the app whether it is tiled, as the driver shows it.
++  void ApplyFloating() {
++    if (window_id_ && HasValidGrant() && visible() && !taken_ &&
++        Driver(window_id_) == this) {
++      exo::EmbeddedWindows::Get()->SetFloating(window_id_, floating_);
++    }
++  }
+   // Sizes the window as the element last asked, if it's in the visible
+   // shell.
+   void ApplyLastSize() {
+     if (window_id_ && !last_size_in_pixels_.IsEmpty()) {
+       SetSize(last_size_in_pixels_);
+     }
++    ApplyFloating();
++  }
++
++  void SetFloating(bool floating) override {
++    floating_ = floating;
++    ApplyFloating();
++  }
++
++  // EXO-EMBED: whether |point| (DIPs in the root view) is just outside this
++  // floating element's content box, where the app's client-side resize
++  // edges are. Its renderer decides whether the page covers it.
++  bool NearResizeEdge(const gfx::PointF& point) {
++    if (!floating_ || !window_id_ || taken_ || !element_visible_ ||
++        !HasValidGrant() || !visible() || rect_in_widget_.IsEmpty()) {
++      return false;
++    }
++    content::RenderWidgetHostView* view = render_frame_host().GetView();
++    if (!view || view->GetDeviceScaleFactor() <= 0) {
++      return false;
++    }
++    gfx::RectF box = gfx::ScaleRect(gfx::RectF(rect_in_widget_),
++                                    1.f / view->GetDeviceScaleFactor());
++    gfx::RectF edges = box;
++    // A pixel more: the renderer has the exact geometry.
++    edges.Outset(blink::mojom::kResizeEdgeMargin * scale_ + 1);
++    return edges.Contains(point) && !box.Contains(point);
++  }
++  const viz::FrameSinkId& parent_frame_sink_id() const {
++    return parent_frame_sink_id_;
+   }
+ 
+   // exo::EmbeddedWindows::Observer:
+@@ -706,6 +742,8 @@ class NativeWindowHostImpl
+   // EXO-FULLSCREEN: whether the element is its document's fullscreen
+   // element.
+   bool fullscreen_ = false;
++  // Whether the page shows the window floating (SetFloating()).
++  bool floating_ = false;
+   // EXO-DISPLAYS: see taken().
+   bool taken_ = false;
+   // EXO-EMBED: what decides which element drives the window (Outranks()).
+@@ -968,6 +1006,17 @@ void ExoEmbedder::RouteMouseEvent(const viz::FrameSinkId& frame_sink_id,
+       std::move(mouse_event));
+ }
+ 
++bool ExoEmbedder::NearResizeEdge(const viz::FrameSinkId& parent_frame_sink_id,
++                                 const gfx::PointF& point) {
++  for (NativeWindowHostImpl* host : Hosts()) {
++    if (host->parent_frame_sink_id() == parent_frame_sink_id &&
++        host->NearResizeEdge(point)) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ void ExoEmbedder::PointerLeft(const viz::FrameSinkId& frame_sink_id) {
+   exo::EmbeddedWindows::Get()->PointerLeave(frame_sink_id);
+ }
+diff --git a/chrome/browser/exo_embedder.h b/chrome/browser/exo_embedder.h
+index e9658c0a9a..e9bcc77b73 100644
+--- a/chrome/browser/exo_embedder.h
++++ b/chrome/browser/exo_embedder.h
+@@ -71,6 +71,8 @@ class ExoEmbedder : public input::ForeignFrameSinkDelegate {
+                        const blink::WebMouseEvent& event) override;
+   void PointerLeft(const viz::FrameSinkId& frame_sink_id) override;
+   void PageMouseDown() override;
++  bool NearResizeEdge(const viz::FrameSinkId& parent_frame_sink_id,
++                      const gfx::PointF& point) override;
+ 
+  private:
+   std::map<std::pair<viz::FrameSinkId, viz::FrameSinkId>, int> links_;
+diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
+index d3c47d9381..c43ccde085 100644
+--- a/components/exo/embedded_windows.cc
++++ b/components/exo/embedded_windows.cc
+@@ -961,6 +961,12 @@ void EmbeddedWindows::SetFullscreen(int32_t window_id, bool fullscreen) {
+   }
+ }
+ 
++void EmbeddedWindows::SetFloating(int32_t window_id, bool floating) {
++  if (ShellSurfaceBase* shell_surface = FindShellSurface(window_id)) {
++    shell_surface->SetEmbedFloating(floating);
++  }
++}
++
+ void EmbeddedWindows::SetShown(
+     int32_t window_id,
+     std::optional<gfx::PointF> geometry_origin_in_screen,
+diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
+index f6306811cc..042592f1a9 100644
+--- a/components/exo/embedded_windows.h
++++ b/components/exo/embedded_windows.h
+@@ -178,6 +178,9 @@ class EmbeddedWindows : public aura::WindowObserver {
+   // EXO-FULLSCREEN: whether an element showing the window is fullscreen;
+   // the app is told it is fullscreen while one is.
+   void SetFullscreen(int32_t window_id, bool fullscreen);
++  // EXO-EMBED: whether the element showing the window shows it floating;
++  // the app is told it is tiled unless it is.
++  void SetFloating(int32_t window_id, bool floating);
+   // Whether the app wants to be fullscreen (asked while parked, or was
+   // fullscreen when parked).
+   bool IsFullscreenRequested(int32_t window_id) const;
+diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
+index e88f05406b..389f116276 100644
+--- a/components/exo/shell_surface_base.cc
++++ b/components/exo/shell_surface_base.cc
+@@ -2928,6 +2928,16 @@ void ShellSurfaceBase::SetEmbedFocused(bool focused) {
+   OnEmbedStateChanged();
+ }
+ 
++void ShellSurfaceBase::SetEmbedFloating(bool floating) {
++  if (embed_floating_ == floating) {
++    return;
++  }
++  embed_floating_ = floating;
++  if (embed_parked_) {
++    OnEmbedStateChanged();
++  }
++}
++
+ void ShellSurfaceBase::SetModalToParent(bool modal) {
+   if (modal_to_parent_ == modal) {
+     return;
+diff --git a/components/exo/shell_surface_base.h b/components/exo/shell_surface_base.h
+index 0e9db80be5..103df7b32c 100644
+--- a/components/exo/shell_surface_base.h
++++ b/components/exo/shell_surface_base.h
+@@ -297,6 +297,11 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   // Whether the window has keyboard focus through the page embedding it.
+   void SetEmbedFocused(bool focused);
+   bool embed_focused() const { return embed_focused_; }
++  // EXO-EMBED: whether the page shows the parked window floating (free to
++  // resize from its edges) rather than tiled. A floating window isn't told
++  // it is tiled, so the client keeps its shadow and resize edges.
++  void SetEmbedFloating(bool floating);
++  bool embed_floating() const { return embed_floating_; }
+   // EXO-MODAL: the client says the window is modal to its parent
+   // (xdg_dialog_v1). Embedded focus on the parent goes to it.
+   void SetModalToParent(bool modal);
+@@ -681,6 +686,7 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   bool embed_saved_bounds_direct_ = false;
+   SurfaceFrameType embed_saved_frame_type_ = SurfaceFrameType::NONE;
+   bool embed_focused_ = false;
++  bool embed_floating_ = false;
+   bool modal_to_parent_ = false;
+   bool embed_saved_can_activate_ = true;
+   ui::ZOrderLevel embed_saved_z_order_ = ui::ZOrderLevel::kNormal;
+diff --git a/components/exo/shell_surface_unittest.cc b/components/exo/shell_surface_unittest.cc
+index 40588d79fc..4fdb5107f4 100644
+--- a/components/exo/shell_surface_unittest.cc
++++ b/components/exo/shell_surface_unittest.cc
+@@ -5765,6 +5765,38 @@ TEST_F(ShellSurfaceTest, EmbedParkedIgnoresClientStateRequests) {
+   EXPECT_FALSE(shell_surface->StartMove());
+ }
+ 
++// EXO-EMBED: the page showing a parked window floating, or no longer
++// floating, configures it again (the client is told whether it is tiled).
++TEST_F(ShellSurfaceTest, EmbedParkedFloatingConfigures) {
++  auto shell_surface =
++      test::ShellSurfaceBuilder({256, 256}).BuildShellSurface();
++  shell_surface->SetEmbedParked(true);
++  int configures = 0;
++  shell_surface->set_configure_callback(base::BindRepeating(
++      [](int* count, const gfx::Rect&, chromeos::WindowStateType, bool, bool,
++         const gfx::Vector2d&, float, aura::Window::OcclusionState,
++         std::optional<chromeos::WindowStateType>) {
++        ++*count;
++        return uint32_t(*count);
++      },
++      &configures));
++  EXPECT_FALSE(shell_surface->embed_floating());
++
++  shell_surface->SetEmbedFloating(true);
++  EXPECT_TRUE(shell_surface->embed_floating());
++  EXPECT_EQ(1, configures);
++  shell_surface->SetEmbedFloating(true);
++  EXPECT_EQ(1, configures);
++  shell_surface->SetEmbedFloating(false);
++  EXPECT_EQ(2, configures);
++
++  // Not parked: nothing to tell the client.
++  shell_surface->SetEmbedParked(false);
++  configures = 0;
++  shell_surface->SetEmbedFloating(true);
++  EXPECT_EQ(0, configures);
++}
++
+ // EXO-EMBED: a parked window that Ash maximizes anyway goes back to the
+ // normal state at the page's size.
+ TEST_F(ShellSurfaceTest, EmbedParkedUndoesServerStateChanges) {
+diff --git a/components/exo/wayland/xdg_shell.cc b/components/exo/wayland/xdg_shell.cc
+index 6f58e72506..36e8f0b689 100644
+--- a/components/exo/wayland/xdg_shell.cc
++++ b/components/exo/wayland/xdg_shell.cc
+@@ -344,8 +344,10 @@ class WaylandToplevel : public aura::WindowObserver {
+       AddState(&states, XDG_TOPLEVEL_STATE_ACTIVATED);
+     // EXO-EMBED: a window embedded in a page is laid out by the page, like a
+     // tiled window; clients then drop client-side shadows and rounded corners.
++    // Unless the page shows it floating: then it keeps its resize edges.
+     if (shell_surface_data_ && shell_surface_data_->shell_surface &&
+         shell_surface_data_->shell_surface->embed_parked() &&
++        !shell_surface_data_->shell_surface->embed_floating() &&
+         wl_resource_get_version(xdg_toplevel_resource_) >=
+             XDG_TOPLEVEL_STATE_TILED_LEFT_SINCE_VERSION) {
+       AddState(&states, XDG_TOPLEVEL_STATE_TILED_LEFT);
+diff --git a/components/input/render_widget_host_input_event_router.cc b/components/input/render_widget_host_input_event_router.cc
+index 2c949a5132..01f4c24854 100644
+--- a/components/input/render_widget_host_input_event_router.cc
++++ b/components/input/render_widget_host_input_event_router.cc
+@@ -721,6 +721,14 @@ RenderWidgetTargetResult RenderWidgetHostInputEventRouter::FindViewAtLocation(
+   if (IsForeignFrameSink(frame_sink_id)) {
+     query_renderer = true;
+   }
++  // EXO-EMBED: just outside a floating window, where its client-side resize
++  // edges are, the page decides whether it covers the point or the press is
++  // the window's (WebFrameWidgetImpl::GetFrameSinkIdAtPoint()).
++  if (!query_renderer && source == viz::EventSource::MOUSE &&
++      ForeignDelegate() && frame_sink_id == root_view->GetFrameSinkId() &&
++      ForeignDelegate()->NearResizeEdge(frame_sink_id, point)) {
++    query_renderer = true;
++  }
+ 
+   auto* view = FindViewFromFrameSinkId(frame_sink_id);
+   // Send the event to |root_view| if |view| is not in |root_view|'s sub-tree
+diff --git a/components/input/render_widget_host_input_event_router.h b/components/input/render_widget_host_input_event_router.h
+index c6948312f0..19667040a7 100644
+--- a/components/input/render_widget_host_input_event_router.h
++++ b/components/input/render_widget_host_input_event_router.h
+@@ -116,6 +116,12 @@ class COMPONENT_EXPORT(INPUT) ForeignFrameSinkDelegate {
+   virtual void PointerLeft(const viz::FrameSinkId& frame_sink_id) = 0;
+   // A mouse button was pressed on page content.
+   virtual void PageMouseDown() = 0;
++  // Whether |point| (DIPs in the view whose frame sink is
++  // |parent_frame_sink_id|) is just outside a window shown floating, where
++  // its client-side resize edges are: the renderer is asked whether the
++  // press is the window's.
++  virtual bool NearResizeEdge(const viz::FrameSinkId& parent_frame_sink_id,
++                              const gfx::PointF& point) = 0;
+ };
+ 
+ // Class owned by WebContentsImpl uniquely for the purpose of directing input
+diff --git a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+index da5e4e51cf..db0e3625ad 100644
+--- a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
++++ b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+@@ -484,6 +484,12 @@ class RenderWidgetHostInputEventRouterTest : public testing::Test {
+   viz::FrameSinkId& foreign_capture_sink() {
+     return rwhier()->foreign_capture_sink_;
+   }
++  bool QueriesRendererAt(const gfx::PointF& point, viz::EventSource source) {
++    gfx::PointF transformed;
++    return rwhier()
++        ->FindViewAtLocation(view_root_.get(), point, source, &transformed)
++        .should_query_view;
++  }
+ 
+   BrowserTaskEnvironment task_environment_;
+ 
+@@ -3109,8 +3115,15 @@ class FakeForeignFrameSinkDelegate : public input::ForeignFrameSinkDelegate {
+   }
+   void PointerLeft(const viz::FrameSinkId& sink) override {}
+   void PageMouseDown() override {}
++  bool NearResizeEdge(const viz::FrameSinkId& parent,
++                      const gfx::PointF& point) override {
++    return parent == edge_parent && point == edge_point;
++  }
+ 
+   std::vector<viz::FrameSinkId> routed;
++  // Where NearResizeEdge() says yes.
++  viz::FrameSinkId edge_parent;
++  gfx::PointF edge_point;
+ 
+  private:
+   std::set<std::pair<viz::FrameSinkId, viz::FrameSinkId>> links_;
+@@ -3190,4 +3203,20 @@ TEST_F(RenderWidgetHostInputEventRouterTest, ForeignCaptureEndsWithTheLink) {
+   EXPECT_FALSE(foreign_capture_sink().is_valid());
+ }
+ 
++// Just outside a floating window (its client-side resize edges), the page's
++// renderer is asked whether the press is the window's; elsewhere on the page
++// it isn't, and touch never is.
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignResizeEdgeQueriesRenderer) {
++  FakeForeignFrameSinkDelegate delegate;
++  view_root_->SetHittestResult(view_root_.get(), false);
++  const gfx::PointF edge(100, 50);
++  EXPECT_FALSE(QueriesRendererAt(edge, viz::EventSource::MOUSE));
++
++  delegate.edge_parent = view_root_->GetFrameSinkId();
++  delegate.edge_point = edge;
++  EXPECT_TRUE(QueriesRendererAt(edge, viz::EventSource::MOUSE));
++  EXPECT_FALSE(QueriesRendererAt(gfx::PointF(10, 10), viz::EventSource::MOUSE));
++  EXPECT_FALSE(QueriesRendererAt(edge, viz::EventSource::TOUCH));
++}
++
+ }  // namespace content
+diff --git a/third_party/blink/public/mojom/native_window/native_window.mojom b/third_party/blink/public/mojom/native_window/native_window.mojom
+index 013273fed1..03343e0e85 100644
+--- a/third_party/blink/public/mojom/native_window/native_window.mojom
++++ b/third_party/blink/public/mojom/native_window/native_window.mojom
+@@ -99,4 +99,15 @@ interface NativeWindowHost {
+   // EXO-FULLSCREEN: the element became, or stopped being, the document's
+   // fullscreen element. The app is told it is fullscreen while it is.
+   OnFullscreenChanged(bool fullscreen);
++  // Whether the page shows the window floating (its `floating` attribute):
++  // the app isn't told it is tiled, so it keeps its client-side shadow and
++  // the resize edges in it, and presses up to kResizeEdgeMargin CSS pixels
++  // outside the content box reach it where nothing of the page's covers
++  // them. Tiled (the default), the app drops its shadow and edges.
++  SetFloating(bool floating);
+ };
++
++// How far outside a floating window's content box (CSS pixels, in the
++// element's own space) presses go to the app, for its client-side resize
++// edges.
++const int32 kResizeEdgeMargin = 8;
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+index 60ad5f2f39..1ed2bccc4f 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+@@ -1018,6 +1018,36 @@ viz::FrameSinkId WebFrameWidgetImpl::GetFrameSinkIdAtPoint(
+     }
+   }
+ 
++  // EXO-EMBED: just outside a floating <native-window>, where the app's
++  // client-side resize edges are, the press is the window's if nothing of the
++  // page's covers it: what was hit is the element itself or one of its
++  // ancestors (e.g. the background behind it). The last such element in tree
++  // order wins.
++  if (auto* container = DynamicTo<ContainerNode>(result_node)) {
++    const gfx::PointF point = widget_base_->DIPsToBlinkSpace(point_in_dips);
++    HTMLNativeWindowElement* edge_window = nullptr;
++    std::optional<gfx::PointF> in_surface;
++    auto consider = [&](HTMLNativeWindowElement& candidate) {
++      if (std::optional<gfx::PointF> p = candidate.ResizeEdgePoint(point)) {
++        edge_window = &candidate;
++        in_surface = p;
++      }
++    };
++    if (auto* self = DynamicTo<HTMLNativeWindowElement>(container)) {
++      consider(*self);
++    }
++    for (HTMLNativeWindowElement& candidate :
++         Traversal<HTMLNativeWindowElement>::DescendantsOf(*container)) {
++      consider(candidate);
++    }
++    if (edge_window) {
++      VLOG(1) << "EXO-EMBED press at " << point_in_dips.ToString()
++              << " is on a floating window's resize edge";
++      *local_point_in_dips = widget_base_->BlinkSpaceToDIPs(*in_surface);
++      return edge_window->EmbeddedFrameSinkId();
++    }
++  }
++
+   viz::FrameSinkId remote_frame_sink_id = GetRemoteFrameSinkId(result);
+   if (remote_frame_sink_id.is_valid()) {
+     gfx::PointF local_point(result.LocalPoint());
+diff --git a/third_party/blink/renderer/core/html/html_attribute_names.json5 b/third_party/blink/renderer/core/html/html_attribute_names.json5
+index 1386cc36a0..bdd3746efc 100644
+--- a/third_party/blink/renderer/core/html/html_attribute_names.json5
++++ b/third_party/blink/renderer/core/html/html_attribute_names.json5
+@@ -79,6 +79,7 @@
+     "credentialless",
+     "crossfade",
+     "crossfade-easing",
++    "floating",
+     "crossorigin",
+     "csp",
+     "customelementregistry",
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
+index 16e5a0793f..d506fe990c 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.cc
++++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
+@@ -34,6 +34,7 @@
+ #include "third_party/blink/renderer/core/intersection_observer/intersection_observer.h"
+ #include "third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h"
+ #include "third_party/blink/renderer/core/html_names.h"
++#include "third_party/blink/renderer/core/layout/layout_box.h"
+ #include "third_party/blink/renderer/core/layout/layout_native_window.h"
+ #include "third_party/blink/renderer/core/animation/document_timeline.h"
+ #include "third_party/blink/renderer/platform/animation/compositor_animation.h"
+@@ -615,6 +616,31 @@ viz::FrameSinkId HTMLNativeWindowElement::EmbeddedFrameSinkId() const {
+   return info_ ? info_->surface_id.frame_sink_id() : viz::FrameSinkId();
+ }
+ 
++std::optional<gfx::PointF> HTMLNativeWindowElement::ResizeEdgePoint(
++    const gfx::PointF& point_in_root_frame) const {
++  auto* box = DynamicTo<LayoutBox>(GetLayoutObject());
++  LocalFrameView* view = GetDocument().View();
++  if (!FastHasAttribute(html_names::kFloatingAttr) || !box || !view ||
++      !EmbeddedFrameSinkId().is_valid() ||
++      box->Style().Visibility() != EVisibility::kVisible ||
++      box->Style().UsedPointerEvents() == EPointerEvents::kNone) {
++    return std::nullopt;
++  }
++  // In the box's own space, through any transforms on the way.
++  const gfx::PointF local =
++      box->AbsoluteToLocalPoint(view->RootFrameToDocument(point_in_root_frame));
++  const gfx::RectF content_box(box->PhysicalContentBoxRect());
++  gfx::RectF edges = content_box;
++  edges.Outset(mojom::blink::kResizeEdgeMargin *
++               box->Style().EffectiveZoom());
++  if (content_box.IsEmpty() || !edges.Contains(local) ||
++      content_box.Contains(local)) {
++    return std::nullopt;
++  }
++  return local - content_box.OffsetFromOrigin() +
++         gfx::Vector2dF(GeometryOffsetInPixels());
++}
++
+ void HTMLNativeWindowElement::FullscreenChanged(bool fullscreen) {
+   if (fullscreen == fullscreen_) {
+     return;
+@@ -664,6 +690,12 @@ void HTMLNativeWindowElement::ParseAttribute(
+     easing_ = nullptr;
+     return;
+   }
++  if (params.name == html_names::kFloatingAttr) {
++    if (attach_requested_ && host_.is_bound()) {
++      host_->SetFloating(!params.new_value.IsNull());
++    }
++    return;
++  }
+   HTMLElement::ParseAttribute(params);
+ }
+ 
+@@ -804,6 +836,7 @@ void HTMLNativeWindowElement::UpdateAttachment() {
+                 client_receiver_.BindNewPipeAndPassRemote(task_runner),
+                 BindOnce(&HTMLNativeWindowElement::OnAttached,
+                          WrapWeakPersistent(this), attach_id));
++  host_->SetFloating(FastHasAttribute(html_names::kFloatingAttr));
+ }
+ 
+ void HTMLNativeWindowElement::BindHost() {
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.h b/third_party/blink/renderer/core/html/html_native_window_element.h
+index 739daea64c..319f17c452 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.h
++++ b/third_party/blink/renderer/core/html/html_native_window_element.h
+@@ -19,6 +19,7 @@
+ #include "third_party/blink/renderer/platform/mojo/heap_mojo_receiver.h"
+ #include "third_party/blink/renderer/platform/graphics/compositor_element_id.h"
+ #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
++#include "ui/gfx/geometry/point_f.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/vector2d.h"
+ 
+@@ -124,6 +125,13 @@ class CORE_EXPORT HTMLNativeWindowElement final
+ 
+   // For hit testing (WebFrameWidgetImpl): the embedded window's frame sink.
+   viz::FrameSinkId EmbeddedFrameSinkId() const;
++  // For hit testing: if the element shows its window floating and
++  // |point_in_root_frame| (blink space) is at most
++  // mojom::blink::kResizeEdgeMargin CSS pixels outside its content box, where
++  // the app's client-side resize edges are, where that is in the window's
++  // surface (blink space).
++  std::optional<gfx::PointF> ResizeEdgePoint(
++      const gfx::PointF& point_in_root_frame) const;
+ 
+   // EXO-FULLSCREEN: called by Fullscreen when the element becomes, or stops
+   // being, its document's fullscreen element.
+diff --git a/third_party/blink/renderer/core/html/html_native_window_element.idl b/third_party/blink/renderer/core/html/html_native_window_element.idl
+index 1c7b324e8e..b526545f13 100644
+--- a/third_party/blink/renderer/core/html/html_native_window_element.idl
++++ b/third_party/blink/renderer/core/html/html_native_window_element.idl
+@@ -26,6 +26,10 @@
+     [CEReactions, Reflect] attribute unsigned long crossfade;
+     // The animation's CSS easing function; by default close to niri's.
+     [CEReactions, Reflect=crossfade_easing] attribute DOMString crossfadeEasing;
++    // The page shows the window floating rather than tiled: the app keeps its
++    // client-side shadow, and presses just outside the element's content box
++    // (where nothing of the page's covers them) reach its resize edges there.
++    [CEReactions, Reflect] attribute boolean floating;
+     // The attached window's id, or 0.
+     readonly attribute long windowId;
+     // "none", "attaching", "attached", "taken" (another page shows it),

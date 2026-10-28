@@ -389,10 +389,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   page would need the pointer for the rest of the drag. Done 2026-10-26
   (`WINDOW_SIZING.md`, patch 0057): the browser hands the rest of the drag to
   the page; niri's move verified on X11 with two displays. Plain ignores both.
-- [ ] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
+- [x] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
   shadow, outside the geometry, where `<native-window>` clips the surface, so
   they never get a press. Let presses within a few pixels outside the
-  content box reach the app (floating windows), or tell apps they're tiled.
+  content box reach the app (floating windows), or tell apps they're tiled. Done
+  2026-10-28: `<native-window floating>` (`features/WINDOW_SIZING.md`, "Tiled
+  or floating").
 - [x] **Cross-fade on the compositor thread.** S · The old frame's opacity is
   stepped from the main thread each frame; a busy shell page makes it stutter.
   A cc opacity animation on its effect node (as LinkHighlightImpl does) would

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 18:07:11 +1300
-Subject: [PATCH 71/82] Plutonium: tabs' web notifications and the host's color
+Subject: [PATCH 71/83] Plutonium: tabs' web notifications and the host's color
  scheme in the Plutonium domain
 
 Web notifications (new Notification(), a service worker's showNotification())
