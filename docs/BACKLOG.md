@@ -451,9 +451,15 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   install an IME. That needs shell UI over `inputMethodPrivate`, or the
   settings page (`features/IME.md`, "What's missing").
 - [ ] **Other missing Wayland protocols** as apps need them:
-  `xdg_toplevel_icon`, explicit sync, `ext_data_control`. M each · Phase 5
+  explicit sync (`linux-drm-syncobj`). M · Phase 5
   `xdg_activation_v1` and `wp_cursor_shape_v1` are done (0063, 0064,
   `features/WAYLAND_PROTOCOLS.md`).
+  - [x] **`ext_data_control_v1`.** Done 2026-10-27 (patch 0084): wl-copy,
+    wl-paste and `wl-paste --watch` without focus, both ways with the page's
+    clipboard; any client may use it. No primary selection.
+  - [x] **`xdg_toplevel_icon_v1`.** Done 2026-10-27 (patch 0085): kwrite's
+    named icon and pixels reach the shells (`windowIcon()` in the shell
+    library) and the switcher.
 - [x] **X11 apps** via rootless Xwayland as an Exo client. Done
   (xwayland-satellite per thread, now in the helper).
 - [ ] **Our own portal backend for the rest** (`org.freedesktop.impl.portal.*`
@@ -640,8 +646,10 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   Electron 43 blanks its environ.
 - [x] **GlobalShortcuts portal.** M · The helper answers it; the focused shell
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
-- [ ] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
-  Discord's away status.
+- [x] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
+  Discord's away status. Done 2026-10-27 (patch 0083,
+  `features/WAYLAND_PROTOCOLS.md`): swayidle idles and resumes on Ash's input,
+  held off by the session's inhibitors (`Plutonium.setIdleInhibited`).
 - [x] **getDisplayMedia from tabs through the shell picker.** M · Replace
   Ash's `DesktopMediaPicker` with `capturerequest`.
 - [ ] **Agent recording over MCP.** M · Records the agent's own thread's items to a file, with no
