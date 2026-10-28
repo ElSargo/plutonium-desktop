@@ -10,15 +10,18 @@ has no voices. Linux Chromium speaks through speech-dispatcher
 (tts_linux.cc, libspeechd dlopen()ed, behind --enable-speech-dispatcher).
 Build tts_linux.cc for ChromeOS too, and use it when ARC's TTS isn't
 there: content's TtsPlatform falls back to it instead of NOTREACHED().
-TTS extensions' voices are listed as before.
+TTS extensions' voices are listed as before. Off a real ChromeOS device,
+TtsExtensionEngineChromeOS waited for its built-in eSpeak extension,
+which this build doesn't have, before speaking anything; it doesn't now.
 ---
- chrome/browser/chrome_content_browser_client.cc |  7 ++++++-
- content/browser/BUILD.gn                        |  4 ++++
- content/browser/speech/tts_platform_impl.cc     | 12 +-----------
- content/browser/speech/tts_platform_impl.h      |  2 +-
- content/public/common/content_switches.cc       |  2 +-
- content/public/common/content_switches.h        |  3 ++-
- 6 files changed, 15 insertions(+), 15 deletions(-)
+ chrome/browser/chrome_content_browser_client.cc      |  7 ++++++-
+ .../tts_engine_extension_api_chromeos.cc             |  7 ++++---
+ content/browser/BUILD.gn                             |  4 ++++
+ content/browser/speech/tts_platform_impl.cc          | 12 +-----------
+ content/browser/speech/tts_platform_impl.h           |  2 +-
+ content/public/common/content_switches.cc            |  2 +-
+ content/public/common/content_switches.h             |  3 ++-
+ 7 files changed, 19 insertions(+), 18 deletions(-)
 
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
 index a988f740ac..802a2d3e2b 100644
@@ -38,6 +41,25 @@ index a988f740ac..802a2d3e2b 100644
  #else
    return nullptr;
  #endif
+diff --git a/chrome/browser/speech/extension_api/tts_engine_extension_api_chromeos.cc b/chrome/browser/speech/extension_api/tts_engine_extension_api_chromeos.cc
+index dc740e5987..e3657a2a50 100644
+--- a/chrome/browser/speech/extension_api/tts_engine_extension_api_chromeos.cc
++++ b/chrome/browser/speech/extension_api/tts_engine_extension_api_chromeos.cc
+@@ -141,10 +141,11 @@ bool TtsExtensionEngineChromeOS::IsBuiltInTtsEngineInitialized(
+   }
+ 
+   // When running on a real Chrome OS environment, require both Google tts and
+-  // Espeak to be initialized; otherwise, only check for Espeak (i.e. on a
+-  // non-Chrome OS linux system running the Chrome OS variant of Chrome).
++  // Espeak to be initialized. Plutonium: otherwise none; its build has no
++  // built-in engines, and pages speak through speech-dispatcher (tts_linux.cc)
++  // instead of waiting for an Espeak that never comes.
+   return base::SysInfo::IsRunningOnChromeOS() ? (saw_google_tts && saw_espeak)
+-                                              : saw_espeak;
++                                              : true;
+ }
+ 
+ void TtsExtensionEngineChromeOS::OnStart() {
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
 index 7e121dff72..c6a07d132f 100644
 --- a/content/browser/BUILD.gn

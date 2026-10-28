@@ -170,6 +170,8 @@ fi
 HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
 [[ -n $HOST_TZ ]] || HOST_TZ=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
 ASH_ENV=(-e "TZ=${HOST_TZ:-UTC}" -e "LANG=${LANG:-C.UTF-8}")
+# The desktop session's bus, for MPRIS (LINUX_COMPAT.md, "Media sessions").
+[[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] && ASH_ENV+=(-e "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
 # Pages and shells use the host's fonts (LINUX_COMPAT.md, "Fonts"). In the
 # container, /etc/fonts is the host's when the container was made with it
 # (plutonium container create); this adds the user's own fonts and settings,
