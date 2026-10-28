@@ -202,6 +202,13 @@ if [[ $MODE == x11 ]]; then
           --use-system-clipboard "--ash-host-window-bounds=${BOUNDS:-0+0-1600x1000}")
   # shellcheck disable=SC2206
   FLAGS+=(${EXTRA_FLAGS:-})
+  # A crashed Xvfb leaves its socket (in /tmp/.X11-unix, shared with the host
+  # and the other container) and its lock (this container's /tmp); the socket
+  # would make us skip starting one (Ash: "Missing X server").
+  if [[ $XDISP == "$PRIVATE_XDISP" ]] &&
+     on_ash sh -c 'p=$(tr -d " " 2>/dev/null < "/tmp/.X$1-lock") && [ -n "$p" ] && [ ! -d "/proc/$p" ]' sh "${XDISP#:}"; then
+    on_ash rm -f "/tmp/.X11-unix/X${XDISP#:}" "/tmp/.X${XDISP#:}-lock"
+  fi
   if [[ $XDISP == "$PRIVATE_XDISP" ]] && ! on_ash test -S "/tmp/.X11-unix/X${XDISP#:}"; then
     # Detached: a background process of an attached exec keeps its session
     # (and pm's systemd-run --wait) from ever ending. Under a shell: as the
