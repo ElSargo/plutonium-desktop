@@ -314,6 +314,16 @@ export class Desktop {
     }
   }
 
+  /** The browser process's pid (SystemInfo.getProcessInfo), or null. */
+  async browserPid(): Promise<number | null> {
+    try {
+      const { processInfo } = (await this.cdp.send("SystemInfo.getProcessInfo")) as { processInfo?: { type: string; id: number }[] };
+      return processInfo?.find((process) => process.type === "browser")?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Plays, pauses… the browser's active media session ("play-pause", "next", …). */
   async mediaSessionAction(action: string): Promise<void> {
     await this.cdp.send("Plutonium.mediaSessionAction", { action });

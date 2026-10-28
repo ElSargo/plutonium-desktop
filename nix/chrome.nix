@@ -8,8 +8,9 @@
   # Linked by chrome and ANGLE (readelf -d)
   alsa-lib, dbus, expat, libgbm, libinput, libxkbcommon, nspr, nss, systemdLibs,
   libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxrandr,
-  # Loaded at run time: GL/EGL (glvnd), VA-API, PCI ids, audio, printing
-  libglvnd, libva, pciutils, libpulseaudio, cups,
+  # Loaded at run time: GL/EGL (glvnd), VA-API, PCI ids, audio, printing,
+  # speech (libspeechd)
+  libglvnd, libva, pciutils, libpulseaudio, cups, speechd-minimal,
 }:
 
 stdenv.mkDerivation {
@@ -24,7 +25,7 @@ stdenv.mkDerivation {
     stdenv.cc.cc.lib
   ];
   # dlopen()ed, so autoPatchelf can't see them: on every binary's RUNPATH.
-  runtimeDependencies = [ libglvnd libva pciutils libpulseaudio cups systemdLibs ];
+  runtimeDependencies = [ libglvnd libva pciutils libpulseaudio cups systemdLibs speechd-minimal ];
 
   installPhase = ''
     runHook preInstall

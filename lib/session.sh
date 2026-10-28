@@ -155,11 +155,23 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
 # The whole list, in order ("!" before shells that are off): the browser's
 # list becomes it.
 [[ -n ${SHELLS:-} ]] && FLAGS+=("--plutonium-shells=$SHELLS" --plutonium-shells-exact)
+# speechSynthesis through the host's speech-dispatcher, when it has one
+# (LINUX_COMPAT.md, "Speech synthesis"): Chromium dlopen()s libspeechd and
+# talks to its socket in $XDG_RUNTIME_DIR, which the container shares. Usually
+# a socket-activated user unit; else one started here (-t 0: it stays, as the
+# container can't autospawn one).
+SPEECHD_SOCKET=$RUN_DIR/speech-dispatcher/speechd.sock
+if [[ ! -S $SPEECHD_SOCKET ]] && command -v speech-dispatcher > /dev/null; then
+  speech-dispatcher --spawn -t 0 > /dev/null 2>&1 || true
+fi
+[[ -S $SPEECHD_SOCKET ]] && FLAGS+=(--enable-speech-dispatcher)
 # Pages see the host's timezone and language, which the container doesn't
 # have (it says UTC): a zone name the container's tzdata knows.
 HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
 [[ -n $HOST_TZ ]] || HOST_TZ=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
 ASH_ENV=(-e "TZ=${HOST_TZ:-UTC}" -e "LANG=${LANG:-C.UTF-8}")
+# The desktop session's bus, for MPRIS (LINUX_COMPAT.md, "Media sessions").
+[[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] && ASH_ENV+=(-e "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
 # Pages and shells use the host's fonts (LINUX_COMPAT.md, "Fonts"). In the
 # container, /etc/fonts is the host's when the container was made with it
 # (plutonium container create); this adds the user's own fonts and settings,

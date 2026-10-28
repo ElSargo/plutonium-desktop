@@ -1,9 +1,10 @@
 // The media service (DESKTOP_SERVICES.md, "media"): what's playing, and
 // play/pause, next and previous. The players are the MPRIS ones on the
 // session bus (mpv, Spotify, Firefox…), watched through NameOwnerChanged and
-// PropertiesChanged, and the browser's own: Plutonium's Chromium (a ChromeOS
-// build) has no MPRIS, so its active media session (a tab, a shell page)
-// comes through the Plutonium DevTools domain instead (`BrowserMedia`). The
+// PropertiesChanged, and the browser's own: its active media session (a tab,
+// a shell page) comes through the Plutonium DevTools domain (`BrowserMedia`),
+// which knows the tab. The browser is on MPRIS too (LINUX_COMPAT.md), as
+// chromium.instance<pid>; that's the same session, so it's left out. The
 // most recently active player comes first; it's the one the media keys
 // control.
 import { DBusConnection, type Message } from "../dbus.ts";
@@ -64,6 +65,8 @@ export interface BrowserMedia {
   action(action: string): Promise<void>;
   /** Calls `listener` with each new session (null when it's gone). */
   onChange(listener: (session: BrowserSession | null) => void): void;
+  /** The browser process's pid: its own MPRIS player (chromium.instance<pid>) is this one again. */
+  pid?(): Promise<number | null>;
 }
 
 export interface MediaOptions {
@@ -207,6 +210,13 @@ export class MediaService implements DesktopService {
     return name.startsWith(`${MPRIS}.`) && !PROXIES.has(name);
   }
 
+  /** The browser's own MPRIS player, which "browser" already is (with its tab). */
+  private async isBrowsers(name: string): Promise<boolean> {
+    const instance = /\.chromium\.instance(\d+)$/.exec(name);
+    if (!instance || !this.options.browser?.pid) return false;
+    return Number(instance[1]) === (await this.options.browser.pid().catch(() => null));
+  }
+
   private dbus(destination: string, path: string, iface: string, member: string, signature = "", body: unknown[] = []) {
     if (!this.bus?.isOpen) return Promise.reject(new ServiceError(503, "No session bus."));
     return this.bus.call({ destination, path, interface: iface, member, signature, body });
@@ -214,6 +224,7 @@ export class MediaService implements DesktopService {
 
   private async addPlayer(name: string): Promise<void> {
     try {
+      if (await this.isBrowsers(name)) return;
       const [owner] = (await this.dbus(BUS, "/org/freedesktop/DBus", BUS, "GetNameOwner", "s", [name])) as [string];
       this.owners.set(name, owner);
       await this.readPlayer(name);
