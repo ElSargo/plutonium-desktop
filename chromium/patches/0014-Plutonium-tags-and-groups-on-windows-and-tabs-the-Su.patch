@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 17 Oct 2026 15:10:06 +1300
-Subject: [PATCH 14/92] Plutonium: tags and groups on windows and tabs, the
+Subject: [PATCH 14/93] Plutonium: tags and groups on windows and tabs, the
  Super+Tab overlay
 
 Every window and tab carries a list of tags; the first (the thread that
