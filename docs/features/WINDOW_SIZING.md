@@ -61,7 +61,24 @@ The page decides what each request means. The niri shell maps maximize/unmaximiz
 
 The page also has the mouse captured for the rest of the drag (the router's capture target is its root view), so the moves and the release reach it wherever the pointer goes, over a tab or over the window itself. The drag is the page's from the request on, whichever way the press was routed (directly, or through the renderer for regions where page content may overlap the window). GTK asks after its drag threshold, so the first few pixels of the drag still go to the app.
 
-GTK 4's resize edges are in its shadow, outside the window geometry, where the element clips the surface: a press there reaches the page, not the app, so an edge resize never starts in a shell (niri's Super+right-drag resizes a column instead). An app that asks for a resize from inside its window gets niri's column resize.
+## Tiled or floating: client-side resize edges
+
+A parked window is told it is tiled (the four `xdg_toplevel` tiled states), so GTK 4 and other CSD apps drop their shadow, rounded corners and resize edges: the page lays it out. A page that shows a window floating sets the element's `floating` attribute (patch 0087):
+- **The app isn't told it's tiled.** It keeps its shadow, and the resize edges in it. The element still clips the shadow.
+- **Presses just outside the content box reach the app,** up to `kResizeEdgeMargin` (8) CSS pixels out, in the element's own space (through transforms), where nothing of the page's covers them. There the browser asks the renderer (`ForeignFrameSinkDelegate::NearResizeEdge()`), and the press is the window's if what Blink hit is the element or one of its ancestors (the background behind it, the tile it is in). A neighbour, a divider or an overlay keeps it. The pointer's moves go there too, so the app shows its resize cursors.
+- **The app then asks for a resize** from that edge, and the page gets the drag as above (`windowrequest`, `edge`).
+
+Shells:
+- **niri:** floating windows are `floating`; tiles aren't (niri's column resize is Super+right-drag, or the app's request from inside its window).
+- **GNOME:** windows stay tiled. The shell draws its own header bar and resize frame (`.rs`) around each window, as server-side decorations.
+- **Plain, T3 Code:** tiled (one window fills the stage or the panel).
+
+Limits:
+- **Over another window,** the margin belongs to that window: viz finds its surface first, and the renderer isn't asked (a floating window's left edge over a tile, in niri).
+- **Touch** doesn't reach the edges (mouse only).
+- **niri while Super is held:** the tile's `.hit` overlay covers the window, but the tile's own border is still the window's ancestor, so a press on the border in the margin goes to the app rather than to Super+drag.
+
+Before this, every embedded window was tiled. GTK 4 without `gtk_shell1` edge constraints then has no resize edges at all, and an app keeping a shadow (Firefox binds an older xdg-shell) had its edges in the clipped shadow, where presses reached the page.
 
 ## Several elements on one window
 
@@ -107,5 +124,8 @@ Before this, a parked window's popups were drawn wherever the window was last pa
 | niri: the app's maximize | column maximized (768 → 1560 px), app configured once; FLIP plus cross-fade, captured with animations at 1/10 speed |
 | niri, X11 with two host displays (2×1280×800): GTK Demo's header bar dragged left over the tab column | `drag … handed to the page` in Ash's log; the page gets every move with `buttons` 1 and the release; the columns swap (GTK Demo 648 → 16). Before the capture fix, moves over the tab or the window and the release went to them, and the drag never ended |
 | Same, dragged onto the second display | stays on its display and drops back, as niri's Super+drag (moving to another display is HTML drag and drop, `MULTI_MONITOR.md`); the second display's page unaffected |
+| niri, floating GTK Demo (`floating`, box 416–1184 px), xdotool on Xvfb (slot 21, build ba339e3a9a31, 2026-10-28): press at x 1188 (4 px right of the box) and drag right | renderer hit `#world` → press on the resize edge → `down` routed to the window, GTK asks to resize → `drag … handed to the page`; niri widens it 768 → 876 px |
+| Same session: press 4 px right of a tiled window (no `floating`) | the browser doesn't ask the renderer; the press stays with the page, nothing resizes |
+| Tiled GTK Demo (screenshot) | square corners, no shadow, as before. Floating, its resize edge outside the box took the press (above), so GTK had its shadow back |
 
 Not verified: pointer input on a scaled (`contain`) window, and the "last pressed" rule. On Xvfb, neither DevTools nor xdotool input reaches embedded apps. A press-driven driver change needs a session with real input (DRM, `tools/uinput.py`).

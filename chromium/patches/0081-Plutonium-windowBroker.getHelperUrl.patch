@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 22:09:54 +1300
-Subject: [PATCH 81/86] Plutonium: windowBroker.getHelperUrl()
+Subject: [PATCH 81/87] Plutonium: windowBroker.getHelperUrl()
 
 A shell page learned the helper's URL by convention (?helper= or port
 3780). The browser has it from the launcher (--plutonium-helper-url):
