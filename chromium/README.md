@@ -27,7 +27,7 @@ Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland
 | 0013 | Several live shells (`--plutonium-shells`), Super+Tab | [features/SHELLS](../docs/features/SHELLS.md) |
 | 0014 | Tags and groups on windows and tabs; the Super+Tab overlay | [features/SHELLS](../docs/features/SHELLS.md) |
 | 0015 | Overlay fix: no empty "Shells" heading | |
-| 0016 | Shell shortcuts beat Ash's accelerators; no Search+arrow rewriting; transparent gutter; touchpads through libinput and scrolling fixes; drag and drop; links from shell pages open as tabs | [features/NIRI_SHELL](../docs/features/NIRI_SHELL.md), [DRAG_AND_DROP](../docs/features/DRAG_AND_DROP.md), [OPENING_LINKS](../docs/features/OPENING_LINKS.md) |
+| 0016 | Shell shortcuts beat Ash's accelerators; no Search+arrow rewriting; transparent gutter; touchpads through libinput and scrolling fixes; drag and drop; links from shell pages open as tabs | [features/STYX_SHELL](../docs/features/STYX_SHELL.md), [DRAG_AND_DROP](../docs/features/DRAG_AND_DROP.md), [OPENING_LINKS](../docs/features/OPENING_LINKS.md) |
 | 0017 | The page alone sizes an embedded window: its maximize, minimize, move and resize requests are refused, and Ash's changes undone | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 | 0018 | `object-fit` for `<native-window>`; `crossfade`, the resize cross-fade | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
 | 0019 | `windowrequest` events; which element drives a window several show | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
@@ -61,7 +61,7 @@ is_debug = false
 dcheck_always_on = true
 symbol_level = 1
 use_system_minigbm = true   # the host's GBM: dmabuf import works (history/VIABILITY_REPORT §5)
-use_libinput = true         # touchpads on DRM (features/NIRI_SHELL)
+use_libinput = true         # touchpads on DRM (features/STYX_SHELL)
 ```
 
 A first build takes about two hours on 32 threads, and incremental builds take seconds to minutes.

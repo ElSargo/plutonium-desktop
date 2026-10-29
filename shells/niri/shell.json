@@ -1,7 +1,7 @@
 {
-  "title": "niri",
-  "version": "3",
-  "description": "A clone of the niri compositor: scrollable tiling, with niri's default binds.",
+  "title": "Styx",
+  "version": "4",
+  "description": "Scrollable tiling, after the niri compositor's design and default binds.",
   "static": "index.html",
   "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"]
 }

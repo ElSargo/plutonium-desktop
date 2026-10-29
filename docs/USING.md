@@ -24,19 +24,19 @@ Each shell adds its own keys, which keep working while an app or tab has the key
 
 These three are shipped, and installed in `~/.pluto/shells` (below).
 
-**niri** (`plutonium run niri`) is a clone of the [niri](https://github.com/YaLTeR/niri) compositor, with niri's default binds:
+**Styx** (`plutonium run niri`) is scrollable tiling after the design of the [niri](https://github.com/YaLTeR/niri) compositor, with niri's default binds:
 - **Super+T** opens a terminal (foot), **Super+D** the launcher, **Super+Q** closes the focused window, and **Super+O** opens the overview.
 - **Super+arrows** move focus.
 - **Super+Shift+/** lists the keys.
 
-Everything it starts is in the thread `niri:desktop`. The full list of binds is in [features/NIRI_SHELL.md](features/NIRI_SHELL.md).
+Everything it starts is in the thread `niri:desktop`. The full list of binds is in [features/STYX_SHELL.md](features/STYX_SHELL.md).
 
 **plain** (`plutonium run plain`) is a minimal thread-based shell.
 - **Layout:** threads are on the left, and each thread's apps and tabs are on the right.
 - **Each thread** can launch apps, open web pages as tabs, and start Claude Code with the thread's tools.
 - **"Elsewhere"** lists windows and tabs from other shells; a click brings one into the current thread.
 
-**T3 Code** (`plutonium run t3`): coding agents' chat threads. Each thread's apps, terminals and browser tabs are in its right panel ([frontends/t3code](../frontends/t3code/README.md)).
+**Hydra** (`plutonium run t3`), built on [T3 Code](https://github.com/pingdotgg/t3code): coding agents' chat threads. Each thread's apps, terminals and browser tabs are in its right panel ([frontends/t3code](../frontends/t3code/README.md)).
 - Alt+1…9 and Ctrl+Tab move between panel tabs.
 - Ctrl+T opens a browser tab.
 - Super+Space opens the app launcher.
@@ -46,7 +46,7 @@ Everything it starts is in the thread `niri:desktop`. The full list of binds is 
 - **What belongs to a thread:** an app started from a thread (from its terminal, its launcher, or its agent) belongs to that thread, and so do the windows it opens. The shell that owns the thread shows them.
 - **Links:** links an app opens become browser tabs in the same thread. That covers `xdg-open`, Ctrl+click in a terminal, Python's `webbrowser`, GTK and KDE apps' "open link", and `$BROWSER`. Files open in their usual app, started in the thread ([features/OPENING_LINKS.md](features/OPENING_LINKS.md)).
 - **Links in pages:** Ctrl+click, middle click, `target=_blank` and `window.open` in a shell page or a tab open a tab in the same thread, never a separate browser window.
-- **Apps started elsewhere:** an app started outside any thread (for example, from your normal desktop pointed at Plutonium's socket) arrives untagged. niri adopts such windows; in T3 they're under "Other windows", and in the plain shell under "Elsewhere".
+- **Apps started elsewhere:** an app started outside any thread (for example, from your normal desktop pointed at Plutonium's socket) arrives untagged. Styx adopts such windows; in Hydra they're under "Other windows", and in the plain shell under "Elsewhere".
 
 - **Notifications:** apps' notifications and websites' (a tab's `new Notification()`, once you allow it) pop up in the shell you're in. Clicking a website's runs what the site does on a click and brings its tab to front.
 - **Like the rest of your desktop:** pages and shells follow your desktop's light or dark setting (the settings portal, or GNOME's), and use its fonts. For the fonts, the container has to be made after this change: `podman rm -f plutonium-prebuilt`, then `plutonium container create` (the session's log says when).
@@ -59,7 +59,7 @@ An agent running in a thread gets the helper's MCP tools for that thread:
 - **Windows:** list, launch, snapshot, focus and close them, and use them: `click_window`, `hover_window`, `drag_window`, `scroll_window`, `type_window`, `press_window`, `resize_window`. Points are the snapshot's pixels.
 - **Tabs:** open, navigate, snapshot, focus and close them, and answer their dialogs. `read_tab` gives the page as an accessibility tree with element refs, for `click_tab`, `type_tab`, `select_tab`, `press_tab`, `hover_tab`, `scroll_tab`, `evaluate_tab` and `wait_for_tab`.
 
-The agent works in the background: your pointer and keyboard stay where they are, and what it drives needn't be on screen. It can only reach windows and tabs tagged with its own thread. In T3 Code every provider's agents get the window tools, and drive tabs with T3's own browser tools ([features/AGENT_CONTROL.md](features/AGENT_CONTROL.md)). INSTALL.md §8 shows how to start one.
+The agent works in the background: your pointer and keyboard stay where they are, and what it drives needn't be on screen. It can only reach windows and tabs tagged with its own thread. In Hydra every provider's agents get the window tools, and drive tabs with T3's own browser tools ([features/AGENT_CONTROL.md](features/AGENT_CONTROL.md)). INSTALL.md §8 shows how to start one.
 
 ## Your shells
 

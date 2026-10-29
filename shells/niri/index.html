@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>niri</title>
+<title>Styx</title>
 <!--
-  A niri clone as a Plutonium frontend: scrollable tiling on the substrate
-  (navigator.windowBroker, <native-window>, browser tabs and the helper's shell
-  library), with niri's default binds and look.
+  Styx, a Plutonium shell after the niri compositor's design: scrollable
+  tiling on the substrate (navigator.windowBroker, <native-window>, browser
+  tabs and the helper's shell library), with niri's default binds and look.
 
   - Each workspace is an infinite horizontal strip of columns; a column holds
     one or more windows stacked vertically (or tabbed). New windows open as a
@@ -1227,7 +1227,7 @@ const actions = {
     for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
     try {
       const { confirm } = await import("./tray.js");
-      if (await confirm("Are you sure you want to exit niri? This ends the Plutonium session and closes its apps.", "Exit")) {
+      if (await confirm("Are you sure you want to exit Styx? This ends the Plutonium session and closes its apps.", "Exit")) {
         await shell.system.power.call("log-out");
       }
     } catch (e) {
@@ -1353,7 +1353,7 @@ bind("Super+KeyV", "Move Window Between Floating and Tiling", () => actions.togg
 bind("Super+Shift+KeyV", "Switch Focus Between Floating and Tiling", () => actions.switchFocusFloatingTiling(), { repeat: false, hotkey: true });
 bind("Super+KeyW", "Toggle Column Tabbed Display", () => actions.toggleTabbed(), { repeat: false, hotkey: true });
 bind("Super+Alt+KeyL", "Lock the Screen", () => actions.lock(), { repeat: false });
-bind(["Super+Shift+KeyE", "Ctrl+Alt+Delete"], "Exit niri", () => actions.quit(), { repeat: false, hotkey: true });
+bind(["Super+Shift+KeyE", "Ctrl+Alt+Delete"], "Exit Styx", () => actions.quit(), { repeat: false, hotkey: true });
 bind(["PrintScreen", "Super+Shift+KeyS"], "Take a Screenshot", () => actions.screenshot(), { repeat: false, hotkey: true });
 bind(["Ctrl+PrintScreen", "Super+Ctrl+Shift+KeyS"], "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
 bind(["Alt+PrintScreen", "Super+Alt+Shift+KeyS"], "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
@@ -2417,7 +2417,7 @@ try {
     render();
   });
   await shell.ready;
-  shell.setGroups([{ tag: TAG, label: "niri" }]);
+  shell.setGroups([{ tag: TAG, label: "Styx" }]);
   updateShortcuts();
   restore();
   ready = true;

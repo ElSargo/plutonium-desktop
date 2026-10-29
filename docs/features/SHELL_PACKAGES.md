@@ -1,9 +1,9 @@
 # Shells as installed packages
 
-The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (niri, gnome, plain, t3) are copied there on the first `plutonium run`. From then on the folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
+The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (`niri` is Styx, `gnome` Charon, `plain`, and `t3` Hydra; the folder names stay as they were) are copied there on the first `plutonium run`. From then on the folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
 
 - A shell that is just a web page is served by the session's helper.
-- A shell with a server (T3 Code) says how to run it, and the helper runs and supervises it.
+- A shell with a server (Hydra, T3 Code's) says how to run it, and the helper runs and supervises it.
 - A shell you run yourself is just an address.
 
 Code: `helper/src/shells.ts` (manifests, installing, updating, URLs, the built-in server), `shellPackages.ts` (the helper's side: servers, edits, safety, adding), `shellServers.ts` (supervision), `shellsCli.ts` (`plutonium shells`). The switcher's parts are in Chromium patch "the switcher's installed shells…".
@@ -107,7 +107,7 @@ The launcher passes every origin that's on to the browser and the helper, as bef
 ## Customizing
 
 On a shell's page in the switcher (Super+Tab, the shell), under **Customize**:
-- **Copy a prompt for your agent**: Plutonium doesn't start an agent itself. This puts a prompt on the clipboard for whichever agent you use (Claude Code, Codex, T3 Code, …): read the Plutonium skill at `$PLUTO_HOME/SKILL.md`, then help change this shell, in its folder. The skill (`skill/SKILL.md` in the checkout, written to `$PLUTO_HOME` with its paths filled in by the helper) says at a glance what Plutonium is, where things are, the rules that matter (edit only `$PLUTO_HOME/shells`, saves are committed and rolled back, don't restart the session), and links to these docs.
+- **Copy a prompt for your agent**: Plutonium doesn't start an agent itself. This puts a prompt on the clipboard for whichever agent you use (Claude Code, Codex, Hydra, …): read the Plutonium skill at `$PLUTO_HOME/SKILL.md`, then help change this shell, in its folder. The skill (`skill/SKILL.md` in the checkout, written to `$PLUTO_HOME` with its paths filled in by the helper) says at a glance what Plutonium is, where things are, the rules that matter (edit only `$PLUTO_HOME/shells`, saves are committed and rolled back, don't restart the session), and links to these docs.
 - **Open a terminal**: your shell, in the folder, in a backup terminal tab.
 - **History, log and updates…**: the helper's shells page (`/v1/shells/page/#<name>`), opened in the backup browser.
 

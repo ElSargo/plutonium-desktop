@@ -1,6 +1,6 @@
-# The GNOME shell
+# Charon
 
-`shells/gnome`: a GNOME-like desktop. A top bar with Activities, the clock and quick settings; floating windows with edge tiling; dynamic workspaces, each one a thread; the Activities overview with a dash of pinned apps; and a Settings app. It's installed, off, like niri; turn it on from the switcher or `plutonium run gnome`.
+`shells/gnome` (installed as `gnome`): a desktop whose design follows GNOME Shell's, credited to the GNOME project; the code is Plutonium's. A top bar with Activities, the clock and quick settings; floating windows with edge tiling; dynamic workspaces, each one a thread; the Activities overview with a dash of pinned apps; and a Settings app. It's installed, off, like Styx; turn it on from the switcher or `plutonium run gnome`.
 
 ## What it does
 

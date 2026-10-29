@@ -1,6 +1,6 @@
 # Opening links
 
-Links open as Plutonium tabs in the thread they came from, not in Chromium or another browser. Apps that a link or file opens belong to that thread too. Tested on DRM (tty2) on 2026-10-17, with the niri shell in front and T3 and the plain shell running behind it.
+Links open as Plutonium tabs in the thread they came from, not in Chromium or another browser. Apps that a link or file opens belong to that thread too. Tested on DRM (tty2) on 2026-10-17, with Styx in front and T3 and the plain shell running behind it.
 
 ## Where links come from
 

@@ -2,7 +2,7 @@
 
 ```
  your apps (host)          shell pages (web apps)                    agents
- foot, Firefox, games…     niri / plain / T3 Code / yours            Claude Code, …
+ foot, Firefox, games…     Styx / plain / Hydra / yours              Claude Code, …
    │ Wayland, X11 via        │ navigator.windowBroker,                 │ MCP (stdio)
    │ xwayland-satellite      │ <native-window>, <embed> tabs           │
    ▼                         ▼                                         ▼
@@ -50,7 +50,7 @@
 **Tags and threads.** Every window and tab carries tags.
 - **The first tag** is its origin and never changes. For a window, it is the `PLUTONIUM_THREAD_ID` of its process, or of the nearest ancestor that has one; the browser reads this from `/proc`. For a tab, it is the thread it was opened for.
 - **Other tags:** shells add and remove these, for example to bring an item into another thread. They describe their tags as groups (label, owning shell).
-- This is how T3's chat threads, niri's desktop and the plain shell's threads share one pool of windows (`features/SHELLS.md`).
+- This is how Hydra's chat threads, Styx's desktop and the plain shell's threads share one pool of windows (`features/SHELLS.md`).
 
 **The helper** (`plutoniumd`, `helper/`) is the frontend-neutral part. It runs on the host, as you, because it starts your apps.
 - **Thread environment:** gives each thread's processes `PLUTONIUM_THREAD_ID`, Exo's `WAYLAND_DISPLAY`, a per-thread `DISPLAY`, toolkit backend variables, and link openers (`xdg-open`, `$BROWSER`) that open tabs in the thread.
@@ -79,7 +79,7 @@
 | Fullscreen, shell shortcuts, pointer capture, the app launcher | [features/CONTROLS.md](features/CONTROLS.md) |
 | Tabs | [features/TABS.md](features/TABS.md) |
 | Several shells, tags, the overlay | [features/SHELLS.md](features/SHELLS.md) |
-| The niri shell; keyboard, touchpad and scrolling fixes | [features/NIRI_SHELL.md](features/NIRI_SHELL.md) |
+| Styx; keyboard, touchpad and scrolling fixes | [features/STYX_SHELL.md](features/STYX_SHELL.md) |
 | Drag and drop | [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md) |
 | Window sizing, `object-fit`, cross-fade, `windowrequest` | [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md) |
 | Links as tabs in their thread | [features/OPENING_LINKS.md](features/OPENING_LINKS.md) |

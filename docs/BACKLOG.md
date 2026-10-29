@@ -479,7 +479,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   - Closing asks the app nicely (`xdg_toplevel.close`) and handles apps
     that refuse or ask to save. Un-settling doesn't reopen anything.
 - [x] **Touchpad on DRM.** Through libinput (`use_libinput`), with scrolling
-  into native windows fixed (`NIRI_SHELL.md`, "Scrolling in apps").
+  into native windows fixed (`STYX_SHELL.md`, "Scrolling in apps").
 - [ ] **Chrome UI still in the shell** (`CHROME_UI.md`). S–M · Ash's
   tooltips for `title`; a shell page's own `alert()`, permission bubbles
   and file pickers; the system clipboard read before a context menu stalls

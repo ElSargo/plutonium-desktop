@@ -560,7 +560,7 @@ t3_fingerprint() {
   (cd "$1" && git ls-files -co --exclude-standard -z -- apps/server/src packages/contracts/src ':!:*.test.ts' |
     sort -z | xargs -0 sha256sum 2> /dev/null || true) | sha256sum | cut -c1-12
 }
-# The T3 shell's server, in the foreground: the session's helper starts and
+# Hydra's server (T3 Code's), in the foreground: the session's helper starts and
 # supervises it (shells/t3/shell.json; its log is $PLUTO_HOME/logs/t3.log),
 # and a helper of the same session adopts it after a restart.
 t3_serve() {

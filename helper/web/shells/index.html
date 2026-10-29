@@ -163,7 +163,7 @@ async function render() {
 async function copyPrompt(text) {
   try {
     await navigator.clipboard.writeText(text);
-    status = `<span class="ok">Copied.</span> Paste it into your agent (Claude Code, Codex, T3 Code, …).`;
+    status = `<span class="ok">Copied.</span> Paste it into your agent (Claude Code, Codex, Hydra, …).`;
   } catch {
     status = `Copy this into your agent:<pre>${esc(text)}</pre>`;
   }

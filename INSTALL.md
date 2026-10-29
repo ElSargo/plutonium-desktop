@@ -21,7 +21,7 @@ From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the
 | sudo | only for `plutonium session install`, and some test tools |
 | optional: `foot` | the terminal the shells open (Super+T) |
 | optional: `xwayland-satellite`, `systemd-socket-activate` | X11 apps (each thread gets a rootless Xwayland) |
-| optional: pnpm (or corepack, included with Node 24) | the T3 Code frontend |
+| optional: pnpm (or corepack, included with Node 24) | Hydra (the T3 Code frontend) |
 | optional: GStreamer (`gst-launch-1.0`, its base and good plugins, PipeWire's plugin) | agents' recordings (`start_recording`): `gstreamer1-plugins-good` and `pipewire-gstreamer` on Fedora, `gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-pipewire` on Ubuntu |
 
 ```
@@ -91,7 +91,7 @@ On an X11 or Xwayland desktop (Plasma, GNOME and most others provide Xwayland on
 plutonium run --x11 :0 niri
 ```
 
-- **The window.** Ash opens as a 1600×1000 window, with niri as its desktop. Super+T opens a terminal, and Super+Shift+/ lists the keys.
+- **The window.** Ash opens as a 1600×1000 window, with Styx (the shell named `niri`) as its desktop. Super+T opens a terminal, and Super+Shift+/ lists the keys.
 - **Super keys.** Your desktop's compositor may keep some Super shortcuts for itself.
 - **Stopping it.** Run `plutonium stop --x11`.
 - **No display.** `--x11` without a display starts a private Xvfb (`:99`), for tests that need no screen.
@@ -104,8 +104,8 @@ If apps render in software, `plutonium run` says so, and `logs/helper-*.log` exp
 2. From this repository, run:
 
 ```
-plutonium run                  # your installed shells: the first run installs them, with T3 Code and plain on
-plutonium run niri plain       # or name them: niri first, the plain shell behind it (Super+Tab)
+plutonium run                  # your installed shells: the first run installs them, with Hydra and plain on
+plutonium run niri plain       # or name them: Styx first, the plain shell behind it (Super+Tab)
 ```
 
 Ash runs in that console's logind session, which hands it the display and input devices ([docs/features/SEAT.md](docs/features/SEAT.md)).
@@ -157,33 +157,35 @@ if [ "$(tty)" = /dev/tty1 ]; then ~/plutonium/bin/plutonium session start; fi
 Not `exec`: when the session ends, or doesn't start, you're at tty1's prompt, rather than logged in again into the same failure.
 
 **Choosing shells.** The first run installs the shipped shells in `~/.pluto/shells` (`plutonium shells list`). With no shells named, `plutonium run` runs the ones that are on there, in order. The switcher's changes (Super+Tab: add, remove, turn off, reorder) are saved for next time. Or list them in order, and the first one is the desktop:
-- installed shells by name: `niri`, `plain`, `t3`, and any you added;
+- installed shells by name: `niri` (Styx), `gnome` (Charon), `plain`, `t3` (Hydra), and any you added;
 - `<name>=<url>` for any web app you've written against the shell API (see `docs/USING.md`).
 
 `plutonium run --safe` runs only the shipped plain shell, whatever your shells do ([docs/features/SHELL_PACKAGES.md](docs/features/SHELL_PACKAGES.md)).
 
-## 7. Optional: T3 Code
+## 7. Optional: Hydra
+
+Hydra is the shell built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for coding agents, with Plutonium's patches.
 
 ```
 plutonium t3 fetch            # clone at frontends/t3code/BASE, apply the patches
 plutonium t3 build            # pnpm install + build the web app (the checkout grows to ~4 GB)
-plutonium run t3 niri         # the helper starts T3 Code's server; the shell pairs itself
+plutonium run t3 niri         # Hydra; the helper starts T3 Code's server, and the shell pairs itself
 ```
 
-T3 Code runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
+Hydra runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
 
 Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium t3` (T3's CLI on the same data): `plutonium t3 connect link` for T3 Connect, or `plutonium t3 pair --tailscale`.
 
 ## 8. Agents
 
-- **Under T3 Code:** T3 gives its Claude sessions the helper's MCP server.
+- **Under Hydra:** T3 Code gives its Claude sessions the helper's MCP server.
 - **Any other agent:** run it inside a thread, for example from a terminal you opened in a shell, which already has the thread's environment. Then give it the bridge:
 
 ```
 claude --mcp-config '{"mcpServers":{"plutonium":{"type":"stdio","command":"node","args":["'$PWD'/helper/plutonium.ts","mcp"]}}}'
 ```
 
-The niri shell's launcher (Super+D) has an entry that starts Claude Code with these tools. The tools are listed in `helper/README.md`.
+Styx's launcher (Super+D) has an entry that starts Claude Code with these tools. The tools are listed in `helper/README.md`.
 
 ## If it hangs
 

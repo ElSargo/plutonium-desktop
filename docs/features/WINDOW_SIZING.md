@@ -45,7 +45,7 @@ The page owns the geometry, so animating the size is up to it. niri's animation 
 2. Wait for a `windowchange` where `windowWidth`/`windowHeight` differ from what they were when the size was set, or are the new size (or 300 ms), as niri's transactions wait.
 3. Animate that transform to `none` (FLIP), and its own frame (border, shadow), with the cross-fade's duration and easing. The element starts the cross-fade at the same moment.
 
-The niri shell does this for every layout change (`placeTile()`): all windows are asked for their sizes, nothing moves until they have drawn, and then the tiles' transitions, the FLIPs and the cross-fades start together. A page that snaps its layout (T3 Code) gets the window filling the new box at once and fading into the app's new frame.
+Styx does this for every layout change (`placeTile()`): all windows are asked for their sizes, nothing moves until they have drawn, and then the tiles' transitions, the FLIPs and the cross-fades start together. A page that snaps its layout (T3 Code) gets the window filling the new box at once and fading into the app's new frame.
 
 Hyprland doesn't cross-fade a resize. It stretches the app's latest frame to the animated size, which is what the element does while the app catches up.
 
@@ -55,7 +55,7 @@ The element fires a `windowrequest` event (`NativeWindowRequestEvent`), which do
 - **`request`:** `"maximize"`, `"unmaximize"`, `"minimize"`, `"move"` or `"resize"`.
 - **`edge`:** for a resize, the edge or corner to resize from (`"top"`, `"bottom-right"`, …).
 
-The page decides what each request means. The niri shell maps maximize/unmaximize to maximize column. T3 Code maps them to the panel's maximize. Fullscreen requests work as before (`CONTROLS.md`).
+The page decides what each request means. Styx maps maximize/unmaximize to maximize column. Hydra maps them to the panel's maximize. Fullscreen requests work as before (`CONTROLS.md`).
 
 **Move and resize** come from a press the app is handling (its title bar, its edges). The browser then gives the page the rest of that drag: the input router stops sending it to the window (`HandForeignDragToPage()`), the app gets a pointer leave, and the page gets the moves and the release as ordinary pointer events (with `buttons` set; there was no `pointerdown` in the page). niri turns them into its interactive move (the column follows the pointer and drops where it's released, as Super+drag) or its column width resize (from the left or right edge; floating windows resize both ways). The plain shell, with one window per stage, ignores both.
 
