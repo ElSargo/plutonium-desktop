@@ -82,8 +82,9 @@ Two LibreOffices on one profile restart each other in a loop: on 2026-10-28 the 
 
 A proxy is socket-activated (python starts on the first connection), runs as the thread's (so a pid lookup on its connections gives the thread), and outlives the helper. The next helper finds it by its pid file in `buses/`, next to the helper's socket. `PLUTONIUM_THREAD_BUS=0` turns this off, as does a missing `systemd-socket-activate` or session bus address.
 
+A Flatpak's bus traffic goes through its own `xdg-dbus-proxy` and then this one, and portals know a Flatpak by `/proc/<pid>/root/.flatpak-info` of the connection's pid. So when a client's root has `.flatpak-info`, the proxy has a holder (`threadbus.py --hold`) make the bus connection: it connects, joins the client's user and mount namespaces (the user owns them) and stays until the connection closes. The bus's pid for the connection then has the sandbox's root. Before (2026-10-28 to 2026-10-30), the portals saw the proxy's pid and took a thread's Flatpaks for host apps. `org.freedesktop.portal.Flatpak.Spawn` then refused them ("only works in a flatpak"), so glycin, the image loader of GNOME 49 runtimes (`flatpak-spawn --sandbox`), failed every image, and GIMP aborted on its first icon.
+
 Limits:
-- A Flatpak's bus traffic goes through its own `xdg-dbus-proxy` and then this one. Portals see this proxy's pid, so they take the app for an unsandboxed host app: no document-portal paths, and host-app rules for permissions. LibreOffice has `--filesystem=host`, so its files still open.
 - A portal or desktop component that calls an app by its app id (a notification's action, D-Bus activation) reaches the desktop's instance, or none, not the thread's.
 - Settings changed in a thread's LibreOffice stay in that thread's copy, also when the user started it there from a launcher.
 - Proxies and profile copies stay until removed (`$XDG_RUNTIME_DIR/plutonium/buses`, `…/libreoffice/plutonium`).
