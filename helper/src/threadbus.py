@@ -14,6 +14,7 @@ import array
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 
@@ -378,10 +379,68 @@ def upstream_address():
     raise SystemExit("threadbus: no unix session bus in DBUS_SESSION_BUS_ADDRESS")
 
 
-def serve(client, address, names):
+# A portal knows a Flatpak by its caller's /proc/PID/root/.flatpak-info, PID
+# being whoever connected to the bus. Through the proxy that's the proxy, so
+# org.freedesktop.portal.Flatpak.Spawn refused every Flatpak ("only works in a
+# flatpak"), and glycin, GTK's image loader in GNOME 49 runtimes, failed every
+# image (GIMP aborted on its first icon). So a Flatpak client's connection is
+# made by a holder: it connects, joins the client's user and mount namespaces
+# (the user owns them) and stays until the connection ends, so the bus's
+# PID for it has the client's root.
+
+def flatpak_pid(client):
+    """The client's PID if it's a Flatpak (its root has .flatpak-info), else None."""
     try:
-        bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        pid = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+        return pid if os.path.exists(f"/proc/{pid}/root/.flatpak-info") else None
+    except OSError:
+        return None
+
+
+def connect_as(pid, address):
+    """A bus connection whose peer is a holder in `pid`'s namespaces, and the holder."""
+    bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    holder = subprocess.Popen(
+        [sys.executable, "-I", __file__, "--hold", str(bus.fileno()), str(pid), address.encode().hex()],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=[bus.fileno()],
+    )
+    ready = holder.stdout.read(1) == b"1"
+    holder.stdout.close()
+    if not ready:
+        holder.wait()
+        bus.close()
+        raise OSError("the holder couldn't connect")
+    return bus, holder
+
+
+def hold(fd, pid, address):
+    """--hold: connects `fd`, moves to `pid`'s namespaces and waits for stdin to close."""
+    bus = socket.socket(fileno=fd)
+    try:
         bus.connect(address)
+    except OSError:
+        sys.exit(1)
+    bus.detach()
+    os.close(fd)
+    try:
+        target = os.pidfd_open(pid)
+        os.setns(target, os.CLONE_NEWUSER | os.CLONE_NEWNS)
+    except OSError:
+        pass  # A sandbox it can't join: the connection is the proxy's, as before.
+    os.write(1, b"1")
+    while os.read(0, 1):
+        pass
+
+
+def serve(client, address, names):
+    holder = None
+    try:
+        pid = flatpak_pid(client)
+        if pid:
+            bus, holder = connect_as(pid, address)
+        else:
+            bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            bus.connect(address)
     except OSError:
         client.close()
         return
@@ -395,9 +454,15 @@ def serve(client, address, names):
         thread.join()
     client.close()
     bus.close()
+    if holder:
+        holder.stdin.close()
+        holder.wait()
 
 
 def main():
+    if sys.argv[1] == "--hold":
+        hold(int(sys.argv[2]), int(sys.argv[3]), bytes.fromhex(sys.argv[4]).decode())
+        return
     tag = sys.argv[1]
     address = upstream_address()
     names = Names(tag)

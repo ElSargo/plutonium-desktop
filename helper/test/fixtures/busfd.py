@@ -1,14 +1,15 @@
 # For threadBus.test.ts: `busfd.py serve ADDRESS NAME` owns NAME and prints
 # "ready", then the text read from the fd of the first call it gets;
-# `busfd.py send ADDRESS NAME TEXT` calls NAME with a pipe's read end that has TEXT.
+# `busfd.py send ADDRESS NAME TEXT` calls NAME with a pipe's read end that has TEXT;
+# `busfd.py hello ADDRESS -` prints its unique name and stays until stdin closes.
 import array, os, socket, struct, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-from threadbus import Header, encode_body, message_length
+from threadbus import Header, decode_body, encode_body, message_length
 
 def connect(address):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(address.split("path=", 1)[1].split(",")[0])
-    sock.sendall(b"\0AUTH EXTERNAL %s\r\n" % str(os.getuid()).encode().hex().encode())
+    sock.sendall(b"\0AUTH EXTERNAL %s\r\n" % os.environ.get("BUS_UID", str(os.getuid())).encode().hex().encode())
     assert sock.recv(4096).startswith(b"OK")
     sock.sendall(b"NEGOTIATE_UNIX_FD\r\n")
     assert sock.recv(4096).startswith(b"AGREE_UNIX_FD")
@@ -50,7 +51,10 @@ incoming = messages(sock)
 for header, data, fds in incoming:
     if header.get(5) == 1:
         break
-if mode == "serve":
+if mode == "hello":
+    print(decode_body(header.end, "s", data[header.body_start :])[0], flush=True)
+    sys.stdin.read()
+elif mode == "serve":
     call(sock, "org.freedesktop.DBus", "RequestName", "su", (name, 4))
     for header, data, fds in incoming:
         if header.get(5) == 2:
