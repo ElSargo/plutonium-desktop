@@ -1,7 +1,7 @@
 {
-  "title": "GNOME",
-  "version": "3",
-  "description": "A GNOME-like desktop: top bar with quick settings and notifications, floating windows with edge tiling, dynamic workspaces (each one a thread), the Activities overview with a dash of pinned apps, and Settings.",
+  "title": "Charon",
+  "version": "4",
+  "description": "A desktop after GNOME Shell's design: top bar with quick settings and notifications, floating windows with edge tiling, dynamic workspaces (each one a thread), the Activities overview with a dash of pinned apps, and Settings.",
   "static": "index.html",
   "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"]
 }

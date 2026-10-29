@@ -1,6 +1,6 @@
 # Drag and drop
 
-Drag and drop between native Wayland apps, browser tabs and shell pages, in any frontend. Tested on DRM (tty2) in the niri shell on 2026-10-17. The Chromium changes are in `chromium/patches/0016-*.patch`.
+Drag and drop between native Wayland apps, browser tabs and shell pages, in any frontend. Tested on DRM (tty2) in Styx on 2026-10-17. The Chromium changes are in `chromium/patches/0016-*.patch`.
 
 ## How a drag works here
 
@@ -22,7 +22,7 @@ In a shell, native windows are drawn inside the page (`<native-window>`), and th
 - **Files from and to host apps.** ChromeOS treats Wayland apps that aren't in a VM as an "unknown VM" and drops their file paths both ways. In Plutonium they are the user's own programs on the same filesystem, so `ChromeSecurityDelegate` passes their paths through as host paths.
 - **A refused drop is a cancel.** `DataOffer::Accept()` did nothing, so a target that accepted no type still got the drop, and the source was told the data had moved. A page that sees "move" deletes the original, for example text dragged out of an editor. Exo now remembers the accept: until one arrives the drag shows no-drop, and at release the target gets `leave` and the source a cancel.
 
-## Verified on DRM (tty2, uinput mouse, niri shell)
+## Verified on DRM (tty2, uinput mouse, Styx)
 
 Pointer positions were read from the clients' `WAYLAND_DEBUG` logs. `tools/uinput.py` got `down` and `up` commands for this.
 

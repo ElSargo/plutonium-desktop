@@ -1,18 +1,18 @@
-# The dock in T3 Code
+# The dock in Hydra
 
 **Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope").
 
-T3 works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a tray in the sidebar's footer, it makes T3 a desktop without changing how its chat works.
+Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a tray in the sidebar's footer, it makes Hydra a desktop without changing how its chat works.
 
 ## Slots
 
 A slot has:
-- **a target:** T3's own terminal (the drawer below the chat), an app (a desktop entry), a site (a URL), or a group of apps and sites;
+- **a target:** Hydra's own terminal (the drawer below the chat), an app (a desktop entry), a site (a URL), or a group of apps and sites;
 - **a scope:** `thread`, `project` or `global`. The scope decides which copy the key finds: "Super+1 = thread terminal" is thread A's terminal in thread A and thread B's in thread B, started if the thread has none;
 - **a layout:** `split` (the chat and the app side by side) or `fold` (the chat folds away);
 - **a rule** (sites and groups): which tabs belong to it, such as `github.com/<org>/<repo>/*`, so a link followed in it, or a tab an agent opened there, is part of it.
 
-Slots are defined once, with templates (`{project.githubUrl}`, `{project.dir}`, `{thread.worktree}`), so one dock serves every project; a project can override single slots. The default dock has slot 1 as the thread's terminal (T3's drawer), which can be changed to any app.
+Slots are defined once, with templates (`{project.githubUrl}`, `{project.dir}`, `{thread.worktree}`), so one dock serves every project; a project can override single slots. The default dock has slot 1 as the thread's terminal (Hydra's drawer), which can be changed to any app.
 
 ```json
 {
@@ -56,7 +56,7 @@ Just after switching threads, step 3 doesn't apply: the switch gave the composer
 
 A group slot raises its last-used member, and pressing again cycles. Super+Shift+Alt+N (to be decided) opens a fuzzy picker of the group, with its members not open yet and "add the current tab". The `"rest"` group is everything in its scope no other slot claims.
 
-They are all T3 keybinding commands, so `keybindings.json` can change them. They are shell shortcuts too: they reach T3 while an app or tab has the keyboard. Alt+1…9 stays with apps (Firefox, terminals and editors use it).
+They are all T3 keybinding commands, so `keybindings.json` can change them. They are shell shortcuts too: they reach Hydra while an app or tab has the keyboard. Alt+1…9 stays with apps (Firefox, terminals and editors use it).
 
 ## Layouts
 
@@ -102,7 +102,7 @@ The sidebar's footer gets a row: the clock and date on the left; network, volume
 ## Step 1 as built (2026-10-27)
 
 - `apps/web/src/plutonium/dock.ts`: the slots (kept in the page's storage, `t3code:plutonium-dock:v1`), finding a slot's windows and tabs, run, raise and go back, assigning and the scope. `panelKeys.ts` handles the keys; ChatView lends the dock the thread's panel and terminal.
-- Keybinding commands `dock.slot.N`, `dock.slotOther.N`, `dock.assign.N`, `dock.toggleLayout`; their defaults have `when: "plutoniumShell"`, a new context that is true in the Plutonium shell only, so Cmd+1 on a Mac stays T3's.
+- Keybinding commands `dock.slot.N`, `dock.slotOther.N`, `dock.assign.N`, `dock.toggleLayout`; their defaults have `when: "plutoniumShell"`, a new context that is true in the Plutonium shell only, so Cmd+1 on a Mac stays T3 Code's.
 - The terminal fold: the drawer takes the chat column (`fill`), the conversation is hidden.
 - Fixed on the way: a browser tab's page or an app's window given the keyboard lost it to the composer a frame later, when the shell window's `focus` event followed. `shouldRefocusComposerOnWindowFocus` now leaves `EMBED` and `NATIVE-WINDOW` alone, as it did `IFRAME` and `WEBVIEW`.
 - Not yet: the folded chat's strip. (Sites in project or global scope: below.)

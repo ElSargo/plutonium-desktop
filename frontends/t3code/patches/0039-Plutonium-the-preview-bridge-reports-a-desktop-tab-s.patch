@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 23:01:35 +1300
-Subject: [PATCH 39/43] Plutonium: the preview bridge reports a desktop tab's
+Subject: [PATCH 39/44] Plutonium: the preview bridge reports a desktop tab's
  page zoom
 
 toState() read zoomFactor as 1; it now comes from the tab's "zoom" state

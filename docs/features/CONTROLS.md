@@ -76,7 +76,7 @@ Not done:
 - a dialog that opens, becomes modal, or is first shown over the focused window takes its focus;
 - when the focused dialog closes or its element goes away, focus goes back to the parent.
 
-The elements' `windowfocus` and `windowblur` events follow, so a shell can move its own focus with them (the niri shell does). If no element shows the dialog, focus stays on the parent. GTK then drops the keys, because its parent is blocked. A shell should show the app's new windows.
+The elements' `windowfocus` and `windowblur` events follow, so a shell can move its own focus with them (Styx does). If no element shows the dialog, focus stays on the parent. GTK then drops the keys, because its parent is blocked. A shell should show the app's new windows.
 
 Verified on the slot's Xvfb session with a small GTK 4 app (a window and a `modal=True` transient window), its dialog shown in a second element. The dialog took focus when shown, kept it when the parent was clicked, got the keys, and gave focus back to the parent when it closed or its element was removed.
 

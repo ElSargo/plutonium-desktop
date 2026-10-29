@@ -12,7 +12,7 @@
 - [features/TABS.md](features/TABS.md): browser tabs as elements
 - [features/CONTROLS.md](features/CONTROLS.md): fullscreen, shell shortcuts, pointer capture, the app launcher
 - [features/SHELLS.md](features/SHELLS.md): several shells, tags and groups, the Super+Tab overlay
-- [features/NIRI_SHELL.md](features/NIRI_SHELL.md): the niri shell; keyboard, touchpad and scrolling fixes
+- [features/STYX_SHELL.md](features/STYX_SHELL.md): Styx, the scrollable tiling shell; keyboard, touchpad and scrolling fixes
 - [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md): drag and drop between apps, tabs and pages
 - [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md): who sizes a window, object-fit, the resize cross-fade, windowrequest
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread
@@ -21,7 +21,7 @@
 - [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording (design, not built)
 - [features/PASSWORDS.md](features/PASSWORDS.md): a password manager adapter for apps, tabs and agents (design, not built)
 - [features/TAB_FEATURES.md](features/TAB_FEATURES.md): find, zoom, printing, permission prompts, downloads, file pickers for tabs, through the shell (built; autofill not)
-- [features/REMOTE_WINDOWS.md](features/REMOTE_WINDOWS.md): native windows for T3 clients away from the desktop, streamed by the server
+- [features/REMOTE_WINDOWS.md](features/REMOTE_WINDOWS.md): native windows for Hydra (T3 Code) clients away from the desktop, streamed by the server
 - [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them (design, not built)
 
 **History.** These are the reports as they were written, in order. Their commands and paths refer to the original research repository: `tools/launch-*.sh` is now `plutonium run`, `patches/exo-*.patch` is now `chromium/patches/`, and `shell/` and `shell-niri/` are now `shells/`.

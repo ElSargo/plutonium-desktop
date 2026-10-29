@@ -24,12 +24,12 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
 
 1. **Edit shells only in `{{PLUTO_HOME}}/shells/<name>/`**, never in the checkout's `shells/` (that's what ships; `plutonium shells update` merges it into the user's copy).
 2. **Every save is committed and reloads the shell.** If no page of the shell connects to the helper (`connect()` in the shell library) within 20 s, the folder is **rolled back** to the last version that worked, and the user is told. So save working states; check the shell came back (`plutonium shells list`) after a change.
-3. **Don't stop or restart the user's session, Ash, the helper or T3 Code's server** unless they ask: agents (maybe you) run inside T3 Code. Use the helper's API to restart one shell's server.
+3. **Don't stop or restart the user's session, Ash, the helper or Hydra's server** unless they ask: agents (maybe you) run inside Hydra (built on T3 Code). Use the helper's API to restart one shell's server.
 4. Shell pages need a **secure, unique origin**: static shells get `http://<name>.localhost:<port>/` from the helper. Shell rights (`navigator.windowBroker`) are per origin.
 
 ## Common requests
 
-- **Change a shell** ("make niri's bar smaller", "add a key binding"): edit its folder. Its page is plain HTML/JS; read it first. niri's keys are near `bind(` in `index.html`.
+- **Change a shell** ("make Styx's bar smaller", "add a key binding"): edit its folder. Its page is plain HTML/JS; read it first. Styx's keys are near `bind(` in `index.html`.
 - **Make a new shell**: `plutonium shells new <name> [<installed shell>]` copies a shell (default: `plain`, a small complete example) into `{{PLUTO_HOME}}/shells/<name>`, turns it on and puts it in the switcher. Then edit it. A shell with a server: set `server` in `shell.json` (below).
 - **Install someone else's shell**: the switcher's "Add a shell…", or `plutonium shells` (folder, git URL or address).
 - **A shell's server misbehaves**: `curl --unix-socket "$PLUTONIUM_HELPER" http://helper/v1/shells` for state; `POST /v1/shells/<name>/restart`; its log is above.
@@ -39,7 +39,7 @@ Plutonium is a desktop environment for Linux where **the desktop is a web page**
   - `power`: `battery` (null on a desktop), `ac`, `brightness` (`available`, 0–1), `can`; `set-brightness`, `step`, `suspend`, `reboot`, `power-off`, `log-out` (ends the Plutonium session). Always confirm the last four with the user's click in your UI.
   - `media`: MPRIS players and the browser's media session, most recent first; `play-pause`, `next`, `previous`, `play`, `pause`, `stop`.
   - `session`: the lock screen and idle: `locked`, `idleSeconds`, `idleAction`, `lockAfter`/`screenOffAfter` (seconds, 0 never), `inhibitors`, `canLock`/`problem`; `lock`, `set-idle {lockAfter, screenOffAfter}`, `inhibit {why}`/`uninhibit` (holds off the screen off and the lock while your shell shows something, e.g. a presentation; it goes with your page). The lock itself is Ash's (Super+L): a shell can't draw, skip or cover it, so don't build one.
-  - The volume, brightness and media keys already work in every shell; listen for the shell's `systemkey` event to draw a level. niri's and plain's indicators (`audio.js`, `power.js`, … in their folders, one module each over `tray.js`) are examples to copy.
+  - The volume, brightness and media keys already work in every shell; listen for the shell's `systemkey` event to draw a level. Styx's and plain's indicators (`audio.js`, `power.js`, … in their folders, one module each over `tray.js`) are examples to copy.
   - `network` (Wi-Fi list, connect with a password, on/off, wired and VPN connections) and `bluetooth` (on/off, devices, discover, pair, connect): their state and actions are in DESKTOP_SERVICES.md. When either needs the user (a Wi-Fi password, a pairing code), the shell gets a `systemrequest` event; without `preventDefault()` the library shows its own prompt.
   - `notifications` lists apps' notifications and the tabs' web notifications (their `app` is the site; `invoke` with `"default"` runs the page's handler and shows its tab). The library pops them up unless `connect({ notificationPopups: false })`.
   - The shell's `shellnotice` event (`{ shell, title, kind: "rollback" | "crash" | "server", message }`): an installed shell's edit was rolled back, its page crashed or its server failed. It's also a notification, so a shell with popups shows it already (`{{PLUTONIUM}}/docs/features/SHELL_PACKAGES.md`).
@@ -81,8 +81,8 @@ await shell.launch("mine:thread/1", ["foot"]);
 | `<native-window>`, the window broker, tabs | `{{PLUTONIUM}}/docs/features/BROKER.md`, `{{PLUTONIUM}}/docs/features/TABS.md` |
 | Sizing, fullscreen, controls, drag and drop | `{{PLUTONIUM}}/docs/features/WINDOW_SIZING.md`, `CONTROLS.md`, `DRAG_AND_DROP.md` (same folder) |
 | Several shells, the switcher | `{{PLUTONIUM}}/docs/features/SHELLS.md` |
-| The niri shell | `{{PLUTONIUM}}/docs/features/NIRI_SHELL.md` |
-| The GNOME shell | `{{PLUTONIUM}}/docs/features/GNOME_SHELL.md` |
+| Styx (folder `niri`) | `{{PLUTONIUM}}/docs/features/STYX_SHELL.md` |
+| Charon (folder `gnome`) | `{{PLUTONIUM}}/docs/features/CHARON_SHELL.md` |
 | Agents driving apps and tabs (MCP tools) | `{{PLUTONIUM}}/docs/features/AGENT_CONTROL.md` |
 | How it's built | `{{PLUTONIUM}}/docs/ARCHITECTURE.md` |
 | Complete example shells | `{{PLUTONIUM}}/shells/plain/index.html` (small), `{{PLUTONIUM}}/shells/niri/index.html` (large) |

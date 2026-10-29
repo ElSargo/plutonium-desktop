@@ -1,9 +1,9 @@
-# The niri shell
+# Styx
 
-A third frontend: a near 1:1 clone of the [niri](https://github.com/YaLTeR/niri) scrollable-tiling Wayland compositor, written as a Plutonium shell page (`shells/niri/index.html`). Like the plain shell, it is built only on the substrate: `navigator.windowBroker`, `<native-window>`, browser tabs and the helper's shell library. Tested on DRM (tty2) on 2026-10-17, Chromium patch `chromium/patches/0016-*.patch`.
+Styx is a Plutonium shell page (`shells/niri/index.html`, installed as `niri`) whose design follows the [niri](https://github.com/YaLTeR/niri) scrollable-tiling Wayland compositor nearly 1:1: its layout, look, animations and default binds are niri's, credited to niri's authors. The code is Plutonium's. Like the plain shell, it is built only on the substrate: `navigator.windowBroker`, `<native-window>`, browser tabs and the helper's shell library. Tested on DRM (tty2) on 2026-10-17, Chromium patch `chromium/patches/0016-*.patch`.
 
 ```
-plutonium run niri plain          # DRM, niri at startup, the plain shell second (Super+Tab)
+plutonium run niri plain          # DRM, Styx at startup, the plain shell second (Super+Tab)
 plutonium run --x11 niri          # a private Xvfb (:99)
 ```
 
@@ -71,7 +71,7 @@ These are niri's default `config.kdl` binds, with Mod = Super:
 | Super+O | overview |
 | Super+Shift+←→↑↓ / H J K L | focus the display that way |
 | Super+Ctrl+Shift+the same | move the column to the display that way (each window a column there) |
-| Super+Shift+E, Ctrl+Alt+Delete | exit niri (ends the session), after a confirm |
+| Super+Shift+E, Ctrl+Alt+Delete | exit Styx (ends the session), after a confirm |
 | Super+Alt+L | lock the screen (the session service; until the shell has it, a notice) |
 | Super+wheel | workspace; +Ctrl moves the column there; +Shift, or sideways: column; +Ctrl+Shift, or Ctrl sideways: move the column |
 | Super+two-finger scroll | swipe: the view, workspaces |
@@ -120,4 +120,4 @@ These were tested on Xvfb only: consume-or-expel, floating (Super+V), overview c
 - **No close animation.** The element disappears with its window.
 - **Swipes and drop zones are checked against a mock broker only** (`preview` tab, 2026-10-27): the drop zones, insert hint, tab click, resize from an edge, swipe snapping and overview drops. Not yet on DRM with a real touchpad and mouse: whether Chromium's touchpad scroll deltas are told apart from wheel notches as expected (`isNotch()`), and Super+middle-drag.
 - **Dialogs (transient windows) are tiled.** niri floats them, but the broker doesn't report a window's parent.
-- **Shell-wide Super.** While niri is visible, apps never see Super (it is a shell shortcut), so app shortcuts with Super don't work.
+- **Shell-wide Super.** While Styx is visible, apps never see Super (it is a shell shortcut), so app shortcuts with Super don't work.

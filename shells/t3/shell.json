@@ -1,7 +1,7 @@
 {
-  "title": "T3",
-  "version": "2",
-  "description": "T3 Code: coding agents' chat threads, each with its apps, terminals and browser tabs.",
+  "title": "Hydra",
+  "version": "3",
+  "description": "Coding agents' chat threads, each with its apps, terminals and browser tabs. Built on T3 Code.",
   "helperParam": "plutoniumHelper",
   "uses": ["notifications"],
   "server": {

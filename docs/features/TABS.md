@@ -165,9 +165,9 @@ Verified on Xvfb with the host's T3 data:
 | Browser tab from the panel, URL typed: loads in the real tab; title and URL reach T3 through the server | ✅ |
 | Relay by hand over the helper's socket: `Browser.getVersion`, `Target.setAutoAttach` announces the page, `Runtime.evaluate` returns the tab's URL | ✅ |
 | A T3 agent (Claude, `preview_*`): opens example.com, snapshots it, clicks "Learn more", reports "Example Domains" at iana.org | ✅ in the real tab (target type `other`); clicks relayed as `Input.dispatchMouseEvent`; no headless Chrome started |
-| Three T3 shell pages in one profile | ✅ one browser tab, attached once |
+| Three Hydra pages in one profile | ✅ one browser tab, attached once |
 | The agent's cursor (`pointer` from the server) | ✅ drawn by T3's overlay over the real tab |
-| A popup from a click (`window.open(url, "auth", "width=500,…")`, cross-origin), with two T3 shell pages | ✅ one new panel tab, `window.opener` set; its `postMessage` reaches the opener; its `window.close()` closes the panel tab and brings the opener back |
+| A popup from a click (`window.open(url, "auth", "width=500,…")`, cross-origin), with two Hydra pages | ✅ one new panel tab, `window.opener` set; its `postMessage` reaches the opener; its `window.close()` closes the panel tab and brings the opener back |
 
 ## Surviving a restart (EXO-SESSION)
 

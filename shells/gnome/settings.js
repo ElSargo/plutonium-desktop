@@ -533,7 +533,7 @@ export function mountSettings(ctx) {
     about() {
       const big = el("div", "st-big");
       big.innerHTML = icon("display");
-      big.append(el("h2", "", "Plutonium"), el("span", "", "GNOME shell for Plutonium · version 2"));
+      big.append(el("h2", "", "Plutonium"), el("span", "", "Charon, a Plutonium shell · version 4"));
       const rows = [
         row("Helper", el("span", "", ctx.helper)),
         row("Shell", el("span", "", location.origin)),

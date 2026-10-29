@@ -4,9 +4,9 @@ A web-based desktop environment for Linux.
 
 In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real browser tabs are elements in that page, which you can lay out, style and script like any other part of the page. So a window manager, a launcher or a whole desktop shell is just a web app.
 
-![The niri shell: a terminal and a browser tab side by side](docs/images/niri.png)
+![Styx: a terminal and a browser tab side by side](docs/images/niri.png)
 
-- **Bring your own shell.** It comes with four: [niri](docs/features/NIRI_SHELL.md) (scrollable tiling), [GNOME](docs/features/GNOME_SHELL.md) (floating windows, workspaces as threads), a minimal reference shell, and [T3 Code](frontends/t3code/README.md) (coding agents). You can run several at once and switch between them with Super+Tab.
+- **Bring your own shell.** It comes with four: [Styx](docs/features/STYX_SHELL.md) (scrollable tiling, after [niri](https://github.com/YaLTeR/niri)'s design), [Charon](docs/features/CHARON_SHELL.md) (floating windows, workspaces as threads, after GNOME Shell's design), a minimal reference shell, and [Hydra](frontends/t3code/README.md) (coding agents, built on [T3 Code](https://github.com/pingdotgg/t3code)). You can run several at once and switch between them with Super+Tab.
 - **Apps and tabs side by side.** Apps get the GPU, keyboard, mouse, touchpad, fullscreen, pointer lock, and drag and drop. Tabs are real Chromium tabs.
 - **Work stays together.** Every app and tab belongs to the thread or workspace that started it. A link clicked in a terminal opens as a tab next to it, and a file opens in its app in the same place.
 - **Built for agents.** An agent can see, launch, screenshot and drive its own thread's apps and tabs over MCP.
@@ -44,7 +44,7 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
 3. Try it in a window on your current desktop:
 
    ```sh
-   bin/plutonium run --x11 :0 niri   # bin/plutonium stop --x11 ends it
+   bin/plutonium run --x11 :0 niri   # Styx; bin/plutonium stop --x11 ends it
    ```
 
 4. To run it as your whole desktop, first set up a kill switch, a key that gets you out if something hangs:
@@ -56,7 +56,7 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
 
 5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
 
-In niri, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
+In Styx, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
 The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
 
@@ -71,7 +71,7 @@ The first run installs the shells in `~/.pluto/shells`. From then on, `bin/pluto
 | `helper/` | `plutoniumd`: threads, app launching, links, the agent bridge ([README](helper/README.md)) |
 | `shells/` | The shells Plutonium ships (installed into `~/.pluto/shells`) |
 | `skill/` | The skill agents read to work on your desktop (written to `~/.pluto/SKILL.md`) |
-| `frontends/t3code/` | Patches that turn T3 Code into a shell |
+| `frontends/t3code/` | Patches that turn T3 Code into Hydra, a shell |
 | `container/` | The build image and the prebuilt runtime image |
 | `killswitch/`, `tools/` | The kill switch; test tools |
 | `docs/` | [Using](docs/USING.md), [building](docs/BUILDING.md), [architecture](docs/ARCHITECTURE.md), [developing](docs/DEVELOPING.md), per-feature docs |

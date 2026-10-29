@@ -1,10 +1,10 @@
-# T3 Code as a Plutonium shell
+# Hydra: T3 Code as a Plutonium shell
 
-[T3 Code](https://github.com/pingdotgg/t3code) is a chat UI for coding agents. With these patches its web app runs as a Plutonium shell:
+Hydra is built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for coding agents by its authors (MIT license). The code is theirs; these patches make its web app a Plutonium shell, named Hydra:
 - every chat thread gets the apps, terminals and browser tabs its agent and terminals start, in the thread's right panel;
 - the agents get Plutonium's MCP tools for their thread's windows and tabs.
 
-T3 Code is optional. The niri and plain shells need nothing from here.
+Hydra is optional. Styx, Charon and the plain shell need nothing from here.
 
 - **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
 - **`patches/`**: the series (`git am`): 15 commits, about 3,300 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
@@ -12,10 +12,10 @@ T3 Code is optional. The niri and plain shells need nothing from here.
 ```
 plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
 plutonium t3 build     # pnpm install, build the web app
-plutonium run t3 niri  # T3 as the desktop, niri behind it (Super+Tab)
+plutonium run t3 niri  # Hydra as the desktop, Styx behind it (Super+Tab)
 ```
 
-`plutonium run t3` starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`, with the scopes T3's desktop app gets, so the shell can pair other devices from Settings, Connections. The page passes it on to T3 only if the profile isn't paired yet, or its session lacks some of those scopes, so a paired profile doesn't add a session each time.
+`plutonium run t3` (Hydra) starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`, with the scopes T3's desktop app gets, so the shell can pair other devices from Settings, Connections. The page passes it on to T3 only if the profile isn't paired yet, or its session lacks some of those scopes, so a paired profile doesn't add a session each time.
 
 ### The host's T3 Code
 
@@ -53,14 +53,15 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0017 | Agents drive windows and tabs: T3's MCP server offers the helper's native window tools to every provider (listed from and forwarded to the helper, with the caller's thread), instead of Claude alone getting the helper's stdio server; the desktop browser channel's `open` and `close`, so the helper opens a server tab no page shows, instead of a 10 s wait and a headless tab ([AGENT_CONTROL](../../docs/features/AGENT_CONTROL.md#in-t3-code)) |
 | 0018 | Windows held at an agent's size: `launch_app` takes a width and height; a window tab shows a held window scaled to fit the panel, locked, saying the agent is using it, with **Take control**; `read_window` and `act_window` ([AGENT_CONTROL](../../docs/features/AGENT_CONTROL.md#sizes-agents-hold)) |
 | 0019 | `t3 auth session issue --runtime-mode-ceiling`: an `mcp-client` session issued from the CLI may launch threads up to that runtime mode (it was capped at approval-required), so the agent tool tests can drive a session's T3 Code from outside ([agent-tests](../../docs/agent-tests/README.md)) |
-| 0031 | The dock: Super+1…9 slots for T3's terminal drawer, apps and sites, kept per thread, per project or everywhere; run, raise and go back, split or fold the chat; Super+Shift+N and the tab menu assign them ([T3_DOCK](../../docs/features/T3_DOCK.md)). A focused tab or app no longer loses the keyboard to the composer |
+| 0031 | The dock: Super+1…9 slots for T3's terminal drawer, apps and sites, kept per thread, per project or everywhere; run, raise and go back, split or fold the chat; Super+Shift+N and the tab menu assign them ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md)). A focused tab or app no longer loses the keyboard to the composer |
 | 0032 | The dock in the sidebar, above the settings row: a button per slot (its icon, its number, whether it runs or shows), clicked as Super+N; a right click puts the panel's tab or the terminal there, or sets the scope or layout. Panel tabs in the dock show their number |
-| 0033 | The dock's slot editor (right click, or click an empty slot): terminal, app (searchable picker) or site, name, scope, layout, clear; sites show their own icon (open tab, T3's remembered one, then `/favicon.ico`), not Google's favicon service ([T3_DOCK](../../docs/features/T3_DOCK.md)) |
-| 0034 | Dock sites kept per project or everywhere: one tab with the scope's tag, which moves to the thread whose key or button asks for it; closing it closes it. A tab brought into a preview (the dock's, or imported from Elsewhere) replaces the server's own blank tab instead of being closed ([T3_DOCK](../../docs/features/T3_DOCK.md#sites-in-a-scope-patch-0034-2026-10-27)) |
-| 0035 | The dock's key hides what its slot shows in a thread just switched to (the switch gave the composer the keyboard, so the key used to only focus it); going back never shows the slot's own thing again ([T3_DOCK](../../docs/features/T3_DOCK.md#keys)) |
+| 0033 | The dock's slot editor (right click, or click an empty slot): terminal, app (searchable picker) or site, name, scope, layout, clear; sites show their own icon (open tab, T3's remembered one, then `/favicon.ico`), not Google's favicon service ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md)) |
+| 0034 | Dock sites kept per project or everywhere: one tab with the scope's tag, which moves to the thread whose key or button asks for it; closing it closes it. A tab brought into a preview (the dock's, or imported from Elsewhere) replaces the server's own blank tab instead of being closed ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md#sites-in-a-scope-patch-0034-2026-10-27)) |
+| 0035 | The dock's key hides what its slot shows in a thread just switched to (the switch gave the composer the keyboard, so the key used to only focus it); going back never shows the slot's own thing again ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md#keys)) |
 | 0036 | Agents get the helper's tab tools preview tools have no counterpart for (`find_in_tab`, `answer_permission`, `request_permission`, `choose_files`, `print_tab`, `cancel_print`, `list_printers`, `list_downloads`, `download_action`, and `tab_requests`), on T3's tab ids ([AGENT_CONTROL](../../docs/features/AGENT_CONTROL.md#in-t3-code)) |
 | 0037 | An archived or deleted thread's permission grants are forgotten: the server asks the helper, which has a shell page call `forgetThreadPermissions` ([TAB_FEATURES](../../docs/features/TAB_FEATURES.md)) |
 | 0038 | `orchestrator_capabilities` gives each provider instance near (80%) or at a subscription usage limit a `usageWarning`: the window, how much is used, when it resets |
+| 0044 | The app names itself Hydra (title, sidebar, welcome, settings and errors that mean this app) with a mark of its own instead of T3's wordmark and icons; text about T3 Code itself (its desktop and mobile apps, T3 Connect, the `t3` CLI, privacy and license notices) keeps its name |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 
