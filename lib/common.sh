@@ -73,6 +73,10 @@ BUILDS_KEEP=${BUILDS_KEEP:-6}
 # CCACHE=1: compile through ccache, in CCACHE_DIR (mounted in the container).
 CCACHE_DIR=${CCACHE_DIR:-$DATA_DIR/ccache}
 CCACHE_SIZE=${CCACHE_SIZE:-50G}
+# Compile jobs a Chromium build runs at once: one per 2 GiB of RAM, at most one
+# per CPU. Chromium's heavier files take 1.5-2 GB each to compile, and autoninja
+# otherwise runs one per CPU, which runs a 32-thread, 32 GB machine out of memory.
+BUILD_JOBS=${BUILD_JOBS:-$(awk -v cpus="$(nproc)" '/^MemTotal:/ { j = int($2 / 2097152); if (j > cpus) j = cpus; print (j < 1 ? 1 : j) }' /proc/meminfo)}
 BUILD_KEY=$(cat "$ROOT/chromium/BASE" "$ROOT/chromium/args.gn" "$ROOT"/chromium/patches/*.patch | sha256sum | cut -c1-12)
 # What the out dir holds (chromium build writes it): "key <K>" for patch set K
 # as it is, "custom <K>" for more work on top of K.

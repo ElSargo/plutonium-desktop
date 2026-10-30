@@ -315,7 +315,9 @@ chromium_build() {
     env=(-e "CCACHE_DIR=$CCACHE_DIR" -e "CCACHE_MAXSIZE=$CCACHE_SIZE" -e "CCACHE_BASEDIR=$src"
          -e CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime)
   fi
-  in_build_container "${env[@]}" sh -c "cd src && gn gen $outdir && autoninja -C $outdir chrome"
+  # Out of memory, the kernel kills a compiler or linker rather than the
+  # desktop's Chrome (whose renderers ask to go first, with up to 1000).
+  in_build_container "${env[@]}" sh -c "echo 1000 > /proc/self/oom_score_adj; cd src && gn gen $outdir && autoninja -j $BUILD_JOBS -C $outdir chrome"
   [[ -n $release ]] || record_build "$src/$outdir"
 }
 # Say in the out dir what it holds, and keep a build of this checkout's series
