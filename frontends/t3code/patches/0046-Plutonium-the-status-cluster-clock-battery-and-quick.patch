@@ -1,0 +1,1189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Fri, 30 Oct 2026 19:27:35 +1300
+Subject: [PATCH 46/46] Plutonium: the status cluster: clock, battery and quick
+ settings in the title bar
+
+At the title bar's right end, shown whatever else is open: the time, the
+battery when not on AC, and an icon for offline or muted. A click opens
+quick settings over the helper's desktop services: the date and a
+calendar, volume and output, brightness, Wi-Fi and Bluetooth, what's
+playing, the battery, and lock, suspend, log out, restart and power off.
+
+Its width is --plutonium-status-width; --workspace-controls-right adds it,
+so the panel toggles sit left of it, and the chat header, the panel's tab
+strip and the page headers reserve it. Only in the Plutonium shell.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/AppSidebarLayout.tsx  |   2 +
+ apps/web/src/components/RightPanelTabs.tsx    |   4 +-
+ .../src/components/WorkspacePageHeader.tsx    |   2 +-
+ apps/web/src/components/chat/ChatHeader.tsx   |   2 +-
+ apps/web/src/index.css                        |  11 +-
+ apps/web/src/plutonium/PlutoniumStatus.tsx    | 867 ++++++++++++++++++
+ apps/web/src/plutonium/systemServices.ts      | 176 ++++
+ apps/web/src/plutonium/windowStore.ts         |  10 +
+ 8 files changed, 1070 insertions(+), 4 deletions(-)
+ create mode 100644 apps/web/src/plutonium/PlutoniumStatus.tsx
+ create mode 100644 apps/web/src/plutonium/systemServices.ts
+
+diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
+index a1eb647a53..dccf15a065 100644
+--- a/apps/web/src/components/AppSidebarLayout.tsx
++++ b/apps/web/src/components/AppSidebarLayout.tsx
+@@ -34,6 +34,7 @@ import {
+ import LegacyThreadSidebar from "./LegacySidebar";
+ import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
+ import { PlutoniumWindowsStarter } from "../plutonium/PlutoniumWindows";
++import { PlutoniumStatus } from "../plutonium/PlutoniumStatus";
+ import ThreadSidebar from "./Sidebar";
+ import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+ import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+@@ -357,6 +358,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+         <NavigationHistoryShortcuts />
+         <MainAppLocationTracker />
+         <PlutoniumWindowsStarter />
++        <PlutoniumStatus />
+       </SidebarProvider>
+     </PanelAnimationSuppressionProvider>
+   );
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index 3ae8dad5bc..2dceafe04a 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -1291,7 +1291,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+           // The sheet overlays from the viewport top, so its tab bar keeps
+           // the titlebar's height: a compact row re-centers the layout
+           // controls a few pixels higher and the cluster jumps on open.
+-          props.mode === "inline" && !props.layoutControls ? "pr-28" : "pr-3",
++          props.mode === "inline" && !props.layoutControls
++            ? "pr-(--right-panel-tabbar-toggles-end)"
++            : "pr-(--right-panel-tabbar-end)",
+           ownsDesktopTitleBar && "drag-region",
+           ownsDesktopTitleBar && "wco:pr-(--workspace-native-controls-inset)",
+           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+diff --git a/apps/web/src/components/WorkspacePageHeader.tsx b/apps/web/src/components/WorkspacePageHeader.tsx
+index 0fb53585d1..3ea345ffc3 100644
+--- a/apps/web/src/components/WorkspacePageHeader.tsx
++++ b/apps/web/src/components/WorkspacePageHeader.tsx
+@@ -19,7 +19,7 @@ export function WorkspacePageHeader({
+   return (
+     <header
+       className={cn(
+-        "flex h-[var(--workspace-topbar-height)]! min-h-[var(--workspace-topbar-height)]! max-h-[var(--workspace-topbar-height)]! shrink-0 items-center gap-3 pl-(--workspace-gutter-start) pr-(--workspace-gutter-end) [[data-panel-animations=true]_&]:motion-safe:transition-[padding-left,padding-right] [[data-panel-animations=true]_&]:motion-safe:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:motion-safe:ease-out",
++        "flex h-[var(--workspace-topbar-height)]! min-h-[var(--workspace-topbar-height)]! max-h-[var(--workspace-topbar-height)]! shrink-0 items-center gap-3 pl-(--workspace-gutter-start) pr-(--workspace-titlebar-end) [[data-panel-animations=true]_&]:motion-safe:transition-[padding-left,padding-right] [[data-panel-animations=true]_&]:motion-safe:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:motion-safe:ease-out",
+         electron && "drag-region",
+         reserveNativeControls && "wco:pr-(--workspace-native-controls-inset)",
+         COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+diff --git a/apps/web/src/components/chat/ChatHeader.tsx b/apps/web/src/components/chat/ChatHeader.tsx
+index c2b1a80501..612d9b0d81 100644
+--- a/apps/web/src/components/chat/ChatHeader.tsx
++++ b/apps/web/src/components/chat/ChatHeader.tsx
+@@ -302,7 +302,7 @@ export const ChatHeader = memo(function ChatHeader({
+       ref={breadcrumbContainerRef}
+       className={cn(
+         "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
+-        rightPanelOpen ? "pr-10" : "pr-24",
++        rightPanelOpen ? "pr-10" : "pr-(--workspace-titlebar-toggles-end)",
+       )}
+       onContextMenu={handleHeaderContextMenu}
+     >
+diff --git a/apps/web/src/index.css b/apps/web/src/index.css
+index 90f204d201..fcea60ce5c 100644
+--- a/apps/web/src/index.css
++++ b/apps/web/src/index.css
+@@ -120,7 +120,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+   --workspace-topbar-height: 52px;
+   --workspace-controls-top: 0px;
+   --workspace-controls-left: calc(env(safe-area-inset-left) + 0.75rem);
+-  --workspace-controls-right: calc(env(safe-area-inset-right) + 0.75rem);
++  /* --plutonium-status-width: the Plutonium shell's status cluster at the right edge (PlutoniumStatus.tsx). */
++  --workspace-controls-right: calc(
++    env(safe-area-inset-right) + 0.75rem + var(--plutonium-status-width, 0px)
++  );
++  /* What the title bar's right end reserves: the layout toggles (when they sit over
++     it), then the status cluster. */
++  --workspace-titlebar-end: calc(var(--workspace-gutter-end) + var(--plutonium-status-width, 0px));
++  --workspace-titlebar-toggles-end: calc(6rem + var(--plutonium-status-width, 0px));
++  --right-panel-tabbar-end: calc(0.75rem + var(--plutonium-status-width, 0px));
++  --right-panel-tabbar-toggles-end: calc(7rem + var(--plutonium-status-width, 0px));
+   --workspace-native-controls-inset: 0px;
+   --workspace-titlebar-control-size: 1.75rem;
+   --workspace-titlebar-control-gap: 0.75rem;
+diff --git a/apps/web/src/plutonium/PlutoniumStatus.tsx b/apps/web/src/plutonium/PlutoniumStatus.tsx
+new file mode 100644
+index 0000000000..206e0366e5
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumStatus.tsx
+@@ -0,0 +1,867 @@
++// Plutonium: the status cluster, at the title bar's right edge, where it shows
++// whatever else is open (sidebar hidden, panel maximized, chat folded): the
++// time, the battery when it isn't on AC, and an icon only for something
++// wrong (offline, muted). A click opens quick settings: the date and a
++// calendar, volume and brightness, Wi-Fi and Bluetooth, what's playing, the
++// battery, and lock, suspend, log out, restart and power off. Over the
++// helper's desktop services (systemServices.ts); only in the Plutonium shell.
++//
++// Its width is --plutonium-status-width on the document: the title bar's
++// other right-hand controls (--workspace-controls-right) and the headers they
++// sit over make room for it.
++import {
++  BatteryChargingIcon,
++  BatteryFullIcon,
++  BatteryIcon,
++  BatteryLowIcon,
++  BatteryMediumIcon,
++  BatteryWarningIcon,
++  BluetoothIcon,
++  ChevronDownIcon,
++  ChevronRightIcon,
++  EthernetPortIcon,
++  LockIcon,
++  LockKeyholeIcon,
++  LogOutIcon,
++  MoonIcon,
++  PauseIcon,
++  PlayIcon,
++  PowerIcon,
++  RotateCcwIcon,
++  SkipBackIcon,
++  SkipForwardIcon,
++  SunIcon,
++  Volume1Icon,
++  Volume2Icon,
++  VolumeXIcon,
++  WifiHighIcon,
++  WifiIcon,
++  WifiLowIcon,
++  WifiOffIcon,
++  WifiZeroIcon,
++} from "lucide-react";
++import {
++  type ReactNode,
++  memo,
++  useCallback,
++  useEffect,
++  useLayoutEffect,
++  useRef,
++  useState,
++} from "react";
++
++import { requestConfirmDialog } from "~/confirmDialog";
++import { Calendar } from "~/components/ui/calendar";
++import { Input } from "~/components/ui/input";
++import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
++import { Switch } from "~/components/ui/switch";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
++import { observeResize } from "~/lib/observeResize";
++import { cn } from "~/lib/utils";
++
++import {
++  type AccessPoint,
++  type BatteryState,
++  type NetworkState,
++  type PowerState,
++  useSystemService,
++} from "./systemServices";
++import { isPlutoniumShell } from "./windowStore";
++
++const STATUS_WIDTH_PROPERTY = "--plutonium-status-width";
++/** The space between the cluster and the controls left of it. */
++const STATUS_GAP_PX = 4;
++
++const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
++const dateFormat = new Intl.DateTimeFormat(undefined, {
++  weekday: "long",
++  day: "numeric",
++  month: "long",
++  year: "numeric",
++});
++
++/** Now, again at each minute's turn. */
++function useMinute(): Date {
++  const [now, setNow] = useState(() => new Date());
++  useEffect(() => {
++    let timer: ReturnType<typeof setTimeout>;
++    const schedule = () => {
++      const next = new Date();
++      timer = setTimeout(
++        () => {
++          setNow(new Date());
++          schedule();
++        },
++        60_000 - (next.getSeconds() * 1000 + next.getMilliseconds()) + 50,
++      );
++    };
++    schedule();
++    // After a suspend the timer is late: catch up when the page shows again.
++    const onVisible = () => setNow(new Date());
++    document.addEventListener("visibilitychange", onVisible);
++    return () => {
++      clearTimeout(timer);
++      document.removeEventListener("visibilitychange", onVisible);
++    };
++  }, []);
++  return now;
++}
++
++function duration(seconds: number): string {
++  const minutes = Math.round(seconds / 60);
++  if (minutes < 60) return `${minutes} min`;
++  const hours = Math.floor(minutes / 60);
++  const rest = minutes % 60;
++  return rest ? `${hours} h ${rest} min` : `${hours} h`;
++}
++
++function batteryLow(battery: BatteryState): boolean {
++  return battery.percent <= 15 && !battery.charging;
++}
++
++function BatteryGlyph({ battery, className }: { battery: BatteryState; className?: string }) {
++  const Icon = battery.charging
++    ? BatteryChargingIcon
++    : batteryLow(battery)
++      ? BatteryWarningIcon
++      : battery.percent >= 85
++        ? BatteryFullIcon
++        : battery.percent >= 50
++          ? BatteryMediumIcon
++          : battery.percent >= 20
++            ? BatteryLowIcon
++            : BatteryIcon;
++  return <Icon className={cn(batteryLow(battery) && "text-destructive", className)} />;
++}
++
++function batteryText(power: PowerState, battery: BatteryState): string {
++  const what =
++    battery.state === "full"
++      ? "Full"
++      : battery.charging
++        ? "Charging"
++        : power.ac
++          ? "Plugged in, not charging"
++          : "On battery";
++  const left = battery.timeLeft
++    ? `, ${duration(battery.timeLeft)} ${battery.charging ? "to full" : "left"}`
++    : "";
++  return `${battery.percent}%: ${what}${left}`;
++}
++
++function WifiGlyph({ strength }: { strength: number | undefined }) {
++  if (strength === undefined || strength >= 70) return <WifiIcon />;
++  if (strength >= 45) return <WifiHighIcon />;
++  return strength >= 20 ? <WifiLowIcon /> : <WifiZeroIcon />;
++}
++
++/** The connection in use: Wi-Fi's signal, wired, or none. */
++function NetworkGlyph({ network }: { network: NetworkState }) {
++  if (!network.primary) return network.wifi.available ? <WifiOffIcon /> : <EthernetPortIcon />;
++  if (network.primary.type === "ethernet") return <EthernetPortIcon />;
++  return <WifiGlyph strength={network.primary.strength} />;
++}
++
++/** What the network row says: the connection in use, else why there's none. */
++function networkSummary(network: NetworkState): string {
++  if (network.state === "connecting") return "Connecting…";
++  if (!network.primary) return network.wifi.available && !network.wifi.enabled ? "Off" : "Offline";
++  const limited =
++    network.connectivity === "portal"
++      ? " (sign-in needed)"
++      : network.connectivity === "limited" || network.connectivity === "none"
++        ? " (no internet)"
++        : "";
++  return `${network.primary.name}${limited}`;
++}
++
++/**
++ * A setter that sends one value at a time, the last one moved to winning:
++ * a slider's drag doesn't queue a call per pixel.
++ */
++function useLatestSender(send: (value: number) => Promise<unknown>): (value: number) => void {
++  const sendRef = useRef(send);
++  useEffect(() => {
++    sendRef.current = send;
++  }, [send]);
++  const queue = useRef<{ busy: boolean; next: number | null }>({ busy: false, next: null });
++  return useCallback((value: number) => {
++    const state = queue.current;
++    const go = (target: number) => {
++      state.busy = true;
++      void sendRef
++        .current(target)
++        .catch((error: unknown) => console.warn(error))
++        .finally(() => {
++          state.busy = false;
++          const again = state.next;
++          state.next = null;
++          if (again !== null) go(again);
++        });
++    };
++    if (state.busy) state.next = value;
++    else go(value);
++  }, []);
++}
++
++function LevelRow({
++  icon,
++  label,
++  value,
++  onChange,
++  onIconClick,
++  iconLabel,
++}: {
++  icon: ReactNode;
++  label: string;
++  value: number;
++  onChange: (value: number) => void;
++  onIconClick?: () => void;
++  iconLabel?: string;
++}) {
++  // The slider follows the hand while it moves; the service's state after.
++  const [dragging, setDragging] = useState<number | null>(null);
++  const shown = dragging ?? value;
++  return (
++    <div className="flex items-center gap-2">
++      {onIconClick ? (
++        <button
++          type="button"
++          aria-label={iconLabel}
++          onClick={onIconClick}
++          className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
++        >
++          {icon}
++        </button>
++      ) : (
++        <span className="flex size-7 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4">
++          {icon}
++        </span>
++      )}
++      <input
++        type="range"
++        aria-label={label}
++        min={0}
++        max={1}
++        step={0.01}
++        value={Math.min(1, shown)}
++        onChange={(event) => {
++          const next = Number(event.currentTarget.value);
++          setDragging(next);
++          onChange(next);
++        }}
++        onPointerUp={() => setDragging(null)}
++        onKeyUp={() => setDragging(null)}
++        className="h-1.5 min-w-0 flex-1 cursor-pointer accent-primary"
++      />
++      <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
++        {Math.round(shown * 100)}%
++      </span>
++    </div>
++  );
++}
++
++function ToggleRow({
++  icon,
++  title,
++  detail,
++  checked,
++  disabled,
++  onCheckedChange,
++  expanded,
++  onExpandedChange,
++}: {
++  icon: ReactNode;
++  title: string;
++  detail: string;
++  checked?: boolean;
++  disabled?: boolean;
++  onCheckedChange?: (checked: boolean) => void;
++  expanded: boolean;
++  onExpandedChange: (expanded: boolean) => void;
++}) {
++  const Chevron = expanded ? ChevronDownIcon : ChevronRightIcon;
++  return (
++    <div className="flex items-center gap-2">
++      <button
++        type="button"
++        onClick={() => onExpandedChange(!expanded)}
++        aria-expanded={expanded}
++        className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 pr-1 text-left hover:bg-accent"
++      >
++        <span className="flex size-7 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4">
++          {icon}
++        </span>
++        <span className="min-w-0 flex-1">
++          <span className="block text-sm">{title}</span>
++          <span className="block truncate text-xs text-muted-foreground">{detail}</span>
++        </span>
++        <Chevron className="size-4 shrink-0 text-muted-foreground" />
++      </button>
++      {onCheckedChange ? (
++        <Switch
++          size="sm"
++          aria-label={`${title} ${checked ? "on" : "off"}`}
++          checked={checked ?? false}
++          disabled={disabled ?? false}
++          onCheckedChange={onCheckedChange}
++        />
++      ) : null}
++    </div>
++  );
++}
++
++function ListButton({
++  children,
++  current,
++  onClick,
++}: {
++  children: ReactNode;
++  current?: boolean;
++  onClick: () => void;
++}) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      className={cn(
++        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-accent [&_svg]:size-3.5 [&_svg]:shrink-0",
++        current && "font-medium",
++      )}
++    >
++      {children}
++    </button>
++  );
++}
++
++function SmallAction({ children, onClick }: { children: ReactNode; onClick: () => void }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      className="rounded-md px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
++    >
++      {children}
++    </button>
++  );
++}
++
++function WifiList({
++  network,
++  call,
++}: {
++  network: NetworkState;
++  call: (action: string, args?: Record<string, unknown>) => Promise<unknown>;
++}) {
++  const [asking, setAsking] = useState<string | null>(null);
++  const [password, setPassword] = useState("");
++  const [open, setOpen] = useState<string | null>(null);
++  const [error, setError] = useState("");
++
++  useEffect(() => {
++    void call("scan").catch(() => {});
++  }, [call]);
++
++  const act = (action: string, args: Record<string, unknown>) => {
++    setError("");
++    call(action, args).catch((cause: unknown) =>
++      setError(String((cause as Error)?.message ?? cause)),
++    );
++  };
++
++  const choose = (ap: AccessPoint) => {
++    if (ap.known) {
++      setOpen(open === ap.ssid ? null : ap.ssid);
++      return;
++    }
++    if (ap.secured && ap.security !== "enterprise") {
++      setAsking(ap.ssid);
++      setPassword("");
++      return;
++    }
++    act("connect", { ssid: ap.ssid });
++  };
++
++  const wired = network.connections.filter((connection) => connection.type !== "wifi");
++  return (
++    <div className="ml-9 grid gap-0.5">
++      {network.wifi.enabled ? (
++        <div className="grid max-h-56 gap-0.5 overflow-y-auto">
++          {network.accessPoints.map((ap) => {
++            return (
++              <div key={ap.ssid}>
++                <ListButton current={ap.active} onClick={() => choose(ap)}>
++                  <WifiGlyph strength={ap.strength} />
++                  <span className="min-w-0 flex-1 truncate">{ap.ssid}</span>
++                  {ap.secured ? <LockKeyholeIcon className="text-muted-foreground" /> : null}
++                </ListButton>
++                {open === ap.ssid ? (
++                  <div className="flex justify-end gap-1 pb-1">
++                    {ap.active ? (
++                      <SmallAction onClick={() => act("disconnect", { id: ap.id })}>
++                        Disconnect
++                      </SmallAction>
++                    ) : (
++                      <SmallAction onClick={() => act("connect", { ssid: ap.ssid })}>
++                        Connect
++                      </SmallAction>
++                    )}
++                    <SmallAction onClick={() => act("forget", { ssid: ap.ssid })}>
++                      Forget
++                    </SmallAction>
++                  </div>
++                ) : null}
++                {asking === ap.ssid ? (
++                  <form
++                    className="flex gap-1 px-2 pb-1"
++                    onSubmit={(event) => {
++                      event.preventDefault();
++                      setAsking(null);
++                      act("connect", { ssid: ap.ssid, password });
++                    }}
++                  >
++                    <Input
++                      size="sm"
++                      type="password"
++                      autoFocus
++                      placeholder="Password"
++                      value={password}
++                      onChange={(event) => setPassword(event.currentTarget.value)}
++                    />
++                    <SmallAction onClick={() => setAsking(null)}>Cancel</SmallAction>
++                  </form>
++                ) : null}
++              </div>
++            );
++          })}
++          {network.accessPoints.length === 0 ? (
++            <div className="px-2 py-1 text-xs text-muted-foreground">
++              {network.wifi.scanning ? "Looking for networks…" : "No networks found."}
++            </div>
++          ) : null}
++        </div>
++      ) : null}
++      {wired.map((connection) => (
++        <ListButton
++          key={connection.id}
++          current={connection.active}
++          onClick={() => act(connection.active ? "disconnect" : "connect", { id: connection.id })}
++        >
++          {connection.type === "vpn" ? <LockIcon /> : <EthernetPortIcon />}
++          <span className="min-w-0 flex-1 truncate">{connection.name}</span>
++        </ListButton>
++      ))}
++      {error ? <div className="px-2 text-xs text-destructive">{error}</div> : null}
++    </div>
++  );
++}
++
++const POWER_ACTIONS = [
++  {
++    action: "suspend",
++    can: "suspend",
++    icon: MoonIcon,
++    label: "Suspend",
++    question: "Suspend the computer?",
++  },
++  {
++    action: "log-out",
++    can: "logOut",
++    icon: LogOutIcon,
++    label: "Log out",
++    question: "Log out? This ends the Plutonium session and closes its apps.",
++  },
++  {
++    action: "reboot",
++    can: "reboot",
++    icon: RotateCcwIcon,
++    label: "Restart",
++    question: "Restart the computer? Unsaved work in open apps is lost.",
++  },
++  {
++    action: "power-off",
++    can: "powerOff",
++    icon: PowerIcon,
++    label: "Power off",
++    question: "Power off the computer? Unsaved work in open apps is lost.",
++  },
++] as const;
++
++function IconAction({
++  label,
++  disabled,
++  onClick,
++  children,
++}: {
++  label: string;
++  disabled?: boolean;
++  onClick: () => void;
++  children: ReactNode;
++}) {
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <button
++            type="button"
++            aria-label={label}
++            disabled={disabled}
++            onClick={onClick}
++            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4"
++          />
++        }
++      >
++        {children}
++      </TooltipTrigger>
++      <TooltipPopup side="top">{label}</TooltipPopup>
++    </Tooltip>
++  );
++}
++
++function confirm(question: string, variant: "default" | "destructive"): Promise<boolean> {
++  return requestConfirmDialog(question, { variant }) ?? Promise.resolve(window.confirm(question));
++}
++
++function QuickSettings({ now, close }: { now: Date; close: () => void }) {
++  const audio = useSystemService("audio");
++  const power = useSystemService("power");
++  const network = useSystemService("network");
++  const bluetooth = useSystemService("bluetooth");
++  const media = useSystemService("media");
++  const session = useSystemService("session");
++  const [expanded, setExpanded] = useState<"calendar" | "wifi" | "bluetooth" | null>(null);
++  const [error, setError] = useState("");
++  const setVolume = useLatestSender((volume) => audio.call("set-volume", { volume }));
++  const setBrightness = useLatestSender((brightness) =>
++    power.call("set-brightness", { brightness }),
++  );
++  const toggle = (what: "calendar" | "wifi" | "bluetooth") => (open: boolean) =>
++    setExpanded(open ? what : null);
++  const run = (label: string, promise: Promise<unknown>) =>
++    promise.catch((cause: unknown) =>
++      setError(`${label}: ${String((cause as Error)?.message ?? cause)}`),
++    );
++
++  const audioState = audio.state?.available ? audio.state : null;
++  const VolumeGlyph = !audioState
++    ? Volume2Icon
++    : audioState.muted || audioState.volume === 0
++      ? VolumeXIcon
++      : audioState.volume < 0.5
++        ? Volume1Icon
++        : Volume2Icon;
++  const networkState = network.state?.available ? network.state : null;
++  const bluetoothState =
++    bluetooth.state?.available && bluetooth.state.adapter ? bluetooth.state : null;
++  const connectedDevices = bluetoothState?.devices.filter((device) => device.connected) ?? [];
++  const player = media.state?.players.find((entry) => entry.id === media.state?.active) ?? null;
++  const battery = power.state?.battery ?? null;
++
++  return (
++    <div className="grid gap-3">
++      <button
++        type="button"
++        onClick={() => setExpanded(expanded === "calendar" ? null : "calendar")}
++        aria-expanded={expanded === "calendar"}
++        className="-mx-1 rounded-md px-1 text-left hover:bg-accent"
++      >
++        <div className="text-2xl font-medium tabular-nums">{timeFormat.format(now)}</div>
++        <div className="text-sm text-muted-foreground">{dateFormat.format(now)}</div>
++      </button>
++      {expanded === "calendar" ? (
++        <Calendar
++          mode="single"
++          selected={now}
++          defaultMonth={now}
++          className="-mx-1 [--cell-size:--spacing(8)]"
++        />
++      ) : null}
++
++      {audioState || power.state?.brightness.available ? (
++        <div className="grid gap-1">
++          {audioState ? (
++            <LevelRow
++              icon={<VolumeGlyph />}
++              iconLabel={audioState.muted ? "Unmute" : "Mute"}
++              onIconClick={() => void run("Mute", audio.call("set-mute", {}))}
++              label="Volume"
++              value={audioState.muted ? 0 : audioState.volume}
++              onChange={setVolume}
++            />
++          ) : null}
++          {audioState && audioState.outputs.length > 1 ? (
++            <select
++              aria-label="Output"
++              className="ml-9 h-7 min-w-0 rounded-md border border-input bg-background px-1.5 text-xs"
++              value={audioState.outputs.find((device) => device.default)?.id ?? ""}
++              onChange={(event) =>
++                void run(
++                  "Output",
++                  audio.call("set-default", { device: Number(event.currentTarget.value) }),
++                )
++              }
++            >
++              {audioState.outputs.map((device) => (
++                <option key={device.id} value={device.id}>
++                  {device.name}
++                </option>
++              ))}
++            </select>
++          ) : null}
++          {power.state?.brightness.available ? (
++            <LevelRow
++              icon={<SunIcon />}
++              label="Brightness"
++              value={power.state.brightness.value}
++              onChange={setBrightness}
++            />
++          ) : null}
++        </div>
++      ) : null}
++
++      {networkState || bluetoothState ? (
++        <div className="grid gap-1">
++          {networkState ? (
++            <>
++              <ToggleRow
++                icon={<NetworkGlyph network={networkState} />}
++                title={networkState.wifi.available ? "Wi-Fi" : "Network"}
++                detail={networkSummary(networkState)}
++                {...(networkState.wifi.available
++                  ? {
++                      checked: networkState.wifi.enabled,
++                      disabled: !networkState.wifi.hardwareEnabled,
++                      onCheckedChange: (enabled: boolean) =>
++                        void run("Wi-Fi", network.call("set-wifi", { enabled })),
++                    }
++                  : {})}
++                expanded={expanded === "wifi"}
++                onExpandedChange={toggle("wifi")}
++              />
++              {expanded === "wifi" ? <WifiList network={networkState} call={network.call} /> : null}
++            </>
++          ) : null}
++          {bluetoothState ? (
++            <>
++              <ToggleRow
++                icon={<BluetoothIcon />}
++                title="Bluetooth"
++                detail={
++                  !bluetoothState.adapter?.powered
++                    ? "Off"
++                    : connectedDevices.length
++                      ? connectedDevices.map((device) => device.name).join(", ")
++                      : "On"
++                }
++                checked={bluetoothState.adapter?.powered ?? false}
++                onCheckedChange={(powered) =>
++                  void run("Bluetooth", bluetooth.call("set-powered", { powered }))
++                }
++                expanded={expanded === "bluetooth"}
++                onExpandedChange={toggle("bluetooth")}
++              />
++              {expanded === "bluetooth" ? (
++                <div className="ml-9 grid gap-0.5">
++                  {bluetoothState.devices
++                    .filter((device) => device.paired)
++                    .map((device) => (
++                      <ListButton
++                        key={device.id}
++                        current={device.connected}
++                        onClick={() =>
++                          void run(
++                            device.name,
++                            bluetooth.call(device.connected ? "disconnect" : "connect", {
++                              device: device.id,
++                            }),
++                          )
++                        }
++                      >
++                        <span className="min-w-0 flex-1 truncate">{device.name}</span>
++                        {device.battery !== null ? (
++                          <span className="text-xs text-muted-foreground tabular-nums">
++                            {device.battery}%
++                          </span>
++                        ) : null}
++                      </ListButton>
++                    ))}
++                  {!bluetoothState.devices.some((device) => device.paired) ? (
++                    <div className="px-2 py-1 text-xs text-muted-foreground">
++                      No paired devices.
++                    </div>
++                  ) : null}
++                </div>
++              ) : null}
++            </>
++          ) : null}
++        </div>
++      ) : null}
++
++      {player ? (
++        <div className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5">
++          <div className="min-w-0 flex-1">
++            <div className="truncate text-sm">{player.title || player.name}</div>
++            <div className="truncate text-xs text-muted-foreground">
++              {player.artist || player.name}
++            </div>
++          </div>
++          <IconAction
++            label="Previous"
++            disabled={!player.canGoPrevious}
++            onClick={() => void run("Previous", media.call("previous", { player: player.id }))}
++          >
++            <SkipBackIcon />
++          </IconAction>
++          <IconAction
++            label={player.status === "playing" ? "Pause" : "Play"}
++            onClick={() => void run("Play", media.call("play-pause", { player: player.id }))}
++          >
++            {player.status === "playing" ? <PauseIcon /> : <PlayIcon />}
++          </IconAction>
++          <IconAction
++            label="Next"
++            disabled={!player.canGoNext}
++            onClick={() => void run("Next", media.call("next", { player: player.id }))}
++          >
++            <SkipForwardIcon />
++          </IconAction>
++        </div>
++      ) : null}
++
++      {error ? <div className="text-xs text-destructive">{error}</div> : null}
++
++      <div className="flex items-center gap-1 border-t pt-2">
++        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted-foreground">
++          {battery && power.state ? (
++            <>
++              <BatteryGlyph battery={battery} className="size-4 shrink-0" />
++              <span className="truncate">{batteryText(power.state, battery)}</span>
++            </>
++          ) : null}
++        </div>
++        {session.state ? (
++          <IconAction
++            label={session.state.problem ? `Lock: ${session.state.problem}` : "Lock"}
++            disabled={!session.state.canLock}
++            onClick={() => {
++              close();
++              void run("Lock", session.call("lock"));
++            }}
++          >
++            <LockIcon />
++          </IconAction>
++        ) : null}
++        {POWER_ACTIONS.map((entry) => {
++          const can = power.state?.can[entry.can] ?? "na";
++          if (can === "na") return null;
++          const Glyph = entry.icon;
++          return (
++            <IconAction
++              key={entry.action}
++              label={entry.label}
++              // "challenge" would ask for a password, which needs a polkit agent.
++              disabled={can === "no"}
++              onClick={() => {
++                close();
++                void confirm(
++                  entry.question,
++                  entry.action === "suspend" ? "default" : "destructive",
++                ).then((yes) => {
++                  if (yes) void run(entry.label, power.call(entry.action));
++                });
++              }}
++            >
++              <Glyph />
++            </IconAction>
++          );
++        })}
++      </div>
++    </div>
++  );
++}
++
++const StatusCluster = memo(function StatusCluster() {
++  const now = useMinute();
++  const audio = useSystemService("audio");
++  const power = useSystemService("power");
++  const network = useSystemService("network");
++  const [open, setOpen] = useState(false);
++  const clusterRef = useRef<HTMLDivElement | null>(null);
++
++  useLayoutEffect(() => {
++    const element = clusterRef.current;
++    if (!element) return;
++    const root = document.documentElement;
++    const measure = () =>
++      root.style.setProperty(
++        STATUS_WIDTH_PROPERTY,
++        `${Math.ceil(element.getBoundingClientRect().width) + STATUS_GAP_PX}px`,
++      );
++    measure();
++    const stopObserving = observeResize(element, measure);
++    return () => {
++      stopObserving();
++      root.style.removeProperty(STATUS_WIDTH_PROPERTY);
++    };
++  }, []);
++
++  const battery = power.state?.battery ?? null;
++  // On AC the battery is of no interest, unless it's low and not charging (a weak charger).
++  const showBattery = battery !== null && (!power.state?.ac || batteryLow(battery));
++  const offline =
++    network.state?.available === true &&
++    (network.state.state === "offline" || network.state.state === "unknown");
++  const muted = audio.state?.available === true && audio.state.muted;
++
++  return (
++    <div
++      ref={clusterRef}
++      className="pointer-events-auto fixed top-[var(--workspace-controls-top)] right-[calc(env(safe-area-inset-right)+0.5rem)] z-50 flex h-[var(--workspace-topbar-height)] items-center [-webkit-app-region:no-drag]"
++      data-plutonium-status=""
++    >
++      <span aria-hidden className="mr-1 h-4 w-px bg-border" />
++      <Popover open={open} onOpenChange={setOpen}>
++        <PopoverTrigger
++          render={
++            <button
++              type="button"
++              aria-label={`${timeFormat.format(now)}, ${dateFormat.format(now)}. Quick settings`}
++              // A click doesn't take the keyboard from the app or tab that has it.
++              onMouseDown={(event) => event.preventDefault()}
++              className={cn(
++                "flex h-7 items-center gap-2 rounded-md px-2 text-sm font-medium text-foreground outline-hidden hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&_svg]:size-4 [&_svg]:shrink-0",
++                open && "bg-accent",
++              )}
++            />
++          }
++        >
++          {offline ? <WifiOffIcon className="text-muted-foreground" aria-label="Offline" /> : null}
++          {muted ? <VolumeXIcon className="text-muted-foreground" aria-label="Muted" /> : null}
++          {showBattery && battery ? (
++            <span className="flex items-center gap-1">
++              <BatteryGlyph battery={battery} />
++              <span
++                className={cn(
++                  "tabular-nums",
++                  batteryLow(battery) ? "text-destructive" : "text-muted-foreground",
++                )}
++              >
++                {battery.percent}%
++              </span>
++            </span>
++          ) : null}
++          <span className="tabular-nums">{timeFormat.format(now)}</span>
++        </PopoverTrigger>
++        <PopoverPopup side="bottom" align="end" width="md" finalFocus={false}>
++          <QuickSettings now={now} close={() => setOpen(false)} />
++        </PopoverPopup>
++      </Popover>
++    </div>
++  );
++});
++
++/** The status cluster; nothing outside the Plutonium shell. */
++export function PlutoniumStatus() {
++  if (!isPlutoniumShell()) return null;
++  return <StatusCluster />;
++}
+diff --git a/apps/web/src/plutonium/systemServices.ts b/apps/web/src/plutonium/systemServices.ts
+new file mode 100644
+index 0000000000..6b9d49e1f0
+--- /dev/null
++++ b/apps/web/src/plutonium/systemServices.ts
+@@ -0,0 +1,176 @@
++// Plutonium: the desktop services Hydra draws in its status cluster
++// (PlutoniumStatus.tsx): the helper's audio, power, network, Bluetooth, media
++// and session services, through the shell library (`shell.system.<name>`,
++// docs/features/DESKTOP_SERVICES.md in the plutonium repo). Each one's state
++// is the helper's JSON, typed here as far as the status cluster reads it.
++import { useCallback, useEffect, useState } from "react";
++
++import { type SystemServiceHandle, isPlutoniumShell, plutoniumShell } from "./windowStore";
++
++export interface AudioDevice {
++  readonly id: number;
++  readonly name: string;
++  readonly default: boolean;
++  readonly volume: number;
++  readonly muted: boolean;
++}
++
++export interface AudioState {
++  readonly available: boolean;
++  readonly volume: number;
++  readonly muted: boolean;
++  readonly outputs: readonly AudioDevice[];
++}
++
++export interface BatteryState {
++  readonly percent: number;
++  readonly charging: boolean;
++  readonly state: string;
++  /** Seconds to empty or to full, or null. */
++  readonly timeLeft: number | null;
++}
++
++type Can = "yes" | "challenge" | "no" | "na";
++
++export interface PowerState {
++  readonly battery: BatteryState | null;
++  readonly ac: boolean;
++  readonly brightness: { readonly available: boolean; readonly value: number };
++  readonly can: {
++    readonly suspend: Can;
++    readonly reboot: Can;
++    readonly powerOff: Can;
++    readonly logOut: Can;
++  };
++}
++
++export interface AccessPoint {
++  readonly ssid: string;
++  readonly strength: number;
++  readonly secured: boolean;
++  readonly security: string;
++  readonly known: boolean;
++  readonly id: string | null;
++  readonly active: boolean;
++}
++
++export interface NetworkConnection {
++  readonly id: string;
++  readonly name: string;
++  readonly type: string;
++  readonly active: boolean;
++}
++
++export interface NetworkState {
++  readonly available: boolean;
++  readonly state: "connected" | "connecting" | "disconnecting" | "offline" | "unknown";
++  readonly connectivity: string;
++  readonly primary: {
++    readonly id: string;
++    readonly name: string;
++    readonly type: string;
++    readonly strength?: number;
++  } | null;
++  readonly wifi: {
++    readonly available: boolean;
++    readonly enabled: boolean;
++    readonly hardwareEnabled: boolean;
++    readonly scanning: boolean;
++  };
++  readonly accessPoints: readonly AccessPoint[];
++  readonly connections: readonly NetworkConnection[];
++}
++
++export interface BluetoothDevice {
++  readonly id: string;
++  readonly name: string;
++  readonly icon: string | null;
++  readonly paired: boolean;
++  readonly connected: boolean;
++  readonly battery: number | null;
++}
++
++export interface BluetoothState {
++  readonly available: boolean;
++  readonly adapter: { readonly powered: boolean } | null;
++  readonly devices: readonly BluetoothDevice[];
++}
++
++export interface MediaPlayer {
++  readonly id: string;
++  readonly name: string;
++  readonly status: "playing" | "paused" | "stopped";
++  readonly title: string;
++  readonly artist: string;
++  readonly canPlay: boolean;
++  readonly canPause: boolean;
++  readonly canGoNext: boolean;
++  readonly canGoPrevious: boolean;
++}
++
++export interface MediaState {
++  readonly available: boolean;
++  readonly players: readonly MediaPlayer[];
++  readonly active: string | null;
++}
++
++export interface SessionState {
++  readonly canLock: boolean;
++  readonly problem: string | null;
++}
++
++interface ServiceStates {
++  audio: AudioState;
++  power: PowerState;
++  network: NetworkState;
++  bluetooth: BluetoothState;
++  media: MediaState;
++  session: SessionState;
++}
++
++export type SystemServiceName = keyof ServiceStates;
++
++/**
++ * A desktop service's state (null until it answers, outside the Plutonium
++ * shell, or when this shell may not use it) and a way to run its actions.
++ */
++export function useSystemService<Name extends SystemServiceName>(
++  name: Name,
++): {
++  readonly state: ServiceStates[Name] | null;
++  readonly call: (action: string, args?: Record<string, unknown>) => Promise<unknown>;
++} {
++  const [service, setService] = useState<SystemServiceHandle | null>(null);
++  const [state, setState] = useState<ServiceStates[Name] | null>(null);
++
++  useEffect(() => {
++    if (!isPlutoniumShell()) return;
++    let current: SystemServiceHandle | null = null;
++    const onChange = () => setState((current?.state as ServiceStates[Name] | null) ?? null);
++    let cancelled = false;
++    void plutoniumShell().then((shell) => {
++      const handle = shell?.system?.get(name);
++      if (cancelled || !handle) return;
++      current = handle;
++      setService(handle);
++      handle.addEventListener("change", onChange);
++      onChange();
++      // Not in "uses", or not on this computer: no state, nothing drawn.
++      handle.ready.catch(() => {});
++    });
++    return () => {
++      cancelled = true;
++      current?.removeEventListener("change", onChange);
++    };
++  }, [name]);
++
++  const call = useCallback(
++    (action: string, args?: Record<string, unknown>) =>
++      service
++        ? service.call(action, args)
++        : Promise.reject(new Error(`The ${name} service isn't available.`)),
++    [name, service],
++  );
++
++  return { state, call };
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 3906ea03bd..21fcebd84e 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -128,6 +128,16 @@ interface PlutoniumShell extends EventTarget {
+   /** The displays (older libraries: missing). */
+   readonly displays?: readonly PlutoniumDisplay[];
+   showOnDisplay?(windowId: number, display: number | string): Promise<boolean>;
++  /** Desktop services (DESKTOP_SERVICES.md; older libraries: missing). */
++  readonly system?: { get(name: string): SystemServiceHandle };
++}
++
++/** A desktop service in the shell library (`shell.system.<name>`): its state, kept current by "change" events. */
++export interface SystemServiceHandle extends EventTarget {
++  readonly state: unknown;
++  readonly error: string | null;
++  readonly ready: Promise<unknown>;
++  call(action: string, args?: Record<string, unknown>): Promise<unknown>;
+ }
+ 
+ interface PlutoniumWindowState {
