@@ -560,6 +560,7 @@ let mru = [];                // keys, most recently focused first
 let focused = null;
 let pendingFocus = null;
 const pendingWs = new Map(); // key → { ws, until }: a move whose tags haven't come back yet
+const arriving = new Map();  // key → its geometry here, dropped on this display from another's page
 let apps = [];
 let quick = null, dateMenu = null, settings = null;
 let loaded = false;           // the saved workspaces are in
@@ -607,6 +608,9 @@ try {
         if (!shell.tagsAvailable) return false;
         claim(window, "w");
       }
+      // Back from another display (its element here lost it there): it's shown here again.
+      const item = items.get(`w:${window.id}`);
+      if (item?.content.windowState === "taken") reclaim(item);
       pendingFocus = `w:${window.id}`;
       sync();
       return true;
@@ -890,8 +894,10 @@ function createItem(key, entry) {
   $("windows").append(root);
 
   const saved = savedGeom[key];
-  item.geom = saved?.geom ?? initialGeom(entry);
-  item.tile = saved?.tile ?? null;
+  const arrived = arriving.get(key);
+  arriving.delete(key);
+  item.geom = arrived ?? saved?.geom ?? initialGeom(entry);
+  item.tile = arrived ? null : saved?.tile ?? null;
   item.hidden = saved?.hidden ?? false;
   item.above = saved?.above ?? false;
   item.notitle = saved?.notitle ?? (kind === "w" && !!prefs.noTitle?.[entry.appId]);
@@ -1561,7 +1567,10 @@ addEventListener("pointermove", (e) => {
     } else {
       item.geom = { ...drag.g0, x: drag.g0.x + dx, y: Math.max(-4, drag.g0.y + dy) };
     }
-    showSnap(prefs.edgeTiling ? snapZone(e.clientX - d.left, e.clientY - d.top, e.clientY < d.top + 2) : null);
+    // Past an edge with another display beyond it: no edge tiling (that edge
+    // isn't the desktop's), and a release there sends it to that display.
+    const away = shell?.otherDisplayAt(e.clientX, e.clientY);
+    showSnap(prefs.edgeTiling && !away ? snapZone(e.clientX - d.left, e.clientY - d.top, e.clientY < d.top + 2) : null);
   } else if (item.tile && item.tile !== "max") {
     // A tiled window's inner edge: both sides of the split follow.
     const ws = wsById(item.ws);
@@ -1581,16 +1590,50 @@ addEventListener("pointerup", (e) => endDrag(e));
 function endDrag(e) {
   if (!drag) return;
   const { item, mode, moved, zone, editOnClick } = drag;
+  const drag0 = drag;
   item.el.classList.remove("dragging", "resizing");
   drag = null;
   document.body.classList.remove("live");
   showSnap(null);
+  const away = mode === "move" && moved && shell?.otherDisplayAt(e.clientX, e.clientY);
+  if (away) { sendToDisplay(item, away, drag0); return; }
   if (mode === "move" && moved && zone) {
     // Tiled: the size it had before stays its size when it's pulled out again.
     item.tile = zone;
   }
   if (!moved && mode === "move") { if (editOnClick) editAddress(item); return; }
   render();
+}
+// Several displays: a window dropped past this display's edge goes to the
+// display there, where it was dropped if that display shows GNOME too (its
+// page hears where on this channel), and leaves this one (minimized, back
+// where it was, for when it comes back).
+const placements = new BroadcastChannel("gnome.placement");
+placements.onmessage = ({ data }) => {
+  if (!shell?.display || data.display !== shell.display.id) return;
+  const wa = workArea();
+  const w = Math.min(data.geom.w, wa.w), h = Math.min(data.geom.h, wa.h);
+  const geom = {
+    w, h,
+    x: Math.round(Math.max(wa.x - w + 60, Math.min(data.geom.x, wa.x + wa.w - 60))),
+    y: Math.round(Math.max(wa.y, Math.min(data.geom.y, wa.y + wa.h - hbH()))),
+  };
+  const item = items.get(data.key);
+  if (item) { item.geom = geom; item.tile = null; render(); }
+  else arriving.set(data.key, geom);
+};
+function sendToDisplay(item, display, drag0) {
+  const own = shell.display;
+  placements.postMessage({
+    display: display.id, key: item.key,
+    geom: { ...item.geom, x: item.geom.x + own.x - display.x, y: item.geom.y + own.y - display.y },
+  });
+  item.geom = drag0.g0;
+  item.tile = drag0.tile0;
+  minimize(item);
+  const sent = item.kind === "w" ? shell.showOnDisplay(item.id, display.id) : shell.showTabOnDisplay(item.id, display.id);
+  sent.then((ok) => { if (!ok) { focusItem(item.key); toast(`Could not move it to display ${display.index}`); } },
+    () => focusItem(item.key));
 }
 /** The edge-tiling zone under the pointer (desk coordinates): GNOME's top edge maximizes, the sides tile. */
 function snapZone(x, y, atTop) {

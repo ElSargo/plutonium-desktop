@@ -651,6 +651,24 @@ export class PlutoniumShell extends EventTarget {
   }
 
   /**
+   * The display under point (x, y) of this page (client coordinates, which go past its edges
+   * while it has the pointer captured, as in a drag), or null if that's on no display.
+   */
+  displayAt(x, y) {
+    const own = this.display;
+    if (!own) return null;
+    const gx = own.x + (x * own.width) / innerWidth;
+    const gy = own.y + (y * own.height) / innerHeight;
+    return this.displays.find((d) => gx >= d.x && gx < d.x + d.width && gy >= d.y && gy < d.y + d.height) ?? null;
+  }
+
+  /** The display other than this page's under point (x, y) of this page, or null: see displayAt(). */
+  otherDisplayAt(x, y) {
+    const display = this.displayAt(x, y);
+    return display && display.id !== this.display.id ? display : null;
+  }
+
+  /**
    * Asks the visible shell on display `which` (id or index) to show window `windowId`, which
    * takes it from where it is shown now, and moves the keyboard there. Resolves to false if
    * there's no such display or window, or that shell doesn't take requests.
