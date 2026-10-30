@@ -32,7 +32,7 @@ plutonium chromium build      # out/Plutonium/chrome
 
 - **`fetch`** clones depot_tools and writes a `.gclient` for Chromium with `target_os = ['chromeos']`. It then syncs straight to the pinned revision with no history and 4 jobs (googlesource rate-limits the default), and runs the hooks. If it stops partway, run it again; it resumes.
 - **`patch`** refuses to touch a checkout with uncommitted changes. Run it again with `--force` to reset the `plutonium` branch.
-- **`build`** copies `chromium/args.gn` into the build dir and runs `autoninja`. Incremental builds after that take seconds to minutes. It's a development build: faster to rebuild, and it stops on internal assertion failures. `--release` builds `out/Release` with `args.release.gn`, which is what the prebuilt image holds.
+- **`build`** copies `chromium/args.gn` into the build dir and runs `autoninja`. Incremental builds after that take seconds to minutes. It's a development build: faster to rebuild, and it stops on internal assertion failures. `--release` builds `out/Release` with `args.release.gn`, which is what the prebuilt image holds. It runs one compile job per 2 GiB of RAM (`BUILD_JOBS` in plutonium.env changes that), and if memory still runs out, the kernel kills the build rather than a running session.
 
 `plutonium doctor` checks each step. Then go on with INSTALL.md's kill switch step. [DEVELOPING.md](DEVELOPING.md) covers changing Chromium, and publishing the prebuilt image.
 
