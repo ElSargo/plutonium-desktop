@@ -82,6 +82,8 @@ Capture requests go to `PlutoniumCapture::FocusedShell()`: the visible shell on 
 
 Plain HTML drag and drop, with `application/x-plutonium-window` and `application/x-plutonium-tab` carrying the item's id (the library's `startItemDrag(event, {windowId | tabId})` and `itemFromDrop(event)`). The drop target shows the item, with a grant (`grantFor`) or `tabElement`, and that claim takes it from where it was. The browser's default drag image (the dragged element) stands in for a snapshot.
 
+A window's own move (a title-bar drag in GNOME, niri's interactive move) keeps the pointer in its page while it crosses to another display, so the page sees points past its edges. The library's `displayAt(x, y)` / `otherDisplayAt(x, y)` say which display such a point is on. There, GNOME doesn't edge-tile and niri doesn't edge-scroll or show its insert hint (those edges aren't the desktop's), and a release sends the window or tab to that display (`showOnDisplay`). The source puts it back where it was (GNOME minimizes it there), and a GNOME page on the other display places it where it was dropped (a `BroadcastChannel` between GNOME's pages).
+
 ### The frontends
 
 - **niri:** the hot corner is the desktop's top left only (not a display's with another display left of it or above). Each display's page is one of niri's outputs, with its own workspaces and its own stored layout. An item is on the output whose `niri:output/<display id>` tag it carries; new items, and those whose display went away, go to the focused display's page, which tags them. A window or tab focused or dropped on a page moves to its output. A tile whose window another page took shows a placeholder, and focusing it brings the window back.
