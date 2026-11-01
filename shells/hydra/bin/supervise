@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# T3 Code's server under Plutonium's launcher (t3_serve in bin/plutonium):
+# T3 Code's server under Hydra's launcher (hydra serve):
 #
-#   t3-server.sh <T3 Code's server.ts> <its arguments, but --host>
+#   supervise <T3 Code's server> <its arguments, but --host>
 #
 # The host follows the shell's Settings, Connections, "Network access": T3's
 # server saves the choice in $T3CODE_HOME/plutonium-network-access and stops
@@ -23,7 +23,7 @@ while :; do
     host=127.0.0.1
   fi
   echo "plutonium: T3 Code's server on $host"
-  node "$@" --host "$host" &
+  "${PLUTONIUM_NODE:-node}" "$@" --host "$host" &
   child=$!
   wait "$child"
   status=$?

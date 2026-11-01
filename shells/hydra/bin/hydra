@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# hydra: Hydra's own command. Hydra is T3 Code made a Plutonium shell (README.md).
+# The session's helper runs `hydra serve` and `hydra pair-url` (shell.json);
+# `plutonium hydra <command>` runs the others. `hydra help` lists them.
+set -euo pipefail
+# The Plutonium it runs under: PLUTONIUM (the helper and `plutonium hydra`
+# set it), else the checkout this file is shipped in.
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+if [[ -z ${PLUTONIUM:-} && -f $here/../../lib/common.sh ]]; then PLUTONIUM=$(cd "$here/../.." && pwd); fi
+[[ -n ${PLUTONIUM:-} ]] || { echo "hydra: run it as plutonium hydra <command>" >&2; exit 1; }
+. "$PLUTONIUM/lib/common.sh"
+. "$here/lib/env.sh"
+die() { echo "hydra: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: plutonium hydra <command>
+
+  <T3 Code command>        T3 Code's own CLI on Hydra's data ($T3_HOME): pair, connect link, ...
+  check                    whether its server can run here (it says what's missing)
+
+From a checkout of the source:
+  fetch                    clone T3 Code at src/BASE into T3CODE_DIR ($T3CODE_DIR)
+                           and apply src/patches on a branch plutonium
+  build                    install its dependencies and build its web app
+  export                   rewrite src/patches from T3CODE_DIR's commits since BASE
+  live apply|revert|status a running server's web app, from another T3 Code checkout's
+                           build, with no restart: hydra live --help
+  bundle <dir>             its server, built for a release, into <dir> (plutonium bundle build)
+
+The server: plutonium shells restart|stop hydra [--x11]. Its log is \$PLUTO_HOME/logs/hydra.log.
+EOF
+}
+
+t3_built() {
+  if [[ -n $HYDRA_BUILD ]]; then [[ -f $T3_SERVER ]]; else [[ -f $T3CODE_DIR/apps/web/dist/index.html ]]; fi
+}
+t3_pnpm() { if command -v pnpm > /dev/null; then pnpm "$@"; else corepack pnpm "$@"; fi; }
+need_source() { [[ -n $DEV ]] || die "$1 is for a checkout of Plutonium's source; this is a release install ($ROOT)"; }
+# git am needs a committer; use a neutral one if git has none configured.
+committer() {
+  if git config user.email > /dev/null; then "$@"
+  else GIT_COMMITTER_NAME=Plutonium GIT_COMMITTER_EMAIL=plutonium@localhost "$@"; fi
+}
+
+# --- The server --------------------------------------------------------------
+# T3 Code runs off the host's own data ($T3_HOME), so it never runs beside a
+# T3 Code that Plutonium didn't start: the T3 Code desktop app, a "t3" CLI
+# server, a boot service. Ours carry PLUTONIUM_T3=<the Plutonium it runs under>.
+t3_ours() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep -qxF "PLUTONIUM_T3=$ROOT"; }
+# The processes writing T3 Code's database, and the server it says is running.
+# A reader (sqlite's mode=ro, like the agent-button receiver) is no T3 Code.
+t3_pids() {
+  local state=$T3_HOME/userdata/server-runtime.json pid fd flags
+  # state.sqlite (T3 before 0.1) or statev2.sqlite.
+  for fd in $(find /proc/[0-9]*/fd -lname "$T3_HOME/userdata/state*.sqlite" 2>/dev/null); do
+    flags=$(sed -n 's/^flags:\s*//p' "${fd%/fd/*}/fdinfo/${fd##*/}" 2>/dev/null)
+    # The access mode is the low octal digit: 0 is O_RDONLY.
+    [[ -n $flags && $((8#$flags & 3)) -eq 0 ]] || echo "$fd" | cut -d/ -f3
+  done
+  pid=$(grep -o '"pid":[0-9]*' "$state" 2>/dev/null | cut -d: -f2)
+  [[ -n $pid && -d /proc/$pid ]] && echo "$pid"
+  true
+}
+t3_refuse_others() {
+  local pid unit other others=()
+  for pid in $(t3_pids | sort -u); do t3_ours "$pid" || others+=("$pid"); done
+  [[ ${#others[@]} -eq 0 ]] && return
+  {
+    echo "hydra: another T3 Code is using $T3_HOME:"
+    for pid in "${others[@]}"; do
+      echo "  $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline" | cut -c1-120)"
+      other=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^PLUTONIUM_T3=//p')
+      [[ -n $other ]] && echo "     (started by the Plutonium in $other)"
+      unit=$(grep -o '[^/]*\.service$' "/proc/$pid/cgroup" 2>/dev/null || true)
+      [[ -n $unit && $unit != app-* && $unit != run-* ]] && echo "     (run by $unit: systemctl --user stop $unit)"
+    done
+    echo "Stop it first (quit the T3 Code app, or stop that server): Hydra runs its own T3 Code on the same data."
+  } >&2
+  exit 1
+}
+# The database this T3 Code opens: statev2.sqlite from 0.1 on, which T3 seeds
+# from state.sqlite once and migrates (state.sqlite is left as it was).
+t3_database() {
+  local name=${T3_DATABASE:-}
+  [[ -n $name ]] || name=$(grep -o 'join(stateDir, "[a-z0-9]*\.sqlite")' "$T3CODE_DIR/apps/server/src/config.ts" | head -1 | cut -d'"' -f2)
+  echo "$T3_HOME/userdata/${name:-state.sqlite}"
+}
+# T3 Code's database is migrated by whichever version opens it. Refuse one newer
+# than this T3 Code knows; before migrating an older one, keep a copy.
+t3_check_db() {
+  local db ours have backup
+  db=$(t3_database)
+  if [[ ! -f $db ]]; then
+    [[ -f $T3_HOME/userdata/state.sqlite ]] &&
+      echo "T3 Code starts ${db##*/} from a copy of state.sqlite; state.sqlite stays as it is"
+    return 0
+  fi
+  ours=${T3_MIGRATION:-}
+  [[ -n $ours ]] || ours=$(find "$T3CODE_DIR/apps/server/src/persistence/Migrations" -maxdepth 1 -name '[0-9]*' ! -name '*.test.ts' -printf '%f\n' |
+    grep -o '^[0-9]*' | sort -n | tail -1)
+  ours=$((10#$ours))
+  have=$("$NODE" -e '
+    const db = new (require("node:sqlite").DatabaseSync)(process.argv[1], { readOnly: true });
+    console.log(db.prepare("select max(migration_id) as m from effect_sql_migrations").get().m ?? 0);
+  ' "$db" 2> /dev/null) || die "can't read T3 Code's database $db"
+  if (( have > ours )); then
+    die "T3 Code's database ($db) is from a newer T3 Code (migration $have; this one has $ours). $([[ -n $HYDRA_BUILD ]] && echo "Install a newer Plutonium" || echo "Update src/BASE to a newer T3 Code") first."
+  elif (( have < ours )); then
+    backup=$db.before-migration-$ours
+    if [[ -e $backup ]]; then
+      echo "T3 Code's database is at migration $have and this one migrates it to $ours (a copy from before is in $backup)"
+      return
+    fi
+    echo "T3 Code's database is at migration $have and this one migrates it to $ours; keeping a copy in $backup"
+    "$NODE" -e '
+      const db = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
+      db.prepare("VACUUM INTO ?").run(process.argv[2]);
+    ' "$db" "$backup" 2> /dev/null || die "couldn't back up $db"
+  fi
+}
+# The part of a T3 Code checkout its web app talks to: the server and the
+# contracts between them. A web app built where these differ from what the
+# running server was started from may not work with it.
+t3_fingerprint() {
+  [[ -z $HYDRA_BUILD ]] || { sha256sum "$T3_SERVER" | cut -c1-12; return; }
+  (cd "$1" && git ls-files -co --exclude-standard -z -- apps/server/src packages/contracts/src ':!:*.test.ts' |
+    sort -z | xargs -0 sha256sum 2> /dev/null || true) | sha256sum | cut -c1-12
+}
+FINGERPRINT=$RUN_DIR/plutonium/t3-server$SLOT_SUFFIX.fingerprint
+# In the foreground: the session's helper starts and supervises it, and a
+# helper of the same session adopts it after a restart.
+t3_serve() {
+  local port=$1 socket=$2 satellite
+  local tailscale=()
+  [[ -n ${T3_TAILSCALE:-} ]] && tailscale=(--tailscale-serve --tailscale-serve-port "$T3_TAILSCALE_PORT")
+  t3_built || die "T3 Code isn't built (plutonium hydra build)"
+  t3_refuse_others
+  curl -s -m 2 -o /dev/null "http://127.0.0.1:$port/" && die "port $port is taken by something else (T3_PORT picks another)"
+  t3_check_db
+  satellite=${PLUTONIUM_XWAYLAND_SATELLITE:-$(command -v xwayland-satellite || true)}
+  mkdir -p "$T3_HOME" "$RUN_DIR/plutonium"
+  # What its clients talk to, for `hydra live apply`.
+  t3_fingerprint "$T3CODE_DIR" > "$FINGERPRINT"
+  cd "$T3_SERVER_DIR"
+  # T3 Connect (remote devices through T3's relay): its public settings.
+  [[ -f .env ]] && { set -a; . ./.env; set +a; }
+  # Under a supervisor that picks the host: Settings, Connections, Network
+  # access in the shell switches it (bin/supervise). Its own session's
+  # helper, not the one of a session this was started from. Not a project
+  # made from its directory (T3's web mode does that), which is T3's own.
+  exec env -u PLUTONIUM -u PLUTONIUM_THREAD_ID -u PLUTONIUM_OPENERS -u PLUTONIUM_SHOW -u PLUTONIUM_T3_HOST_PINNED \
+    PLUTONIUM_T3="$ROOT" PLUTONIUM_WAYLAND_DISPLAY="$socket" T3CODE_HOME="$T3_HOME" \
+    T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=false \
+    PLUTONIUM_HELPER="$RUN_DIR/plutonium/$socket.sock" PLUTONIUM_NODE="$NODE" \
+    PLUTONIUM_T3_SUPERVISED=1 ${T3_HOST:+T3_HOST="$T3_HOST" PLUTONIUM_T3_HOST_PINNED=1} \
+    ${satellite:+PLUTONIUM_XWAYLAND_SATELLITE="$satellite"} \
+    bash "$HYDRA/bin/supervise" "$T3_SERVER" --port "$port" "${tailscale[@]}" --no-browser < /dev/null
+}
+# T3 Code's own CLI, on the same data and settings as the server.
+t3_cli() {
+  [[ -f $T3_SERVER ]] || die "no T3 Code at $T3_SERVER_DIR (plutonium hydra fetch)"
+  cd "$T3_SERVER_DIR"
+  [[ -f .env ]] && { set -a; . ./.env; set +a; }
+  T3CODE_HOME="$T3_HOME" exec "$NODE" "$T3_SERVER" "$@"
+}
+# A one-time pairing token for the shell's profile, good for 5 minutes, offered
+# as #plutoniumPair: the page uses it only if the profile isn't paired yet, or
+# its session lacks some of the token's scopes. The shell is the machine's own
+# desktop app, so it gets what T3 Code's desktop app gets: every scope,
+# including pairing other devices (access:write).
+t3_pair_url() {
+  local port=$1 token scopes
+  if [[ -n $HYDRA_BUILD ]]; then
+    scopes=$(printf -- '--scope=%s ' $T3_ADMIN_SCOPES)
+  else
+    scopes=$(cd "$T3CODE_DIR" && "$NODE" --input-type=module -e '
+      const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
+      console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
+    ' 2> /dev/null) || die "couldn't read T3 Code's scopes"
+  fi
+  # shellcheck disable=SC2086 # one --scope=… per word
+  token=$(cd "$T3_SERVER_DIR" && T3CODE_HOME="$T3_HOME" "$NODE" "$T3_SERVER" auth pairing create \
+    $scopes --ttl 5m --label "Plutonium shell" --json 2> /dev/null | grep -o '"credential": *"[^"]*"' | cut -d'"' -f4)
+  [[ -n $token ]] || die "couldn't create a T3 Code pairing token"
+  echo "http://127.0.0.1:$port/#plutoniumPair=$token"
+}
+
+# --- The source --------------------------------------------------------------
+# T3's release builds stamp the release's version into these (the source keeps
+# an older one); so does `build`, for a BASE that is a release tag. The stamp
+# stays out of git's way (skip-worktree), and `fetch` takes it out.
+T3_VERSION_FILES=(apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json)
+t3_stamp_version() {
+  local tag
+  tag=$(git -C "$T3CODE_DIR" describe --tags --exact-match "$1" 2> /dev/null) || return 0
+  [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+  (cd "$T3CODE_DIR" && node scripts/update-release-package-versions.ts "${tag#v}" > /dev/null) ||
+    die "couldn't stamp T3 Code's version $tag"
+  git -C "$T3CODE_DIR" update-index --skip-worktree "${T3_VERSION_FILES[@]}"
+  echo "T3 Code version: ${tag#v}"
+}
+t3_unstamp_version() {
+  local file
+  for file in "${T3_VERSION_FILES[@]}"; do
+    [[ -f $T3CODE_DIR/$file ]] || continue
+    git -C "$T3CODE_DIR" update-index --no-skip-worktree "$file"
+    # Only a stamp: every changed line is a "version".
+    if ! git -C "$T3CODE_DIR" diff -U0 -- "$file" | grep '^[-+][^-+]' | grep -qv '"version":'; then
+      git -C "$T3CODE_DIR" checkout -q -- "$file"
+    fi
+  done
+}
+t3_fetch() {
+  local base=$1
+  [[ -d $T3CODE_DIR/.git ]] || git clone https://github.com/pingdotgg/t3code.git "$T3CODE_DIR"
+  git -C "$T3CODE_DIR" rev-parse -q --verify "$base^{commit}" > /dev/null || git -C "$T3CODE_DIR" fetch --tags origin
+  t3_unstamp_version
+  [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "$T3CODE_DIR has uncommitted changes"
+  git -C "$T3CODE_DIR" checkout -q -B plutonium "$base"
+  committer git -C "$T3CODE_DIR" am -q --3way "$HYDRA_SRC"/patches/*.patch
+  # T3 Connect, as in T3's release builds (the same public settings).
+  [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
+}
+t3_build() {
+  local base=$1
+  [[ -d $T3CODE_DIR ]] || die "no T3 Code checkout at $T3CODE_DIR (plutonium hydra fetch)"
+  [[ -f $T3CODE_DIR/.env ]] || cp "$T3CODE_DIR/.env.example" "$T3CODE_DIR/.env"
+  (cd "$T3CODE_DIR" && t3_pnpm install) || die "pnpm install failed"
+  t3_stamp_version "$base"
+  # A live web app (hydra live apply): build in place of it, not into it.
+  if [[ -L $T3CODE_DIR/apps/web/dist ]]; then
+    rm "$T3CODE_DIR/apps/web/dist"
+    echo "the server serves this build now, not the live one (plutonium hydra live status)"
+  fi
+  (cd "$T3CODE_DIR/apps/web" && t3_pnpm exec vp build)
+}
+# The server built for a release, in <dir>: T3's server bundle (bin.mjs), its
+# web app without source maps, and the native packages T3's own CLI archive
+# carries (src/runtime.ts); in its own T3 Code checkout. hydra.env records
+# what this command otherwise reads from T3's source, and BUILD what it was
+# made from (the bundle's manifest lists it).
+t3_bundle() {
+  local out=$1 base patches
+  base=$(cat "$HYDRA_SRC/BASE")
+  patches=$(cat "$HYDRA_SRC"/patches/*.patch | sha256sum | cut -c1-12)
+  T3CODE_DIR=$DATA_DIR/bundle$SLOT_SUFFIX/t3code
+  echo "T3 Code at ${base:0:12} + $(find "$HYDRA_SRC/patches" -name '*.patch' | wc -l) patches, in $T3CODE_DIR"
+  t3_fetch "$base"
+  t3_build "$base"
+  (cd "$T3CODE_DIR/apps/server" && node scripts/cli.ts build)
+  # Its release icons, not the development ones the build puts in (as T3's
+  # own release does, scripts/build-desktop-artifact.ts).
+  (cd "$T3CODE_DIR" && node scripts/apply-web-brand-assets.ts production apps/server/dist/client)
+  rm -rf "$out"
+  mkdir -p "$out"
+  cp "$T3CODE_DIR"/apps/server/dist/*.mjs "$out/"
+  cp -r "$T3CODE_DIR/apps/server/dist/client" "$out/"
+  find "$out" -name '*.map' -delete
+  (cd "$T3CODE_DIR" && node "$HYDRA_SRC/runtime.ts" "$T3CODE_DIR" "$out")
+  (
+    cd "$T3CODE_DIR"
+    echo "T3_DATABASE=$(grep -o 'join(stateDir, "[a-z0-9]*\.sqlite")' apps/server/src/config.ts | head -1 | cut -d'"' -f2)"
+    echo "T3_MIGRATION=$(find apps/server/src/persistence/Migrations -maxdepth 1 -name '[0-9]*' ! -name '*.test.ts' -printf '%f\n' | grep -o '^[0-9]*' | sort -n | tail -1)"
+    echo "T3_ADMIN_SCOPES=\"$(node --input-type=module -e '
+      const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
+      console.log(AuthAdministrativeScopes.join(" "));')\""
+    echo "T3_VERSION=$(node -p 'require("./apps/server/package.json").version')"
+  ) > "$out/hydra.env"
+  printf 'HYDRA_T3_BASE=%s\nHYDRA_PATCHES=%s\n' "$base" "$patches" > "$out/BUILD"
+  # Its public T3 Connect settings, which the server reads at run time.
+  [[ -f $T3CODE_DIR/.env ]] && cp "$T3CODE_DIR/.env" "$out/.env"
+  true
+}
+
+# --- Live --------------------------------------------------------------------
+# The running server serves its checkout's apps/web/dist, which `live apply`
+# makes a link to a copy: a build of any T3 Code checkout, swapped in with no
+# restart. The copies, and the links current and previous, are in LIVE_ROOT.
+LIVE_ROOT=$DATA_DIR/live/t3-$(realpath -m "$T3CODE_DIR" | sha256sum | cut -c1-8)
+LIVE_KEEP=${LIVE_KEEP:-5}
+live_usage() {
+  cat <<EOF
+Usage: plutonium hydra live <command>
+
+  apply [--from <dir>] [--follow] [--no-reload] [--force]
+        Build a T3 Code checkout's web app (default T3CODE_DIR, as it is now),
+        serve it from the running server, and reload Hydra's pages. --follow
+        serves that checkout's own dist instead. It refuses a checkout whose
+        server or contracts differ from what the running server was started
+        from; --force applies it anyway.
+  revert   go back to what was served before
+  status   what the server serves, and from where
+EOF
+}
+# Repoint a link with one rename, so no request finds it missing.
+live_link() { ln -sfn "$2" "$1.tmp" && mv -T "$1.tmp" "$1"; }
+# Make a target current; what was current becomes previous.
+live_switch() {
+  local old
+  old=$(readlink "$LIVE_ROOT/current" 2> /dev/null || true)
+  [[ -n $old && $old != "$1" ]] && live_link "$LIVE_ROOT/previous" "$old"
+  live_link "$LIVE_ROOT/current" "$1"
+}
+live_new_id() {   # <label>: a new copy's name
+  local id n=1
+  id=$(date +%Y%m%d-%H%M%S)-$1
+  while [[ -e $LIVE_ROOT/$id ]]; do n=$((n + 1)) id=${id%_[0-9]*}_$n; done
+  echo "$id"
+}
+live_commit_of() {   # <dir>: its commit, with -dirty if it has changes
+  local commit
+  commit=$(git -C "$1" rev-parse --short=8 HEAD 2> /dev/null || echo nogit)
+  [[ -n $(git -C "$1" status --porcelain 2> /dev/null) ]] && commit+=-dirty
+  echo "$commit"
+}
+live_note() {   # <id> <source> <commit>
+  printf 'source %s\ncommit %s\ntaken %s\n' "$2" "$3" "$(date '+%F %T')" > "$LIVE_ROOT/$1.info"
+}
+live_describe() {   # <link>
+  local target
+  target=$(readlink "$LIVE_ROOT/$1" 2> /dev/null) || { echo "-"; return; }
+  if [[ $target == /* ]]; then echo "$target, as it is"
+  else echo "$target, from $(sed -n 's/^source //p' "$LIVE_ROOT/$target.info" 2> /dev/null), taken $(sed -n 's/^taken //p' "$LIVE_ROOT/$target.info" 2> /dev/null)"; fi
+}
+live_prune() {
+  local cur prev id
+  cur=$(readlink "$LIVE_ROOT/current" 2> /dev/null || true) prev=$(readlink "$LIVE_ROOT/previous" 2> /dev/null || true)
+  find "$LIVE_ROOT" -maxdepth 1 -regextype egrep -regex '.*/[0-9]{8}-[0-9]{6}-[^./]*' -printf '%f\n' | sort -r | tail -n +$(( LIVE_KEEP + 1 )) |
+    while read -r id; do
+      [[ $id == "$cur" || $id == "$prev" ]] || rm -rf "${LIVE_ROOT:?}/$id" "$LIVE_ROOT/$id.info"
+    done
+}
+# Whether a checkout's server and contracts are what the running server was
+# started from (t3_serve records it; before that, T3CODE_DIR as it is now).
+live_compatible() {
+  local want
+  if [[ -f $FINGERPRINT ]]; then want=$(cat "$FINGERPRINT"); else want=$(t3_fingerprint "$T3CODE_DIR"); fi
+  [[ $(t3_fingerprint "$1") == "$want" ]]
+}
+# Build a checkout's web app (or link its dist, with follow); prints the new target.
+live_take() {   # <source> <follow>
+  local src=$1 follow=$2 id commit version
+  [[ -f $src/apps/web/package.json ]] || die "$src isn't a T3 Code checkout"
+  mkdir -p "$LIVE_ROOT"
+  if [[ -n $follow ]]; then
+    [[ $src != "$(realpath "$T3CODE_DIR")" ]] || die "that's the server's own checkout; its dist is what the link replaces"
+    [[ -f $src/apps/web/dist/index.html ]] || die "$src has no build (its apps/web/dist)"
+    echo "$src/apps/web/dist"
+    return
+  fi
+  [[ -d $src/node_modules ]] || die "$src has no dependencies installed (pnpm install there)"
+  commit=$(live_commit_of "$src")
+  id=$(live_new_id "$commit")
+  # Built as the running server's version, so the page doesn't report a mismatch.
+  version=$(node -p 'require(process.argv[1]).version' "$T3CODE_DIR/apps/server/package.json")
+  echo "building T3 Code's web app from $src (log $LOGS/live-hydra-build.log)" >&2
+  (
+    cd "$src/apps/web"
+    # T3 Connect's settings, as the server's checkout has them, if this one has none.
+    [[ -f $src/.env || ! -f $T3CODE_DIR/.env ]] || { set -a; . "$T3CODE_DIR/.env"; set +a; }
+    APP_VERSION=$version t3_pnpm exec vp build --outDir "$LIVE_ROOT/$id" --emptyOutDir
+  ) > "$LOGS/live-hydra-build.log" 2>&1 || { rm -rf "${LIVE_ROOT:?}/$id"; die "the build failed ($LOGS/live-hydra-build.log)"; }
+  live_note "$id" "$src" "$commit"
+  echo "$id"
+}
+# Turn T3CODE_DIR's dist into a link to the live one. The build it holds is
+# kept as a copy (made before the swap, so the server always has one to serve).
+live_adopt() {
+  local dist=$T3CODE_DIR/apps/web/dist id
+  [[ -L $dist && $(readlink "$dist") == "$LIVE_ROOT/current" ]] && return
+  [[ ! -e $dist || -L $dist || -d $dist ]] || die "$dist isn't a directory"
+  if [[ -d $dist && ! -L $dist ]]; then
+    id=$(live_new_id built)
+    cp -a --reflink=auto "$dist" "$LIVE_ROOT/$id"
+    live_note "$id" "$T3CODE_DIR (its own build, before live)" "$(live_commit_of "$T3CODE_DIR")"
+    [[ -e $LIVE_ROOT/current ]] || live_link "$LIVE_ROOT/current" "$id"
+    mv "$dist" "$dist.before-live"
+  fi
+  live_link "$dist" "$LIVE_ROOT/current"
+  rm -rf "$dist.before-live"
+}
+# Hydra's pages, in this slot's running sessions (their helpers reload them).
+live_reload() {
+  local sock
+  echo "(reloading Hydra: its browser panel tabs move to Elsewhere, as after any reload)"
+  for sock in "$RUN_DIR/plutonium/wayland-plutonium$SLOT_SUFFIX.sock" "$RUN_DIR/plutonium/wayland-plutonium-x11$SLOT_SUFFIX.sock"; do
+    [[ -S $sock ]] && curl -s -m 30 --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{}' http://helper/v1/shells/hydra/reload > /dev/null
+  done
+  true
+}
+live_cmd() {
+  local cmd=${1:-} from= follow= reload=1 force= src target
+  shift || true
+  [[ -z $HYDRA_BUILD ]] || die "live is for a checkout's T3 Code; a release install's is built in"
+  case $cmd in
+    apply)
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --from) from=${2:?--from needs a directory}; shift ;;
+          --follow) follow=1 ;;
+          --no-reload) reload= ;;
+          --force) force=1 ;;
+          *) live_usage; exit 2 ;;
+        esac
+        shift
+      done
+      src=$(realpath "${from:-$T3CODE_DIR}")
+      if [[ -z $force ]] && ! live_compatible "$src"; then
+        echo "$src's server or contracts (apps/server/src, packages/contracts/src) differ from what the running" >&2
+        echo "T3 Code server was started from, so its web app may not work with that server:" >&2
+        diff -rq -x '*.test.ts' "$T3CODE_DIR/apps/server/src" "$src/apps/server/src" 2> /dev/null | head -5 >&2 || true
+        diff -rq -x '*.test.ts' "$T3CODE_DIR/packages/contracts/src" "$src/packages/contracts/src" 2> /dev/null | head -5 >&2 || true
+        die "restart the server on it instead (T3CODE_DIR; plutonium shells restart hydra), or --force"
+      fi
+      target=$(live_take "$src" "$follow")
+      live_adopt
+      live_switch "$target"
+      echo "hydra: $(live_describe current)"
+      live_prune
+      [[ -z $reload ]] || live_reload ;;
+    revert)
+      target=$(readlink "$LIVE_ROOT/previous" 2> /dev/null) || die "nothing to go back to"
+      live_adopt
+      live_switch "$target"
+      echo "hydra: $(live_describe current)"
+      live_reload ;;
+    status)
+      local dist=$T3CODE_DIR/apps/web/dist
+      if [[ ! -L $LIVE_ROOT/current ]]; then echo "not live; the server serves $dist"; return; fi
+      echo "current: $(live_describe current)"
+      [[ -L $LIVE_ROOT/previous ]] && echo "previous: $(live_describe previous)"
+      if [[ -L $dist && $(readlink "$dist") == "$LIVE_ROOT/current" ]]; then echo "served by $T3CODE_DIR's server"
+      else echo "but the server serves $dist (live apply moves it)"; fi ;;
+    *) live_usage; [[ -z $cmd || $cmd == -h || $cmd == --help ]] || exit 2 ;;
+  esac
+}
+
+cmd=${1:-help}
+shift || true
+case $cmd in
+  # shell.json: the helper runs these.
+  serve)
+    port=$T3_PORT socket=${PLUTONIUM_WAYLAND_DISPLAY:-}
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --port) port=$2; shift ;;
+        --wayland-display) socket=$2; shift ;;
+      esac
+      shift
+    done
+    [[ -n $socket ]] || die "serve needs --wayland-display"
+    t3_serve "$port" "$socket" ;;
+  pair-url)
+    [[ ${1:-} == --port ]] && T3_PORT=$2
+    t3_pair_url "$T3_PORT" ;;
+  check)
+    t3_built && exit 0
+    if [[ -d $T3CODE_DIR/.git ]]; then echo "T3 Code isn't built (plutonium hydra build)"
+    else echo "no T3 Code checkout at $T3CODE_DIR (plutonium hydra fetch, then build)"; fi
+    exit 1 ;;
+  fetch)
+    need_source fetch
+    t3_fetch "$(cat "$HYDRA_SRC/BASE")"
+    echo "T3 Code is on branch plutonium in $T3CODE_DIR. Next: plutonium hydra build" ;;
+  build) need_source build; t3_build "$(cat "$HYDRA_SRC/BASE")" ;;
+  export)
+    need_source export
+    [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]] || die "commit your changes in $T3CODE_DIR first"
+    rm -f "$HYDRA_SRC"/patches/*.patch
+    git -C "$T3CODE_DIR" format-patch -q --zero-commit --no-signature -o "$HYDRA_SRC/patches" "$(cat "$HYDRA_SRC/BASE")"..HEAD
+    find "$HYDRA_SRC/patches" -name '*.patch' | wc -l | xargs echo "patches written to $HYDRA_SRC/patches:" ;;
+  live) need_source live; live_cmd "$@" ;;
+  bundle) need_source bundle; t3_bundle "${1:?usage: hydra bundle <dir>}" ;;
+  help|-h|--help) usage ;;
+  *) t3_cli "$cmd" "$@" ;;
+esac

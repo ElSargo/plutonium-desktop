@@ -35,7 +35,7 @@ stdenv.mkDerivation {
     # namespace sandbox instead, but only if this helper isn't there.
     rm -f $out/libexec/plutonium/chrome/chrome-sandbox
     # XDG_DATA_DIRS: Mesa's Vulkan ICDs, for the bundled Vulkan loader. The
-    # CLI and the kill switch find Ash by the binary's own path (lib/common.sh,
+    # CLI finds Ash by the binary's own path (dev/env.sh,
     # ASH_BIN), which Chromium puts in its process title.
     makeWrapper $out/libexec/plutonium/chrome/chrome $out/bin/chrome \
       --prefix XDG_DATA_DIRS : /run/opengl-driver/share

@@ -4,18 +4,23 @@ Hydra is built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for 
 - every chat thread gets the apps, terminals and browser tabs its agent and terminals start, in the thread's right panel;
 - the agents get Plutonium's MCP tools for their thread's windows and tabs.
 
-Hydra is optional. Styx, Charon and the plain shell need nothing from here.
+Hydra is optional, and all of it is in this folder: Plutonium knows it only through `shell.json` ([SHELL_PACKAGES.md](../../docs/features/SHELL_PACKAGES.md)). Styx, Charon and the plain shell need nothing from here.
 
-- **`BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
-- **`patches/`**: the series (`git am`): 15 commits, about 3,300 lines, mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`shell.json`**: a server shell, whose server is `bin/hydra serve`, and whose own command (`cli`) is `bin/hydra`: `plutonium hydra help`.
+- **`bin/hydra`**: serving and pairing (the helper runs them), T3 Code's own CLI, and from a checkout `fetch`, `build`, `export`, `live` and `bundle`. **`bin/supervise`** keeps the server on the host the shell's Network access setting picks. **`lib/env.sh`**: its settings (`T3CODE_DIR`, `T3_HOME`, `T3_PORT`, …), which `plutonium.env` can set.
+- **`src/BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
+- **`src/patches/`**: the series (`git am`), mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`src/runtime.ts`**: the native packages a release's build carries (`hydra bundle`).
+
+An install copies `shell.json`, `bin/` and `lib/` into `~/.pluto/shells/hydra` (`exclude` leaves out `src/`, `build/` and this file). A release has the server built beside it, in `shells/hydra/build`; a checkout runs it from its T3 Code checkout's source.
 
 ```
-plutonium t3 fetch     # clone into frontends/t3code/checkout (T3CODE_DIR), branch plutonium
-plutonium t3 build     # pnpm install, build the web app
-plutonium run t3 niri  # Hydra as the desktop, Styx behind it (Super+Tab)
+plutonium hydra fetch     # clone into shells/hydra/src/checkout (T3CODE_DIR), branch plutonium
+plutonium hydra build     # pnpm install, build the web app
+plutonium run hydra niri  # Hydra as the desktop, Styx behind it (Super+Tab)
 ```
 
-`plutonium run t3` (Hydra) starts the server if it isn't running, for that session's socket. `plutonium t3 server [--x11]` restarts it, and `plutonium t3 stop` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`, with the scopes T3's desktop app gets, so the shell can pair other devices from Settings, Connections. The page passes it on to T3 only if the profile isn't paired yet, or its session lacks some of those scopes, so a paired profile doesn't add a session each time.
+`plutonium run hydra` starts the server if it isn't running, for that session's socket. `plutonium shells restart hydra [--x11]` restarts it, and `plutonium shells stop hydra` stops it. Each run offers the shell a one-time pairing token (5 minutes) as `#plutoniumPair=`, with the scopes T3's desktop app gets, so the shell can pair other devices from Settings, Connections. The page passes it on to T3 only if the profile isn't paired yet, or its session lacks some of those scopes, so a paired profile doesn't add a session each time.
 
 ### The host's T3 Code
 
@@ -24,14 +29,14 @@ The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `
 - **One at a time:** before starting, Plutonium looks for anything else using that data: the T3 Code app, a `t3` server, a boot service. It finds them by the open database, and by T3's `server-runtime.json`. If there is one, it refuses and says what it found; quit that one first. Plutonium's own server carries `PLUTONIUM_T3=<this checkout>`, so it is told apart and restarted.
 - **The database's version:** T3 migrates its database when it opens it. Plutonium refuses a database from a newer T3 Code than the checkout. An older one is migrated, and first copied to `<database>.before-migration-<n>`. Since 0.1, T3's database is `statev2.sqlite`: on its first start T3 seeds it from a copy of `state.sqlite`, which it leaves as it was, so T3 Code before 0.1 still runs on the old data.
 - **T3 Code's own CLI on NixOS:** the `t3` npm package is a native executable since 0.1, which NixOS can't run as it comes. Point it at Nix's loader with `patchelf --set-interpreter` and an rpath to glibc and gcc's `lib` (also for `resource-monitor/linux-x64/t3-resource-monitor`), or use nix-ld. Plutonium runs T3 from its checkout and doesn't need it.
-- **Remote devices:** `plutonium t3 <command>` is T3's own CLI on the same data. `fetch` and `build` copy T3's `.env.example` to `.env`, the T3 Connect settings T3's release builds have. Without them, a source build has no T3 Connect. To pair remote devices, use one of:
-  - `plutonium t3 connect link`: signs in to T3 Connect once; the server then registers with T3's relay at every start.
+- **Remote devices:** `plutonium hydra <command>` is T3's own CLI on the same data. `fetch` and `build` copy T3's `.env.example` to `.env`, the T3 Connect settings T3's release builds have. Without them, a source build has no T3 Connect. To pair remote devices, use one of:
+  - `plutonium hydra connect link`: signs in to T3 Connect once; the server then registers with T3's relay at every start.
   - `T3_TAILSCALE=1` (in `plutonium.env`): Tailscale Serve publishes the server at `https://<machine>.<tailnet>.ts.net` while it runs (on 443; slot N on 8443 + 100 × N, or `T3_TAILSCALE_PORT`). The server stays on loopback, and Settings, Connections shows the pairing link's QR code for that address. It needs tailscaled running, and `sudo tailscale set --operator=$USER` so the server can configure Serve.
-  - `plutonium t3 pair --tailscale`: a QR code over your tailnet, in the terminal.
-  - `T3_HOST=0.0.0.0` with `plutonium t3 pair`: a QR code on your network.
-  - **Settings, Connections, Network access** in the shell (patch 0016): the switch T3's desktop app has. The launcher runs the server under `lib/t3-server.sh`, which binds it to 0.0.0.0 or 127.0.0.1 from `$T3_HOME/plutonium-network-access`. Switching saves the choice there and restarts the server (running agents stop, as in the desktop app), and the shell stays signed in. Then Authorized clients makes pairing links and QR codes for the LAN address, for phones, browsers and other T3 Code apps (Add environment). `T3_HOST` pins the host, and the switch is then disabled. The machine's firewall must let `T3_PORT` (3773, as for T3's desktop app) in.
+  - `plutonium hydra pair --tailscale`: a QR code over your tailnet, in the terminal.
+  - `T3_HOST=0.0.0.0` with `plutonium hydra pair`: a QR code on your network.
+  - **Settings, Connections, Network access** in the shell (patch 0016): the switch T3's desktop app has. The launcher runs the server under `shells/hydra/bin/supervise`, which binds it to 0.0.0.0 or 127.0.0.1 from `$T3_HOME/plutonium-network-access`. Switching saves the choice there and restarts the server (running agents stop, as in the desktop app), and the shell stays signed in. Then Authorized clients makes pairing links and QR codes for the LAN address, for phones, browsers and other T3 Code apps (Add environment). `T3_HOST` pins the host, and the switch is then disabled. The machine's firewall must let `T3_PORT` (3773, as for T3's desktop app) in.
 
-The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
+The log is `~/.pluto/logs/hydra.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
 
 ## What the patches do
 
@@ -78,4 +83,4 @@ Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/histo
 
 ## Changing it
 
-Commit on the `plutonium` branch of the checkout, then `plutonium t3 export` rewrites `patches/`.
+Commit on the `plutonium` branch of the checkout, then `plutonium hydra export` rewrites `src/patches/`. To try a T3 Code worktree's web app in a running session without restarting its server: `plutonium hydra live apply --from <worktree>` (`plutonium hydra live --help`).

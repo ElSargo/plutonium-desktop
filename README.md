@@ -6,7 +6,7 @@ In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real 
 
 ![Styx: a terminal and a browser tab side by side](docs/images/niri.png)
 
-- **Bring your own shell.** It comes with four: [Styx](docs/features/STYX_SHELL.md) (scrollable tiling, after [niri](https://github.com/YaLTeR/niri)'s design), [Charon](docs/features/CHARON_SHELL.md) (floating windows, workspaces as threads, after GNOME Shell's design), a minimal reference shell, and [Hydra](frontends/t3code/README.md) (coding agents, built on [T3 Code](https://github.com/pingdotgg/t3code)). You can run several at once and switch between them with Super+Tab.
+- **Bring your own shell.** It comes with four: [Styx](docs/features/STYX_SHELL.md) (scrollable tiling, after [niri](https://github.com/YaLTeR/niri)'s design), [Charon](docs/features/CHARON_SHELL.md) (floating windows, workspaces as threads, after GNOME Shell's design), a minimal reference shell, and [Hydra](shells/hydra/README.md) (coding agents, built on [T3 Code](https://github.com/pingdotgg/t3code)). You can run several at once and switch between them with Super+Tab.
 - **Apps and tabs side by side.** Apps get the GPU, keyboard, mouse, touchpad, fullscreen, pointer lock, and drag and drop. Tabs are real Chromium tabs.
 - **Work stays together.** Every app and tab belongs to the thread or workspace that started it. A link clicked in a terminal opens as a tab next to it, and a file opens in its app in the same place.
 - **Built for agents.** An agent can see, launch, screenshot and drive its own thread's apps and tabs over MCP.
@@ -19,7 +19,7 @@ A public beta: usable day to day by its developer, new to everyone else. Working
 - a settings page to choose an input method;
 - the other desktop portals (notifications, settings, OpenURI).
 
-**Supported:** x86-64 Linux with systemd and rootless podman, and an AMD or Intel GPU on Mesa. It's developed on NixOS with AMD graphics. Fedora 44 and Ubuntu 24.04 are tested as far as a container allows, not on hardware yet; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
+**Supported:** x86-64 Linux with systemd and rootless podman, and an AMD or Intel GPU on Mesa. It's developed on NixOS with AMD graphics, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested as far as a container allows; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Quick start
 
@@ -47,33 +47,26 @@ With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [do
    bin/plutonium run --x11 :0 niri   # Styx; bin/plutonium stop --x11 ends it
    ```
 
-4. To run it as your whole desktop, first set up a kill switch, a key that gets you out if something hangs:
-
-   ```sh
-   bin/plutonium killswitch find     # press a spare key, copy the two lines into plutonium.env
-   bin/plutonium killswitch install
-   ```
-
-5. Then either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
+4. To run it as your whole desktop, either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
 
 In Styx, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
 The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
 
-**If it hangs,** press the kill switch: Ash is killed and you're back where you were. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
+**If it hangs,** `plutonium stop --drm` over ssh ends it, and the text console comes back. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
 
 ## Repository
 
 | Path | |
 |---|---|
-| `bin/plutonium` | The command for setup, builds and sessions (`plutonium help`) |
+| `bin/plutonium`, `lib/` | The command for sessions and setup (`plutonium help`): what a release install has |
 | `chromium/` | The Chromium revision, patches and build settings ([README](chromium/README.md)) |
 | `helper/` | `plutoniumd`: threads, app launching, links, the agent bridge ([README](helper/README.md)) |
 | `shells/` | The shells Plutonium ships (installed into `~/.pluto/shells`) |
 | `skill/` | The skill agents read to work on your desktop (written to `~/.pluto/SKILL.md`) |
-| `frontends/t3code/` | Patches that turn T3 Code into Hydra, a shell |
-| `container/` | The build image and the prebuilt runtime image |
-| `killswitch/`, `tools/` | The kill switch; test tools |
+| `shells/hydra/` | Hydra, all of it: its launcher (`plutonium hydra`), and in `src/` the patches that turn T3 Code into it ([README](shells/hydra/README.md)) |
+| `dev/` | A checkout's own commands and files, which a release install doesn't have: Chromium builds, the container (`dev/container/`), `HOST=1`'s Nix build (`dev/nix/`), worktrees, and the release bundle (`dev/bundle/`, [DEVELOPING.md](docs/DEVELOPING.md#the-release-bundle)) |
+| `tools/` | Test tools |
 | `docs/` | [Using](docs/USING.md), [building](docs/BUILDING.md), [architecture](docs/ARCHITECTURE.md), [developing](docs/DEVELOPING.md), per-feature docs |
 
 ## License

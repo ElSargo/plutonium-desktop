@@ -1,15 +1,20 @@
 {
   "title": "Hydra",
   "version": "4",
+  "default": 1,
   "description": "Coding agents' chat threads, each with its apps, terminals and browser tabs. Built on T3 Code.",
   "helperParam": "plutoniumHelper",
   "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"],
+  "cli": "bin/hydra",
+  "exclude": ["src", "build", "README.md"],
+  "bundle": ["bin/hydra", "bundle", "{out}"],
   "server": {
     "run": "plutonium",
-    "argv": ["{plutonium}/bin/plutonium", "t3", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],
+    "argv": ["{shell}/bin/hydra", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],
+    "check": ["{shell}/bin/hydra", "check"],
     "port": 3773,
     "health": "http://127.0.0.1:{port}/",
     "restart": "on-failure",
-    "entryCommand": ["{plutonium}/bin/plutonium", "t3", "pair-url", "--port", "{port}"]
+    "entryCommand": ["{shell}/bin/hydra", "pair-url", "--port", "{port}"]
   }
 }
