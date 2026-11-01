@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 12:24:09 +1300
-Subject: [PATCH 24/46] Preview tools: drag along a path; snapshot images in
+Subject: [PATCH 24/47] Preview tools: drag along a path; snapshot images in
  click coordinates; cursor follows a scaled tab
 
 - preview_drag takes a path of viewport points (with button and modifiers) as

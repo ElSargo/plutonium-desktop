@@ -4,7 +4,7 @@
   "default": 1,
   "description": "Coding agents' chat threads, each with its apps, terminals and browser tabs. Built on T3 Code.",
   "helperParam": "plutoniumHelper",
-  "uses": ["notifications"],
+  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"],
   "cli": "bin/hydra",
   "exclude": ["src", "build", "README.md"],
   "bundle": ["bin/hydra", "bundle", "{out}"],

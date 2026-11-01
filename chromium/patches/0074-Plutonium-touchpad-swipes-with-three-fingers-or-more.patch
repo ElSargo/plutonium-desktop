@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 08:17:19 +1300
-Subject: [PATCH 74/93] Plutonium: touchpad swipes with three fingers or more
+Subject: [PATCH 74/95] Plutonium: touchpad swipes with three fingers or more
  go to the shell page
 
 libinput's swipe gestures, which the libinput converter didn't read, go on
