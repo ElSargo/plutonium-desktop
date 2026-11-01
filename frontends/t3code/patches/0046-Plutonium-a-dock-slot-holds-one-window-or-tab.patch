@@ -1,0 +1,1539 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 1 Nov 2026 13:08:31 +1300
+Subject: [PATCH 46/46] Plutonium: a dock slot holds one window or tab
+
+A slot used to claim whatever fit its description: a site slot every tab
+whose address started with its prefix, an app slot every window of the app
+in its scope, cycling through several. Now it holds the one put in it: that
+window or tab carries the slot's tag (t3:dock/<slot id>) beside its scope's,
+and a press, the button's state and the panel tab's number all find it by
+the two tags, wherever the tab browses. With nothing found, the press opens
+a tab of the site or starts the app and tags what that made: for an app, the
+new window of the process started (or of the app in the scope), not any new
+window.
+
+Assigning a tab or window moves the slot to it (what the slot held in that
+scope loses the tag); changing a slot's scope retags only what it holds; a
+tab a docked tab opens drops the inherited slot tag. The slot keeps its id
+while it names the same app or site. The editor loses "Tabs start with";
+stored slots get an id and lose their prefix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/RightPanelTabs.tsx |   8 +-
+ apps/web/src/plutonium/PlutoniumDock.tsx   | 111 ++--
+ apps/web/src/plutonium/dock.test.ts        | 214 +++++--
+ apps/web/src/plutonium/dock.ts             | 628 +++++++++++++--------
+ apps/web/src/plutonium/previewBridge.ts    |  52 +-
+ apps/web/src/plutonium/threadTag.ts        |  12 +
+ 6 files changed, 672 insertions(+), 353 deletions(-)
+
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index 3ae8dad5bc..6bffde8cdd 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -105,6 +105,7 @@ import { windowLabel } from "~/plutonium/PlutoniumWindows";
+ import { type NativeWindowEntry, usePlutoniumWindowStore } from "~/plutonium/windowStore";
+ import {
+   assignDockSlot,
++  clearDockSlot,
+   DOCK_SLOT_NUMBERS,
+   type DockContext,
+   type DockScope,
+@@ -113,6 +114,7 @@ import {
+   dockSlotOfSurface,
+   setDockSlotScope,
+   useDockStore,
++  useDockWorld,
+ } from "~/plutonium/dock";
+ 
+ interface RightPanelTabsProps {
+@@ -931,6 +933,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+   const nativeWindows = usePlutoniumWindowStore((state) => state.windows);
+   // Plutonium: a tab in the dock shows its key.
+   const dockSlots = useDockStore((state) => state.slots);
++  // The windows and tabs, whose tags say which slot holds them.
++  const dockWorld = useDockWorld();
+   const tabListRef = useRef<HTMLDivElement>(null);
+   const addSurfaceTriggerRef = useRef<HTMLButtonElement>(null);
+   const [renamingDevice, setRenamingDevice] = useState<string | null>(null);
+@@ -1174,7 +1178,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+         return;
+       }
+       if (inSlot && action === "dock-remove") {
+-        useDockStore.getState().setSlot(inSlot, null);
++        clearDockSlot(inSlot);
+         return;
+       }
+       switch (action) {
+@@ -1427,7 +1431,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+                               <span className="truncate">{title}</span>
+                               {(() => {
+                                 const slot = props.dock
+-                                  ? dockSlotOfSurface(dockSlots, surface, props.dock)
++                                  ? dockSlotOfSurface(dockSlots, surface, props.dock, dockWorld)
+                                   : null;
+                                 return slot ? (
+                                   <span
+diff --git a/apps/web/src/plutonium/PlutoniumDock.tsx b/apps/web/src/plutonium/PlutoniumDock.tsx
+index e45453be28..a5c1d164e2 100644
+--- a/apps/web/src/plutonium/PlutoniumDock.tsx
++++ b/apps/web/src/plutonium/PlutoniumDock.tsx
+@@ -4,7 +4,7 @@
+ // what it is, where it's kept, how it's laid out (dock.ts).
+ import type { ScopedThreadRef } from "@t3tools/contracts";
+ import { AppWindowIcon, GlobeIcon, SquareTerminalIcon } from "lucide-react";
+-import { memo, useEffect, useId, useMemo, useState, useSyncExternalStore } from "react";
++import { memo, useEffect, useId, useMemo, useState } from "react";
+ 
+ import { useFaviconForThreadUrl } from "~/browserFaviconStore";
+ import { FaviconImage } from "~/components/preview/PreviewFaviconIcon";
+@@ -23,6 +23,7 @@ import {
+   type ActiveDock,
+   activeDockableSurface,
+   assignActiveDockSlot,
++  clearDockSlot,
+   clickDockSlot,
+   DOCK_SLOT_NUMBERS,
+   type DockLayout,
+@@ -33,18 +34,14 @@ import {
+   type DockTarget,
+   dockSlotLabel,
+   dockSlotState,
++  dockSlotTabHere,
++  saveDockSlot,
+   setActiveDockSlotScope,
+-  siteMatchOf,
+   useActiveDockStore,
+   useDockStore,
++  useDockWorld,
+ } from "./dock";
+-import { type BrokerTab, plutoniumPreview } from "./previewBridge";
+-import {
+-  type DesktopApp,
+-  isPlutoniumShell,
+-  plutoniumShell,
+-  usePlutoniumWindowStore,
+-} from "./windowStore";
++import { type DesktopApp, isPlutoniumShell, plutoniumShell } from "./windowStore";
+ 
+ type SiteTarget = Extract<DockTarget, { kind: "site" }>;
+ type Kind = DockTarget["kind"];
+@@ -271,7 +268,6 @@ function SiteFields(props: { target: SiteTarget | null; onChange: (target: SiteT
+   const id = useId();
+   const { target } = props;
+   const [address, setAddress] = useState(target?.url ?? "");
+-  const [match, setMatch] = useState(target?.match ?? "");
+   const [error, setError] = useState<string | null>(null);
+   const commitAddress = () => {
+     const url = normalizeSiteUrl(address);
+@@ -288,46 +284,26 @@ function SiteFields(props: { target: SiteTarget | null; onChange: (target: SiteT
+       url,
+       // Another site gets its host as its name, and not the old one's icon.
+       name: sameSite && target ? target.name : hostOf(url),
+-      ...(target?.match && sameSite ? { match: target.match } : {}),
+       ...(target?.icon && sameSite ? { icon: target.icon } : {}),
+     });
+   };
+-  const commitMatch = () => {
+-    if (!target) return;
+-    const value = match.trim();
+-    const { match: _previous, ...rest } = target;
+-    if (value !== (target.match ?? "")) props.onChange(value ? { ...rest, match: value } : rest);
+-  };
+   return (
+-    <div className="flex flex-col gap-3">
+-      <div className="flex flex-col gap-1.5">
+-        <Label htmlFor={`${id}-url`}>Address</Label>
+-        <Input
+-          id={`${id}-url`}
+-          size="sm"
+-          autoFocus={!target}
+-          placeholder="github.com/org/repo"
+-          value={address}
+-          onChange={(event) => setAddress(event.target.value)}
+-          onBlur={commitAddress}
+-          onKeyDown={(event) => event.key === "Enter" && commitAddress()}
+-        />
+-        {error ? <span className="text-destructive-foreground text-xs">{error}</span> : null}
+-      </div>
+-      {target ? (
+-        <div className="flex flex-col gap-1.5">
+-          <Label htmlFor={`${id}-match`}>Tabs that belong to it start with</Label>
+-          <Input
+-            id={`${id}-match`}
+-            size="sm"
+-            placeholder={new URL(target.url).origin}
+-            value={match}
+-            onChange={(event) => setMatch(event.target.value)}
+-            onBlur={commitMatch}
+-            onKeyDown={(event) => event.key === "Enter" && commitMatch()}
+-          />
+-        </div>
+-      ) : null}
++    <div className="flex flex-col gap-1.5">
++      <Label htmlFor={`${id}-url`}>Address</Label>
++      <Input
++        id={`${id}-url`}
++        size="sm"
++        autoFocus={!target}
++        placeholder="github.com/org/repo"
++        value={address}
++        onChange={(event) => setAddress(event.target.value)}
++        onBlur={commitAddress}
++        onKeyDown={(event) => event.key === "Enter" && commitAddress()}
++      />
++      {error ? <span className="text-destructive-foreground text-xs">{error}</span> : null}
++      <span className="text-muted-foreground text-xs">
++        Where a new tab for it opens. The slot keeps that tab, wherever you browse in it.
++      </span>
+     </div>
+   );
+ }
+@@ -390,7 +366,7 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+   const dockable = activeDockableSurface();
+ 
+   const save = (target: DockTarget, next: Partial<Pick<DockSlot, "scope" | "layout">> = {}) =>
+-    useDockStore.getState().setSlot(number, {
++    saveDockSlot(number, {
+       target,
+       scope: target.kind === "terminal" ? "thread" : (next.scope ?? scope),
+       layout: next.layout ?? layout,
+@@ -554,7 +530,7 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+           variant="ghost-destructive"
+           disabled={!slot}
+           onClick={() => {
+-            useDockStore.getState().setSlot(number, null);
++            clearDockSlot(number);
+             setKind(null);
+             setPicking(true);
+           }}
+@@ -646,42 +622,23 @@ export const PlutoniumDock = memo(function PlutoniumDock() {
+   return <Dock />;
+ });
+ 
+-const NO_TABS: readonly BrokerTab[] = [];
+-const subscribeTabs = (listener: () => void) => plutoniumPreview()?.onTabs(listener) ?? (() => {});
+-const readTabs = () => plutoniumPreview()?.tabList() ?? NO_TABS;
+-
+ function Dock() {
+   const slots = useDockStore((state) => state.slots);
+-  // The browser's tabs, for sites kept per project or everywhere.
+-  const brokerTabs = useSyncExternalStore(subscribeTabs, readTabs);
++  // The windows and the browser's tabs, which hold the slots' tags.
++  const world = useDockWorld();
+   const active = useActiveDockStore((state) => state.active);
+-  const windows = usePlutoniumWindowStore((state) => state.windows);
+   const preview = useThreadPreviewState(active?.threadRef ?? null);
+   const [editing, setEditing] = useState<{
+     number: DockSlotNumber;
+     anchor: HTMLElement;
+   } | null>(null);
+-  const tabUrls = useMemo(() => {
+-    const urls: Record<string, string> = {};
+-    for (const session of Object.values(preview.sessions)) {
+-      const status = session.navStatus as { url?: string };
+-      if (typeof status.url === "string") urls[session.tabId] = status.url;
+-    }
+-    return urls;
+-  }, [preview.sessions]);
+-  // A site slot's icon, from one of its open tabs.
+-  const liveIcons = useMemo(() => {
+-    const icons: Partial<Record<DockSlotNumber, string>> = {};
+-    for (const number of DOCK_SLOT_NUMBERS) {
+-      const target = slots[number]?.target;
+-      if (target?.kind !== "site") continue;
+-      const prefix = siteMatchOf(target);
+-      const tabId = Object.keys(tabUrls).find((id) => tabUrls[id]!.startsWith(prefix));
+-      const favicon = tabId ? preview.desktopByTabId[tabId]?.favicon : undefined;
+-      if (favicon?.dataUrl) icons[number] = favicon.dataUrl;
+-    }
+-    return icons;
+-  }, [slots, tabUrls, preview.desktopByTabId]);
++  // A site slot's icon, from its tab when that shows here.
++  const liveIcons: Partial<Record<DockSlotNumber, string>> = {};
++  for (const number of DOCK_SLOT_NUMBERS) {
++    const tabId = dockSlotTabHere(slots[number], active, world);
++    const favicon = tabId ? preview.desktopByTabId[tabId]?.favicon : undefined;
++    if (favicon?.dataUrl) liveIcons[number] = favicon.dataUrl;
++  }
+   return (
+     <>
+       <div
+@@ -695,7 +652,7 @@ function Dock() {
+             key={number}
+             number={number}
+             slot={slots[number]}
+-            state={dockSlotState(slots[number], active, windows, tabUrls, brokerTabs)}
++            state={dockSlotState(slots[number], active, world)}
+             active={active}
+             liveIcon={liveIcons[number] ?? null}
+             onEdit={(slot, anchor) => setEditing({ number: slot, anchor })}
+diff --git a/apps/web/src/plutonium/dock.test.ts b/apps/web/src/plutonium/dock.test.ts
+index 06b02c3c17..7988f13d64 100644
+--- a/apps/web/src/plutonium/dock.test.ts
++++ b/apps/web/src/plutonium/dock.test.ts
+@@ -4,20 +4,25 @@ vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
+ 
+ import {
+   type ActiveDock,
++  type DockSlot,
++  type DockWorld,
++  dockSlotOfSurface,
+   dockSlotState,
++  findDockThing,
++  migrateDockSlots,
++  type PreviewPlace,
+   sameApp,
+   scopeOfTags,
+   scopeOfWindow,
+-  siteMatchOf,
+ } from "./dock";
+ import type { BrokerTab } from "./previewBridge";
+-import { isDockScopeTag } from "./threadTag";
++import { dockSlotTag, isDockScopeTag, isDockSlotTag } from "./threadTag";
+ import type { NativeWindowEntry } from "./windowStore";
+ 
+-const window = (tags: string[]): NativeWindowEntry => ({
+-  id: 1,
+-  appId: "foot",
+-  title: "foot",
++const window = (tags: string[], id = 1, appId = "foot"): NativeWindowEntry => ({
++  id,
++  appId,
++  title: appId,
+   width: 800,
+   height: 600,
+   deviceScaleFactor: 1,
+@@ -28,6 +33,56 @@ const window = (tags: string[]): NativeWindowEntry => ({
+   tags,
+ });
+ 
++const tab = (id: number, url: string, tags: string[], opener?: number): BrokerTab =>
++  ({
++    id,
++    url,
++    tag: tags[0] ?? "",
++    tags,
++    openerId: opener ?? 0,
++    openedBy: opener ? "page" : "shell",
++  }) as unknown as BrokerTab;
++
++/** Thread `a` of project `p`, with `surface` showing in its panel. */
++const activeIn = (surface: string | null = null): ActiveDock =>
++  ({
++    threadKey: "e:a",
++    threadRef: { environmentId: "e", threadId: "a" },
++    projectId: "p",
++    activeSurfaceId: surface,
++    panelOpen: surface !== null,
++    terminalOpen: false,
++  }) as unknown as ActiveDock;
++
++/** Windows, tabs, and which thread's preview tab shows a tab (by broker tab id). */
++const worldOf = (
++  windows: NativeWindowEntry[],
++  tabs: BrokerTab[],
++  shown: Record<number, [thread: string, serverTabId: string]> = {},
++): DockWorld => ({
++  windows: Object.fromEntries(windows.map((entry) => [entry.id, entry])),
++  tabs,
++  previewOf: (tabId): PreviewPlace | null => {
++    const place = shown[tabId];
++    return place ? { environmentId: "e", threadId: place[0], tabId: place[1] } : null;
++  },
++});
++
++const SLOT = "s1";
++const TAG = dockSlotTag(SLOT);
++const site = (scope: DockSlot["scope"]): DockSlot => ({
++  id: SLOT,
++  target: { kind: "site", url: "https://github.com/a/b", name: "b" },
++  scope,
++  layout: "split",
++});
++const app = (scope: DockSlot["scope"]): DockSlot => ({
++  id: SLOT,
++  target: { kind: "app", desktopId: "foot", windowAppId: "foot", name: "Foot" },
++  scope,
++  layout: "split",
++});
++
+ describe("the dock", () => {
+   it("matches a desktop entry to its windows' app id", () => {
+     expect(sameApp("foot.desktop", "foot")).toBe(true);
+@@ -41,20 +96,7 @@ describe("the dock", () => {
+     expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p"]))).toBe("project");
+     expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p", "t3:global"]))).toBe("global");
+     expect(scopeOfWindow(window(["niri:desktop"]))).toBe("thread");
+-  });
+-
+-  it("matches a site by its own prefix, else its origin", () => {
+-    expect(siteMatchOf({ kind: "site", url: "https://github.com/a/b/pulls", name: "b" })).toBe(
+-      "https://github.com",
+-    );
+-    expect(
+-      siteMatchOf({
+-        kind: "site",
+-        url: "https://github.com/a/b",
+-        match: "https://github.com/a/b",
+-        name: "b",
+-      }),
+-    ).toBe("https://github.com/a/b");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:global", TAG]))).toBe("global");
+   });
+ 
+   it("keeps a tab in the last dock scope tag it has", () => {
+@@ -64,36 +106,122 @@ describe("the dock", () => {
+     expect(isDockScopeTag("t3:global")).toBe(true);
+     expect(isDockScopeTag("t3:project/p")).toBe(true);
+     expect(isDockScopeTag("t3:thread/a")).toBe(false);
++    expect(isDockScopeTag(TAG)).toBe(false);
++    expect(isDockSlotTag(TAG)).toBe(true);
++    expect(isDockSlotTag("t3:thread/a")).toBe(false);
++  });
++
++  it("gives stored slots an id, and drops a site's prefix", () => {
++    const slots = migrateDockSlots({
++      1: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++      2: {
++        target: {
++          kind: "site",
++          url: "https://github.com/a",
++          match: "https://github.com/a",
++          name: "a",
++        },
++        scope: "global",
++        layout: "fold",
++      },
++      3: { id: "kept", target: { kind: "terminal" }, scope: "thread", layout: "split" },
++      12: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++    });
++    expect(Object.keys(slots)).toEqual(["1", "2", "3"]);
++    expect(slots[1]!.id).toMatch(/^[0-9a-f]{12}$/);
++    expect(slots[2]!.id).not.toBe(slots[1]!.id);
++    expect(slots[2]!.target).toEqual({ kind: "site", url: "https://github.com/a", name: "a" });
++    expect(slots[2]!.layout).toBe("fold");
++    expect(slots[3]!.id).toBe("kept");
++  });
++
++  it("holds the one tab put in it, not others of the site", () => {
++    const docked = tab(1, "https://elsewhere.example/now", ["t3:thread/a", TAG]);
++    const other = tab(2, "https://github.com/a/b", ["t3:thread/a"]);
++    const world = worldOf([], [docked, other], { 1: ["a", "s-1"], 2: ["a", "s-2"] });
++    const slot = site("thread");
++    // It navigated off the site: still the slot's.
++    expect(findDockThing(slot, activeIn(), world)).toMatchObject({ kind: "tab", tab: docked });
++    expect(dockSlotState(slot, activeIn("browser:s-1"), world)).toBe("showing");
++    // Another tab on the site isn't the slot's.
++    expect(dockSlotState(slot, activeIn("browser:s-2"), world)).toBe("running");
++    const surface = (id: `browser:${string}`) =>
++      ({ id, kind: "preview", resourceId: id.slice(8) }) as const;
++    expect(dockSlotOfSurface({ 4: slot }, surface("browser:s-1"), activeIn(), world)).toBe(4);
++    expect(dockSlotOfSurface({ 4: slot }, surface("browser:s-2"), activeIn(), world)).toBeNull();
++    // Nothing of it in this thread (another thread's own): the key opens one.
++    const elsewhere = worldOf([], [tab(3, "https://github.com/a/b", ["t3:thread/b", TAG])], {
++      3: ["b", "s-3"],
++    });
++    expect(findDockThing(slot, activeIn(), elsewhere)).toBeNull();
++    expect(dockSlotState(slot, activeIn(), elsewhere)).toBe("idle");
++  });
++
++  it("doesn't hold the tabs its tab opens", () => {
++    const docked = tab(1, "https://github.com/a/b", ["t3:thread/a", TAG]);
++    // A page's new tab starts with its opener's tags.
++    const popup = tab(2, "https://github.com/login", ["t3:thread/a", TAG], 1);
++    const world = worldOf([], [docked, popup], { 1: ["a", "s-1"], 2: ["a", "s-2"] });
++    expect(findDockThing(site("thread"), activeIn(), world)).toMatchObject({ tab: docked });
++    expect(dockSlotState(site("thread"), activeIn("browser:s-2"), world)).toBe("running");
++    // Put in the slot itself (its opener left it), it is the slot's.
++    const moved = worldOf([], [tab(1, "https://github.com/a/b", ["t3:thread/a"]), popup], {
++      1: ["a", "s-1"],
++      2: ["a", "s-2"],
++    });
++    expect(findDockThing(site("thread"), activeIn(), moved)).toMatchObject({ tab: popup });
+   });
+ 
+   it("finds a site kept everywhere or per project by its scope's tab, in any thread", () => {
+-    const active = {
+-      threadKey: "e:a",
+-      threadRef: { environmentId: "e", threadId: "a" },
+-      projectId: "p",
+-      activeSurfaceId: null,
+-      panelOpen: false,
+-      terminalOpen: false,
+-    } as unknown as ActiveDock;
+-    const tab = (url: string, tags: string[]) => ({ id: 1, url, tags }) as unknown as BrokerTab;
+-    const site = { kind: "site", url: "https://github.com/a/b", name: "b" } as const;
+-    const global = { target: site, scope: "global", layout: "split" } as const;
+-    const project = { target: site, scope: "project", layout: "split" } as const;
+-    expect(dockSlotState(global, active, {}, {}, [])).toBe("idle");
+-    // Another thread's tab of the site isn't the slot's.
++    expect(dockSlotState(site("global"), activeIn(), worldOf([], []))).toBe("idle");
++    // A tab of the scope that isn't the slot's.
+     expect(
+-      dockSlotState(global, active, {}, {}, [tab("https://github.com/x", ["t3:thread/b"])]),
++      dockSlotState(
++        site("global"),
++        activeIn(),
++        worldOf([], [tab(1, "https://github.com/x", ["t3:global", "t3:thread/b"])]),
++      ),
+     ).toBe("idle");
++    const global = worldOf(
++      [],
++      [tab(1, "https://github.com/x", ["t3:global", "t3:thread/b", TAG])],
++      {
++        1: ["b", "s-1"],
++      },
++    );
++    expect(dockSlotState(site("global"), activeIn(), global)).toBe("running");
++    expect(findDockThing(site("global"), activeIn(), global)).toMatchObject({
++      place: { threadId: "b", tabId: "s-1" },
++    });
+     expect(
+-      dockSlotState(global, active, {}, {}, [
+-        tab("https://github.com/x", ["t3:global", "t3:thread/b"]),
+-      ]),
+-    ).toBe("running");
+-    expect(
+-      dockSlotState(project, active, {}, {}, [tab("https://github.com/x", ["t3:project/q"])]),
++      dockSlotState(
++        site("project"),
++        activeIn(),
++        worldOf([], [tab(1, "https://github.com/x", ["t3:project/q", TAG])]),
++      ),
+     ).toBe("idle");
++    const here = worldOf(
++      [],
++      [tab(1, "https://github.com/x", ["t3:project/p", TAG, "t3:thread/a"])],
++      {
++        1: ["a", "s-1"],
++      },
++    );
++    expect(dockSlotState(site("project"), activeIn("browser:s-1"), here)).toBe("showing");
++  });
++
++  it("holds the one window put in it, in its scope", () => {
++    const docked = window(["t3:global", TAG], 7);
++    const other = window(["t3:global"], 8);
++    const world = worldOf([docked, other], []);
++    expect(findDockThing(app("global"), activeIn(), world)).toMatchObject({ entry: docked });
++    expect(dockSlotState(app("global"), activeIn("app:7"), world)).toBe("showing");
++    expect(dockSlotState(app("global"), activeIn("app:8"), world)).toBe("running");
++    // Per thread: the one in this thread.
++    const threads = worldOf([window(["t3:thread/b", TAG], 9), window(["t3:thread/a"], 10)], []);
++    expect(findDockThing(app("thread"), activeIn(), threads)).toBeNull();
+     expect(
+-      dockSlotState(project, active, {}, {}, [tab("https://github.com/x", ["t3:project/p"])]),
+-    ).toBe("running");
++      findDockThing(app("thread"), activeIn(), worldOf([window(["t3:thread/a", TAG], 11)], [])),
++    ).toMatchObject({ entry: { id: 11 } });
+   });
+ });
+diff --git a/apps/web/src/plutonium/dock.ts b/apps/web/src/plutonium/dock.ts
+index 3e7bd52891..a6be2de39b 100644
+--- a/apps/web/src/plutonium/dock.ts
++++ b/apps/web/src/plutonium/dock.ts
+@@ -2,27 +2,33 @@
+ // app or a site, kept per thread, per project or everywhere. A slot's key
+ // starts what it names, shows it, gives it the keyboard, and goes back to
+ // where you were when pressed again (plutonium-desktop
+-// docs/features/T3_DOCK.md).
++// docs/features/HYDRA_DOCK.md).
+ //
+-// A scope is a Plutonium tag: an app started for a slot runs with its scope's
+-// tag as PLUTONIUM_THREAD_ID, so its windows carry it, and a window put in a
+-// slot from the panel gets the slot scope's tag added. A site kept per project
+-// or everywhere has one tab with its scope's tag, which moves to the thread
+-// whose key asks for it (previewBridge.ts).
++// A slot holds one window or tab, not every one that looks like it: the one
++// put in it carries the slot's tag (t3:dock/<slot id>). A scope is a tag too:
++// the slot's thing in a thread is the one with the slot's tag and the scope's
++// (the thread's, the project's or t3:global), so a slot kept per thread has
++// one in each thread. With none, the key starts the app or opens the site,
++// and tags what that made. An app started for a slot runs with its scope's
++// tag as PLUTONIUM_THREAD_ID, so its windows carry it. A site's tab kept per
++// project or everywhere moves to the thread whose key asks for it
++// (previewBridge.ts).
+ import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import { useSyncExternalStore } from "react";
+ import { create } from "zustand";
+ import { createJSONStorage, persist } from "zustand/middleware";
+ 
+ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { toastManager } from "~/components/ui/toast";
++import { randomUUID } from "~/lib/utils";
+ import { resolveStorage } from "~/lib/storage";
+ import { readThreadPreviewState } from "~/previewStateStore";
+ import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+ 
+ import { focusRightPanelSurface } from "./panelKeys";
+ import { type BrokerTab, plutoniumPreview, tabTags } from "./previewBridge";
+-import { GLOBAL_TAG, projectTag } from "./threadTag";
++import { dockSlotTag, GLOBAL_TAG, isDockScopeTag, isDockSlotTag, projectTag } from "./threadTag";
+ import {
+   type NativeWindowEntry,
+   plutoniumShell,
+@@ -50,24 +56,57 @@ export type DockTarget =
+     }
+   | {
+       readonly kind: "site";
++      /** Where a new tab for it opens. */
+       readonly url: string;
+-      /** Tabs whose address starts with this belong to the slot (default: the URL's origin). */
+-      readonly match?: string;
+       readonly name: string;
+       /** The site's icon (a data URL) as a tab showed it, for when none is open. */
+       readonly icon?: string;
+     };
+ 
+ export interface DockSlot {
++  /** What the slot's things are tagged with (dockSlotTag); new when it names something else. */
++  readonly id: string;
+   readonly target: DockTarget;
+   readonly scope: DockScope;
+   readonly layout: DockLayout;
+ }
+ 
+-const DEFAULT_SLOTS: Partial<Record<DockSlotNumber, DockSlot>> = {
+-  1: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++export type DockSlots = Partial<Record<DockSlotNumber, DockSlot>>;
++
++/** A new slot id. */
++export function newDockSlotId(): string {
++  return randomUUID().replaceAll("-", "").slice(0, 12);
++}
++
++const DEFAULT_SLOTS: DockSlots = {
++  1: { id: newDockSlotId(), target: { kind: "terminal" }, scope: "thread", layout: "split" },
+ };
+ 
++/**
++ * Slots as stored before slots held one thing each (version 1): they get an
++ * id, and a site loses the prefix its tabs started with. Nothing carries the
++ * new id yet: the slot's thing is the next one put in it, or the next one its
++ * key opens.
++ */
++export function migrateDockSlots(slots: unknown): DockSlots {
++  if (!slots || typeof slots !== "object") return DEFAULT_SLOTS;
++  const migrated: DockSlots = {};
++  for (const [key, value] of Object.entries(slots as Record<string, unknown>)) {
++    const number = Number(key);
++    if (!DOCK_SLOT_NUMBERS.includes(number as DockSlotNumber)) continue;
++    if (!value || typeof value !== "object") continue;
++    const slot = value as DockSlot & { target: DockTarget & { match?: string } };
++    if (!slot.target || typeof slot.target !== "object") continue;
++    const { match: _match, ...target } = slot.target;
++    migrated[number as DockSlotNumber] = {
++      ...slot,
++      id: typeof slot.id === "string" && slot.id ? slot.id : newDockSlotId(),
++      target: target as DockTarget,
++    };
++  }
++  return migrated;
++}
++
+ /** Where a slot's key came from, to go back to on the next press. */
+ interface ReturnPoint {
+   readonly slot: DockSlotNumber;
+@@ -79,7 +118,7 @@ interface ReturnPoint {
+ }
+ 
+ interface DockState {
+-  readonly slots: Partial<Record<DockSlotNumber, DockSlot>>;
++  readonly slots: DockSlots;
+   /** A thread's own layout for a slot (Super+Up), by thread key, then slot. */
+   readonly layouts: Readonly<Record<string, Partial<Record<DockSlotNumber, DockLayout>>>>;
+   /** Threads whose terminal drawer has the chat column to itself, by thread key. */
+@@ -141,7 +180,11 @@ export const useDockStore = create<DockState>()(
+     }),
+     {
+       name: "t3code:plutonium-dock:v1",
+-      version: 1,
++      version: 2,
++      migrate: (persisted, version) => {
++        const state = (persisted ?? {}) as Record<string, unknown>;
++        return version < 2 ? { ...state, slots: migrateDockSlots(state.slots) } : state;
++      },
+       storage: createJSONStorage(() =>
+         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
+       ),
+@@ -219,72 +262,224 @@ export function sameApp(desktopId: string, windowAppId: string): boolean {
+   return a === b || a.split(".").at(-1) === b.split(".").at(-1);
+ }
+ 
+-function windowMatches(target: Extract<DockTarget, { kind: "app" }>, entry: NativeWindowEntry) {
++/** Whether `entry` is a window of the slot's app (to find the one its start opened). */
++function isAppWindow(target: Extract<DockTarget, { kind: "app" }>, entry: NativeWindowEntry) {
+   if (target.windowAppId) return entry.appId === target.windowAppId;
+   return target.desktopId !== null && sameApp(target.desktopId, entry.appId);
+ }
+ 
+-/** The slot's windows in `tag`, oldest first. */
+-function slotWindows(
+-  target: Extract<DockTarget, { kind: "app" }>,
+-  tag: string,
+-): NativeWindowEntry[] {
+-  return Object.values(usePlutoniumWindowStore.getState().windows)
+-    .filter((entry) => windowTags(entry).includes(tag) && windowMatches(target, entry))
+-    .toSorted((a, b) => a.id - b.id);
++/** Where a preview tab shows a browser tab: its thread and server tab id. */
++export interface PreviewPlace {
++  readonly environmentId: string;
++  readonly threadId: string;
++  readonly tabId: string;
++}
++
++/** What the dock finds slots' things in. */
++export interface DockWorld {
++  readonly windows: Readonly<Record<number, NativeWindowEntry>>;
++  /** The browser's tabs, oldest first. */
++  readonly tabs: readonly BrokerTab[];
++  /** The preview tab showing browser tab `tabId`, if one does. */
++  readonly previewOf: (tabId: number) => PreviewPlace | null;
++}
++
++const noPreview = () => null;
++
++/** The world as it is now. */
++function currentWorld(): DockWorld {
++  const preview = plutoniumPreview();
++  return {
++    windows: usePlutoniumWindowStore.getState().windows,
++    tabs: preview?.tabList() ?? [],
++    previewOf: preview ? (tabId) => preview.previewOf(tabId) : noPreview,
++  };
++}
++
++const NO_TABS: readonly BrokerTab[] = [];
++const subscribeTabs = (listener: () => void) => plutoniumPreview()?.onTabs(listener) ?? (() => {});
++const readTabs = () => plutoniumPreview()?.tabList() ?? NO_TABS;
++
++/** The world, re-rendering when a window or a tab changes. */
++export function useDockWorld(): DockWorld {
++  const windows = usePlutoniumWindowStore((state) => state.windows);
++  const tabs = useSyncExternalStore(subscribeTabs, readTabs);
++  const preview = plutoniumPreview();
++  return {
++    windows,
++    tabs,
++    previewOf: preview ? (tabId) => preview.previewOf(tabId) : noPreview,
++  };
++}
++
++/**
++ * Whether `tab` carries slot tag `tag` as its own: a page's new tab starts
++ * with its opener's tags, and isn't the slot's for that (previewBridge.ts
++ * takes the tag off it).
++ */
++function tabHolds(tab: BrokerTab, tag: string, tabs: readonly BrokerTab[]): boolean {
++  if (!tabTags(tab).includes(tag)) return false;
++  if (tab.openedBy !== "page") return true;
++  const opener = tabs.find((other) => other.id === tab.openerId);
++  return !opener || !tabTags(opener).includes(tag);
++}
++
++/** A slot's thing in a scope: its window, or its tab and where that shows. */
++export type DockThing =
++  | { readonly kind: "window"; readonly entry: NativeWindowEntry }
++  | { readonly kind: "tab"; readonly tab: BrokerTab; readonly place: PreviewPlace | null };
++
++const isHere = (place: PreviewPlace | null, threadRef: ScopedThreadRef) =>
++  place !== null &&
++  place.environmentId === threadRef.environmentId &&
++  place.threadId === threadRef.threadId;
++
++/**
++ * Slot `slot`'s thing in `context`'s thread: what carries the slot's tag and
++ * its scope's. A tab that shows in this thread first, else the newest.
++ */
++export function findDockThing(
++  slot: DockSlot,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  world: DockWorld,
++): DockThing | null {
++  if (slot.target.kind === "terminal") return null;
++  const scopeTag = scopeTagOf(slot.scope, context);
++  if (!scopeTag) return null;
++  const tag = dockSlotTag(slot.id);
++  if (slot.target.kind === "app") {
++    const entry = Object.values(world.windows)
++      .filter((window) => {
++        const tags = windowTags(window);
++        return tags.includes(tag) && tags.includes(scopeTag);
++      })
++      .toSorted((a, b) => a.id - b.id)
++      .at(-1);
++    return entry ? { kind: "window", entry } : null;
++  }
++  let found: DockThing | null = null;
++  for (const tab of world.tabs) {
++    if (!tabTags(tab).includes(scopeTag) || !tabHolds(tab, tag, world.tabs)) continue;
++    const place = world.previewOf(tab.id);
++    found = { kind: "tab", tab, place };
++    if (isHere(place, context.threadRef)) break;
++  }
++  return found;
++}
++
++/** The panel surface of `thing` in `threadRef`'s panel, if it shows there (a window always can). */
++function surfaceOfThing(thing: DockThing, threadRef: ScopedThreadRef): RightPanelSurface | null {
++  if (thing.kind === "window") return appSurface(thing.entry);
++  return thing.place && isHere(thing.place, threadRef) ? browserSurface(thing.place.tabId) : null;
++}
++
++/** The broker tab behind `surface` in `threadRef`'s panel, if it has one yet. */
++function tabOfSurface(surface: RightPanelSurface, threadRef: ScopedThreadRef): BrokerTab | null {
++  if (surface.kind !== "preview" || !surface.resourceId) return null;
++  const { serverEpoch } = readThreadPreviewState(threadRef);
++  return (
++    plutoniumPreview()?.tab(previewRuntimeTabId(threadRef, serverEpoch, surface.resourceId)) ?? null
++  );
++}
++
++/** A window or tab, to tag. */
++interface Taggable {
++  readonly kind: "window" | "tab";
++  readonly id: number;
++}
++
++const taggableOf = (thing: DockThing): Taggable =>
++  thing.kind === "window"
++    ? { kind: "window", id: thing.entry.id }
++    : { kind: "tab", id: thing.tab.id };
++
++const sameItem = (a: Taggable, b: Taggable | null) =>
++  b !== null && a.kind === b.kind && a.id === b.id;
++
++function tagsOfItem(item: Taggable, world: DockWorld): readonly string[] {
++  if (item.kind === "window") {
++    const entry = world.windows[item.id];
++    return entry ? windowTags(entry) : [];
++  }
++  const tab = world.tabs.find((other) => other.id === item.id);
++  return tab ? tabTags(tab) : [];
++}
++
++/** Adds `add` to and takes `remove` off `item`'s tags (not its origin tag). */
++async function retag(
++  item: Taggable,
++  add: readonly string[],
++  remove: readonly string[] = [],
++): Promise<void> {
++  if (item.kind === "window") {
++    const shell = await plutoniumShell();
++    await shell?.tagWindow?.(item.id, add, remove);
++  } else {
++    await plutoniumPreview()?.broker.updateTabTags?.(item.id, add, remove);
++  }
++}
++
++/** Takes slot `slot`'s tag off everything that carries it, in every scope. */
++function releaseDockSlot(slot: DockSlot): void {
++  if (slot.target.kind === "terminal") return;
++  const tag = dockSlotTag(slot.id);
++  const world = currentWorld();
++  for (const window of Object.values(world.windows)) {
++    if (windowTags(window).includes(tag)) {
++      void retag({ kind: "window", id: window.id }, [], [tag]).catch(() => undefined);
++    }
++  }
++  for (const tab of world.tabs) {
++    if (tabTags(tab).includes(tag)) {
++      void retag({ kind: "tab", id: tab.id }, [], [tag]).catch(() => undefined);
++    }
++  }
+ }
+ 
+-/** What a site slot matches: its own prefix, else its URL's origin. */
+-export function siteMatchOf(target: Extract<DockTarget, { kind: "site" }>): string {
+-  if (target.match) return target.match;
++function hostOf(url: string): string {
+   try {
+-    return new URL(target.url).origin;
++    return new URL(url).host;
+   } catch {
+-    return target.url;
++    return url;
+   }
+ }
+ 
+ /**
+- * The thread's browser tabs (server tab ids) that belong to the site slot,
+- * oldest first. With `tag` (a slot kept per project or everywhere), only the
+- * ones that carry it: the scope's own tab, when it is in this thread.
++ * Whether `next` names the same app or site as `previous`, so the slot keeps
++ * its id: what it holds elsewhere (another thread's, kept per thread) stays.
+  */
+-function slotTabs(
+-  target: Extract<DockTarget, { kind: "site" }>,
+-  threadRef: ScopedThreadRef,
+-  tag: string | null = null,
+-): string[] {
+-  const prefix = siteMatchOf(target);
+-  const state = readThreadPreviewState(threadRef);
+-  const preview = tag ? plutoniumPreview() : null;
+-  if (tag && !preview) return [];
+-  return Object.values(state.sessions)
+-    .filter((session) => {
+-      const status = session.navStatus as { url?: string };
+-      if (typeof status.url !== "string" || !status.url.startsWith(prefix)) return false;
+-      if (!tag || !preview) return true;
+-      const tab = preview.tab(previewRuntimeTabId(threadRef, state.serverEpoch, session.tabId));
+-      return tab !== null && tabTags(tab).includes(tag);
+-    })
+-    .map((session) => session.tabId as string);
+-}
+-
+-/** The browser tabs anywhere that are a site slot's in scope `tag`, oldest first. */
+-function scopeSiteTabs(
+-  target: Extract<DockTarget, { kind: "site" }>,
+-  tag: string,
+-  tabs: readonly BrokerTab[],
+-): BrokerTab[] {
+-  const prefix = siteMatchOf(target);
+-  return tabs.filter((tab) => tabTags(tab).includes(tag) && tab.url.startsWith(prefix));
+-}
+-
+-/** The tag a site slot's tab carries: null when kept per thread (any of the thread's tabs). */
+-function siteTagOf(
+-  slot: DockSlot,
+-  context: Pick<DockContext, "threadRef" | "projectId">,
+-): string | null {
+-  return slot.scope === "thread" ? null : scopeTagOf(slot.scope, context);
++function namesSameThing(previous: DockTarget, next: DockTarget): boolean {
++  if (previous.kind === "terminal" || next.kind === "terminal") return previous.kind === next.kind;
++  if (previous.kind === "app" && next.kind === "app") {
++    return (
++      (previous.desktopId !== null && previous.desktopId === next.desktopId) ||
++      (previous.windowAppId !== null && previous.windowAppId === next.windowAppId)
++    );
++  }
++  if (previous.kind === "site" && next.kind === "site") {
++    return hostOf(previous.url) === hostOf(next.url);
++  }
++  return false;
++}
++
++/**
++ * Slot `number` set to `next` (from the editor): it keeps its id while it
++ * names the same app or site; naming another, what it held leaves it.
++ */
++export function saveDockSlot(number: DockSlotNumber, next: Omit<DockSlot, "id">): void {
++  const state = useDockStore.getState();
++  const previous = state.slots[number];
++  const keep = previous && namesSameThing(previous.target, next.target);
++  if (previous && !keep) releaseDockSlot(previous);
++  state.setSlot(number, { ...next, id: keep ? previous.id : newDockSlotId() });
++}
++
++/** Empties slot `number`; what it held leaves it. */
++export function clearDockSlot(number: DockSlotNumber): void {
++  const state = useDockStore.getState();
++  const previous = state.slots[number];
++  if (previous) releaseDockSlot(previous);
++  state.setSlot(number, null);
+ }
+ 
+ const appSurface = (entry: NativeWindowEntry): RightPanelSurface => ({
+@@ -349,7 +544,7 @@ function goBack(context: DockContext, point: ReturnPoint, own: readonly string[]
+   context.focusComposer();
+ }
+ 
+-/** Remembers what shows now, unless this slot already did (pressing it again cycles). */
++/** Remembers what shows now, unless this slot already did (it was pressed before going back). */
+ function rememberReturn(context: DockContext, slot: DockSlotNumber): void {
+   const key = scopedThreadKey(context.threadRef);
+   const dock = useDockStore.getState();
+@@ -380,24 +575,27 @@ function raiseSurface(context: DockContext, surface: RightPanelSurface, layout:
+ }
+ 
+ /**
+- * Brings a site slot's tab in scope `tag` to this thread: from the thread
+- * showing it, if one does, else a new one.
++ * Brings site slot `slot`'s `tab` (its tab in scope `scopeTag`, shown in
++ * another thread or none) to this thread, or opens a new one there.
+  */
+ async function bringSiteTab(
+   context: DockContext,
+-  target: Extract<DockTarget, { kind: "site" }>,
+-  tag: string,
++  slot: DockSlot,
++  scopeTag: string,
++  tab: BrokerTab | null,
+   layout: DockLayout,
+ ): Promise<void> {
++  const target = slot.target as Extract<DockTarget, { kind: "site" }>;
+   const preview = plutoniumPreview();
+-  if (!preview) {
++  if (!preview?.broker.updateTabTags) {
++    // No tags to hold it by: a tab of the site, which the slot won't find again.
+     await context.openSite(target.url);
++    useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
+     return;
+   }
+-  let tab = scopeSiteTabs(target, tag, preview.tabList()).at(-1);
+   try {
+     if (!tab) {
+-      tab = await preview.createDockTab(target.url, tag);
++      tab = await preview.createDockTab(target.url, scopeTag, dockSlotTag(slot.id));
+     } else {
+       const from = preview.previewOf(tab.id);
+       if (from) {
+@@ -428,14 +626,19 @@ async function bringSiteTab(
+ 
+ const WINDOW_WAIT_MS = 60_000;
+ 
+-/** Starts the slot's app in `tag` and raises its first new window. */
++/**
++ * Starts slot `slot`'s app in scope `scopeTag`, and puts the window it opens
++ * in the slot and shows it: a new window of the process started, or of the
++ * app in the scope (a launcher that hands over to another process).
++ */
+ async function launchSlotApp(
+   context: DockContext,
+   slotNumber: DockSlotNumber,
+-  target: Extract<DockTarget, { kind: "app" }>,
+-  tag: string,
++  slot: DockSlot,
++  scopeTag: string,
+   layout: DockLayout,
+ ): Promise<void> {
++  const target = slot.target as Extract<DockTarget, { kind: "app" }>;
+   const shell = await plutoniumShell();
+   if (!shell) return;
+   if (!target.desktopId) {
+@@ -449,20 +652,31 @@ async function launchSlotApp(
+     return;
+   }
+   const known = new Set(Object.keys(usePlutoniumWindowStore.getState().windows).map(Number));
++  let pid: number | null = null;
+   let opened = false;
+   const open = () => {
++    if (opened) return;
+     const entry = Object.values(usePlutoniumWindowStore.getState().windows)
+-      .filter((window) => window.threadId === tag && !known.has(window.id))
++      .filter(
++        (window) =>
++          !known.has(window.id) &&
++          ((pid !== null && window.pid === pid) ||
++            (windowTags(window).includes(scopeTag) && isAppWindow(target, window))),
++      )
+       .toSorted((a, b) => a.id - b.id)[0];
+-    if (!entry || opened) return;
++    if (!entry) return;
+     opened = true;
+     stop();
+-    // Its windows are found by their app id from now on.
+-    const slot = useDockStore.getState().slots[slotNumber];
+-    if (slot?.target.kind === "app" && !slot.target.windowAppId) {
+-      useDockStore
+-        .getState()
+-        .setSlot(slotNumber, { ...slot, target: { ...slot.target, windowAppId: entry.appId } });
++    void retag({ kind: "window", id: entry.id }, [scopeTag, dockSlotTag(slot.id)]).catch(
++      () => undefined,
++    );
++    // Remember its app id: the next start finds its window by it too.
++    const current = useDockStore.getState().slots[slotNumber];
++    if (current?.id === slot.id && current.target.kind === "app" && !current.target.windowAppId) {
++      useDockStore.getState().setSlot(slotNumber, {
++        ...current,
++        target: { ...current.target, windowAppId: entry.appId },
++      });
+     }
+     raiseSurface(context, appSurface(entry), layout);
+   };
+@@ -474,7 +688,8 @@ async function launchSlotApp(
+   }
+   toastManager.add({ type: "info", title: `Starting ${target.name}…`, timeout: 2500 });
+   try {
+-    await shell.launchApp(tag, target.desktopId);
++    pid = (await shell.launchApp(scopeTag, target.desktopId)).pid || null;
++    open();
+   } catch (error) {
+     stop();
+     toastManager.add({
+@@ -541,56 +756,29 @@ export function runDockSlot(
+     return;
+   }
+ 
+-  let candidates: RightPanelSurface[];
+-  if (target.kind === "app") {
+-    const tag = scopeTagOf(slot.scope, context);
+-    if (!tag) {
+-      toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
+-      return;
+-    }
+-    candidates = slotWindows(target, tag).map(appSurface);
+-    if (candidates.length === 0) {
+-      rememberReturn(context, slotNumber);
+-      void launchSlotApp(context, slotNumber, target, tag, layout);
+-      return;
+-    }
+-  } else {
+-    // Per thread: any of the thread's tabs on the site. Per project or
+-    // everywhere: the scope's one tab, brought here from where it is.
+-    const tag = siteTagOf(slot, context);
+-    if (slot.scope !== "thread" && !tag) {
+-      toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
+-      return;
+-    }
+-    candidates = slotTabs(target, context.threadRef, tag).map(browserSurface);
+-    if (candidates.length === 0) {
+-      rememberReturn(context, slotNumber);
+-      if (tag) {
+-        void bringSiteTab(context, target, tag, layout);
+-      } else {
+-        void context.openSite(target.url).then(() => {
+-          useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
+-        });
+-      }
+-      return;
++  const scopeTag = scopeTagOf(slot.scope, context);
++  if (!scopeTag) {
++    toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++    return;
++  }
++  const thing = findDockThing(slot, context, currentWorld());
++  const surface = thing ? surfaceOfThing(thing, context.threadRef) : null;
++  if (!surface) {
++    // Nothing of it in its scope: start it. A site's tab elsewhere: bring it here.
++    rememberReturn(context, slotNumber);
++    if (target.kind === "app") void launchSlotApp(context, slotNumber, slot, scopeTag, layout);
++    else {
++      const tab = thing?.kind === "tab" ? thing.tab : null;
++      void bringSiteTab(context, slot, scopeTag, tab, layout);
+     }
++    return;
+   }
+ 
+-  const showing = context.panelOpen
+-    ? candidates.findIndex((surface) => surface.id === context.activeSurfaceId)
+-    : -1;
+-  const current = showing >= 0 ? candidates[showing]! : undefined;
+-  if (current && (options.click || arrived || surfaceHasKeyboard(current)) && !options.other) {
+-    // Shown and focused: the next copy, or back to where you were.
+-    if (candidates.length > 1 && !arrived) {
+-      raiseSurface(context, candidates[(showing + 1) % candidates.length]!, layout);
+-    } else if (back?.slot === slotNumber) {
+-      goBack(
+-        context,
+-        back,
+-        candidates.map((surface) => surface.id),
+-      );
+-    } else {
++  const showing = context.panelOpen && context.activeSurfaceId === surface.id;
++  if (showing && (options.click || arrived || surfaceHasKeyboard(surface)) && !options.other) {
++    // Shown and focused: back to where you were.
++    if (back?.slot === slotNumber) goBack(context, back, [surface.id]);
++    else {
+       // Nowhere remembered to go back to: put it away.
+       const panel = useRightPanelStore.getState();
+       panel.setMaximized(context.threadRef, false);
+@@ -600,8 +788,8 @@ export function runDockSlot(
+     return;
+   }
+   rememberReturn(context, slotNumber);
+-  // Shown: give it the keyboard. Not shown: the newest copy.
+-  raiseSurface(context, current ?? candidates.at(-1)!, layout);
++  // Shown or not: show it and give it the keyboard.
++  raiseSurface(context, surface, layout);
+ }
+ 
+ /**
+@@ -628,11 +816,11 @@ export function toggleDockLayout(context: DockContext): void {
+   }
+ }
+ 
+-/** What `surface` would be as a slot's target, and the scope it's in now. */
++/** What `surface` would be as a slot's target, the scope it's in now, and the thing to tag. */
+ async function targetOf(
+   surface: RightPanelSurface,
+   threadRef: ScopedThreadRef,
+-): Promise<{ target: DockTarget; scope: DockScope } | null> {
++): Promise<{ target: DockTarget; scope: DockScope; item: Taggable | null } | null> {
+   if (surface.kind === "app") {
+     const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
+     if (!entry) return null;
+@@ -647,10 +835,12 @@ async function targetOf(
+         name: app?.name ?? (entry.title || entry.appId),
+       },
+       scope: scopeOfWindow(entry),
++      item: { kind: "window", id: entry.id },
+     };
+   }
+   if (surface.kind === "preview" && surface.resourceId) {
+-    const session = readThreadPreviewState(threadRef).sessions[surface.resourceId];
++    const state = readThreadPreviewState(threadRef);
++    const session = state.sessions[surface.resourceId];
+     const status = session?.navStatus as { url?: string; title?: string } | undefined;
+     if (!status?.url) return null;
+     let name = status.title || status.url;
+@@ -659,14 +849,9 @@ async function targetOf(
+     } catch {
+       // Keep the address.
+     }
+-    const favicon =
+-      readThreadPreviewState(threadRef).desktopByTabId[session?.tabId ?? surface.resourceId]
+-        ?.favicon;
++    const favicon = state.desktopByTabId[session?.tabId ?? surface.resourceId]?.favicon;
+     // A dock slot's tab from elsewhere stays in its scope.
+-    const state = readThreadPreviewState(threadRef);
+-    const tab = plutoniumPreview()?.tab(
+-      previewRuntimeTabId(threadRef, state.serverEpoch, surface.resourceId),
+-    );
++    const tab = tabOfSurface(surface, threadRef);
+     return {
+       target: {
+         kind: "site",
+@@ -675,6 +860,7 @@ async function targetOf(
+         ...(favicon?.dataUrl ? { icon: favicon.dataUrl } : {}),
+       },
+       scope: tab ? scopeOfTags(tabTags(tab)) : "thread",
++      item: tab ? { kind: "tab", id: tab.id } : null,
+     };
+   }
+   return null;
+@@ -692,7 +878,11 @@ const SCOPE_LABEL: Record<DockScope, string> = {
+   global: "everywhere",
+ };
+ 
+-/** Puts `surface` (null: the terminal drawer) in slot `slotNumber`. */
++/**
++ * Puts `surface` (null: the terminal drawer) in slot `slotNumber`: that
++ * window or tab is the slot's in its scope, instead of what was (and it
++ * leaves any other slot it was in).
++ */
+ export async function assignDockSlot(
+   context: Pick<DockContext, "threadRef" | "projectId">,
+   slotNumber: DockSlotNumber,
+@@ -702,7 +892,13 @@ export async function assignDockSlot(
+   const previous = state.slots[slotNumber];
+   let next: DockSlot;
+   if (surface === null) {
+-    next = { target: { kind: "terminal" }, scope: "thread", layout: previous?.layout ?? "split" };
++    if (previous && previous.target.kind !== "terminal") releaseDockSlot(previous);
++    next = {
++      id: previous?.target.kind === "terminal" ? previous.id : newDockSlotId(),
++      target: { kind: "terminal" },
++      scope: "thread",
++      layout: previous?.layout ?? "split",
++    };
+   } else {
+     const found = await targetOf(surface, context.threadRef);
+     if (!found) {
+@@ -713,7 +909,30 @@ export async function assignDockSlot(
+       });
+       return;
+     }
+-    next = { target: found.target, scope: found.scope, layout: previous?.layout ?? "split" };
++    const keep = previous !== undefined && namesSameThing(previous.target, found.target);
++    next = {
++      id: keep ? previous.id : newDockSlotId(),
++      target: found.target,
++      scope: found.scope,
++      layout: previous?.layout ?? "split",
++    };
++    const tag = dockSlotTag(next.id);
++    const world = currentWorld();
++    if (previous && !keep) releaseDockSlot(previous);
++    else if (previous) {
++      // What the slot held here (in this thread, project or everywhere) leaves it.
++      const old = findDockThing(previous, context, world);
++      if (old && !sameItem(taggableOf(old), found.item)) {
++        await retag(taggableOf(old), [], [tag]).catch(() => undefined);
++      }
++    }
++    if (found.item) {
++      // It leaves the other slots it was in.
++      const others = tagsOfItem(found.item, world).filter(
++        (other) => isDockSlotTag(other) && other !== tag,
++      );
++      await retag(found.item, [tag], others).catch(() => undefined);
++    }
+   }
+   state.setSlot(slotNumber, next);
+   toastManager.add({
+@@ -725,9 +944,9 @@ export async function assignDockSlot(
+ }
+ 
+ /**
+- * Keeps slot `slotNumber` in `scope`. For an app, the windows showing in
+- * this thread get the scope's tag, so the slot finds them there; for a site,
+- * the thread's tabs of it get it instead of the old scope's.
++ * Keeps slot `slotNumber` in `scope`. What it holds in this thread's old
++ * scope gets the new scope's tag (and loses a project's or t3:global); what
++ * it holds elsewhere stays as it is.
+  */
+ export async function setDockSlotScope(
+   context: Pick<DockContext, "threadRef" | "projectId">,
+@@ -736,60 +955,33 @@ export async function setDockSlotScope(
+ ): Promise<void> {
+   const state = useDockStore.getState();
+   const slot = state.slots[slotNumber];
+-  if (!slot) return;
+-  const tag = scopeTagOf(scope, context);
+-  if (!tag) {
++  if (!slot || slot.target.kind === "terminal") return;
++  const to = scopeTagOf(scope, context);
++  if (!to) {
+     toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
+     return;
+   }
+-  state.setSlot(slotNumber, { ...slot, scope });
+-  if (slot.target.kind === "site") {
+-    const preview = plutoniumPreview();
+-    if (!preview?.broker.updateTabTags) return;
+-    const from = siteTagOf(slot, context);
+-    const to = scope === "thread" ? null : tag;
+-    const { serverEpoch } = readThreadPreviewState(context.threadRef);
+-    for (const tabId of slotTabs(slot.target, context.threadRef, from)) {
+-      const tab = preview.tab(previewRuntimeTabId(context.threadRef, serverEpoch, tabId));
+-      if (!tab) continue;
+-      await preview.broker
+-        .updateTabTags(tab.id, to ? [to] : [], from ? [from] : [])
+-        .catch(() => undefined);
+-    }
+-    return;
+-  }
+-  if (slot.target.kind !== "app") return;
+-  const shell = await plutoniumShell();
+   const from = scopeTagOf(slot.scope, context);
+-  if (!shell?.tagWindow || !from) return;
+-  for (const entry of slotWindows(slot.target, from)) {
+-    await shell.tagWindow(entry.id, [tag]).catch(() => undefined);
+-  }
++  const thing = findDockThing(slot, context, currentWorld());
++  state.setSlot(slotNumber, { ...slot, scope });
++  if (!thing) return;
++  // A thread's tag stays: the thread shows it, and its agent reaches it.
++  const remove = from && from !== to && isDockScopeTag(from) ? [from] : [];
++  await retag(taggableOf(thing), [to], remove).catch(() => undefined);
+ }
+ 
+-/** The slot `surface` is in, if any. */
++/** The slot `surface` holds in `context`'s thread, if any. */
+ export function dockSlotOfSurface(
+-  slots: Partial<Record<DockSlotNumber, DockSlot>>,
++  slots: DockSlots,
+   surface: RightPanelSurface,
+   context: Pick<DockContext, "threadRef" | "projectId">,
++  world: DockWorld = currentWorld(),
+ ): DockSlotNumber | null {
+-  // A tab with a scope's tag is that scope's slot's, before any thread's slot of its site.
+-  const order = DOCK_SLOT_NUMBERS.toSorted(
+-    (a, b) => Number(slots[a]?.scope === "thread") - Number(slots[b]?.scope === "thread"),
+-  );
+-  for (const number of order) {
++  for (const number of DOCK_SLOT_NUMBERS) {
+     const slot = slots[number];
+-    const target = slot?.target;
+-    if (!slot || !target) continue;
+-    if (target.kind === "app" && surface.kind === "app") {
+-      const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
+-      if (entry && windowMatches(target, entry)) return number;
+-    }
+-    if (target.kind === "site" && surface.kind === "preview" && surface.resourceId) {
+-      const tag = siteTagOf(slot, context);
+-      if (slot.scope !== "thread" && !tag) continue;
+-      if (slotTabs(target, context.threadRef, tag).includes(surface.resourceId)) return number;
+-    }
++    if (!slot || slot.target.kind === "terminal") continue;
++    const thing = findDockThing(slot, context, world);
++    if (thing && surfaceOfThing(thing, context.threadRef)?.id === surface.id) return number;
+   }
+   return null;
+ }
+@@ -868,47 +1060,35 @@ export type DockSlotState = "empty" | "idle" | "running" | "showing";
+ 
+ /**
+  * Slot `slot`'s state in the active thread: nothing set, set but nothing of it
+- * in its scope, running, or showing now. `brokerTabs` are the browser's tabs,
+- * for sites kept per project or everywhere.
++ * in its scope, running (somewhere in its scope), or showing here now.
+  */
+ export function dockSlotState(
+   slot: DockSlot | undefined,
+   active: ActiveDock | null,
+-  windows: Readonly<Record<number, NativeWindowEntry>>,
+-  tabUrls: Readonly<Record<string, string>>,
+-  brokerTabs: readonly BrokerTab[] = [],
++  world: DockWorld,
+ ): DockSlotState {
+   if (!slot) return "empty";
+   if (!active) return "idle";
+-  const target = slot.target;
+-  if (target.kind === "terminal") return active.terminalOpen ? "showing" : "idle";
+-  let ids: string[];
+-  if (target.kind === "app") {
+-    const tag = scopeTagOf(slot.scope, active);
+-    if (!tag) return "idle";
+-    ids = Object.values(windows)
+-      .filter((entry) => windowTags(entry).includes(tag) && windowMatches(target, entry))
+-      .map((entry) => `app:${entry.id}`);
+-  } else if (slot.scope !== "thread") {
+-    // Running wherever the scope's tab is; showing if it is here.
+-    const tag = scopeTagOf(slot.scope, active);
+-    if (!tag || scopeSiteTabs(target, tag, brokerTabs).length === 0) return "idle";
+-    ids = slotTabs(target, active.threadRef, tag).map((tabId) => `browser:${tabId}`);
+-    return active.panelOpen && active.activeSurfaceId && ids.includes(active.activeSurfaceId)
+-      ? "showing"
+-      : "running";
+-  } else {
+-    const prefix = siteMatchOf(target);
+-    ids = Object.entries(tabUrls)
+-      .filter(([, url]) => url.startsWith(prefix))
+-      .map(([tabId]) => `browser:${tabId}`);
+-  }
+-  if (ids.length === 0) return "idle";
+-  return active.panelOpen && active.activeSurfaceId && ids.includes(active.activeSurfaceId)
++  if (slot.target.kind === "terminal") return active.terminalOpen ? "showing" : "idle";
++  const thing = findDockThing(slot, active, world);
++  if (!thing) return "idle";
++  const surface = surfaceOfThing(thing, active.threadRef);
++  return active.panelOpen && surface && active.activeSurfaceId === surface.id
+     ? "showing"
+     : "running";
+ }
+ 
++/** Slot `slot`'s tab's server tab id in the active thread, if it shows there. */
++export function dockSlotTabHere(
++  slot: DockSlot | undefined,
++  active: ActiveDock | null,
++  world: DockWorld,
++): string | null {
++  if (!slot || !active || slot.target.kind !== "site") return null;
++  const thing = findDockThing(slot, active, world);
++  return thing?.kind === "tab" && isHere(thing.place, active.threadRef) ? thing.place!.tabId : null;
++}
++
+ /** The active thread's tab showing in the panel, if it can go in the dock. */
+ export function activeDockableSurface(): RightPanelSurface | null {
+   const context = activeContext;
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+index 4bc8677c67..10e9532d8d 100644
+--- a/apps/web/src/plutonium/previewBridge.ts
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -21,9 +21,11 @@
+ // popup keeps `window.opener` to report back through, and closes its preview
+ // tab when it closes itself.
+ //
+-// A dock slot kept per project or everywhere has a tab of its own, tagged
+-// with the scope's tag (t3:project/<id>, t3:global). It moves to the thread
+-// whose dock key or button asks for it (releaseTab, then an import there).
++// A dock slot's tab carries the slot's tag (t3:dock/<slot id>). Kept per
++// project or everywhere, it carries the scope's tag too (t3:project/<id>,
++// t3:global), and moves to the thread whose dock key or button asks for it
++// (releaseTab, then an import there). A page's new tab starts with its
++// opener's tags, but not its slot: that comes off again.
+ import type {
+   DesktopPreviewBridge,
+   DesktopPreviewNavStatus,
+@@ -33,7 +35,7 @@ import type {
+   DesktopPreviewTabState,
+ } from "@t3tools/contracts";
+ 
+-import { isDockScopeTag, threadIdOfTag, threadTag } from "./threadTag";
++import { isDockScopeTag, isDockSlotTag, threadIdOfTag, threadTag } from "./threadTag";
+ import { plutoniumShell } from "./windowStore";
+ 
+ /** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
+@@ -173,6 +175,8 @@ class PlutoniumPreview {
+    * tab, and the server's preview tab id once known (any new one otherwise).
+    */
+   private readonly imports = new Map<string, { tabId: number; serverTabId: string | null }>();
++  /** Tabs a page opened whose inherited dock slot tags were looked at. */
++  private readonly unslotted = new Set<number>();
+   private elsewhereTabs: readonly BrokerTab[] = [];
+   private allTabs: readonly BrokerTab[] = [];
+ 
+@@ -187,6 +191,7 @@ class PlutoniumPreview {
+     broker.addEventListener("tabremoved", (event) => {
+       const { tabId } = event as BrowserTabEvent;
+       this.tabs.delete(tabId);
++      this.unslotted.delete(tabId);
+       this.pendingPopups.delete(tabId);
+       this.dropWaitingPopup(tabId);
+       const openerId = this.popupOpeners.get(tabId);
+@@ -220,6 +225,7 @@ class PlutoniumPreview {
+ 
+   private update(entry: BrokerTab): void {
+     this.tabs.set(entry.id, entry);
++    this.dropInheritedSlots(entry);
+     // What a preview's page opens becomes another preview tab of its thread.
+     const opener =
+       entry.openedBy === "page"
+@@ -259,6 +265,24 @@ class PlutoniumPreview {
+     this.notifyTabs();
+   }
+ 
++  /**
++   * A page's new tab starts with its opener's tags, a dock slot's among them;
++   * it isn't the slot's (only what was put in the slot is). Looked at once,
++   * when the tab first shows up, so the tab can be put in a slot itself.
++   */
++  private dropInheritedSlots(entry: BrokerTab): void {
++    if (entry.openedBy !== "page" || this.unslotted.has(entry.id)) return;
++    this.unslotted.add(entry.id);
++    const opener = this.tabs.get(entry.openerId);
++    if (!opener) return;
++    const inherited = tabTags(entry).filter(
++      (tag) => isDockSlotTag(tag) && tabTags(opener).includes(tag),
++    );
++    if (inherited.length > 0) {
++      void this.broker.updateTabTags?.(entry.id, [], inherited).catch(() => {});
++    }
++  }
++
+   /**
+    * Runs `run` in one shell page only: every page that shows a tab sees what
+    * happens to it, and each would otherwise open (or close) a preview tab.
+@@ -351,9 +375,23 @@ class PlutoniumPreview {
+       : null;
+   }
+ 
+-  /** A new tab at `url` for a dock slot, tagged with its scope's `tag` (shown by none yet). */
+-  createDockTab(url: string, tag: string): Promise<BrokerTab> {
+-    return this.broker.createTab(url, tag);
++  /**
++   * A new tab at `url` for a dock slot, its origin its scope's `tag`, and
++   * tagged `slotTag` (shown by none yet).
++   */
++  async createDockTab(url: string, tag: string, slotTag: string): Promise<BrokerTab> {
++    const tab = await this.broker.createTab(url, tag);
++    try {
++      if (!this.broker.updateTabTags) throw new Error("This browser has no tab tags");
++      await this.broker.updateTabTags(tab.id, [slotTag]);
++    } catch (error) {
++      this.broker.tabCommand(tab.id, "close");
++      throw error;
++    }
++    const entry = this.tabs.get(tab.id) ?? tab;
++    return tabTags(entry).includes(slotTag)
++      ? entry
++      : { ...entry, tags: [...tabTags(entry), slotTag] };
+   }
+ 
+   /**
+diff --git a/apps/web/src/plutonium/threadTag.ts b/apps/web/src/plutonium/threadTag.ts
+index 095df91153..10b488e399 100644
+--- a/apps/web/src/plutonium/threadTag.ts
++++ b/apps/web/src/plutonium/threadTag.ts
+@@ -27,3 +27,15 @@ export const GLOBAL_TAG = "t3:global";
+ export function isDockScopeTag(tag: string): boolean {
+   return tag === GLOBAL_TAG || tag.startsWith("t3:project/");
+ }
++
++const DOCK_SLOT_TAG_PREFIX = "t3:dock/";
++
++/** The tag of the one window or tab a dock slot holds (in each of its scopes). */
++export function dockSlotTag(slotId: string): string {
++  return `${DOCK_SLOT_TAG_PREFIX}${slotId}`;
++}
++
++/** Whether `tag` marks something a dock slot holds. */
++export function isDockSlotTag(tag: string): boolean {
++  return tag.startsWith(DOCK_SLOT_TAG_PREFIX);
++}
