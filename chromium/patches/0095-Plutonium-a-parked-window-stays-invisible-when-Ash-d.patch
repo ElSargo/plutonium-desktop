@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 1 Nov 2026 18:14:26 +1300
+Subject: [PATCH 95/95] Plutonium: a parked window stays invisible when Ash
+ demotes it
+
+A parked window is hidden by its layer's opacity alone, and floats above
+normal windows (for its popups). When a window goes fullscreen on its
+display, as a shell's window does when the shell is turned on again,
+WorkspaceLayoutManager::UpdateAlwaysOnTop() demotes floating windows with
+WindowState::DisableZOrdering(), which hides and shows each one. The show
+animation ends at opacity 1, so every parked window there was drawn as
+itself above the shells: square, at its element's last place, taking no
+input, and left there when its element moved or went away. Parked windows,
+and hidden popups (hidden the same way), have kAnimationsDisabledKey until
+they are shown again.
+
+WaylandDmabufFeedbackManager::MaybeResendFeedback() cleared a scanout
+candidate's scanout tranche on a display change without checking it had
+one; a display with no scanout formats gives none (a window first shown
+on the second display of an X11-hosted session DCHECKed).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ components/exo/shell_surface_base.cc          | 20 +++++++++++++++++++
+ components/exo/shell_surface_base.h           |  2 ++
+ components/exo/shell_surface_unittest.cc      | 19 ++++++++++++++++++
+ .../wayland_dmabuf_feedback_manager.cc        |  7 +++++--
+ 4 files changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/components/exo/shell_surface_base.cc b/components/exo/shell_surface_base.cc
+index ad23ddc0d3..078ed11dbb 100644
+--- a/components/exo/shell_surface_base.cc
++++ b/components/exo/shell_surface_base.cc
+@@ -2706,6 +2706,14 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     if (frame_type_ != SurfaceFrameType::NONE) {
+       OnSetFrame(SurfaceFrameType::NONE);
+     }
++    // EXO-DISPLAYS: opacity 0 is all that hides it, and a show animation
++    // ends at opacity 1. Ash hides and shows a floating window to demote it
++    // when a window goes fullscreen on its display (a shell's window opening
++    // there): it would then be drawn above the page, square and taking no
++    // input. No animations while parked.
++    embed_saved_animations_disabled_ =
++        window->GetProperty(aura::client::kAnimationsDisabledKey);
++    window->SetProperty(aura::client::kAnimationsDisabledKey, true);
+     // Popups go into their parent's container, so park above normal windows
+     // for them to show above the page.
+     embed_saved_z_order_ = widget_->GetZOrderLevel();
+@@ -2723,6 +2731,8 @@ void ShellSurfaceBase::SetEmbedParked(bool parked) {
+     const gfx::Rect bounds(embed_saved_origin_,
+                            widget_->GetWindowBoundsInScreen().size());
+     window->layer()->SetOpacity(1.f);
++    window->SetProperty(aura::client::kAnimationsDisabledKey,
++                        embed_saved_animations_disabled_);
+     window->SetEventTargetingPolicy(
+         aura::EventTargetingPolicy::kTargetAndDescendants);
+     if (auto* window_state = ash::WindowState::Get(window)) {
+@@ -2838,6 +2848,16 @@ void ShellSurfaceBase::SetEmbedPopupHidden(bool hidden) {
+   }
+   embed_popup_hidden_ = hidden;
+   aura::Window* window = widget_->GetNativeWindow();
++  // EXO-DISPLAYS: as a parked window (SetEmbedParked()), a show animation
++  // mustn't make it opaque.
++  if (hidden) {
++    embed_popup_saved_animations_disabled_ =
++        window->GetProperty(aura::client::kAnimationsDisabledKey);
++    window->SetProperty(aura::client::kAnimationsDisabledKey, true);
++  } else {
++    window->SetProperty(aura::client::kAnimationsDisabledKey,
++                        embed_popup_saved_animations_disabled_);
++  }
+   window->layer()->SetOpacity(hidden ? 0.f : 1.f);
+   window->SetEventTargetingPolicy(
+       hidden ? aura::EventTargetingPolicy::kNone
+diff --git a/components/exo/shell_surface_base.h b/components/exo/shell_surface_base.h
+index 30dd7e74c5..0c391175f4 100644
+--- a/components/exo/shell_surface_base.h
++++ b/components/exo/shell_surface_base.h
+@@ -689,6 +689,7 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   // For a popup: hides it (see SetEmbedShown()) or shows it again.
+   void SetEmbedPopupHidden(bool hidden);
+   bool embed_popup_hidden_ = false;
++  bool embed_popup_saved_animations_disabled_ = false;
+   // EXO-FULLSCREEN: see SetEmbedFullscreen().
+   bool embed_fullscreen_ = false;
+   bool embed_fullscreen_requested_ = false;
+@@ -699,6 +700,7 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+   bool modal_to_parent_ = false;
+   bool embed_saved_can_activate_ = true;
+   ui::ZOrderLevel embed_saved_z_order_ = ui::ZOrderLevel::kNormal;
++  bool embed_saved_animations_disabled_ = false;
+   // Where the window was before it was parked; it goes back there.
+   gfx::Point embed_saved_origin_;
+   // Whether the page shows the parked window at the display's full size. The
+diff --git a/components/exo/shell_surface_unittest.cc b/components/exo/shell_surface_unittest.cc
+index 4fdb5107f4..060230d405 100644
+--- a/components/exo/shell_surface_unittest.cc
++++ b/components/exo/shell_surface_unittest.cc
+@@ -5765,6 +5765,25 @@ TEST_F(ShellSurfaceTest, EmbedParkedIgnoresClientStateRequests) {
+   EXPECT_FALSE(shell_surface->StartMove());
+ }
+ 
++// EXO-DISPLAYS: a parked window stays invisible when Ash hides and shows it,
++// as it does to demote floating windows when a window goes fullscreen on
++// their display (a shell's window opening there).
++TEST_F(ShellSurfaceTest, EmbedParkedStaysInvisibleWhenDemoted) {
++  auto shell_surface =
++      test::ShellSurfaceBuilder({256, 256}).BuildShellSurface();
++  aura::Window* window = shell_surface->GetWidget()->GetNativeWindow();
++  shell_surface->SetEmbedParked(true);
++  ASSERT_EQ(0.f, window->layer()->GetTargetOpacity());
++
++  ash::WindowState::Get(window)->DisableZOrdering(nullptr);
++  EXPECT_TRUE(window->IsVisible());
++  EXPECT_EQ(0.f, window->layer()->GetTargetOpacity());
++
++  shell_surface->SetEmbedParked(false);
++  EXPECT_EQ(1.f, window->layer()->GetTargetOpacity());
++  EXPECT_FALSE(window->GetProperty(aura::client::kAnimationsDisabledKey));
++}
++
+ // EXO-EMBED: the page showing a parked window floating, or no longer
+ // floating, configures it again (the client is told whether it is tiled).
+ TEST_F(ShellSurfaceTest, EmbedParkedFloatingConfigures) {
+diff --git a/components/exo/wayland/wayland_dmabuf_feedback_manager.cc b/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
+index 7524b7c721..19e2964f3e 100644
+--- a/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
++++ b/components/exo/wayland/wayland_dmabuf_feedback_manager.cc
+@@ -549,8 +549,11 @@ void WaylandDmabufFeedbackManager::MaybeResendFeedback(Surface* surface) {
+   const auto& surface_feedback = surface_feedbacks_[surface];
+   auto* feedback = surface_feedback->GetFeedback();
+   // PLUTONIUM (EXO-DISPLAYS): an embedded window that is a scanout candidate
+-  // moves between displays: its old display's tranche goes first.
+-  feedback->ClearScanoutTranche();
++  // moves between displays: its old display's tranche goes first (if it had
++  // one: a display without scanout formats gives none).
++  if (feedback->GetScanoutTranche()) {
++    feedback->ClearScanoutTranche();
++  }
+   feedback->MaybeAddScanoutTranche(surface);
+ 
+   for (WaylandDmabufSurfaceFeedbackResourceWrapper* feedback_ref :
