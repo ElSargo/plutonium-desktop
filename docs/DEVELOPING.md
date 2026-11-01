@@ -101,10 +101,10 @@ It's made from:
 
 ## Putting a change on your own desktop
 
-The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. The bundle tooling (`dev/bundle/`, `--official`) is still on the core-split branch: these steps use its snapshot worktree, `.worktrees/bundle/core-split-main`, with `main` merged in. From a T3 thread, run them with a clean environment: the thread's names the live session's helper, profile and shells.
+The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. These steps run in the main checkout, on `main`: the bundle is made from its commit. From a T3 thread, run them with a clean environment: the thread's names the live session's helper, profile and shells.
 
 ```
-R=~/projects/plutonium-desktop B=$R/.worktrees/bundle/core-split-main S=~/chromium/src
+R=~/projects/plutonium-desktop S=~/chromium/src
 E="env -i HOME=$HOME USER=$USER PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) LANG=C.UTF-8"
 
 # 1. The patch: commit in the Chromium checkout, export, merge into main.
@@ -112,8 +112,9 @@ git -C $S commit …                                   # branch plutonium; a new
 cd $R/.worktrees/<branch> && $E bin/plutonium chromium export
 git add chromium/patches docs … && git commit …      # then, in $R: git merge --no-ff <branch>
 
-# 2. The bundle worktree takes main first (its patches name the build).
-cd $B && git merge main
+# 2. The Chromium checkout at main's series: the branch's commits on plutonium
+#    (git -C $S merge --ff-only <commit> if they were made in another checkout).
+cd $R
 
 # 3. The official (LTO) build, of the Chromium checkout as it is. A change to
 #    one component is a few minutes, mostly the link. It doesn't label
@@ -129,7 +130,7 @@ $E bin/plutonium bundle build --chrome-out $S/out/Official   # → dist/plutoniu
 # 5. Install and restart, as one detached unit (below).
 systemd-run --user --unit=plutonium-redeploy --collect \
   --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin \
-  $R/tools/redeploy.sh $B/dist/plutonium-<version>-x86_64.tar.xz $B/dev/bundle/install.sh tty2
+  $R/tools/redeploy.sh $R/dist/plutonium-<version>-x86_64.tar.xz $R/dev/bundle/install.sh tty2
 ```
 
 **Step 5.** The installer refuses while a session runs from `/opt/plutonium`, so `tools/redeploy.sh` stops the DRM session, installs, and starts it again with `plutonium run --vt tty2` (`tty2`: the console you're logged in on), even if the install failed. As a transient unit it outlives the session it stops, and so an agent in one of that session's threads; the agent's turn is cut, and T3 continues it once the session is back. The session then runs in the unit rather than in the console's shell; `plutonium stop` ends it as usual. Its log: `journalctl --user -u plutonium-redeploy` and `~/.local/share/plutonium/logs/redeploy.log`. `plutonium status` names the release afterwards.
