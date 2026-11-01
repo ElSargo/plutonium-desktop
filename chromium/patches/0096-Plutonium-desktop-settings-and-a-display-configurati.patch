@@ -42,18 +42,18 @@ and change the configuration.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  chrome/browser/devtools/cros_protocol.pdl     |   22 +
- .../devtools/protocol/plutonium_handler.cc    |   45 +
+ .../devtools/protocol/plutonium_handler.cc    |   47 +
  .../devtools/protocol/plutonium_handler.h     |   15 +-
  chrome/browser/plutonium_shells.h             |    9 +
  .../browser/ui/ash/main_extra_parts/BUILD.gn  |    3 +
- .../plutonium_display_config.cc               |  633 +++++
+ .../plutonium_display_config.cc               |  680 +++++
  .../plutonium_display_config.h                |   98 +
- .../main_extra_parts/plutonium_lock_impl.cc   |    8 +-
- .../ash/main_extra_parts/plutonium_overlay.cc | 2278 ++++++++++++++++-
+ .../main_extra_parts/plutonium_lock_impl.cc   |   10 +-
+ .../ash/main_extra_parts/plutonium_overlay.cc | 2255 ++++++++++++++++-
  .../ash/main_extra_parts/plutonium_overlay.h  |    9 +
- .../main_extra_parts/plutonium_shells_impl.cc |   29 +
+ .../main_extra_parts/plutonium_shells_impl.cc |   39 +-
  .../main_extra_parts/plutonium_shells_impl.h  |    6 +
- 12 files changed, 3085 insertions(+), 70 deletions(-)
+ 12 files changed, 3116 insertions(+), 77 deletions(-)
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.cc
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.h
 
@@ -91,7 +91,7 @@ index c5cfba5e35..3c2d18d12f 100644
    # captureWindow image's pixels divided by deviceScaleFactor). Neither the
    # user's pointer nor the keyboard focus moves.
 diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
-index f4784b1421..2d7b769995 100644
+index f4784b1421..03a471ba33 100644
 --- a/chrome/browser/devtools/protocol/plutonium_handler.cc
 +++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
 @@ -225,6 +225,10 @@ Response PlutoniumHandler::Enable() {
@@ -113,15 +113,16 @@ index f4784b1421..2d7b769995 100644
    media_session_.reset();
    notifications_.reset();
    screencasts_.clear();
-@@ -989,6 +994,46 @@ void PlutoniumHandler::OnLockChanged(bool locked) {
+@@ -989,6 +994,48 @@ void PlutoniumHandler::OnLockChanged(bool locked) {
    frontend_->LockChanged(locked);
  }
  
 +Response PlutoniumHandler::GetDisplayConfig(std::string* json) {
 +  PlutoniumShells* shells = PlutoniumShells::Get();
 +  if (!shells) {
-+    return Response::ServerError("There are displays to configure only in "
-+                                 "shell mode.");
++    return Response::ServerError(
++        "There are displays to configure only in "
++        "shell mode.");
 +  }
 +  *json = shells->GetDisplayConfigJson();
 +  return Response::Success();
@@ -130,8 +131,9 @@ index f4784b1421..2d7b769995 100644
 +Response PlutoniumHandler::ConfigureDisplays(const std::string& change_json) {
 +  PlutoniumShells* shells = PlutoniumShells::Get();
 +  if (!shells) {
-+    return Response::ServerError("There are displays to configure only in "
-+                                 "shell mode.");
++    return Response::ServerError(
++        "There are displays to configure only in "
++        "shell mode.");
 +  }
 +  const std::string error = shells->ConfigureDisplays(change_json);
 +  return error.empty() ? Response::Success() : Response::InvalidParams(error);
@@ -257,10 +259,10 @@ index b8e768adb4..17b1f2a643 100644
      "//ui/views",
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.cc
 new file mode 100644
-index 0000000000..ebc3b74096
+index 0000000000..a09b01d05b
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.cc
-@@ -0,0 +1,633 @@
+@@ -0,0 +1,680 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -307,6 +309,10 @@ index 0000000000..ebc3b74096
 +display::DisplayManager* Manager() {
 +  return ash::Shell::Get()->display_manager();
 +}
++
++// How far (DIPs) an edge may be from lining up with another's and still be
++// taken as lined up.
++constexpr int kSnap = 48;
 +
 +bool IsDrm() {
 +  return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
@@ -410,8 +416,8 @@ index 0000000000..ebc3b74096
 +  entry.Set("id", IdString(id));
 +  entry.Set("index", indices.contains(id) ? indices[id] : 0);
 +  entry.Set("name", manager->GetDisplayNameForId(id));
-+  entry.Set("internal", display ? display->IsInternal()
-+                                : display::IsInternalDisplayId(id));
++  entry.Set("internal",
++            display ? display->IsInternal() : display::IsInternalDisplayId(id));
 +  entry.Set("primary",
 +            display && id == display::Screen::Get()->GetPrimaryDisplay().id());
 +  entry.Set("enabled", enabled);
@@ -474,8 +480,7 @@ index 0000000000..ebc3b74096
 +  display::DisplayManager* manager = Manager();
 +  const display::DisplayIdList connected = manager->GetConnectedDisplayIdList();
 +  std::set<int64_t> listed;
-+  std::vector<display::Display> all =
-+      display::Screen::Get()->GetAllDisplays();
++  std::vector<display::Display> all = display::Screen::Get()->GetAllDisplays();
 +  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
 +    // In the shells' order ("display 1" first).
 +    std::vector<display::Display> sorted;
@@ -640,10 +645,10 @@ index 0000000000..ebc3b74096
 +        best = &candidate;
 +        continue;
 +      }
-+      const bool closer =
-+          refresh ? std::abs(candidate.refresh_rate() - *refresh) <
-+                        std::abs(best->refresh_rate() - *refresh)
-+                  : candidate.refresh_rate() > best->refresh_rate();
++      const bool closer = refresh
++                              ? std::abs(candidate.refresh_rate() - *refresh) <
++                                    std::abs(best->refresh_rate() - *refresh)
++                              : candidate.refresh_rate() > best->refresh_rate();
 +      if (closer) {
 +        best = &candidate;
 +      }
@@ -665,17 +670,27 @@ index 0000000000..ebc3b74096
 +  }
 +  // kPolicy: no notification to confirm the mode (shell mode never shows
 +  // Ash's); |confirm| is this class's own.
-+  const ash::DisplayConfigResult result =
++  ash::DisplayConfigResult result =
 +      ash::Shell::Get()->cros_display_config()->SetDisplayProperties(
 +          *id, properties, ash::DisplayConfigSource::kPolicy);
++  // DisplayManager::SetDisplayMode() says no when the mode it was given
++  // matches the display's native bounds, though it took it: an X11 host
++  // window, whose size never follows its mode, going back to that size.
++  if (result == ash::DisplayConfigResult::kSetDisplayModeError &&
++      properties.display_mode) {
++    display::ManagedDisplayMode active;
++    if (manager->GetActiveModeForDisplayId(*id, &active) &&
++        active.IsEquivalent(*properties.display_mode)) {
++      result = ash::DisplayConfigResult::kSuccess;
++    }
++  }
 +  if (result != ash::DisplayConfigResult::kSuccess) {
 +    return ResultText(result);
 +  }
 +  LOG(WARNING) << "EXO-DISPLAYS configured display " << *id;
 +  if (confirm && !what.empty()) {
 +    std::u16string name = base::UTF8ToUTF16(manager->GetDisplayNameForId(*id));
-+    SetPending(base::JoinString(what, u", ") + u" of " + name,
-+               std::move(undo));
++    SetPending(base::JoinString(what, u", ") + u" of " + name, std::move(undo));
 +  }
 +  return std::string();
 +}
@@ -729,11 +744,46 @@ index 0000000000..ebc3b74096
 +        }
 +      }
 +    }
-+    const display::DisplayPlacement placement =
++    display::DisplayPlacement placement =
 +        display::DisplayLayout::CreatePlacementForRectangles(rects[parent],
 +                                                             rects[best]);
++    // A drag's few pixels off an edge line up: the start edges, or the end
++    // edges (a display moved by hand is rarely exact).
++    const bool beside = placement.position == display::DisplayPlacement::LEFT ||
++                        placement.position == display::DisplayPlacement::RIGHT;
++    const int end_aligned = beside
++                                ? rects[parent].height() - rects[best].height()
++                                : rects[parent].width() - rects[best].width();
++    if (std::abs(placement.offset) <= kSnap) {
++      placement.offset = 0;
++    } else if (std::abs(placement.offset - end_aligned) <= kSnap) {
++      placement.offset = end_aligned;
++    }
 +    builder.AddDisplayPlacement(best, parent, placement.position,
 +                                placement.offset);
++    // The rest are placed against where this one ends up.
++    gfx::Rect placed_rect = rects[best];
++    switch (placement.position) {
++      case display::DisplayPlacement::LEFT:
++        placed_rect.set_origin(
++            gfx::Point(rects[parent].x() - placed_rect.width(),
++                       rects[parent].y() + placement.offset));
++        break;
++      case display::DisplayPlacement::RIGHT:
++        placed_rect.set_origin(gfx::Point(
++            rects[parent].right(), rects[parent].y() + placement.offset));
++        break;
++      case display::DisplayPlacement::TOP:
++        placed_rect.set_origin(
++            gfx::Point(rects[parent].x() + placement.offset,
++                       rects[parent].y() - placed_rect.height()));
++        break;
++      case display::DisplayPlacement::BOTTOM:
++        placed_rect.set_origin(gfx::Point(rects[parent].x() + placement.offset,
++                                          rects[parent].bottom()));
++        break;
++    }
++    rects[best] = placed_rect;
 +    placed.insert(best);
 +  }
 +  std::unique_ptr<display::DisplayLayout> built = builder.Build();
@@ -820,9 +870,9 @@ index 0000000000..ebc3b74096
 +      chromeos::DISPLAY_POWER_INTERNAL_OFF_EXTERNAL_ON,
 +      display::DisplayConfigurator::kSetDisplayPowerNoFlags, base::DoNothing());
 +  if (confirm) {
-+    SetPending(u"The built-in display off", base::DictValue()
-+                                                .Set("display", IdString(id))
-+                                                .Set("enabled", true));
++    SetPending(
++        u"The built-in display off",
++        base::DictValue().Set("display", IdString(id)).Set("enabled", true));
 +  }
 +  return std::string();
 +}
@@ -855,8 +905,7 @@ index 0000000000..ebc3b74096
 +  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
 +      FROM_HERE, base::BindOnce([]() {
 +        PlutoniumDisplayConfig* config = PlutoniumDisplayConfig::Get();
-+        if (!config || !config->internal_off_ ||
-+            !ash::Shell::HasInstance()) {
++        if (!config || !config->internal_off_ || !ash::Shell::HasInstance()) {
 +          return;
 +        }
 +        for (const display::Display& display :
@@ -999,11 +1048,16 @@ index 0000000000..4b0c0c32a1
 +
 +#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_DISPLAY_CONFIG_H_
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
-index d6cd682059..b61db12a71 100644
+index d6cd682059..913c0ac7f7 100644
 --- a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
-@@ -19,6 +19,7 @@
+@@ -15,10 +15,11 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/i18n/time_formatting.h"
+ #include "base/logging.h"
+-#include "base/strings/string_number_conversions.h"
  #include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
  #include "base/strings/utf_string_conversions.h"
  #include "base/task/single_thread_task_runner.h"
 +#include "chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.h"
@@ -1026,7 +1080,7 @@ index d6cd682059..b61db12a71 100644
          base::DoNothing());
    }
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
-index c36c98eeda..e8d8e02270 100644
+index c36c98eeda..882f9eeead 100644
 --- a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
 @@ -5,6 +5,8 @@
@@ -1038,14 +1092,22 @@ index c36c98eeda..e8d8e02270 100644
  #include <map>
  #include <string>
  #include <utility>
-@@ -15,6 +17,7 @@
+@@ -14,13 +16,14 @@
+ #include "ash/shell.h"
  #include "base/command_line.h"
  #include "base/functional/bind.h"
++#include "base/json/json_writer.h"
  #include "base/logging.h"
 +#include "base/no_destructor.h"
  #include "base/strings/strcat.h"
  #include "base/strings/string_number_conversions.h"
  #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+-#include "base/json/json_writer.h"
+ #include "base/timer/timer.h"
+ #include "chrome/browser/devtools/devtools_window.h"
+ #include "chrome/browser/exo_embedder.h"
 @@ -30,6 +33,7 @@
  #include "chrome/browser/plutonium_shells.h"
  #include "chrome/browser/plutonium_tabs.h"
@@ -1072,8 +1134,8 @@ index c36c98eeda..e8d8e02270 100644
  #include "ui/gfx/geometry/rect.h"
 +#include "ui/gfx/geometry/rect_conversions.h"
 +#include "ui/gfx/geometry/rect_f.h"
-+#include "ui/gfx/geometry/vector2d_f.h"
  #include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/vector2d_f.h"
  #include "ui/gfx/image/image_skia.h"
 +#include "ui/views/accessibility/view_accessibility.h"
  #include "ui/views/background.h"
@@ -1272,7 +1334,7 @@ index c36c98eeda..e8d8e02270 100644
 +        canvas->DrawRoundRect(rect, 8, stroke);
 +      }
 +      const gfx::Rect box = gfx::ToEnclosedRect(rect);
-+      const bool room = box.height() >= 78;
++      const bool room = box.height() >= 78 && box.width() >= 150;
 +      gfx::Rect number = box;
 +      if (room) {
 +        number.set_height(box.height() / 2 + 6);
@@ -1419,7 +1481,7 @@ index c36c98eeda..e8d8e02270 100644
        } else {
          SubmitForm();
        }
-@@ -564,6 +874,23 @@ class PlutoniumOverlayView : public views::View,
+@@ -564,6 +874,22 @@ class PlutoniumOverlayView : public views::View,
    void OnTabRemoved(int32_t) override { RebuildSoon(); }
    void OnGroupsChanged() override { RebuildSoon(); }
    void OnShellsChanged() override { RebuildSoon(); }
@@ -1429,21 +1491,20 @@ index c36c98eeda..e8d8e02270 100644
 +    RebuildSoon();
 +    // Not from inside the display change.
 +    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-+        FROM_HERE,
-+        base::BindOnce(
-+            [](base::WeakPtr<PlutoniumOverlayView> view) {
-+              if (view) {
-+                view->overlay_->Recenter();
-+              }
-+            },
-+            weak_ptr_factory_.GetWeakPtr()));
++        FROM_HERE, base::BindOnce(
++                       [](base::WeakPtr<PlutoniumOverlayView> view) {
++                         if (view) {
++                           view->overlay_->Recenter();
++                         }
++                       },
++                       weak_ptr_factory_.GetWeakPtr()));
 +  }
 +
 +  bool SelectSettingsPage(const std::string& page) { return SelectPage(page); }
  
   private:
    // Lists.
-@@ -611,6 +938,14 @@ class PlutoniumOverlayView : public views::View,
+@@ -611,6 +937,14 @@ class PlutoniumOverlayView : public views::View,
        RebuildSoon();
      }
      LoadPackages();
@@ -1458,7 +1519,7 @@ index c36c98eeda..e8d8e02270 100644
    }
  
    // The helper's installed shells (GET /v1/shells): their folders, servers
-@@ -863,6 +1198,7 @@ class PlutoniumOverlayView : public views::View,
+@@ -863,6 +1197,7 @@ class PlutoniumOverlayView : public views::View,
        row.dot = built_in.open ? kOk : 0;
        rows_.push_back(row);
      }
@@ -1466,7 +1527,7 @@ index c36c98eeda..e8d8e02270 100644
    }
  
    void BuildWindowRows() {
-@@ -1081,6 +1417,15 @@ class PlutoniumOverlayView : public views::View,
+@@ -1081,6 +1416,15 @@ class PlutoniumOverlayView : public views::View,
          case Row::Kind::kTab:
            keys = u"Enter fullscreen   Ctrl+W close   " + keys;
            break;
@@ -1482,7 +1543,7 @@ index c36c98eeda..e8d8e02270 100644
          case Row::Kind::kHeader:
            break;
        }
-@@ -1182,6 +1527,15 @@ class PlutoniumOverlayView : public views::View,
+@@ -1182,6 +1526,15 @@ class PlutoniumOverlayView : public views::View,
        case Row::Kind::kTab:
          PresentTab(row->id);
          return;
@@ -1498,7 +1559,7 @@ index c36c98eeda..e8d8e02270 100644
        case Row::Kind::kHeader:
          return;
      }
-@@ -1450,6 +1804,15 @@ class PlutoniumOverlayView : public views::View,
+@@ -1450,6 +1803,15 @@ class PlutoniumOverlayView : public views::View,
          // Not the apps: their list updates by itself (UpdateAppList()).
          signature += overlay_->IsLaunching() ? "w" : "";
          break;
@@ -1514,7 +1575,7 @@ index c36c98eeda..e8d8e02270 100644
        case Row::Kind::kAddShell:
        case Row::Kind::kHeader:
          break;
-@@ -1474,10 +1837,20 @@ class PlutoniumOverlayView : public views::View,
+@@ -1474,10 +1836,20 @@ class PlutoniumOverlayView : public views::View,
      const bool focus_name = same && name_field_ && name_field_->HasFocus();
      const bool focus_url = same && url_field_ && url_field_->HasFocus();
      const bool focus_filter = same && app_filter_ && app_filter_->HasFocus();
@@ -1535,7 +1596,7 @@ index c36c98eeda..e8d8e02270 100644
      page_key_ = key;
      page_signature_ = signature;
      name_field_ = nullptr;
-@@ -1509,6 +1882,27 @@ class PlutoniumOverlayView : public views::View,
+@@ -1509,6 +1881,27 @@ class PlutoniumOverlayView : public views::View,
          case Row::Kind::kTab:
            BuildTabPage(row->id, !same);
            break;
@@ -1563,7 +1624,7 @@ index c36c98eeda..e8d8e02270 100644
          case Row::Kind::kHeader:
            break;
        }
-@@ -1531,6 +1925,12 @@ class PlutoniumOverlayView : public views::View,
+@@ -1531,6 +1924,12 @@ class PlutoniumOverlayView : public views::View,
        } else if (focus_filter && app_filter_) {
          app_filter_->RequestFocus();
        }
@@ -1576,7 +1637,7 @@ index c36c98eeda..e8d8e02270 100644
      }
      SizeContents(page_scroll_, 600);
      if (!same) {
-@@ -1592,7 +1992,7 @@ class PlutoniumOverlayView : public views::View,
+@@ -1592,7 +1991,7 @@ class PlutoniumOverlayView : public views::View,
    template <typename Method, typename... Args>
    base::RepeatingClosure Bind(Method method, Args... args) {
      return base::BindRepeating(method, weak_ptr_factory_.GetWeakPtr(),
@@ -1585,7 +1646,7 @@ index c36c98eeda..e8d8e02270 100644
    }
  
    void AddField(views::View* parent,
-@@ -2576,84 +2976,1826 @@ class PlutoniumOverlayView : public views::View,
+@@ -2576,84 +2975,1802 @@ class PlutoniumOverlayView : public views::View,
                                         DevToolsOpenedByAction::kUnknown);
    }
  
@@ -1669,10 +1730,9 @@ index c36c98eeda..e8d8e02270 100644
 +      return;
 +    }
 +    services_loading_ = true;
-+    plutonium_helper::Get(
-+        "/v1/system/services",
-+        base::BindOnce(&PlutoniumOverlayView::OnServices,
-+                       weak_ptr_factory_.GetWeakPtr()));
++    plutonium_helper::Get("/v1/system/services",
++                          base::BindOnce(&PlutoniumOverlayView::OnServices,
++                                         weak_ptr_factory_.GetWeakPtr()));
 +  }
  
 -BEGIN_METADATA(PlutoniumOverlayView)
@@ -1855,8 +1915,8 @@ index c36c98eeda..e8d8e02270 100644
 +      if (percent < 15 && !charging) {
 +        *dot = kError;
 +      }
-+      return u"Battery " + base::NumberToString16(std::lround(percent)) +
-+             u"%" + (charging ? u"  ·  charging" : u"");
++      return u"Battery " + base::NumberToString16(std::lround(percent)) + u"%" +
++             (charging ? u"  ·  charging" : u"");
 +    }
 +    return u"On mains power";
 +  }
@@ -1873,10 +1933,10 @@ index c36c98eeda..e8d8e02270 100644
 +    if (count) {
 +      *dot = kAccent;
 +    }
-+    std::u16string text = count ? base::NumberToString16(count) +
-+                                      (count == 1 ? u" notification"
-+                                                  : u" notifications")
-+                                : u"None";
++    std::u16string text =
++        count ? base::NumberToString16(count) +
++                    (count == 1 ? u" notification" : u" notifications")
++              : u"None";
 +    return quiet ? text + u"  ·  do not disturb" : text;
 +  }
 +
@@ -1996,10 +2056,9 @@ index c36c98eeda..e8d8e02270 100644
 +  }
 +
 +  std::string SettingsSignature(Row::Kind kind) const {
-+    std::string signature = confirm_action_ + "|" + password_ssid_ + "|" +
-+                            display_selected_ + "|" +
-+                            base::UTF16ToUTF8(services_error_) +
-+                            (services_loaded_ ? "l" : "");
++    std::string signature =
++        confirm_action_ + "|" + password_ssid_ + "|" + display_selected_ + "|" +
++        base::UTF16ToUTF8(services_error_) + (services_loaded_ ? "l" : "");
 +    auto add = [&](std::string_view name) {
 +      if (const base::Value* state = services_.Find(name)) {
 +        signature += StructureJson(*state);
@@ -2007,9 +2066,8 @@ index c36c98eeda..e8d8e02270 100644
 +    };
 +    switch (kind) {
 +      case Row::Kind::kQuickSettings:
-+        for (const char* name :
-+             {"network", "bluetooth", "audio", "power", "media",
-+              "notifications", "session"}) {
++        for (const char* name : {"network", "bluetooth", "audio", "power",
++                                 "media", "notifications", "session"}) {
 +          add(name);
 +        }
 +        break;
@@ -2068,24 +2126,25 @@ index c36c98eeda..e8d8e02270 100644
 +
 +  // A slider for a service's level: |read| gives it from the state, and a
 +  // move sends |action| with the value as |key| (values are slider × |scale|).
-+  views::Slider* AddSlider(views::View* parent,
-+                           const std::u16string& label,
-+                           const std::string& service,
-+                           const std::string& action,
-+                           const std::string& key,
-+                           base::DictValue args,
-+                           base::RepeatingCallback<std::optional<double>()> read,
-+                           double scale = 1.0) {
++  views::Slider* AddSlider(
++      views::View* parent,
++      const std::u16string& label,
++      const std::string& service,
++      const std::string& action,
++      const std::string& key,
++      base::DictValue args,
++      base::RepeatingCallback<std::optional<double>()> read,
++      double scale = 1.0) {
 +    auto* row = AddBox(parent, views::BoxLayout::Orientation::kHorizontal, 12);
 +    views::Label* name = AddLabel(row, label, kDim);
-+    name->SetPreferredSize(gfx::Size(
-+        120, name->GetPreferredSize(views::SizeBounds()).height()));
++    name->SetPreferredSize(
++        gfx::Size(120, name->GetPreferredSize(views::SizeBounds()).height()));
 +    auto* slider = row->AddChildView(std::make_unique<views::Slider>(this));
 +    slider->SetPreferredSize(gfx::Size(340, 28));
 +    slider->GetViewAccessibility().SetName(label);
 +    views::Label* value = AddLabel(row, u"", kTitle);
-+    value->SetPreferredSize(gfx::Size(
-+        52, value->GetPreferredSize(views::SizeBounds()).height()));
++    value->SetPreferredSize(
++        gfx::Size(52, value->GetPreferredSize(views::SizeBounds()).height()));
 +    SliderBinding& binding = sliders_[next_slider_++];
 +    binding.service = service;
 +    binding.action = action;
@@ -2155,10 +2214,10 @@ index c36c98eeda..e8d8e02270 100644
 +    args.Set(binding.key, *binding.queued);
 +    binding.queued.reset();
 +    binding.in_flight = true;
-+    plutonium_helper::Post(
-+        ServicePath(binding.service, binding.action), std::move(args),
-+        base::BindOnce(&PlutoniumOverlayView::OnSliderSent,
-+                       weak_ptr_factory_.GetWeakPtr(), id));
++    plutonium_helper::Post(ServicePath(binding.service, binding.action),
++                           std::move(args),
++                           base::BindOnce(&PlutoniumOverlayView::OnSliderSent,
++                                          weak_ptr_factory_.GetWeakPtr(), id));
 +  }
 +
 +  void OnSliderSent(int id,
@@ -2179,14 +2238,13 @@ index c36c98eeda..e8d8e02270 100644
 +  }
 +
 +  // What reads a level from the state.
-+  base::RepeatingCallback<std::optional<double>()> Reader(
-+      std::string service,
-+      std::string dict,
-+      std::string key) {
++  base::RepeatingCallback<std::optional<double>()> Reader(std::string service,
++                                                          std::string dict,
++                                                          std::string key) {
 +    return base::BindRepeating(
 +        [](base::WeakPtr<PlutoniumOverlayView> view, const std::string& service,
-+           const std::string& dict, const std::string& key)
-+            -> std::optional<double> {
++           const std::string& dict,
++           const std::string& key) -> std::optional<double> {
 +          if (!view) {
 +            return std::nullopt;
 +          }
@@ -2238,12 +2296,12 @@ index c36c98eeda..e8d8e02270 100644
 +    auto* line = AddBox(parent, views::BoxLayout::Orientation::kHorizontal, 8);
 +    AddSlider(line, u"Volume", "audio", "set-volume", "volume",
 +              base::DictValue(), Reader("audio", "", "volume"));
-+    AddButton(line, Bool(audio, "muted") ? u"Unmute" : u"Mute",
-+              Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
-+                   std::string("set-mute"), base::DictValue(),
-+                   std::u16string()),
-+              Bool(audio, "muted") ? ActionButton::Style::kPrimary
-+                                   : ActionButton::Style::kNormal);
++    AddButton(
++        line, Bool(audio, "muted") ? u"Unmute" : u"Mute",
++        Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
++             std::string("set-mute"), base::DictValue(), std::u16string()),
++        Bool(audio, "muted") ? ActionButton::Style::kPrimary
++                             : ActionButton::Style::kNormal);
 +  }
 +
 +  void AddBrightness(views::View* parent) {
@@ -2259,7 +2317,8 @@ index c36c98eeda..e8d8e02270 100644
 +
 +  void AddNowPlaying(views::View* parent) {
 +    const base::DictValue* media = ServiceState("media");
-+    const base::ListValue* players = media ? media->FindList("players") : nullptr;
++    const base::ListValue* players =
++        media ? media->FindList("players") : nullptr;
 +    if (!players || players->empty()) {
 +      return;
 +    }
@@ -2285,8 +2344,7 @@ index c36c98eeda..e8d8e02270 100644
 +              Bind(&PlutoniumOverlayView::CallService, std::string("media"),
 +                   std::string("previous"), args.Clone(), std::u16string()),
 +              ActionButton::Style::kNormal, Bool(player, "canGoPrevious"));
-+    AddButton(controls,
-+              Str(player, "status") == "playing" ? u"Pause" : u"Play",
++    AddButton(controls, Str(player, "status") == "playing" ? u"Pause" : u"Play",
 +              Bind(&PlutoniumOverlayView::CallService, std::string("media"),
 +                   std::string("play-pause"), args.Clone(), std::u16string()),
 +              ActionButton::Style::kPrimary);
@@ -2316,14 +2374,13 @@ index c36c98eeda..e8d8e02270 100644
 +        {"log-out", "logOut", u"Log out"},
 +    };
 +    for (const Action& action : actions) {
-+      AddButton(buttons, ConfirmLabel(action.action, action.label),
-+                Bind(&PlutoniumOverlayView::PowerAction,
-+                     std::string(action.action)),
-+                confirm_action_ == action.action
-+                    ? ActionButton::Style::kDanger
-+                    : ActionButton::Style::kNormal,
-+                Str(can, action.can) == "yes" ||
-+                    std::string_view(action.action) == "log-out");
++      AddButton(
++          buttons, ConfirmLabel(action.action, action.label),
++          Bind(&PlutoniumOverlayView::PowerAction, std::string(action.action)),
++          confirm_action_ == action.action ? ActionButton::Style::kDanger
++                                           : ActionButton::Style::kNormal,
++          Str(can, action.can) == "yes" ||
++              std::string_view(action.action) == "log-out");
 +    }
 +  }
 +
@@ -2354,48 +2411,44 @@ index c36c98eeda..e8d8e02270 100644
 +    if (Bool(wifi, "available")) {
 +      SkColor dot;
 +      const bool on = Bool(wifi, "enabled");
-+      AddButton(toggles,
-+                on ? u"Wi-Fi  ·  " + NetworkSummary(&dot) : u"Wi-Fi  ·  Off",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("network"), std::string("set-wifi"),
-+                     base::DictValue().Set("enabled", !on), std::u16string()),
-+                on ? ActionButton::Style::kPrimary
-+                   : ActionButton::Style::kNormal);
++      AddButton(
++          toggles, on ? u"Wi-Fi  ·  " + NetworkSummary(&dot) : u"Wi-Fi  ·  Off",
++          Bind(&PlutoniumOverlayView::CallService, std::string("network"),
++               std::string("set-wifi"), base::DictValue().Set("enabled", !on),
++               std::u16string()),
++          on ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal);
 +    }
 +    const base::DictValue* bluetooth = ServiceState("bluetooth");
 +    if (const base::DictValue* adapter =
 +            bluetooth ? bluetooth->FindDict("adapter") : nullptr) {
 +      SkColor dot;
 +      const bool on = Bool(adapter, "powered");
-+      AddButton(toggles, u"Bluetooth  ·  " + BluetoothSummary(&dot),
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("bluetooth"), std::string("set-powered"),
-+                     base::DictValue().Set("powered", !on), std::u16string()),
-+                on ? ActionButton::Style::kPrimary
-+                   : ActionButton::Style::kNormal);
++      AddButton(
++          toggles, u"Bluetooth  ·  " + BluetoothSummary(&dot),
++          Bind(&PlutoniumOverlayView::CallService, std::string("bluetooth"),
++               std::string("set-powered"),
++               base::DictValue().Set("powered", !on), std::u16string()),
++          on ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal);
 +    }
-+    if (const base::DictValue* notifications =
-+            ServiceState("notifications")) {
++    if (const base::DictValue* notifications = ServiceState("notifications")) {
 +      const bool on = Bool(notifications, "doNotDisturb");
-+      AddButton(toggles, u"Do not disturb",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("notifications"),
-+                     std::string("set-do-not-disturb"),
-+                     base::DictValue().Set("on", !on), std::u16string()),
-+                on ? ActionButton::Style::kPrimary
-+                   : ActionButton::Style::kNormal);
++      AddButton(
++          toggles, u"Do not disturb",
++          Bind(&PlutoniumOverlayView::CallService, std::string("notifications"),
++               std::string("set-do-not-disturb"),
++               base::DictValue().Set("on", !on), std::u16string()),
++          on ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal);
 +    }
 +    if (const base::DictValue* audio = ServiceState("audio");
 +        audio && Has("audio") && audio->FindDict("input")) {
 +      const base::DictValue* input = audio->FindDict("input");
 +      const bool muted = Bool(input, "muted");
-+      AddButton(toggles, muted ? u"Microphone  ·  Muted" : u"Microphone",
-+                Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
-+                     std::string("set-mute"),
-+                     base::DictValue().Set("device", "input"),
-+                     std::u16string()),
-+                muted ? ActionButton::Style::kNormal
-+                      : ActionButton::Style::kPrimary);
++      AddButton(
++          toggles, muted ? u"Microphone  ·  Muted" : u"Microphone",
++          Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
++               std::string("set-mute"),
++               base::DictValue().Set("device", "input"), std::u16string()),
++          muted ? ActionButton::Style::kNormal : ActionButton::Style::kPrimary);
 +    }
 +
 +    auto* levels = AddSection(u"Levels");
@@ -2436,31 +2489,29 @@ index c36c98eeda..e8d8e02270 100644
 +    AddTitle(u"Wi-Fi and network", summary, dot);
 +    const base::DictValue* net = ServiceState("network");
 +    if (!net || !Has("network")) {
-+      AddNotAvailable(u"NetworkManager isn't running, so there's nothing to "
-+                      u"show or change.");
++      AddNotAvailable(
++          u"NetworkManager isn't running, so there's nothing to "
++          u"show or change.");
 +      return;
 +    }
 +    const base::DictValue* wifi = net->FindDict("wifi");
 +    auto* actions = AddButtons(page_);
 +    if (Bool(wifi, "available")) {
 +      const bool on = Bool(wifi, "enabled");
-+      AddButton(actions, on ? u"Turn Wi-Fi off" : u"Turn Wi-Fi on",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("network"), std::string("set-wifi"),
-+                     base::DictValue().Set("enabled", !on),
-+                     std::u16string(on ? u"Turning Wi-Fi off…"
-+                                       : u"Turning Wi-Fi on…")),
-+                on ? ActionButton::Style::kNormal
-+                   : ActionButton::Style::kPrimary,
-+                Bool(wifi, "hardwareEnabled", true));
++      AddButton(
++          actions, on ? u"Turn Wi-Fi off" : u"Turn Wi-Fi on",
++          Bind(&PlutoniumOverlayView::CallService, std::string("network"),
++               std::string("set-wifi"), base::DictValue().Set("enabled", !on),
++               std::u16string(on ? u"Turning Wi-Fi off…"
++                                 : u"Turning Wi-Fi on…")),
++          on ? ActionButton::Style::kNormal : ActionButton::Style::kPrimary,
++          Bool(wifi, "hardwareEnabled", true));
 +      AddButton(actions,
 +                Bool(wifi, "scanning") ? u"Looking for networks…"
 +                                       : u"Look for networks",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("network"), std::string("scan"),
-+                     base::DictValue(), std::u16string()),
-+                ActionButton::Style::kNormal,
-+                on && !Bool(wifi, "scanning"));
++                Bind(&PlutoniumOverlayView::CallService, std::string("network"),
++                     std::string("scan"), base::DictValue(), std::u16string()),
++                ActionButton::Style::kNormal, on && !Bool(wifi, "scanning"));
 +      if (!Bool(wifi, "hardwareEnabled", true)) {
 +        AddParagraph(page_, u"Wi-Fi is off by the computer's own switch.",
 +                     kWarn);
@@ -2509,15 +2560,14 @@ index c36c98eeda..e8d8e02270 100644
 +      name->SetPreferredSize(
 +          gfx::Size(380, name->GetPreferredSize(views::SizeBounds()).height()));
 +      const std::string id = Str(connection, "id");
-+      AddButton(row, active ? u"Disconnect" : u"Connect",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("network"),
-+                     std::string(active ? "disconnect" : "connect"),
-+                     base::DictValue().Set("id", id),
-+                     std::u16string(active ? u"Disconnecting…"
-+                                           : u"Connecting…")),
-+                active ? ActionButton::Style::kNormal
-+                       : ActionButton::Style::kPrimary);
++      AddButton(
++          row, active ? u"Disconnect" : u"Connect",
++          Bind(&PlutoniumOverlayView::CallService, std::string("network"),
++               std::string(active ? "disconnect" : "connect"),
++               base::DictValue().Set("id", id),
++               std::u16string(active ? u"Disconnecting…" : u"Connecting…")),
++          active ? ActionButton::Style::kNormal
++                 : ActionButton::Style::kPrimary);
 +    }
 +    AddParagraph(page_,
 +                 u"A network that asks for a password later (a changed one, "
@@ -2535,9 +2585,9 @@ index c36c98eeda..e8d8e02270 100644
 +    auto* row = AddButtons(parent);
 +    std::u16string detail = Percent(Num(&point, "strength") / 100.0);
 +    if (Num(&point, "strength") > 1) {
-+      detail = base::NumberToString16(
-+                   static_cast<int>(Num(&point, "strength"))) +
-+               u"%";
++      detail =
++          base::NumberToString16(static_cast<int>(Num(&point, "strength"))) +
++          u"%";
 +    }
 +    detail += secured ? u"  ·  " + U(security) : u"  ·  open";
 +    if (active) {
@@ -2552,9 +2602,8 @@ index c36c98eeda..e8d8e02270 100644
 +        gfx::Size(340, text->GetPreferredSize(views::SizeBounds()).height()));
 +    if (active) {
 +      AddButton(row, u"Disconnect",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("network"), std::string("disconnect"),
-+                     base::DictValue().Set("id", id),
++                Bind(&PlutoniumOverlayView::CallService, std::string("network"),
++                     std::string("disconnect"), base::DictValue().Set("id", id),
 +                     std::u16string(u"Disconnecting…")));
 +    } else if (known || !secured) {
 +      AddButton(row, u"Connect",
@@ -2628,32 +2677,31 @@ index c36c98eeda..e8d8e02270 100644
 +    const base::DictValue* adapter =
 +        bluetooth ? bluetooth->FindDict("adapter") : nullptr;
 +    if (!bluetooth || !Has("bluetooth") || !adapter) {
-+      AddNotAvailable(u"There's no Bluetooth adapter (or BlueZ isn't "
-+                      u"running).");
++      AddNotAvailable(
++          u"There's no Bluetooth adapter (or BlueZ isn't "
++          u"running).");
 +      return;
 +    }
 +    const bool on = Bool(adapter, "powered");
 +    const bool discovering = Bool(adapter, "discovering");
 +    auto* actions = AddButtons(page_);
-+    AddButton(actions, on ? u"Turn Bluetooth off" : u"Turn Bluetooth on",
-+              Bind(&PlutoniumOverlayView::CallService,
-+                   std::string("bluetooth"), std::string("set-powered"),
-+                   base::DictValue().Set("powered", !on), std::u16string()),
-+              on ? ActionButton::Style::kNormal
-+                 : ActionButton::Style::kPrimary);
-+    AddButton(actions,
-+              discovering ? u"Stop looking" : u"Find devices",
-+              Bind(&PlutoniumOverlayView::CallService,
-+                   std::string("bluetooth"), std::string("discover"),
-+                   base::DictValue().Set("on", !discovering),
-+                   std::u16string()),
++    AddButton(
++        actions, on ? u"Turn Bluetooth off" : u"Turn Bluetooth on",
++        Bind(&PlutoniumOverlayView::CallService, std::string("bluetooth"),
++             std::string("set-powered"), base::DictValue().Set("powered", !on),
++             std::u16string()),
++        on ? ActionButton::Style::kNormal : ActionButton::Style::kPrimary);
++    AddButton(actions, discovering ? u"Stop looking" : u"Find devices",
++              Bind(&PlutoniumOverlayView::CallService, std::string("bluetooth"),
++                   std::string("discover"),
++                   base::DictValue().Set("on", !discovering), std::u16string()),
 +              ActionButton::Style::kNormal, on);
 +    if (discovering) {
 +      AddParagraph(page_, u"Looking for devices nearby (30 s)…", kWarn);
 +    }
-+    AddField(page_, u"Adapter",
-+             U(Str(adapter, "name")) + u"  (" + U(Str(adapter, "address")) +
-+                 u")");
++    AddField(
++        page_, u"Adapter",
++        U(Str(adapter, "name")) + u"  (" + U(Str(adapter, "address")) + u")");
 +    const base::ListValue* devices = bluetooth->FindList("devices");
 +    auto* list = AddSection(u"Devices");
 +    if (!devices || devices->empty()) {
@@ -2686,8 +2734,8 @@ index c36c98eeda..e8d8e02270 100644
 +                  base::NumberToString16(static_cast<int>(*battery)) + u"%";
 +      }
 +      AddLabel(text, detail, kDim, -1);
-+      text->SetPreferredSize(gfx::Size(
-+          340, text->GetPreferredSize(views::SizeBounds()).height()));
++      text->SetPreferredSize(
++          gfx::Size(340, text->GetPreferredSize(views::SizeBounds()).height()));
 +      const base::DictValue args = base::DictValue().Set("device", id);
 +      if (!paired) {
 +        AddButton(row, u"Pair",
@@ -2697,16 +2745,14 @@ index c36c98eeda..e8d8e02270 100644
 +                  ActionButton::Style::kPrimary, on && !pairing);
 +        continue;
 +      }
-+      AddButton(row, connected ? u"Disconnect" : u"Connect",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("bluetooth"),
-+                     std::string(connected ? "disconnect" : "connect"),
-+                     args.Clone(),
-+                     std::u16string(connected ? u"Disconnecting…"
-+                                              : u"Connecting…")),
-+                connected ? ActionButton::Style::kNormal
-+                          : ActionButton::Style::kPrimary,
-+                on);
++      AddButton(
++          row, connected ? u"Disconnect" : u"Connect",
++          Bind(&PlutoniumOverlayView::CallService, std::string("bluetooth"),
++               std::string(connected ? "disconnect" : "connect"), args.Clone(),
++               std::u16string(connected ? u"Disconnecting…" : u"Connecting…")),
++          connected ? ActionButton::Style::kNormal
++                    : ActionButton::Style::kPrimary,
++          on);
 +      AddButton(row, ConfirmLabel("forget/" + id, u"Forget"),
 +                Bind(&PlutoniumOverlayView::ForgetDevice, id),
 +                ActionButton::Style::kDanger);
@@ -2739,19 +2785,17 @@ index c36c98eeda..e8d8e02270 100644
 +      }
 +      auto* row = AddButtons(parent);
 +      const bool chosen = Bool(device, "default");
-+      views::Label* name =
-+          AddLabel(row, U(Str(device, "name")), chosen ? kAccent : kTitle, 1,
-+                   chosen);
++      views::Label* name = AddLabel(row, U(Str(device, "name")),
++                                    chosen ? kAccent : kTitle, 1, chosen);
 +      name->SetPreferredSize(
 +          gfx::Size(380, name->GetPreferredSize(views::SizeBounds()).height()));
-+      AddButton(row, chosen ? u"In use" : u"Use this",
-+                Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
-+                     std::string("set-default"),
-+                     base::DictValue().Set("device", id->Clone()),
-+                     std::u16string()),
-+                chosen ? ActionButton::Style::kPrimary
-+                       : ActionButton::Style::kNormal,
-+                !chosen);
++      AddButton(
++          row, chosen ? u"In use" : u"Use this",
++          Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
++               std::string("set-default"),
++               base::DictValue().Set("device", id->Clone()), std::u16string()),
++          chosen ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal,
++          !chosen);
 +    }
 +  }
 +
@@ -2773,13 +2817,12 @@ index c36c98eeda..e8d8e02270 100644
 +                base::DictValue().Set("device", "input"),
 +                Reader("audio", "input", "volume"));
 +      const bool muted = Bool(microphone, "muted");
-+      AddButton(line, muted ? u"Unmute" : u"Mute",
-+                Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
-+                     std::string("set-mute"),
-+                     base::DictValue().Set("device", "input"),
-+                     std::u16string()),
-+                muted ? ActionButton::Style::kPrimary
-+                      : ActionButton::Style::kNormal);
++      AddButton(
++          line, muted ? u"Unmute" : u"Mute",
++          Bind(&PlutoniumOverlayView::CallService, std::string("audio"),
++               std::string("set-mute"),
++               base::DictValue().Set("device", "input"), std::u16string()),
++          muted ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal);
 +    } else {
 +      AddParagraph(input, u"No microphone.", kDim);
 +    }
@@ -2797,9 +2840,9 @@ index c36c98eeda..e8d8e02270 100644
 +    }
 +    if (const base::DictValue* battery = power->FindDict("battery")) {
 +      auto* section = AddSection(u"Battery");
-+      AddField(section, u"Charge",
-+               base::NumberToString16(std::lround(Num(battery, "percent"))) +
-+                   u"%");
++      AddField(
++          section, u"Charge",
++          base::NumberToString16(std::lround(Num(battery, "percent"))) + u"%");
 +      AddField(section, u"State", U(Str(battery, "state")));
 +      if (const std::optional<double> left = battery->FindDouble("timeLeft");
 +          left && *left > 0) {
@@ -2816,8 +2859,7 @@ index c36c98eeda..e8d8e02270 100644
 +                    static_cast<int>(Num(session, "screenOffAfter")));
 +      AddIdleChoice(screen, u"Lock after", "lockAfter",
 +                    static_cast<int>(Num(session, "lockAfter")));
-+      if (const base::ListValue* inhibitors =
-+              session->FindList("inhibitors");
++      if (const base::ListValue* inhibitors = session->FindList("inhibitors");
 +          inhibitors && !inhibitors->empty()) {
 +        std::vector<std::u16string> why;
 +        for (const base::Value& item : *inhibitors) {
@@ -2849,8 +2891,8 @@ index c36c98eeda..e8d8e02270 100644
 +    };
 +    for (const auto& [seconds, text] : choices) {
 +      AddButton(row, text,
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("session"), std::string("set-idle"),
++                Bind(&PlutoniumOverlayView::CallService, std::string("session"),
++                     std::string("set-idle"),
 +                     base::DictValue().Set(key, seconds), std::u16string()),
 +                seconds == current ? ActionButton::Style::kPrimary
 +                                   : ActionButton::Style::kNormal);
@@ -2868,22 +2910,20 @@ index c36c98eeda..e8d8e02270 100644
 +    const bool quiet = Bool(notifications, "doNotDisturb");
 +    const base::ListValue* list = notifications->FindList("notifications");
 +    auto* actions = AddButtons(page_);
-+    AddButton(actions, quiet ? u"Do not disturb: on" : u"Do not disturb: off",
-+              Bind(&PlutoniumOverlayView::CallService,
-+                   std::string("notifications"),
-+                   std::string("set-do-not-disturb"),
-+                   base::DictValue().Set("on", !quiet), std::u16string()),
-+              quiet ? ActionButton::Style::kPrimary
-+                    : ActionButton::Style::kNormal);
-+    AddButton(actions, u"Clear all",
-+              Bind(&PlutoniumOverlayView::CallService,
-+                   std::string("notifications"), std::string("clear"),
-+                   base::DictValue(), std::u16string()),
-+              ActionButton::Style::kNormal, list && !list->empty());
++    AddButton(
++        actions, quiet ? u"Do not disturb: on" : u"Do not disturb: off",
++        Bind(&PlutoniumOverlayView::CallService, std::string("notifications"),
++             std::string("set-do-not-disturb"),
++             base::DictValue().Set("on", !quiet), std::u16string()),
++        quiet ? ActionButton::Style::kPrimary : ActionButton::Style::kNormal);
++    AddButton(
++        actions, u"Clear all",
++        Bind(&PlutoniumOverlayView::CallService, std::string("notifications"),
++             std::string("clear"), base::DictValue(), std::u16string()),
++        ActionButton::Style::kNormal, list && !list->empty());
 +    if (quiet) {
-+      AddParagraph(page_,
-+                   u"New notifications don't pop up, except urgent ones.",
-+                   kDim);
++      AddParagraph(
++          page_, u"New notifications don't pop up, except urgent ones.", kDim);
 +    }
 +    auto* section = AddSection(u"Recent");
 +    if (!list || list->empty()) {
@@ -2905,20 +2945,20 @@ index c36c98eeda..e8d8e02270 100644
 +               U(Str(note, "app")) +
 +                   (body.empty() ? std::u16string() : u"  ·  " + U(body)),
 +               kDim, -1);
-+      text->SetPreferredSize(gfx::Size(
-+          380, text->GetPreferredSize(views::SizeBounds()).height()));
-+      AddButton(row, u"Open",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("notifications"), std::string("invoke"),
-+                     base::DictValue()
-+                         .Set("id", id->Clone())
-+                         .Set("action", "default"),
-+                     std::u16string()));
-+      AddButton(row, u"Dismiss",
-+                Bind(&PlutoniumOverlayView::CallService,
-+                     std::string("notifications"), std::string("dismiss"),
-+                     base::DictValue().Set("id", id->Clone()),
-+                     std::u16string()));
++      text->SetPreferredSize(
++          gfx::Size(380, text->GetPreferredSize(views::SizeBounds()).height()));
++      AddButton(
++          row, u"Open",
++          Bind(
++              &PlutoniumOverlayView::CallService, std::string("notifications"),
++              std::string("invoke"),
++              base::DictValue().Set("id", id->Clone()).Set("action", "default"),
++              std::u16string()));
++      AddButton(
++          row, u"Dismiss",
++          Bind(&PlutoniumOverlayView::CallService, std::string("notifications"),
++               std::string("dismiss"), base::DictValue().Set("id", id->Clone()),
++               std::u16string()));
 +    }
 +  }
 +
@@ -2994,8 +3034,7 @@ index c36c98eeda..e8d8e02270 100644
 +  }
 +
 +  void SetMirror(bool on) {
-+    ConfigureDisplays(
-+        base::DictValue().Set("mirror", on).Set("confirm", true));
++    ConfigureDisplays(base::DictValue().Set("mirror", on).Set("confirm", true));
 +  }
 +
 +  void KeepDisplays() {
@@ -3041,11 +3080,13 @@ index c36c98eeda..e8d8e02270 100644
 +    if (!mode) {
 +      return u"—";
 +    }
++    const double rate = Num(mode, "refreshRate");
++    // Without a rate (an X11 host window), just the size.
 +    return base::NumberToString16(static_cast<int>(Num(mode, "width"))) +
 +           u" × " +
 +           base::NumberToString16(static_cast<int>(Num(mode, "height"))) +
-+           u" at " + U(base::NumberToString(Num(mode, "refreshRate"))) +
-+           u" Hz";
++           (rate > 0 ? u" at " + U(base::NumberToString(rate)) + u" Hz"
++                     : std::u16string());
 +  }
 +
 +  void BuildDisplaysPage() {
@@ -3071,8 +3112,8 @@ index c36c98eeda..e8d8e02270 100644
 +      pending_label_ = AddLabel(
 +          banner,
 +          u"Keep this?  " + U(Str(pending, "what")) + u" goes back in " +
-+              base::NumberToString16(static_cast<int>(
-+                  Num(pending, "secondsLeft"))) +
++              base::NumberToString16(
++                  static_cast<int>(Num(pending, "secondsLeft"))) +
 +              u" s.",
 +          kWarn, 1, /*bold=*/true);
 +      static_cast<views::BoxLayout*>(banner->GetLayoutManager())
@@ -3176,10 +3217,10 @@ index c36c98eeda..e8d8e02270 100644
 +    const bool mirrored = !!display.FindString("mirrorOf");
 +    const bool is_primary = Bool(&display, "primary");
 +    const int index = display.FindInt("index").value_or(0);
-+    auto* section = AddSection(
-+        (index ? u"Display " + base::NumberToString16(index) + u":  "
-+               : std::u16string()) +
-+        U(Str(&display, "name")));
++    auto* section =
++        AddSection((index ? u"Display " + base::NumberToString16(index) + u":  "
++                          : std::u16string()) +
++                   U(Str(&display, "name")));
 +    const base::DictValue* mode = display.FindDict("mode");
 +    const gfx::Rect bounds = RectOf(display.FindDict("bounds"));
 +    AddField(section, u"Mode", ModeText(mode));
@@ -3189,24 +3230,23 @@ index c36c98eeda..e8d8e02270 100644
 +                 base::NumberToString16(bounds.x()) + u", " +
 +                 base::NumberToString16(bounds.y()) + u"  ·  scale " +
 +                 U(base::NumberToString(Num(&display, "scale"))));
-+    AddField(section, u"Kind",
-+             std::u16string(Bool(&display, "internal") ? u"Built-in"
-+                                                       : u"Monitor") +
-+                 (is_primary ? u", primary (the shells' startup display)"
-+                             : u""));
++    AddField(
++        section, u"Kind",
++        std::u16string(Bool(&display, "internal") ? u"Built-in" : u"Monitor") +
++            (is_primary ? u", primary (the shells' startup display)" : u""));
 +
 +    // On or off: only the built-in panel, while a monitor is on.
 +    if (Bool(&display, "internal") &&
 +        (!enabled || Bool(&config, "canTurnOffPanel"))) {
 +      auto* power = AddButtons(section);
-+      AddButton(power, enabled ? u"Turn the built-in display off"
-+                               : u"Turn the built-in display on",
++      AddButton(power,
++                enabled ? u"Turn the built-in display off"
++                        : u"Turn the built-in display on",
 +                Bind(&PlutoniumOverlayView::SetDisplayEnabled, id, !enabled),
 +                enabled ? ActionButton::Style::kNormal
 +                        : ActionButton::Style::kPrimary);
 +      if (enabled) {
-+        AddLabel(power, u"While a monitor is on: like closing the lid.",
-+                 kDim);
++        AddLabel(power, u"While a monitor is on: like closing the lid.", kDim);
 +      }
 +    }
 +    if (!enabled) {
@@ -3232,12 +3272,11 @@ index c36c98eeda..e8d8e02270 100644
 +      const std::pair<int, std::u16string> sides[] = {
 +          {0, u"Left of"}, {1, u"Right of"}, {2, u"Above"}, {3, u"Below"}};
 +      for (const auto& [side, label] : sides) {
-+        AddButton(actions,
-+                  label + u" " +
-+                      base::NumberToString16(
-+                          primary->FindInt("index").value_or(1)),
-+                  Bind(&PlutoniumOverlayView::PlaceDisplay, id, bounds, other,
-+                       side));
++        AddButton(
++            actions,
++            label + u" " +
++                base::NumberToString16(primary->FindInt("index").value_or(1)),
++            Bind(&PlutoniumOverlayView::PlaceDisplay, id, bounds, other, side));
 +      }
 +    }
 +
@@ -3277,24 +3316,22 @@ index c36c98eeda..e8d8e02270 100644
 +        }
 +        ++in_row;
 +        const bool current = w == width && h == height;
-+        AddButton(row,
-+                  base::NumberToString16(w) + u" × " +
-+                      base::NumberToString16(h),
-+                  Bind(&PlutoniumOverlayView::SetMode, id, w, h, rate),
-+                  current ? ActionButton::Style::kPrimary
-+                          : ActionButton::Style::kNormal);
++        AddButton(
++            row, base::NumberToString16(w) + u" × " + base::NumberToString16(h),
++            Bind(&PlutoniumOverlayView::SetMode, id, w, h, rate),
++            current ? ActionButton::Style::kPrimary
++                    : ActionButton::Style::kNormal);
 +      }
 +    }
 +    if (rates.size() > 1) {
 +      AddChoiceLabel(section, u"Refresh rate");
 +      auto* row = AddButtons(section);
 +      for (double candidate : rates) {
-+        AddButton(row, U(base::NumberToString(candidate)) + u" Hz",
-+                  Bind(&PlutoniumOverlayView::SetMode, id, width, height,
-+                       candidate),
-+                  std::abs(candidate - rate) < 0.01
-+                      ? ActionButton::Style::kPrimary
-+                      : ActionButton::Style::kNormal);
++        AddButton(
++            row, U(base::NumberToString(candidate)) + u" Hz",
++            Bind(&PlutoniumOverlayView::SetMode, id, width, height, candidate),
++            std::abs(candidate - rate) < 0.01 ? ActionButton::Style::kPrimary
++                                              : ActionButton::Style::kNormal);
 +      }
 +    }
 +
@@ -3463,10 +3500,10 @@ index c36c98eeda..e8d8e02270 100644
 +  if (!widget_ || !widget_->GetNativeWindow()) {
 +    return;
 +  }
-+  widget_->SetBounds(BoundsIn(display::Screen::Get()
-+                                  ->GetDisplayNearestWindow(
-+                                      widget_->GetNativeWindow())
-+                                  .work_area()));
++  widget_->SetBounds(
++      BoundsIn(display::Screen::Get()
++                   ->GetDisplayNearestWindow(widget_->GetNativeWindow())
++                   .work_area()));
 +}
 +
 +void PlutoniumOverlay::Open(int step) {
@@ -3514,7 +3551,7 @@ index a06bacec73..8e579516a6 100644
  
    raw_ptr<PlutoniumShells> shells_;
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
-index ae84f445cd..8d6f18052c 100644
+index ae84f445cd..ac52f46337 100644
 --- a/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_shells_impl.cc
 @@ -10,6 +10,8 @@
@@ -3526,14 +3563,38 @@ index ae84f445cd..8d6f18052c 100644
  #include "base/logging.h"
  #include "base/strings/string_number_conversions.h"
  #include "base/strings/string_split.h"
-@@ -30,6 +32,7 @@
+@@ -23,25 +25,26 @@
+ #include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_tabstrip.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
  #include "chrome/browser/ui/extensions/application_launch.h"
++#include "components/exo/embedded_windows.h"
  #include "components/prefs/pref_service.h"
  #include "components/prefs/scoped_user_pref_update.h"
-+#include "chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.h"
- #include "chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.h"
- #include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h"
- #include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h"
+-#include "chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.h"
+-#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h"
+-#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h"
+-#include "components/exo/embedded_windows.h"
+ #include "components/tabs/public/tab_interface.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/reload_type.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/common/referrer.h"
+ #include "ui/aura/window.h"
+-#include "ui/base/page_transition_types.h"
+ #include "ui/base/base_window.h"
++#include "ui/base/page_transition_types.h"
+ #include "ui/base/ui_base_types.h"
+ #include "ui/display/display.h"
+ #include "ui/display/manager/display_manager.h"
 @@ -113,6 +116,7 @@ PlutoniumShellsImpl::PlutoniumShellsImpl() {
  
  PlutoniumShellsImpl::~PlutoniumShellsImpl() {

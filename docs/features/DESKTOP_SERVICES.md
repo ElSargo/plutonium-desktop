@@ -25,7 +25,7 @@ await shell.system.available();            // [{ name, allowed }]: what this hel
   `"uses": ["audio", "power"]`. It gets only those (403 otherwise); a page that
   isn't an installed shell (a URL given to `plutonium run`) gets them all.
   The names: `audio`, `power`, `network`, `bluetooth`, `media`,
-  `notifications`, `session`.
+  `notifications`, `session`, `display`.
 - A service the computer doesn't have (no NetworkManager, no battery) answers
   its state with what's there (`{ available: false }` or an empty list), not an
   error, so a shell can hide its control.
@@ -79,6 +79,13 @@ The routes (shell origins only, like the rest of `/v1/shell/`):
 | `POST /v1/shell/system/<name>/<action>` | JSON args → `{ value }` |
 
 Errors: 403 (not in `uses`), 404 (no such service or action), 400 (bad args).
+
+Ash's own UI (the switcher's settings pages, [SHELLS.md](SHELLS.md)) uses the
+same services over the helper's Unix socket, not as a shell: `GET
+/v1/system/services` (every service's state at once, `{ <name>: state }`),
+`GET /v1/system/services/<name>` and `POST
+/v1/system/services/<name>/<action>` (JSON args → `{ value }`, the same
+errors). Like the rest of the socket, they're for this user's processes.
 
 ## A native side and storage
 
@@ -495,3 +502,60 @@ off, and the lock itself.
   ending the session while locked. That run found the helper following the
   launching shell's logind session (tty4's) instead of tty5's, fixed as
   above; the machine wasn't suspended.
+
+### display
+
+The monitors and how they're set up, and the switcher's settings pages for a
+shell to open. The displays are Ash's: its `CrosDisplayConfig`, as ChromeOS's
+Settings uses, through the Plutonium DevTools domain
+(`getDisplayConfig`, `configureDisplays`, `openSwitcher` and the
+`displayConfigChanged` event). [MULTI_MONITOR.md](MULTI_MONITOR.md) has what a
+second display does to the shells.
+
+- **State:** `{ available, displays, mirror, canMirror, pending }`. Each
+  display: `{ id, index, name, internal, primary, enabled, bounds, workArea,
+  rotation, scale, zoom, zooms, mode, modes }`. `id` is Ash's display id as a
+  string (they don't fit in a double); `index` numbers them from 1, left to
+  right then top to bottom ("display 2"). `bounds` and `workArea` are DIPs in
+  the desktop's coordinates. A mode is `{ width, height, refreshRate, scale,
+  native }` in physical pixels. `zoom` is the size setting (1 is the mode's
+  own), one of `zooms`. `enabled` is false only for a built-in panel turned
+  off while a monitor is on. `pending` is a change waiting for `keep`: `{
+  what, secondsLeft }`. `available` is false with no browser, or a browser
+  without the domain's display methods.
+- **Actions** (a display is its `id` or its `index`):
+  - `configure {display, mode?, zoom?, rotation?, primary?, enabled?,
+    position?, confirm?}`: `mode` is `{width, height, refreshRate?}` (the
+    rate nearest the one given; the highest without one), `rotation`
+    0/90/180/270, `primary: true`, `position {x, y}` in DIPs. Returns the
+    new state.
+  - `arrange {layout: [{display, x, y}, …]}`: where each display is, as the
+    switcher's drag gives it. Each goes against the nearest edge of one
+    already placed (from the primary), and an offset within 48 DIPs of lining
+    up (start or end edges) lines up. Ash applies the layout after its
+    animation, so the new bounds come as a change rather than in the reply.
+  - `set-mirror {on, confirm?}`.
+  - `keep` and `revert`: a change made with `confirm: true` (a new mode,
+    size, rotation, mirroring, the panel off) goes back after 15 s unless
+    kept. Shell mode never shows Ash's own confirmation, so the asking is the
+    caller's: the switcher's banner, or GNOME's "Keep Display Changes?".
+  - `open-settings {page}`: opens the switcher on one of its pages:
+    `settings` (quick settings), `displays`, `network`, `bluetooth`, `sound`,
+    `power` or `notifications`.
+- **Code:** `helper/src/services/display.ts`, the domain's calls in
+  `helper/src/desktop.ts`; in Chromium,
+  `chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.{h,cc}`
+  (the configuration, as `CrosDisplayConfigImpl` does it, with modes set as
+  policy so Ash doesn't ask) and the switcher's pages in
+  `plutonium_overlay.cc` (Chromium patch 0096).
+- **In the shells:** GNOME's quick settings has a display button, and its
+  Settings app a Displays page over this service. niri's bar and plain's tray
+  have `display.js` (a monitor icon with the count; its popover lists the
+  displays, turns mirroring on and off, and opens Displays or All settings).
+  Hydra's quick settings has Displays and All settings rows (T3 patch 0049).
+  Each names `display` in its `shell.json`'s `uses`.
+- **Tested:** `helper/test/display.test.ts` with a fake browser: the state,
+  each action's arguments and errors, a display by index or id,
+  `open-settings`'s pages, and changes sent on the browser's event. In an X11
+  session with two host displays and several modes each, see SHELLS.md
+  ("Verified: settings and Displays").
