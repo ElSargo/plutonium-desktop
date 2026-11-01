@@ -1,7 +1,7 @@
 // The volume indicator (shell.system.audio): the default output's level;
 // scroll to change it, middle-click to mute, click for a slider, the outputs
 // and the microphone.
-import { button, icon, item, popover, refill, slider, style, watch } from "./tray.js";
+import { button, icon, item, popover, refill, slider, style, watch } from "../widgets.js";
 
 export default function audio(shell, container) {
   style();

@@ -109,7 +109,8 @@ export function mountMinimap(shell, container, niri) {
     try { origin = /^https?:$/.test(new URL(tab?.url).protocol) ? new URL(tab.url).origin : ""; } catch {}
     const host = origin ? new URL(origin).hostname.replace(/^www\./, "") : "";
     return { id: origin ? `site:${origin}` : "", label: host || tab?.title || "?", title: tab?.title || tab?.url || "tab",
-      load: () => probe(`${origin}/favicon.ico`) };
+      // The helper's (some sites forbid this page their /favicon.ico), else the page's own try.
+      load: () => (origin ? Promise.resolve(shell.siteIcon?.(origin) ?? null).then((url) => url ?? probe(`${origin}/favicon.ico`)) : Promise.resolve(null)) };
   };
   const probe = (src) => new Promise((resolve) => {
     const image = new Image();

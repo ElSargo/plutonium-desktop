@@ -1,6 +1,6 @@
 // The battery indicator (shell.system.power): its level, charging, and the
 // time left in its tooltip. Hidden without a battery.
-import { batteryIcon, button, duration, style, watch } from "./tray.js";
+import { batteryIcon, button, duration, style, watch } from "../widgets.js";
 
 export default function battery(shell, container) {
   style();

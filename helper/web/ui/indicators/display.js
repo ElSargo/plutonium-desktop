@@ -4,7 +4,7 @@
 // configuration tool: the switcher's Displays page (arrange, resolution,
 // refresh rate, size, rotation, primary, the built-in panel on or off). Also
 // "All settings…", the switcher's quick settings. Hidden without the service.
-import { button, closePopover, icon, item, popover, refill, style, watch } from "./tray.js";
+import { button, closePopover, icon, item, popover, refill, style, watch } from "../widgets.js";
 
 export default function display(shell, container) {
   style();

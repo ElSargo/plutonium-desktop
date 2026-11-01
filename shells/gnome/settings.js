@@ -76,9 +76,9 @@ body.overview .settings { opacity: 0; pointer-events: none; }
 `;
 
 /**
- * ctx: { shell, helper, prefs, setPref, toast, quick, ACTIONS, keysOf, normalizeCombo, record(fn), stopRecording(),
- *        favorites(), setFavorites(list), appById(id), appIconEl(app), apps(), workspaces(), renameWorkspace(id, name),
- *        WALLPAPERS, ACCENTS }
+ * ctx: { shell, helper, prefs, setPref, toast, quick, keymap (the UI library's), normalizeCombo, record(fn), stopRecording(),
+ *        dock() (the UI library's Dock), ui (the UI library), appById(id), appIconEl(app), apps(), workspaces(),
+ *        renameWorkspace(id, name), WALLPAPERS, ACCENTS }
  */
 export function mountSettings(ctx) {
   const { shell } = ctx;
@@ -542,7 +542,12 @@ export function mountSettings(ctx) {
       return [
         group("Background", [walls, textRow("Picture Address", P.wallpaperUrl, (v) => { ctx.setPref("wallpaperUrl", v); if (v) ctx.setPref("wallpaper", "custom"); render(); }, { placeholder: "https://… or data:", sub: "An image on the web for the background" })]),
         group("Accent Color", [row("Color", accents)]),
-        group("Dash", [dock, row("Icon Size", slider(P.dockIconSize, 64, (v) => ctx.setPref("dockIconSize", Math.max(32, Math.round(v))), { step: 4 }), { sub: `${P.dockIconSize} px` })], { desc: "The dash holds your pinned apps and the running ones." }),
+        group("Dash", [dock, row("Icon Size", slider(P.dockIconSize, 64, (v) => ctx.setPref("dockIconSize", Math.max(32, Math.round(v))), { step: 4 }), { sub: `${P.dockIconSize} px` }),
+          // The dock's settings (the UI library's schema), as this app draws rows.
+          ...ctx.ui.dockCore.dockSettingsSchema().filter((spec) => spec.key !== "iconSize").map((spec) => spec.kind === "switch"
+            ? switchRow(spec.label, P[spec.key] !== false, (on) => ctx.setPref(spec.key, on), spec.help)
+            : row(spec.label, select(P[spec.key], spec.choices, (v) => ctx.setPref(spec.key, v)), { sub: spec.help })),
+        ], { desc: "The dash holds your pinned apps and sites and the running apps, as Dash to Dock's does." }),
         group("Windows", [
           row("Title Bar Buttons", select(P.titlebarButtons, [["close", "Close"], ["all", "Minimize, Maximize, Close"]], (v) => ctx.setPref("titlebarButtons", v))),
           row("Apps Without Title Bars", el("span", "", String(Object.keys(P.noTitle ?? {}).length || "None")), { sub: "Turn a window's title bar off in its menu (right-click the title bar)" }),
@@ -577,7 +582,8 @@ export function mountSettings(ctx) {
     keyboard() {
       const out = [];
       const groups = new Map();
-      for (const a of ctx.ACTIONS) {
+      for (const a of ctx.keymap.list()) {
+        if (!a.editable) continue;
         if (!groups.has(a.group)) groups.set(a.group, []);
         groups.get(a.group).push(a);
       }
@@ -589,7 +595,7 @@ export function mountSettings(ctx) {
       out.push(group(null, [filter], { box: false, desc: "Click a shortcut to set new keys. Backspace removes it, Escape cancels." }));
       out.push(group("Overview", [switchRow("Super Opens the Overview", ctx.prefs.overlayKey, (on) => ctx.setPref("overlayKey", on), "Tap Super on its own")]));
       for (const [name, list] of groups) {
-        const rows = list.filter((a) => !q || a.label.toLowerCase().includes(q) || ctx.keysOf(a).join(" ").toLowerCase().includes(q)).map((a) => shortcutRow(a));
+        const rows = list.filter((a) => !q || a.label.toLowerCase().includes(q) || ctx.keymap.keysOf(a.id).join(" ").toLowerCase().includes(q)).map((a) => shortcutRow(a));
         if (rows.length) out.push(group(name, rows));
       }
       // Custom shortcuts: a command for a key.
@@ -601,7 +607,7 @@ export function mountSettings(ctx) {
       const g = group("Custom Shortcuts", custom.length ? custom : [el("div", "st-empty", "None yet")], { desc: "Run a command with a key. It starts in the current workspace's thread." });
       g.querySelector("h3").append(" ", button("st-pill", { label: "Add…", onClick: () => editCustom(-1) }));
       out.push(g);
-      out.push(group(null, [row("Reset All Shortcuts", pill("Reset All", async () => { if (await confirm("Reset All Shortcuts?", "Every shortcut goes back to its default.", "Reset")) { ctx.setPref("keys", {}); render(); } }, "danger"))]));
+      out.push(group(null, [row("Reset All Shortcuts", pill("Reset All", async () => { if (await confirm("Reset All Shortcuts?", "Every shortcut goes back to its default.", "Reset")) { ctx.keymap.resetAll(); render(); } }, "danger"))]));
       out.push(group("Taken by Plutonium", [
         row("Switch shells, windows and tabs", keycaps(["Super+Tab"])),
         row("Lock the screen", keycaps(["Super+KeyL"])),
@@ -613,29 +619,49 @@ export function mountSettings(ctx) {
     },
     apps() {
       const P = ctx.prefs;
-      const fav = ctx.favorites();
-      const rows = fav.map((id, i) => {
-        const app = ctx.appById(id);
+      // The dock's slots (the UI library's Dock): Super+1…9, in order.
+      const dock = ctx.dock();
+      const slots = dock?.slots ?? [];
+      const SCOPE = { thread: "This workspace", global: "Everywhere" };
+      const rows = slots.map((slot, i) => {
+        if (!slot) return row(`Super+${i + 1}`, pill("Remove", () => { dock.unpin(i); render(); }, "danger"), { sub: "Empty" });
+        const target = slot.target;
+        const name = target.kind === "terminal" ? "Terminal" : target.name;
+        const app = target.kind === "app" ? ctx.appById(target.desktopId) : null;
         const ic = el("span", "app-ic");
-        ic.append(ctx.appIconEl(app ?? { name: id }));
-        const r = row(app?.name ?? id, [
-          button("round", { icon: "back", title: "Move up", onClick: () => { if (i) { const l = [...fav]; [l[i - 1], l[i]] = [l[i], l[i - 1]]; ctx.setFavorites(l); render(); } } }),
-          button("round", { icon: "forward", title: "Move down", onClick: () => { if (i < fav.length - 1) { const l = [...fav]; [l[i + 1], l[i]] = [l[i], l[i + 1]]; ctx.setFavorites(l); render(); } } }),
-          pill("Unpin", () => { ctx.setFavorites(fav.filter((f) => f !== id)); render(); }, "danger"),
-        ], { sub: `Super+${i + 1}` });
+        ic.append(ctx.appIconEl(app ?? { name }));
+        const r = row(name, [
+          button("round", { icon: "back", title: "Move up", onClick: () => { if (i) { dock.move(i, i - 1); render(); } } }),
+          button("round", { icon: "forward", title: "Move down", onClick: () => { if (i < slots.length - 1) { dock.move(i, i + 1); render(); } } }),
+          select(slot.scope, Object.entries(SCOPE), (v) => { void dock.setScope(i, v).then(render); }),
+          pill("Unpin", () => { dock.unpin(i); render(); }, "danger"),
+        ], { sub: `${i < 9 ? `Super+${i + 1} · ` : ""}${target.kind === "site" ? target.url : target.kind === "app" ? (target.desktopId ?? target.windowAppId ?? "") : "A terminal"}` });
         r.prepend(ic);
         return r;
       });
+      const pinned = new Set(slots.filter((slot) => slot?.target.kind === "app").map((slot) => slot.target.desktopId));
       const add = el("select");
       add.append(el("option", "", "Pin an app…"));
-      for (const app of [ctx.appById("plutonium:web"), ctx.appById("plutonium:agent"), ...ctx.apps()].filter((a) => a && !fav.includes(a.id))) {
+      for (const app of [ctx.appById("plutonium:web"), ctx.appById("plutonium:agent"), ...ctx.apps()].filter((a) => a && !pinned.has(a.id))) {
         const o = el("option", "", app.name);
         o.value = app.id;
         add.append(o);
       }
-      add.addEventListener("change", () => { if (add.value) { ctx.setFavorites([...fav, add.value]); render(); } });
+      add.addEventListener("change", () => {
+        const app = ctx.appById(add.value);
+        if (app) { dock.pin({ kind: "app", desktopId: app.id, windowAppId: null, name: app.name }); render(); }
+      });
+      const site = el("input", "entry");
+      site.placeholder = "github.com/org/repo";
+      site.spellcheck = false;
+      site.addEventListener("change", () => {
+        const url = ctx.ui.dockCore.normalizeSiteUrl(site.value);
+        if (!url) return;
+        dock.pin({ kind: "site", url, name: ctx.ui.dockCore.hostOf(url) });
+        render();
+      });
       return [
-        group("Pinned Apps", [...(rows.length ? rows : [el("div", "st-empty", "Nothing pinned")]), row("Add", add)], { desc: "Pin apps from the app grid or the dash with a right-click, or drag them onto the dash." }),
+        group("Pinned Apps and Sites", [...(rows.length ? rows : [el("div", "st-empty", "Nothing pinned")]), row("Add an App", add), row("Add a Site", site, { sub: "A web address: its tab is kept in the dash" })], { desc: "Super+1…9 open them; Super+Shift+1…9 put the focused window there. Pin from the app grid or the dash with a right-click, or drag apps onto the dash." }),
         group("Default Apps", [
           textRow("Terminal", P.terminal, (v) => ctx.setPref("terminal", v || "foot"), { placeholder: "foot", sub: "The command for Super+Enter (it must take -T and -e for Claude Code)" }),
           textRow("Home Page", P.homepage, (v) => ctx.setPref("homepage", v), { placeholder: "https://duckduckgo.com/", sub: "What a new browser tab opens" }),
@@ -689,8 +715,7 @@ export function mountSettings(ctx) {
   // ---------------------------------------------------------------- shortcuts
   let kbFilter = "";
   let recording = null; // { id }
-  const KEYNAMES = { Super: "Super", Ctrl: "Ctrl", Alt: "Alt", Shift: "Shift", ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Backquote: "`", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Comma: ",", Period: ".", Slash: "/", Backslash: "\\", Semicolon: ";", Quote: "'", PrintScreen: "Print", PageUp: "Page Up", PageDown: "Page Down", Escape: "Esc" };
-  const pretty = (combo) => combo.split("+").map((p) => KEYNAMES[p] ?? p.replace(/^Key/, "").replace(/^Digit/, "")).join(" + ");
+  const pretty = (combo) => ctx.ui.keys.prettyCombo(combo);
   function keycaps(combos, cls = "") {
     const box = el("span", "st-keys");
     if (!combos.length) box.append(el("span", "kbd none", "Disabled"));
@@ -698,12 +723,12 @@ export function mountSettings(ctx) {
     return box;
   }
   function shortcutRow(a) {
-    const keys = ctx.keysOf(a);
-    const changed = ctx.prefs.keys?.[a.id] !== undefined;
+    const keys = ctx.keymap.keysOf(a.id);
+    const changed = ctx.keymap.changed(a.id);
     const isRec = recording?.id === a.id;
     const caps = isRec ? (() => { const b = el("span", "st-keys"); b.append(el("span", "kbd rec", "Press keys…")); return b; })() : keycaps(keys, changed ? "changed" : "");
     const controls = [caps];
-    if (changed && !isRec) controls.push(button("round", { icon: "reload", title: "Reset to default", onClick: () => { const k = { ...ctx.prefs.keys }; delete k[a.id]; ctx.setPref("keys", k); render(); } }));
+    if (changed && !isRec) controls.push(button("round", { icon: "reload", title: "Reset to default", onClick: () => { ctx.keymap.setKeys(a.id, null); render(); } }));
     return row(a.label, controls, { onClick: () => startRecording(a), sub: changed ? `Default: ${a.defaults.map(pretty).join(", ") || "none"}` : undefined });
   }
   function startRecording(a) {
@@ -714,14 +739,10 @@ export function mountSettings(ctx) {
     ctx.record((combo) => {
       stopRecording();
       if (combo === null) { render(); return; }
-      if (combo === "") { ctx.setPref("keys", { ...ctx.prefs.keys, [a.id]: [] }); render(); return; }
-      const norm = ctx.normalizeCombo(combo);
+      if (combo === "") { ctx.keymap.setKeys(a.id, []); render(); return; }
       // A combo another action had moves here.
-      const keys = { ...ctx.prefs.keys };
-      const clash = ctx.ACTIONS.find((b) => b.id !== a.id && ctx.keysOf(b).includes(norm));
-      if (clash) keys[clash.id] = ctx.keysOf(clash).filter((k) => k !== norm);
-      keys[a.id] = [norm];
-      ctx.setPref("keys", keys);
+      const norm = ctx.normalizeCombo(combo);
+      const clash = ctx.keymap.assign(a.id, norm);
       if (clash) ctx.toast(`${pretty(norm)} was “${clash.label}”: that one has no key now`);
       render();
     });
@@ -761,7 +782,7 @@ export function mountSettings(ctx) {
   function searchSettings(q) {
     const out = [];
     for (const p of PAGES) if (p !== "-" && `${p.title} ${p.keywords} settings`.toLowerCase().includes(q)) out.push({ page: p.id, title: p.title, icon: p.icon, detail: "Settings" });
-    for (const a of ctx.ACTIONS) if (a.label.toLowerCase().includes(q)) out.push({ page: "keyboard", title: a.label, icon: "keyboard", detail: ctx.keysOf(a).map(pretty).join(", ") || "Keyboard Shortcuts" });
+    for (const a of ctx.keymap.list()) if (a.editable && a.label.toLowerCase().includes(q)) out.push({ page: "keyboard", title: a.label, icon: "keyboard", detail: ctx.keymap.keysOf(a.id).map(pretty).join(", ") || "Keyboard Shortcuts" });
     return out;
   }
 

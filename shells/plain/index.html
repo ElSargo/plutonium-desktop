@@ -53,7 +53,7 @@
   aside li button { width: 100%; text-align: left; }
   aside li button.current { background: var(--hover); font-weight: 600; }
   aside footer { margin-top: auto; padding: 10px 12px; color: var(--muted); font-size: 11px; }
-  /* The status indicators (tray.js and one module each), over the desktop services. */
+  /* The status indicators (the UI library's indicators, helper/web/ui/indicators), over the desktop services. */
   /* On :root, not #tray: the popovers are the body's. */
   :root {
     --tray-bg: var(--panel); --tray-fg: var(--text); --tray-muted: var(--muted); --tray-accent: var(--accent);
@@ -288,15 +288,15 @@ try {
     container.append(slot);
     import(file).then((module) => module.default(shell, slot)).catch(console.error);
   };
-  indicator("./media.js", document.getElementById("tray-media"));
-  indicator("./network.js", document.getElementById("tray"));
-  indicator("./bluetooth.js", document.getElementById("tray"));
-  indicator("./audio.js", document.getElementById("tray"));
-  indicator("./brightness.js", document.getElementById("tray"));
-  indicator("./display.js", document.getElementById("tray"));
-  indicator("./battery.js", document.getElementById("tray"));
-  indicator("./power.js", document.getElementById("tray"));
-  indicator("./osd.js");
+  indicator(`${helper}/v1/ui/indicators/media.js`, document.getElementById("tray-media"));
+  indicator(`${helper}/v1/ui/indicators/network.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/bluetooth.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/audio.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/brightness.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/display.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/battery.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/power.js`, document.getElementById("tray"));
+  indicator(`${helper}/v1/ui/indicators/osd.js`);
   shell.addEventListener("change", render);
   shell.ready.then(() => {
     listed = true;

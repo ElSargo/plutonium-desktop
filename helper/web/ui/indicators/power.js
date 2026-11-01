@@ -1,7 +1,7 @@
 // The power menu (shell.system.power): lock (shell.system.session), then
 // suspend, restart, power off and log out, each after a confirm. Log out ends
 // this Plutonium session.
-import { button, closePopover, confirm, icon, item, popover, style, watch } from "./tray.js";
+import { button, closePopover, confirm, icon, item, popover, style, watch } from "../widgets.js";
 
 const ACTIONS = [
   { action: "suspend", can: "suspend", icon: "suspend", label: "Suspend", question: "Suspend the computer?" },

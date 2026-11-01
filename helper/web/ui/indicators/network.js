@@ -2,7 +2,7 @@
 // offline; click for Wi-Fi on/off, the networks in range (a password asked
 // here for a new one), and the wired and VPN connections. A known network's
 // changed password is asked by the library's prompt (the "systemrequest").
-import { button, popover, refill, style, watch } from "./tray.js";
+import { button, popover, refill, style, watch } from "../widgets.js";
 
 const svg = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;

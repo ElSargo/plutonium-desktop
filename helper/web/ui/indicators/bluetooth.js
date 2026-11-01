@@ -2,7 +2,7 @@
 // click for on/off, the paired devices (connect, disconnect, forget) and,
 // after "Find devices", the ones nearby to pair. A PIN or a code to confirm
 // is asked by the library's prompt (the "systemrequest").
-import { button, popover, refill, style, watch } from "./tray.js";
+import { button, popover, refill, style, watch } from "../widgets.js";
 
 const svg = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;

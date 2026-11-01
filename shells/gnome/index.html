@@ -22,7 +22,7 @@
     hot corner, or swipe up with three fingers.
   - Settings (settings.js): Wi-Fi, Bluetooth, sound, power, appearance,
     multitasking, keyboard shortcuts (rebindable, and custom ones), apps.
-  Keys: see ACTIONS below; all of them can be changed in Settings → Keyboard.
+  Keys: the actions below (the UI library's keymap); all of them can be changed in Settings → Keyboard.
 -->
 <style>
   :root {
@@ -243,6 +243,17 @@
   .icon-btn.focused-app .dots i { background: var(--accent); }
   .icon-btn.drop-before::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
   .icon-btn.ghost { opacity: .35; }
+  /* The dash is the UI library's dock (dock/dock.js), sized and coloured as GNOME's. */
+  #dash .pl-dock { --pl-dock-icon: var(--dock-icon); --pl-dock-pad: 8px; --pl-dock-radius: 14px; --pl-dock-gap: 4px; --pl-dock-shown: transparent; --pl-dock-focused: #ffffff14; --pl-dock-ring: transparent; --tray-accent: var(--accent); }
+  #dash .pl-dock-item { color: #fff; }
+  #dash .pl-dock-item.idle .pl-dock-icon { opacity: 1; }
+  #dash .pl-dock-item:hover { background: #ffffff1f; }
+  #dash .pl-dock-sep { height: 40px; margin: 0 4px; background: #ffffff30; }
+  #dash .pl-dock-dots { bottom: 1px; gap: 3px; }
+  #dash .pl-dock-dots i { width: 5px; height: 5px; background: #fff; opacity: 1; }
+  #dash .pl-dock-item.focused .pl-dock-dots i { background: var(--accent); }
+  #dash .pl-dock-icon > .letter, #dash .pl-dock-icon > .glyph, #dash .pl-dock-icon > img { width: 100%; height: 100%; }
+  #dash .pl-dock-num { top: 2px; right: 4px; font-size: 11px; line-height: 14px; min-width: 14px; border-radius: 7px; background: var(--accent); color: var(--accent-fg); }
   .letter {
     display: grid; place-items: center; border-radius: 22%; font-size: 22px; font-weight: 700;
     background: linear-gradient(#5e9cee, #2a6fca); color: #fff;
@@ -512,6 +523,21 @@ const helper =
   "http://127.0.0.1:3780";
 const display = params.get("display") ?? "";
 const $ = (id) => document.getElementById(id);
+// The UI library every shell shares (helper/web/ui, UI_LIBRARY.md): keys,
+// settings, dragging, widgets and the dock (the dash is its view). Without it
+// there's no shell.
+let ui;
+try {
+  const names = ["keys", "settings", "drag", "widgets", "dock/core", "dock/dock"];
+  const [keys, settings, drag, widgets, dockCore, dockView] = await Promise.all(names.map((name) => import(`${helper}/v1/ui/${name}.js`)));
+  ui = { keys, settings, drag, widgets, dockCore, dockView };
+} catch (error) {
+  document.body.append(Object.assign(document.createElement("p"), {
+    textContent: `Charon: the helper's UI library didn't load (${helper}): ${error.message}`,
+    style: "position:fixed;inset:auto 0 0;padding:1em;color:#fff;background:#600;font:14px system-ui;z-index:9999",
+  }));
+  throw error;
+}
 // Each workspace is a thread, tagged with its id. A second display's page
 // has workspaces of its own.
 const WS_PREFIX = display ? `gnome:${display}:workspace/` : "gnome:workspace/";
@@ -543,13 +569,15 @@ const DEFAULT_PREFS = {
   clock24: null, clockSeconds: false, clockWeekday: true, batteryPercent: false, weekStartsSunday: false,
   banners: true, terminal: "foot", homepage: "https://duckduckgo.com/",
   keys: {}, custom: [],
+  // The dock's (dock/core.js); its icon size is dockIconSize.
+  ...Object.fromEntries(Object.entries(ui.dockCore.DOCK_DEFAULTS).filter(([key]) => key !== "iconSize")),
 };
 
 // ---------------------------------------------------------------- state
 let shell = null;
 let listed = false;          // the broker's lists are in (removing what's gone is safe)
 let prefs = { ...DEFAULT_PREFS };
-let favorites = null;        // app ids, in the dash's order
+let favorites = null;        // the app ids pinned before the dash was the dock (moved into it once)
 let workspaces = [{ id: 1, name: "" }];
 let nextWsId = 2;
 let cur = 0;                 // the current workspace's index
@@ -576,19 +604,9 @@ function toast(text, { action, onAction, ms = 3500 } = {}) {
 }
 
 // Kept with the shell (shell.storage: outside its folder, the same in every
-// slot), and in localStorage when there's no helper.
-const saveTimers = new Map();
-const store = {
-  async get(key) {
-    try { if (shell?.available) { const v = await shell.storage.get(key); if (v !== undefined) return v; } } catch {}
-    try { return JSON.parse(localStorage.getItem(`gnome.${key}`)) ?? undefined; } catch { return undefined; }
-  },
-  set(key, value) {
-    try { localStorage.setItem(`gnome.${key}`, JSON.stringify(value)); } catch {}
-    clearTimeout(saveTimers.get(key));
-    saveTimers.set(key, setTimeout(() => shell?.storage.set(key, value).catch(() => {}), 300));
-  },
-};
+// slot), and in localStorage when there's no helper: the UI library's store,
+// made once the shell is connected.
+let store = ui.settings.shellStore(null, "gnome.");
 // Geometry is per window id, which lasts as long as Ash: the page's own storage.
 const geomKey = `gnome.geom2${SUFFIX}`;
 const savedGeom = (() => { try { return JSON.parse(localStorage.getItem(geomKey)) ?? {}; } catch { return {}; } })();
@@ -634,8 +652,11 @@ try {
   console.error(error);
 }
 
-// What's kept: settings, pinned apps, workspaces.
-prefs = { ...DEFAULT_PREFS, ...((await store.get("prefs")) ?? {}) };
+// What's kept: settings, the dock (once pinned apps), workspaces.
+store = ui.settings.shellStore(shell, "gnome.");
+const settingsStore = new ui.settings.Settings({ store, key: "prefs", defaults: DEFAULT_PREFS });
+await settingsStore.load().catch(() => {});
+prefs = settingsStore.all();
 favorites = (await store.get("favorites")) ?? null;
 {
   const saved = await store.get(`workspaces${SESSION}`);
@@ -650,8 +671,8 @@ function saveWorkspaces() {
   store.set(`workspaces${SESSION}`, { list: workspaces, next: nextWsId, cur: workspaces[cur]?.id });
 }
 function setPref(key, value) {
+  settingsStore.set(key, value);
   prefs[key] = value;
-  store.set("prefs", prefs);
   applyPrefs();
 }
 
@@ -1538,7 +1559,8 @@ function dropTargetAt(x, y) {
 // From a header bar or an edge (sx/sy known), or an app's own request, where the
 // page gets the rest of the drag without a pointerdown (sx/sy from the first move).
 let drag = null;
-const edgeCode = (edge) => ({ top: "n", bottom: "s", left: "w", right: "e", "top-left": "nw", "top-right": "ne", "bottom-left": "sw", "bottom-right": "se" })[edge] ?? "se";
+// An edge's compass code ("se"), and resizing with the opposite edge kept: the UI library's (drag.js).
+const { edgeCode, resizeRect } = ui.drag;
 function beginDrag(item, mode, x, y) {
   if (overview()) return;
   drag = { item, mode, sx: x, sy: y, g0: { ...item.geom }, tile0: item.tile, moved: false, zone: null };
@@ -1577,12 +1599,7 @@ addEventListener("pointermove", (e) => {
     if (mode.includes("e") || mode.includes("w")) ws.split = Math.max(0.2, Math.min(0.8, (e.clientX - d.left - wa.x) / wa.w));
     if (mode.includes("n") || mode.includes("s")) ws.vsplit = Math.max(0.2, Math.min(0.8, (e.clientY - d.top - wa.y) / wa.h));
   } else {
-    const g0 = drag.g0, g = { ...g0 };
-    if (mode.includes("e")) g.w = Math.max(MIN_W, g0.w + dx);
-    if (mode.includes("s")) g.h = Math.max(MIN_H, g0.h + dy);
-    if (mode.includes("w")) { g.w = Math.max(MIN_W, g0.w - dx); g.x = g0.x + g0.w - g.w; }
-    if (mode.includes("n")) { g.h = Math.max(MIN_H, g0.h - dy); g.y = g0.y + g0.h - g.h; }
-    item.geom = g;
+    item.geom = resizeRect(drag.g0, mode, dx, dy, { min: { w: MIN_W, h: MIN_H } });
   }
   render();
 });
@@ -1753,15 +1770,10 @@ function defaultFavorites() {
     pick("org.gnome.Console.desktop", "org.gnome.Terminal.desktop", "foot.desktop", "kitty.desktop", "alacritty.desktop"),
     pick("org.gnome.TextEditor.desktop", "org.gnome.gedit.desktop", "code.desktop"), AGENT].filter(Boolean);
 }
-function setFavorites(list) {
-  favorites = [...new Set(list)];
-  store.set("favorites", favorites);
-  render();
-  if (overviewTarget === 2) renderGrid();
-}
-const isFavorite = (id) => favorites?.includes(id);
-const pin = (id) => { if (!isFavorite(id)) setFavorites([...(favorites ?? []), id]); };
-const unpin = (id) => setFavorites((favorites ?? []).filter((f) => f !== id));
+const appTarget = (id) => ({ kind: "app", desktopId: id, windowAppId: null, name: appById(id)?.name ?? id });
+const isFavorite = (id) => (dock?.pinnedIndexOf(id) ?? -1) >= 0;
+const pin = (id, index) => { if (!isFavorite(id)) dock?.pin(appTarget(id), index === undefined ? {} : { index }); };
+const unpin = (id) => { const i = dock?.pinnedIndexOf(id) ?? -1; if (i >= 0) dock.unpin(i); };
 
 /** The windows of each app, most recently used first. */
 function runningApps({ currentWorkspace = false } = {}) {
@@ -1777,52 +1789,124 @@ function runningApps({ currentWorkspace = false } = {}) {
   return groups;
 }
 
-let dashSig = "";
-function renderDash() {
-  const dash = $("dash");
-  document.documentElement.style.setProperty("--dock-icon", `${prefs.dockIconSize}px`);
-  const running = runningApps();
-  const fav = favorites ?? [];
-  const extra = [...running.keys()].filter((id) => !fav.includes(id));
-  const focusApp = focused && items.get(focused) ? appKeyOf(items.get(focused)) : "";
-  const sig = JSON.stringify([fav, extra, [...running].map(([id, g]) => [id, g.items.length]), focusApp, appDrag?.over, apps.length, prefs.dockIconSize]);
-  if (sig === dashSig) return;
-  dashSig = sig;
-  const make = (id) => {
-    const app = appById(id) ?? running.get(id)?.app;
-    const group = running.get(id);
-    const b = el("button", `icon-btn ${id === focusApp ? "focused-app" : ""}`);
-    b.dataset.app = id;
-    b.title = app?.name ?? id;
-    b.append(appIconEl(app ?? { name: id }));
-    if (group) {
-      const dots = el("span", "dots");
-      for (let i = 0; i < Math.min(3, group.items.length); i++) dots.append(el("i"));
-      b.append(dots);
+// ---------------------------------------------------------------- the dash: the UI library's dock
+// The dash is the dock (dock/core.js, dock/dock.js), as Dash to Dock makes
+// GNOME's dash: pinned apps and sites on Super+1…9, each holding a window or
+// tab, kept on this workspace or everywhere; the running apps nothing pins
+// after a separator; Show Apps at the end. Its slots were the pinned apps
+// ("favorites") before; they move over once.
+const GLOBAL = "gnome:global";
+let dock = null;
+let dockView = null;
+const dockMaximized = new Set();
+const keyOfThing = (thing) => (thing.kind === "window" ? `w:${thing.entry.id}` : `t:${thing.tab.id}`);
+const gnomeDockHost = {
+  ns: "gnome",
+  scopes: ["thread", "global"],
+  world() {
+    const windows = [];
+    const tabs = [];
+    for (const item of items.values()) {
+      const entry = { ...item.entry, tags: tagsOf(item.entry) };
+      if (item.kind === "w") windows.push(entry); else tabs.push(entry);
     }
-    b.addEventListener("mousedown", (e) => e.preventDefault());
-    b.addEventListener("click", (e) => activateApp(id, { newWindow: e.ctrlKey }));
-    b.addEventListener("auxclick", (e) => { if (e.button === 1) activateApp(id, { newWindow: true }); });
-    b.addEventListener("contextmenu", (e) => { e.preventDefault(); appMenu(id, { anchor: b }); });
-    b.addEventListener("pointerdown", (e) => appPointerDown(e, id, b, "dash"));
-    return b;
-  };
-  const children = [...fav.map(make), ...(extra.length && fav.length ? [el("div", "sep")] : []), ...extra.map(make)];
-  if (appDrag?.over !== undefined && appDrag.over !== null) {
-    const favButtons = children.filter((c) => c.dataset?.app && fav.includes(c.dataset.app));
-    const at = favButtons[appDrag.over];
-    if (at) at.classList.add("drop-before");
-    else if (favButtons.length) favButtons.at(-1).after(Object.assign(el("div", "icon-btn"), { style: "width:6px" }));
-    if (appDrag.from === "dash") children.find((c) => c.dataset?.app === appDrag.id)?.classList.add("ghost");
-  }
-  const show = el("button", "icon-btn");
+    return { windows, tabs };
+  },
+  contextKey: () => String(curWs().id),
+  scopeTag: (scope) => (scope === "global" ? GLOBAL : curTag()),
+  inScope(item, scope, kind) {
+    if (scope === "global") return (item.tags ?? []).includes(GLOBAL);
+    return items.get(`${kind === "window" ? "w" : "t"}:${item.id}`)?.ws === curWs().id;
+  },
+  launchThread: () => curTag(),
+  retag: (item, add, remove) => (item.kind === "window" ? shell.tagWindow(item.id, add, remove) : shell.tagTab(item.id, add, remove)),
+  // Charon's own apps too: Web opens a tab, Claude Code a terminal.
+  launchApp: (desktopId) => launchAppId(desktopId),
+  launchTerminal: () => launch(terminalArgv()),
+  async openTab(url, tags) {
+    const tab = await shell.createTab(curTag(), url);
+    const extra = tags.filter((tag) => tag !== curTag());
+    if (tab && extra.length) await shell.tagTab(tab.id, extra).catch(() => {});
+    return tab ? { ...tab, tags: [...(tab.tags ?? [curTag()]), ...extra] } : null;
+  },
+  presence(thing) {
+    const item = items.get(keyOfThing(thing));
+    if (!item) return "hidden";
+    if (focused === item.key && !overview() && !item.hidden) return "focused";
+    return !item.hidden && item.ws === curWs().id ? "shown" : "hidden";
+  },
+  show(thing, { layout, scope }) {
+    const key = keyOfThing(thing);
+    let item = items.get(key);
+    if (!item) {
+      const entry = thing.kind === "window" ? shell.windows.get(thing.entry.id) : shell.tabs.get(thing.tab.id);
+      if (!entry) return;
+      claim(entry, thing.kind === "window" ? "w" : "t");
+      pendingFocus = key;
+      sync();
+      return;
+    }
+    // Kept everywhere: it comes to this workspace.
+    if (scope === "global" && item.ws !== curWs().id) moveToWorkspace(item, curWs().id);
+    setView(0);
+    if (layout === "fold" && item.tile !== "max") { dockMaximized.add(key); setTile(item, "max"); }
+    else if (layout === "split" && dockMaximized.has(key)) { dockMaximized.delete(key); setTile(item, null); }
+    focusItem(key);
+  },
+  hide: (thing) => minimize(items.get(keyOfThing(thing))),
+  close: (thing) => { const item = items.get(keyOfThing(thing)); if (item) closeItem(item); },
+  snapshot: () => ({ key: focused, ws: curWs().id }),
+  restore(point, own) {
+    const ownKey = own ? keyOfThing(own) : null;
+    if (point?.key && point.key !== ownKey && items.has(point.key)) focusItem(point.key);
+    else if (own) minimize(items.get(ownKey));
+  },
+  focusedItem() {
+    const item = items.get(focused);
+    return item ? { kind: item.kind === "w" ? "window" : "tab", id: item.id } : null;
+  },
+  apps: async () => [PSEUDO[WEB], PSEUDO[AGENT], PSEUDO[SETTINGS], ...apps],
+  toast: (text, { detail = "" } = {}) => toast(detail ? `${text} ${detail}` : text),
+  // Web's are the tabs, as Charon's dash always counted them.
+  belongsTo: (target, item, kind) => (target.kind === "app" && target.desktopId === WEB ? kind === "tab" : undefined),
+  groupOf(entry, kind) {
+    const item = items.get(`${kind === "window" ? "w" : "t"}:${entry.id}`);
+    if (!item) return null;
+    const app = appOf(item);
+    return { key: app.id, name: app.name, desktopId: appById(app.id) ? app.id : null, windowAppId: app.windowAppId ?? null };
+  },
+};
+
+function mountDash() {
+  const show = el("button", "pl-dock-item");
   show.id = "show-apps";
   show.title = "Show Apps";
-  show.innerHTML = icon("grid");
+  show.innerHTML = `<span class="pl-dock-icon">${icon("grid")}</span>`;
   show.addEventListener("mousedown", (e) => e.preventDefault());
   // As GNOME's: from the app grid, back to the windows.
   show.onclick = () => setView(overviewTarget === 2 ? 1 : 2);
-  dash.replaceChildren(...children, el("div", "sep"), show);
+  const appIcon = (app) => { const e = appIconEl(app); return e; };
+  dockView = ui.dockView.mountDock($("dash"), dock, {
+    side: "bottom",
+    icons: {
+      app: (id) => (shell ? shell.appIcon(id) : Promise.resolve(null)),
+      site: (url) => shell?.siteIcon?.(url) ?? Promise.resolve(null),
+      window: (entry) => shell.windowIcon(shell.windows.get(entry.id) ?? entry).catch(() => null),
+      // Charon's own apps draw their glyphs; the others their icons, as the grid does.
+      target: (target) => (target.kind === "app" ? appIcon(appById(target.desktopId) ?? { name: target.name, id: target.desktopId, hasIcon: true }) : null),
+      group: (group) => appIcon(appById(group.key) ?? runningApps().get(group.key)?.app ?? { name: group.name }),
+    },
+    scopeLabels: { thread: "This workspace", global: "Everywhere" },
+    layoutLabels: { split: "Normal window", fold: "Maximized" },
+    takeKeyboard: () => { blurWindows(); return () => { const it = items.get(focused); if (it) giveKeyboard(it); }; },
+    onSettings: () => settings?.open("appearance"),
+    extras: [show],
+  });
+}
+
+function renderDash() {
+  document.documentElement.style.setProperty("--dock-icon", `${prefs.dockIconSize}px`);
+  dock?.changed();
 }
 
 /** A dash or grid icon's click: the app's window (the next one if it's on top), or a new one. */
@@ -1838,6 +1922,7 @@ function activateApp(id, { newWindow = false } = {}) {
   focusItem(target.key);
 }
 
+// The app grid's menu.
 function appMenu(id, { anchor, x, y } = {}) {
   const app = appById(id) ?? runningApps().get(id)?.app;
   const group = runningApps().get(id);
@@ -1861,77 +1946,52 @@ function appMenu(id, { anchor, x, y } = {}) {
   menu(entries, { anchor, x, y, align: "center" });
 }
 
-// Dragging an app icon (the dash or the grid): to the dash to pin it or
-// move it there, out of the dash to unpin it, or onto a workspace to open it there.
+// Dragging an app icon from the grid: onto the dash to pin it there (the
+// dock's view shows where), or onto a workspace to open it there. The dash's
+// own icons drag in the dock's view.
 let appDrag = null;
 function appPointerDown(e, id, btn, from) {
   if (e.button !== 0) return;
-  const sx = e.clientX, sy = e.clientY;
-  let started = false;
-  const ghost = () => {
-    const g = el("div");
-    g.id = "drag-ghost";
-    g.append(appIconEl(appById(id) ?? runningApps().get(id)?.app));
-    document.body.append(g);
-    return g;
-  };
   let g = null;
-  const move = (ev) => {
-    if (!started && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 10) return;
-    if (!started) {
-      started = true;
-      btn.setPointerCapture?.(ev.pointerId);
-      appDrag = { id, from, over: null };
-      g = ghost();
-    }
-    g.style.left = `${ev.clientX}px`;
-    g.style.top = `${ev.clientY}px`;
-    appDrag.over = dashSlotAt(ev.clientX, ev.clientY);
-    const t = overview() ? dropTargetAt(ev.clientX, ev.clientY) : null;
-    if ((t?.ws ?? null) !== (ovDrop?.ws ?? null)) { ovDrop = t; render(); }
-    renderDash();
-  };
-  const up = (ev) => {
-    removeEventListener("pointermove", move, true);
-    removeEventListener("pointerup", up, true);
-    if (!started) return;
-    g?.remove();
-    const over = appDrag.over;
-    appDrag = null;
-    const target = ovDrop;
-    ovDrop = null;
-    const fav = (favorites ?? []).filter((f) => f !== id);
-    if (over !== null && appById(id)) {
-      fav.splice(Math.min(over, fav.length), 0, id);
-      setFavorites(fav);
-    } else if (target?.ws) {
-      launchAppId(id, target.ws);
-    } else if (from === "dash" && isFavorite(id) && !inDash(ev.clientX, ev.clientY)) {
-      unpin(id);
-      toast(`${appById(id)?.name ?? id} unpinned`, { action: "Undo", onAction: () => pin(id) });
-    }
-    dashSig = "";
-    render();
-    // The click that follows a drag isn't one.
-    const eat = (c) => { c.stopPropagation(); c.preventDefault(); };
-    addEventListener("click", eat, { capture: true, once: true });
-    setTimeout(() => removeEventListener("click", eat, true), 0);
-  };
-  addEventListener("pointermove", move, true);
-  addEventListener("pointerup", up, true);
-}
-const inDash = (x, y) => { const r = $("dash").getBoundingClientRect(); return x >= r.left - 20 && x <= r.right + 20 && y >= r.top - 30 && y <= r.bottom + 10; };
-/** Where in the pinned apps a drop at (x, y) goes, or null when it's not over the dash. */
-function dashSlotAt(x, y) {
-  if (!inDash(x, y)) return null;
-  const favButtons = [...$("dash").querySelectorAll(".icon-btn[data-app]")].filter((b) => (favorites ?? []).includes(b.dataset.app) && !b.classList.contains("ghost"));
-  let i = 0;
-  for (const b of favButtons) {
-    const r = b.getBoundingClientRect();
-    if (x > r.left + r.width / 2) i++;
-  }
-  const without = (favorites ?? []).filter((f) => f !== appDrag?.id);
-  return Math.min(i, without.length);
+  ui.drag.trackDrag(e, {
+    threshold: 10,
+    onMove: ({ x, y, event }) => {
+      if (!appDrag) {
+        btn.setPointerCapture?.(event.pointerId);
+        appDrag = { id, from, over: null };
+        g = el("div");
+        g.id = "drag-ghost";
+        g.append(appIconEl(appById(id) ?? runningApps().get(id)?.app));
+        document.body.append(g);
+      }
+      g.style.left = `${x}px`;
+      g.style.top = `${y}px`;
+      appDrag.over = appById(id) ? dockView?.dropIndexAt(x, y) ?? null : null;
+      dockView?.showDrop(appDrag.over);
+      const t = overview() ? dropTargetAt(x, y) : null;
+      if ((t?.ws ?? null) !== (ovDrop?.ws ?? null)) { ovDrop = t; render(); }
+    },
+    onEnd: ({ moved }) => {
+      if (!moved || !appDrag) return;
+      g?.remove();
+      const over = appDrag.over;
+      appDrag = null;
+      dockView?.showDrop(null);
+      const target = ovDrop;
+      ovDrop = null;
+      if (over !== null) {
+        const at = dock.pinnedIndexOf(id);
+        if (at >= 0) dock.move(at, over > at ? over - 1 : over);
+        else pin(id, over);
+      } else if (target?.ws) launchAppId(id, target.ws);
+      render();
+      // The click that follows a drag isn't one.
+      const eat = (c) => { c.stopPropagation(); c.preventDefault(); };
+      addEventListener("click", eat, { capture: true, once: true });
+      setTimeout(() => removeEventListener("click", eat, true), 0);
+    },
+    onCancel: () => { g?.remove(); appDrag = null; dockView?.showDrop(null); ovDrop = null; render(); },
+  });
 }
 
 // The app grid, and search results.
@@ -2103,25 +2163,28 @@ $("search").addEventListener("keydown", (e) => {
 });
 
 // ---------------------------------------------------------------- launching
+/** Starts app `id` (or Charon's own: Web, Claude Code, Settings) on a workspace: { pid } or { tab }, or nothing. */
 async function launchAppId(id, wsId = curWs().id) {
-  if (id === WEB) return openTab(prefs.homepage || "about:blank", { edit: true, wsId });
+  if (id === WEB) return { tab: await openTab(prefs.homepage || "about:blank", { edit: true, wsId }) };
   if (id === AGENT) return startAgent(wsId);
-  if (id === SETTINGS) { setView(0); return settings.open(); }
+  if (id === SETTINGS) { setView(0); await settings.open(); return {}; }
   setView(0);
   if (wsId !== curWs().id) switchTo(wsIndex(wsId));
   try {
     const result = await shell.launchApp(wsTag(wsId), id, { waitMs: 8000 });
     const w = result?.windows?.[0];
     if (w) { pendingFocus = `w:${w.id}`; sync(); }
-  } catch (error) { toast(error.message); }
+    return { pid: result?.pid };
+  } catch (error) { toast(error.message); return {}; }
 }
 async function launch(argv, wsId = curWs().id) {
   setView(0);
   try {
-    const { windows } = await shell.launch(wsTag(wsId), argv, { waitMs: 8000, show: true });
+    const { pid, windows } = await shell.launch(wsTag(wsId), argv, { waitMs: 8000, show: true });
     if (windows[0]) { pendingFocus = `w:${windows[0].id}`; sync(); }
     else toast(`${argv[0]} started, no window yet`);
-  } catch (error) { toast(error.message); }
+    return { pid };
+  } catch (error) { toast(error.message); return {}; }
 }
 const terminalArgv = () => (prefs.terminal || "foot").trim().split(/\s+/);
 async function openTab(url, { edit = false, wsId = curWs().id } = {}) {
@@ -2141,15 +2204,16 @@ async function openTab(url, { edit = false, wsId = curWs().id } = {}) {
       };
       setTimeout(wait, 150);
     }
-  } catch (error) { toast(error.message); }
+    return tab;
+  } catch (error) { toast(error.message); return null; }
 }
 // Claude Code in a terminal, in the workspace's thread: it sees and drives that workspace's apps and tabs.
 async function startAgent(wsId = curWs().id) {
   try {
     const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(wsTag(wsId))}`).then((r) => r.json());
     const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
-    launch([...terminalArgv(), "-T", "Claude Code", "-e", "claude", "--mcp-config", mcp], wsId);
-  } catch (error) { toast(`Claude Code: ${error.message}`); }
+    return await launch([...terminalArgv(), "-T", "Claude Code", "-e", "claude", "--mcp-config", mcp], wsId);
+  } catch (error) { toast(`Claude Code: ${error.message}`); return {}; }
 }
 async function runDialog() {
   const cmd = await ask("Run a Command", { placeholder: "Enter a command", action: "Run" });
@@ -2319,8 +2383,9 @@ function closeSwitcher({ restore = false } = {}) {
 // ---------------------------------------------------------------- keys
 // Every action, its default keys (GNOME's), and what Settings → Keyboard
 // lets the user change. Combos are "Super+Ctrl+Alt+Shift+<code>" in that order.
-const ACTIONS = [];
-const action = (id, group, label, keys, run, opts = {}) => ACTIONS.push({ id, group, label, defaults: keys, run, ...opts });
+// The UI library's keymap (keys.js): the user's keys are prefs.keys.
+const keymap = new ui.keys.Keymap({ onOverrides: (keys) => setPref("keys", keys) });
+const action = (id, group, label, keys, run, opts = {}) => keymap.define(id, { group, label, keys, run, ...opts });
 const focusedItem = () => items.get(focused);
 action("overview", "Navigation", "Show the overview", ["Alt+F1"], toggleOverview);
 action("app-grid", "Navigation", "Show all apps", ["Super+KeyA"], toggleApps);
@@ -2356,8 +2421,7 @@ action("always-on-top", "Windows", "Toggle always on top", [], () => { const it 
 action("move", "Windows", "Move with the keyboard", ["Alt+F7"], () => keyboardMove("move"));
 action("resize", "Windows", "Resize with the keyboard", ["Alt+F8"], () => keyboardMove("resize"));
 action("lower", "Windows", "Lower the window below the others", [], () => { const it = focusedItem(); if (it) { lower(it); focusTop(); } });
-for (let n = 1; n <= 9; n++) action(`app-${n}`, "Apps", `Open pinned app ${n}`, [`Super+Digit${n}`], () => { const id = favorites?.[n - 1]; if (id) activateApp(id); });
-for (let n = 1; n <= 9; n++) action(`app-new-${n}`, "Apps", `New window of pinned app ${n}`, [`Super+Ctrl+Digit${n}`], () => { const id = favorites?.[n - 1]; if (id) launchAppId(id); });
+// Super+1…9 are the dock's (defineDockActions, once it's there).
 action("terminal", "Apps", "Open a terminal", ["Super+Enter", "Ctrl+Alt+KeyT"], () => launch(terminalArgv()));
 action("web", "Apps", "Open a browser tab", ["Super+KeyB"], () => launchAppId(WEB));
 action("agent", "Apps", "Start Claude Code in this workspace", ["Super+Shift+Enter"], () => startAgent());
@@ -2368,30 +2432,16 @@ action("screenshot-window", "Screenshots", "Screenshot the window", ["Alt+PrintS
 action("lock", "System", "Lock the screen", [], lock);
 action("log-out", "System", "Log out", ["Ctrl+Alt+Delete"], () => quick?.openSub("power"));
 
-const comboOf = (e) => `${e.metaKey ? "Super+" : ""}${e.ctrlKey ? "Ctrl+" : ""}${e.altKey ? "Alt+" : ""}${e.shiftKey ? "Shift+" : ""}${e.code}`;
-const normalizeCombo = (text) => {
-  const parts = text.split("+");
-  const code = parts.pop();
-  const has = (m) => parts.includes(m);
-  return `${has("Super") ? "Super+" : ""}${has("Ctrl") ? "Ctrl+" : ""}${has("Alt") ? "Alt+" : ""}${has("Shift") ? "Shift+" : ""}${code}`;
-};
+const { comboOf, normalizeCombo } = ui.keys;
 /** The keys an action has now: the user's, else its defaults. */
-const keysOf = (a) => (prefs.keys?.[a.id] ?? a.defaults).map(normalizeCombo);
-let byCombo = new Map();
-// A keyboard Ash takes for a Chromebook's sends its top row as actions: F1–F4
-// arrive as Back, Forward, Refresh and the zoom key, so those answer too.
-// (F5 on are brightness and media keys there: not taken.)
-const TOP_ROW = { F1: "BrowserBack", F2: "BrowserForward", F3: "BrowserRefresh", F4: "ZoomToggle" };
-const withTopRow = (combo) => {
-  const code = combo.split("+").pop();
-  return TOP_ROW[code] ? [combo, combo.slice(0, -code.length) + TOP_ROW[code]] : [combo];
-};
+const keysOf = (a) => keymap.keysOf(a.id);
 function buildBindings() {
-  byCombo = new Map();
-  for (const a of ACTIONS) for (const k of keysOf(a)) for (const c of withTopRow(k)) byCombo.set(c, a);
+  keymap.setOverrides(prefs.keys);
+  // Custom shortcuts: a command each (Settings → Keyboard lists them on their own).
+  keymap.undefine("custom:*");
   for (const c of prefs.custom ?? []) {
     if (!c.combo || !c.command) continue;
-    byCombo.set(normalizeCombo(c.combo), { id: `custom:${c.name}`, label: c.name, run: () => launch(["sh", "-c", c.command]) });
+    keymap.define(`custom:${c.name}`, { group: "Custom", label: c.name, keys: [c.combo], editable: false, run: () => launch(["sh", "-c", c.command]) });
   }
   updateShortcuts();
 }
@@ -2417,7 +2467,7 @@ const OVERLAY_SHORTCUTS = [
 
 function updateShortcuts() {
   if (!shell) return;
-  const list = [...byCombo.keys()];
+  const list = keymap.combos();
   if (prefs.overlayKey) list.push(...OVERLAY_SHORTCUTS);
   // While the overview, a switcher or a keyboard move is up, its keys too.
   if (overview()) list.push("Escape", "Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown");
@@ -2437,11 +2487,14 @@ addEventListener("keydown", (e) => {
     if (!recorder) { e.preventDefault(); return; }
   } else if (superTap.down) superTap.used = true;
   if (recorder) {
-    if (["ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"].includes(e.code)) return;
+    const combo = ui.keys.recordedCombo(e);
+    if (combo === undefined) return;
     e.preventDefault(); e.stopPropagation();
-    recorder(e.code === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey ? null : e.code === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey ? "" : comboOf(e));
+    recorder(combo);
     return;
   }
+  // The dock's editor (or another of the library's) is recording, or a field of its has the keyboard.
+  if (ui.keys.isRecording()) return;
   // The switcher's own keys.
   if (switcher) {
     e.preventDefault(); e.stopPropagation();
@@ -2467,7 +2520,7 @@ addEventListener("keydown", (e) => {
     return;
   }
   lastKey = e;
-  const a = byCombo.get(comboOf(e));
+  const a = keymap.actionFor(comboOf(e));
   if (!a) {
     if (overview() && e.code === "Escape" && document.activeElement !== $("search")) { e.preventDefault(); setView(0); }
     return;
@@ -2616,7 +2669,6 @@ function applyPrefs() {
   const b = document.body.classList;
   b.toggle("dock-always", prefs.dock === "always");
   b.toggle("dock-auto", prefs.dock === "auto");
-  dashSig = "";
   buildBindings();
   dateMenu?.tick();
   quick?.refresh();
@@ -2643,9 +2695,9 @@ settings = {
   _mod: null,
   async load() {
     this._mod ??= (await import("./settings.js")).mountSettings({
-      shell, helper, get prefs() { return prefs; }, setPref, toast, quick, ACTIONS, keysOf, normalizeCombo,
+      shell, helper, get prefs() { return prefs; }, setPref, toast, quick, keymap, normalizeCombo, dock: () => dock, ui,
       record: (fn) => { recorder = fn; updateShortcuts(); }, stopRecording: () => { recorder = null; updateShortcuts(); },
-      favorites: () => favorites ?? [], setFavorites, appById, appIconEl, apps: () => apps,
+      appById, appIconEl, apps: () => apps,
       workspaces: () => workspaces.map((w, i) => ({ ...w, label: wsName(w, i), count: itemsOn(w.id).length })),
       renameWorkspace: (id, name) => { const w = wsById(id); if (w) { w.name = name; normalizeWorkspaces(); render(); } },
       WALLPAPERS, ACCENTS,
@@ -2665,7 +2717,7 @@ const SETTINGS_INDEX = [
   { page: "appearance", title: "Appearance", icon: "appearance", keywords: "wallpaper background accent color dock theme" },
   { page: "multitasking", title: "Multitasking", icon: "multitasking", keywords: "workspaces hot corner edge tiling super key switcher" },
   { page: "keyboard", title: "Keyboard Shortcuts", icon: "keyboard", keywords: "keys hotkeys shortcuts accelerators bindings custom" },
-  { page: "apps", title: "Apps", icon: "apps", keywords: "dash pinned favorites terminal default browser homepage" },
+  { page: "apps", title: "Apps", icon: "apps", keywords: "dash dock pinned favorites sites terminal default browser homepage" },
   { page: "notifications", title: "Notifications", icon: "bell", keywords: "do not disturb banners" },
   { page: "privacy", title: "Screen Lock", icon: "lock", keywords: "privacy lock idle blank screen" },
   { page: "datetime", title: "Date & Time", icon: "info", keywords: "clock 24-hour seconds weekday calendar" },
@@ -2704,14 +2756,24 @@ if (shell) {
     if (tab) { claim(tab, "t", wsId); pendingFocus = `t:${tab.id}`; }
     sync();
   });
-  shell.apps().then((list) => {
+  const appsLoaded = shell.apps().then((list) => {
     apps = list;
     appsVersion++;
     renderGrid();
-    favorites ??= defaultFavorites();
-    dashSig = "";
     render();
-  }).catch(() => { favorites ??= [WEB, AGENT]; render(); });
+  }).catch(() => {});
+  // The dash: the UI library's dock. Its slots are what was pinned before,
+  // the first time (their names once the apps are in).
+  dock = new ui.dockCore.Dock({
+    host: gnomeDockHost, store, key: `dock${SUFFIX}`.replace(/[^\w.-]/g, "_"),
+    settings: { get: (key) => (key === "iconSize" ? Number(prefs.dockIconSize) : prefs[key]) },
+  });
+  ui.dockCore.defineDockActions(keymap, dock, { group: "Dock" });
+  await dock.load(async () => {
+    await appsLoaded;
+    return (favorites ?? defaultFavorites()).map((id) => ({ target: appTarget(id), scope: "thread", layout: "split" }));
+  }).catch((error) => console.error(error));
+  mountDash();
   await shell.ready;
   listed = true;
   applyPrefs();
@@ -2722,7 +2784,6 @@ if (shell) {
   if (items.size === 0) setView(1);
   else focusTop();
 } else {
-  favorites ??= [WEB, AGENT];
   applyPrefs();
   toast(`helper unreachable (${helper})`);
 }
