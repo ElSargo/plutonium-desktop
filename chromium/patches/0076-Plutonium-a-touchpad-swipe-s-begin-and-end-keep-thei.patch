@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 18:15:02 +1300
-Subject: [PATCH 76/93] Plutonium: a touchpad swipe's begin and end keep their
+Subject: [PATCH 76/94] Plutonium: a touchpad swipe's begin and end keep their
  finger count
 
 ScrollEvent's copy from a native event read the offsets of a fling cancel or

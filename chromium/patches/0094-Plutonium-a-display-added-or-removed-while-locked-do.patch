@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 1 Nov 2026 16:17:06 +1300
+Subject: [PATCH 94/94] Plutonium: a display added or removed while locked
+ doesn't crash Ash
+
+CloseWidgets() moved each lock widget out of widgets_ into DeleteSoon()
+while hiding the rest. Hiding one could activate another window, and
+OnWindowActivated() walked widgets_ through IsLockWindow(), dereferencing
+the moved-from (null) entry. The widgets now leave widgets_ before any is
+hidden.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+index d46cbd460c..d6cd682059 100644
+--- a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+@@ -405,13 +405,16 @@ void PlutoniumLockImpl::BuildWidgets() {
+ 
+ void PlutoniumLockImpl::CloseWidgets() {
+   view_ = nullptr;
+-  for (auto& widget : widgets_) {
++  // Out of widgets_ first: hiding one can activate another window, and
++  // OnWindowActivated() walks widgets_ (a moved-from entry there crashed).
++  std::vector<std::unique_ptr<views::Widget>> widgets;
++  widgets.swap(widgets_);
++  for (auto& widget : widgets) {
+     widget->Hide();
+     // Not from inside one of the widget's own calls (the Enter key).
+     base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+         FROM_HERE, std::move(widget));
+   }
+-  widgets_.clear();
+ }
+ 
+ void PlutoniumLockImpl::RebuildSoon() {

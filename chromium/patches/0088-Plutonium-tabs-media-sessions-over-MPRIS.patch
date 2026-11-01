@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 08:39:51 +1300
-Subject: [PATCH 88/93] Plutonium: tabs' media sessions over MPRIS
+Subject: [PATCH 88/94] Plutonium: tabs' media sessions over MPRIS
 
 Linux Chromium puts the active media session on the session bus as an
 org.mpris.MediaPlayer2 player, for media keys, playerctl and desktop
