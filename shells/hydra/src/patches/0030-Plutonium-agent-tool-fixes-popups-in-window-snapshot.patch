@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 12:23:55 +1300
-Subject: [PATCH 30/47] Plutonium: agent tool fixes: popups in window
+Subject: [PATCH 30/48] Plutonium: agent tool fixes: popups in window
  snapshots, results that say what happened, private tabs marked
 
 - snapshot_window passes on the window's open popups; click_window,

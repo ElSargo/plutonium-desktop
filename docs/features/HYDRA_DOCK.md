@@ -1,6 +1,6 @@
 # The dock in Hydra
 
-**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope").
+**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope"). Since 2026-11-01 a slot holds one window or tab, not every one that looks like it ("Identity-based slots", patch 0048).
 
 Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a status cluster at the title bar's right end, it makes Hydra a desktop without changing how its chat works.
 
@@ -10,14 +10,15 @@ A slot has:
 - **a target:** Hydra's own terminal (the drawer below the chat), an app (a desktop entry), a site (a URL), or a group of apps and sites;
 - **a scope:** `thread`, `project` or `global`. The scope decides which copy the key finds: "Super+1 = thread terminal" is thread A's terminal in thread A and thread B's in thread B, started if the thread has none;
 - **a layout:** `split` (the chat and the app side by side) or `fold` (the chat folds away);
-- **a rule** (sites and groups): which tabs belong to it, such as `github.com/<org>/<repo>/*`, so a link followed in it, or a tab an agent opened there, is part of it.
+- **what it holds:** one window or tab in each copy of its scope, the one put in it or the one its key opened, wherever that tab browses ("Identity-based slots", below). An app or a site in a single slot is the recipe for a new one, not a pattern.
+- **a rule** (groups, step 3, not built): which tabs belong to it, such as `github.com/<org>/<repo>/*`, so a link followed in it, or a tab an agent opened there, is part of it.
 
 Slots are defined once, with templates (`{project.githubUrl}`, `{project.dir}`, `{thread.worktree}`), so one dock serves every project; a project can override single slots. The default dock has slot 1 as the thread's terminal (Hydra's drawer), which can be changed to any app.
 
 ```json
 {
   "1": { "scope": "thread",  "terminal": true },
-  "2": { "scope": "project", "site": "{project.githubUrl}", "match": "{project.githubUrl}/*" },
+  "2": { "scope": "project", "site": "{project.githubUrl}" },
   "3": { "scope": "thread",  "app": "code", "args": ["{thread.worktree}"], "layout": "fold" },
   "4": { "scope": "project", "group": [{ "site": "{project.githubUrl}/pulls" }, { "match": "localhost:*" }] },
   "5": { "scope": "global",  "group": "rest" }
@@ -50,7 +51,6 @@ Pressing a slot's key:
 2. running, not shown: show it and give it the keyboard;
 3. shown, keyboard elsewhere: give it the keyboard;
 4. shown and focused: back to where you were before (the chat, unfolded, or the panel as it was);
-5. several copies: pressing again cycles through them.
 
 Just after switching threads, step 3 doesn't apply: the switch gave the composer the keyboard, so a slot's thing already showing in the new thread is taken as focused and its key hides it (step 4). Typing or clicking in the thread ends that (patch 0035). Going back (step 4) never shows the slot's own thing again: if it was showing when the slot's key was first pressed, the slot is put away.
 
@@ -69,7 +69,7 @@ They are all T3 keybinding commands, so `keybindings.json` can change them. They
 A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, the site's own icon: an open tab's, then the one T3 remembers, then the site's `/favicon.ico`; no third-party icon service) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
 
 - **Click:** what Super+N does. Clicking the one that shows goes back, or puts it away (panel hidden, drawer closed) when there's nowhere remembered to go back to. The click doesn't take the keyboard.
-- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (an address and the prefix its tabs start with), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere; the terminal is always the thread's); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
+- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (the address a new tab of it opens at), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere; the terminal is always the thread's); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
 - **Panel tabs** in the dock show their slot's number.
 
 ChatView publishes the active thread's context (`publishDockContext`) for the sidebar, which is outside it.
@@ -150,3 +150,36 @@ Verified on Xvfb (slot 14), through the dock's buttons in the page:
 | This project, from A's own example.com tabs: they get `t3:project/<id>`; the other thread of the project takes the newest; closing it there closes it | ✅ |
 | On DRM, an agent driving a moved tab | not yet |
 
+## Identity-based slots (patch 0048, 2026-11-01)
+
+Before, a slot kept a description and claimed whatever fit it: a site slot every tab whose address started with its prefix (the editor's "Tabs start with", else the site's origin), an app slot every window of the app in its scope, cycling when there were several. Unrelated tabs of the same site joined the slot (the button showed "showing" for them, the tab menu labelled them, presses cycled through them); a docked tab that left the site dropped out, and the next press opened a new one; changing a slot's scope tagged every matching tab; two slots with overlapping prefixes both claimed a tab; and starting an app bound the first new window with the scope's tag, whatever app it was.
+
+Now a slot holds one thing:
+- **The slot's tag.** Each slot has a stable id, and what it holds carries `t3:dock/<id>` beside its scope's tag. Putting a tab or a window in a slot (Super+Shift+N, the tab menu, the editor's **Use the panel's tab**) tags exactly that one; what the slot held in the same scope copy loses the tag, and the thing leaves any other slot it was in.
+- **Finding it.** A press, the button's state and the panel tab's number all look for what carries the slot's tag and its scope's: the thread's tag (one per thread), the project's or `t3:global` (one, which moves between threads as before). No addresses or app ids are compared.
+- **Nothing found:** the press makes one from the slot's recipe and tags it. A site's tab is created with the scope's tag as its origin and the slot's tag, then shown here (a thread's own, too, now goes the way a project's tab does: `createDockTab`, then the import). An app is started in the scope; the window it binds is the first new one of the process started (its pid), or else a new window of the app in the scope, not any new window. A slot set up in the editor with just an address or an app works this way on its first press.
+- **Tabs a docked tab opens** (links with `target=_blank`, popups) aren't the slot's. Chromium gives a page's new tab its opener's tags; the preview bridge takes the slot's tag off it when it first shows up, and the lookup ignores a slot tag that the opener carries too, until then.
+- **The id changes** when the slot names another app or site (another desktop entry, another host): then what it held anywhere loses the tag. The same site at another address (`github.com/a` to `github.com/a/pulls`), a new name, layout or scope keep it, so what it holds in other threads stays.
+- **Changing the scope** retags only what the slot holds here: it gets the new scope's tag, and loses a project's or `t3:global` (a thread's tag stays: the thread shows it, its agent reaches it). Copies in other threads of a slot kept per thread are no longer found.
+- **Clearing a slot** (the editor, **Remove from the dock**) takes its tag off everything.
+- **Stored slots** (`t3code:plutonium-dock:v1`, version 2) get an id and lose `match`. Nothing carries the new id, so the first press opens a fresh one, or Super+Shift+N binds what's open. Tags live in the browser, so a reload of the page keeps them; after a browser restart the press opens a fresh one.
+- **Gone:** the "Tabs start with" field, `siteMatchOf`, `match` on sites, cycling through copies. Groups and their rules (step 3) are still to come.
+- **Not done: dialogs following their window.** An app's dialog shown as its own panel tab isn't the slot's, so the button says "running" while it shows, and the key raises the main window (Exo then gives a modal dialog the focus). The shells don't see which window a dialog belongs to: Exo knows the parent (`xdg_toplevel.set_parent`, `xdg_wm_dialog_v1`), but the broker's window entry doesn't carry it. That needs a Chromium patch adding the parent to the entry; then the lookup can count a window's dialogs as part of it.
+
+Verified on Xvfb (slot 35, its own T3 data, a scratch project, two draft threads; clicks and keys as synthetic events in the page, tags read from `navigator.windowBroker`):
+
+| Check | |
+|---|---|
+| Stored version-1 slots: ids added, `match` dropped, version 2 | ✅ |
+| Slot 3 (example.com, per thread): one new tab with the thread's tag and the slot's; button "showing", tab numbered 3 | ✅ |
+| A popup from it (`window.open`, same site): only the thread's tag (the slot's came off); button "running" while it shows; no number on it; the key raises the docked tab | ✅ |
+| The docked tab goes to iana.org: still slot 3 ("showing", numbered); pressed away and back, the same tab, no new one | ✅ |
+| Super+Shift+3 on the popup: it holds slot 3, the iana tab loses the tag (another host: a new id) | ✅ |
+| Editor: no "Tabs start with"; **Everywhere**: only the held tab gets `t3:global`, the iana tab nothing | ✅ |
+| Another thread: slot 3 "running"; pressed, the same tab moves there; back in the first thread, it left the panel; pressed there, it comes back and the other thread's tag comes off | ✅ |
+| Slot 2 (migrated, everywhere, example.com) with a global example.com tab open: opens its own tab, leaves the other alone | ✅ |
+| Slot 4 (foot, per thread) with another foot open in the thread: "idle"; pressed, a new foot starts and only its window (matched by pid) gets the slot's tag | ✅ |
+| Slot 4 to **This project**: only its window gets `t3:project/<id>`; **Clear** takes the slot's tag off | ✅ |
+| Super+Shift+5 on the foot window: slot 5 holds it, kept per project (its tags) | ✅ |
+| Reloading the page: the slots find what they held | ✅ |
+| On DRM, through Ash; an app's dialogs | not yet |

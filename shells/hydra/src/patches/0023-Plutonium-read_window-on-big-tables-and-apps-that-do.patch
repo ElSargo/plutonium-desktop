@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 17:00:28 +1300
-Subject: [PATCH 23/47] Plutonium: read_window on big tables and apps that
+Subject: [PATCH 23/48] Plutonium: read_window on big tables and apps that
  don't answer; launch_app waits for windows to settle
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
