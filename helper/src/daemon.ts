@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { A11yError, Accessibility } from "./a11y.ts";
 import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
+import { SiteIcons } from "./siteIcons.ts";
 import { BrowserCdp } from "./cdp.ts";
 import {
   Desktop,
@@ -378,6 +379,7 @@ export class Daemon {
     this.relay.notifyWhere((origin) => this.mayUse(origin, service), "system", { service, state }),
   );
   readonly apps = new DesktopApps();
+  readonly siteIcons = new SiteIcons();
   /** EXO-LOCK: the lock screen and idle (services/session.ts). */
   readonly session: SessionService;
   readonly terminals: Terminals;
@@ -2137,6 +2139,20 @@ export class Daemon {
       const found = this.apps.icon(decodeURIComponent(icon[1]!));
       if (!found) throw new HttpError(404, "No icon.");
       response.writeHead(200, { "Content-Type": found.contentType, "Cache-Control": "max-age=3600" });
+      response.end(found.data);
+      return;
+    }
+    // A website's own icon (src/siteIcons.ts): a page can't always show it itself.
+    if (method === "GET" && path === "/v1/sites/icon") {
+      const found = await this.siteIcons.icon(url.searchParams.get("url") ?? "");
+      if (!found) throw new HttpError(404, "No icon.");
+      // A site's SVG is the site's: nothing in it runs, should it be opened here.
+      response.writeHead(200, {
+        "Content-Type": found.contentType,
+        "Cache-Control": "max-age=3600",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+        "X-Content-Type-Options": "nosniff",
+      });
       response.end(found.data);
       return;
     }

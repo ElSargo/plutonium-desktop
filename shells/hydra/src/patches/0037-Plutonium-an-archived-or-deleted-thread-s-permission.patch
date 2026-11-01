@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 20:08:07 +1300
-Subject: [PATCH 37/49] Plutonium: an archived or deleted thread's permission
+Subject: [PATCH 37/50] Plutonium: an archived or deleted thread's permission
  grants are forgotten
 
 Plutonium's browser keeps a thread's permission decisions until a shell

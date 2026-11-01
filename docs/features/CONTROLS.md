@@ -112,7 +112,8 @@ New keybinding commands. They are configurable like any other, and their default
 - `GET /v1/apps`: the launchable desktop entries, from `$XDG_DATA_HOME` and `$XDG_DATA_DIRS` (NixOS fallbacks if unset). Hidden, NoDisplay, OnlyShowIn, and missing TryExec entries are skipped.
 - `GET /v1/apps/<id>/icon`: the icon, SVG or PNG. Looked up in `PLUTONIUM_ICON_THEME`, breeze, hicolor and Adwaita, then pixmaps.
 - `POST /v1/apps/launch {thread, id, waitMs?}`: runs the entry's Exec, with field codes dropped and Flatpak's empty `@@` markers removed. `Terminal=true` apps run in `$TERMINAL`, else foot, kitty, alacritty and so on.
-- Shell library: `apps()`, `appIcon(id)` (an object URL, fetched so only the shell can read it), `launchApp(threadId, id)`, `setShellShortcuts(list)`.
+- `GET /v1/sites/icon?url=<page>`: a website's own icon, fetched by the helper (a shell page can't show every site's: some send `Cross-Origin-Resource-Policy: same-origin`, many name theirs with `<link rel="icon">`). The one the site's front page names (an SVG, else the smallest at least 32 px), else its `/favicon.ico`; no cookies, no third-party icon service. Kept per origin six hours, a miss ten minutes.
+- Shell library: `apps()`, `appIcon(id)` (an object URL, fetched so only the shell can read it), `siteIcon(pageUrl)` (likewise, per origin), `launchApp(threadId, id)`, `setShellShortcuts(list)`.
 
 ## Not done / caveats
 

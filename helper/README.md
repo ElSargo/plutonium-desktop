@@ -70,6 +70,7 @@ Shared (socket and shell):
 | `POST /v1/launch {thread, argv, cwd?, waitMs?, show?}` | `{pid, windows}`; `windows` are the thread's new windows, if any appeared within `waitMs`. `show: true` sets `PLUTONIUM_SHOW` |
 | `GET /v1/apps` | launchable desktop apps (`.desktop` entries from the XDG data dirs): `{id, name, genericName, comment, keywords, categories, hasIcon, terminal}`, by name |
 | `GET /v1/apps/<id>/icon` | the app's icon (SVG or PNG; themes `PLUTONIUM_ICON_THEME`, breeze, hicolor, Adwaita). An id that isn't a desktop entry's is taken as a window's app id (its `StartupWMClass`, or the desktop file's name, case-insensitively), then as an icon name |
+| `GET /v1/sites/icon?url=<page>` | a website's own icon: the one its front page names with `<link rel="icon">`, else its `/favicon.ico` (src/siteIcons.ts). For shells, which can't show every site's icon themselves |
 | `POST /v1/apps/launch {thread, id, waitMs?, show?}` | starts the app in the thread, as `/v1/launch` (`Terminal=true` apps in `$TERMINAL` or foot); shown unless `show: false` |
 | `GET /v1/printers?title=` | the host's printers through CUPS (`lpstat`): `{available, printers: [{name, description, state, isDefault}], error?, defaultPdfPath}` (`~/Downloads/<title>.pdf`) |
 | `POST /v1/print?printer&copies&duplex&color&title` (a PDF body) | prints it with `lp`: `{job}`; `duplex` none, long-edge or short-edge, `color` 1 or 0 |
