@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 22:09:52 +1300
-Subject: [PATCH 78/95] Plutonium: only the shell window is held fullscreen
+Subject: [PATCH 78/96] Plutonium: only the shell window is held fullscreen
 
 Shell mode held every browser window in fullscreen, as kiosk mode does,
 with no exit bubble, exit button or immersive reveal. Scope it to the

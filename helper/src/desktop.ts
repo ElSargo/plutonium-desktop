@@ -168,6 +168,8 @@ export class Desktop {
   readonly mediaListeners = new Set<(session: BrowserSession | null) => void>();
   /** EXO-LOCK: the lock went up or down. */
   readonly lockListeners = new Set<(locked: boolean) => void>();
+  /** EXO-DISPLAYS: a display came, went or changed (the display service). */
+  readonly displayListeners = new Set<() => void>();
   readonly captureListeners = new Set<(type: "start" | "change" | "stop", capture: DesktopCapture) => void>();
   /** The Plutonium domain was enabled: the browser came up, or came back. */
   readonly enableListeners = new Set<() => void>();
@@ -277,6 +279,10 @@ export class Desktop {
         for (const listener of this.captureListeners) listener(type, capture);
         return;
       }
+      case "Plutonium.displayConfigChanged": {
+        for (const listener of this.displayListeners) listener();
+        return;
+      }
       case "Plutonium.lockChanged": {
         for (const listener of this.lockListeners) listener(value.locked === true);
         return;
@@ -344,6 +350,28 @@ export class Desktop {
   /** EXO-LOCK: the displays off (until the user does something) or on; false where it can't (X11). */
   async setDisplaysOff(off: boolean): Promise<boolean> {
     return ((await this.cdp.send("Plutonium.setDisplaysOff", { off })) as { applied: boolean }).applied;
+  }
+
+  /** EXO-DISPLAYS: the displays' configuration (the display service's state), or null: an older browser. */
+  async displayConfig(): Promise<Record<string, unknown> | null> {
+    if (!(await this.available())) return null;
+    try {
+      const { json } = (await this.cdp.send("Plutonium.getDisplayConfig")) as { json: string };
+      return JSON.parse(json) as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof CdpError && /wasn't found|not found/i.test(error.message)) return null;
+      throw error;
+    }
+  }
+
+  /** EXO-DISPLAYS: applies a display change (the domain's JSON); throws with the browser's reason. */
+  async configureDisplays(change: Record<string, unknown>): Promise<void> {
+    await this.cdp.send("Plutonium.configureDisplays", { changeJson: JSON.stringify(change) });
+  }
+
+  /** Opens the switcher (Super+Tab's) on one of its pages: "displays", "settings", … */
+  async openSwitcher(page: string): Promise<void> {
+    await this.cdp.send("Plutonium.openSwitcher", { page });
   }
 
   /** EXO-LOCK: whether an inhibitor holds idle off, for Wayland apps' ext_idle_notify_v1. */

@@ -62,6 +62,7 @@ import { AudioService } from "./services/audio.ts";
 import { PowerService } from "./services/power.ts";
 import { MediaService } from "./services/media.ts";
 import { BluetoothService } from "./services/bluetooth.ts";
+import { DisplayService } from "./services/display.ts";
 import { NetworkService } from "./services/network.ts";
 import { SessionService } from "./services/session.ts";
 import { findChecker, unixChecker } from "./password.ts";
@@ -476,6 +477,28 @@ export class Daemon {
     const agentId = `org.plutonium.helper.${basename(options.socketPath).replace(/[^A-Za-z0-9_-]/g, "_")}`;
     this.services.register(new NetworkService({ agentId, ask: (kind, detail, signal) => this.askForService("network", kind, detail, signal) }));
     this.services.register(new BluetoothService({ ask: (kind, detail, signal) => this.askForService("bluetooth", kind, detail, signal) }));
+    // EXO-DISPLAYS: Ash's displays and the switcher's Displays page, through the Plutonium domain.
+    this.services.register(
+      new DisplayService(
+        cdp
+          ? {
+              config: async () => ((await this.desktop?.displayConfig()) ?? null) as never,
+              configure: async (change) => {
+                if (!this.desktop) throw new Error("No browser.");
+                await this.desktop.configureDisplays(change);
+              },
+              openSwitcher: async (page) => {
+                if (!this.desktop) throw new Error("No browser.");
+                await this.desktop.openSwitcher(page);
+              },
+              onChange: (listener) => {
+                this.desktop?.displayListeners.add(listener);
+                this.desktop?.enableListeners.add(listener);
+              },
+            }
+          : null,
+      ),
+    );
     // EXO-LOCK: unix_chkpwd checks the password; PLUTONIUM_PASSWORD_CHECKER
     // names a stand-in with its interface, for tests.
     const checker = process.env.PLUTONIUM_PASSWORD_CHECKER || findChecker();
@@ -2248,6 +2271,37 @@ export class Daemon {
       const forget = path.match(/^\/v1\/threads\/([^/]+)\/permissions\/forget$/);
       if (method === "POST" && forget) {
         return sendJson(response, 200, await this.forgetThreadPermissions(decodeURIComponent(forget[1]!)));
+      }
+      // Desktop services for Ash's own UI (the switcher's settings): every
+      // service, as a shell that uses them all would see them.
+      if (method === "GET" && path === "/v1/system/services") {
+        const states: Record<string, unknown> = {};
+        await Promise.all(
+          this.services.names().map(async (name) => {
+            try {
+              states[name] = await this.services.state(name);
+            } catch (error) {
+              states[name] = { available: false, error: (error as Error).message };
+            }
+          }),
+        );
+        return sendJson(response, 200, states);
+      }
+      const serviceRoute = path.match(/^\/v1\/system\/services\/([a-z]+)(?:\/([\w-]+))?$/);
+      if (serviceRoute) {
+        const [, name, action] = serviceRoute as unknown as [string, string, string | undefined];
+        try {
+          if (method === "GET" && !action) return sendJson(response, 200, await this.services.state(name));
+          if (method === "POST" && action) {
+            const args = (await readJson(request)) as Record<string, unknown>;
+            return sendJson(response, 200, {
+              value: (await this.services.call(name, action, args ?? {}, "switcher")) ?? null,
+            });
+          }
+        } catch (error) {
+          if (error instanceof ServiceError) throw new HttpError(error.status, error.message);
+          throw error;
+        }
       }
       // The hardware keys (volume, brightness, media) Ash hands over in shell mode.
       if (method === "POST" && path === "/v1/system/key") {

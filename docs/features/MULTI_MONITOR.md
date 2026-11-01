@@ -90,6 +90,10 @@ A window's own move (a title-bar drag in GNOME, niri's interactive move) keeps t
 - **Plain:** the threads are shared; each display has its own current thread and open tabs. A taken window shows "Shown on another display" with "Bring it back". Apps and tabs can be dragged (to another shell or display), the stage takes drops, and "To display N" sends the shown item to another display.
 - **T3:** an app tab whose window another display took shows a placeholder with "Bring it back"; the app header has "To display N". T3's own state is on its server, so a T3 page per display stays in sync without more.
 
+### Configuring the displays
+
+Where the displays are, and each one's resolution, refresh rate, size, rotation, primary, mirroring and the built-in panel on or off, are set in the switcher's **Displays** page (Super+Tab, Settings, Displays; [SHELLS.md](SHELLS.md)), which every shipped shell's bar opens. The helper's `display` service ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md)) gives shells and agents the same configuration and actions. It's Ash's `CrosDisplayConfig`, as ChromeOS's Settings uses. Whether a layout survives a restart or a display unplugged and plugged back in hasn't been checked. A change that could leave the screen unusable (a mode, size, rotation, mirroring, the panel off) goes back after 15 s unless kept. The pages per display follow as for hotplug: mirroring takes display 2's pages away and turning it off brings them back.
+
 ### Verified (2026-10-25, X11: Xvfb 2560×1000, two host displays 1280×800, dev build)
 
 Session: `XVFB_SIZE=2560x1000 BOUNDS="0+0-1280x800,1280+0-1280x800" plutonium run --x11 niri plain --flags --plutonium-test-displays` (and `t3 niri` for T3).

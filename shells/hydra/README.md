@@ -69,6 +69,7 @@ The log is `~/.pluto/logs/hydra.log`. The server needs Node 24.13+ and pnpm. If 
 | 0044 | The app names itself Hydra (title, sidebar, welcome, settings and errors that mean this app) with a mark of its own instead of T3's wordmark and icons; text about T3 Code itself (its desktop and mobile apps, T3 Connect, the `t3` CLI, privacy and license notices) keeps its name |
 | 0046 | The welcome wizard's "Connect your computers" step keeps the computer serving the app selected; its box is disabled |
 | 0047 | The status cluster at the title bar's right end, always shown: the time, the battery when not on AC, offline and muted icons; a click opens quick settings (calendar, volume, brightness, Wi-Fi, Bluetooth, media, lock and power) over the helper's desktop services. The panel toggles and headers make room for it ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md#the-tray)) |
+| 0049 | Quick settings' Displays and All settings rows, over the helper's `display` service: they open the switcher's Displays page (the display configuration tool) and its quick settings ([SHELLS](../../docs/features/SHELLS.md#step-3-the-overlay-the-switcher)) |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 

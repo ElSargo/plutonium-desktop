@@ -104,6 +104,22 @@ Starting a shell from here keeps the switcher open.
 
 Neither backup window is a shell. They sit above the shells until one is shown. Ash learns where the helper is from `--plutonium-helper-url` and `--plutonium-helper-socket`, which `lib/session.sh` passes.
 
+**Settings**, below the built-ins: the desktop's settings, for any shell or none. Each row has a live summary ("HomeNet", "Volume 64%", "Battery 80%, charging", "2 displays · 1280×800"):
+- **Quick settings**: Wi-Fi, Bluetooth and Do not disturb toggles, the volume and brightness sliders, mute, lock, suspend, restart, power off and log out, and buttons to the other pages.
+- **Wi-Fi and network**: Wi-Fi on and off, the networks (a password field for a new one), connect, disconnect, forget; wired and VPN connections.
+- **Bluetooth**: on and off, find devices, pair, connect, disconnect, forget.
+- **Sound**: volume and mute, the outputs (pick the default), the microphone's level, what's playing.
+- **Displays**: the display configuration tool (below).
+- **Power**: the battery, brightness, the idle times (screen off, lock), and lock, suspend, restart, power off and log out. Restart, power off and log out take a second click.
+- **Notifications**: do not disturb, and the notifications, to dismiss.
+
+The pages drive the helper's desktop services ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md)) over its Unix socket (`GET /v1/system/services`, `POST /v1/system/services/<name>/<action>`), the same services the shells' bars use, polled every second while the switcher is open. A slider sends one request at a time (the latest value next) and isn't moved by the state while you hold it.
+
+**Displays** draws the displays as they're arranged. Drag one into place (it goes against the nearest edge of one already placed, and an edge within 48 DIPs of lining up with another's lines up), or put it left of, right of, above or below the primary with a button. For the display chosen below the drawing: its resolution, refresh rate, size (Ash's zoom levels), rotation, primary, mirroring, and the built-in panel off while a monitor is on. A new mode, size, rotation, mirroring or the panel off goes back after 15 s unless you click Keep in the banner, since shell mode never shows Ash's own confirmation. It's Ash's `CrosDisplayConfig`, as ChromeOS's Settings uses (`PlutoniumDisplayConfig`, `plutonium_display_config.cc`), and the helper's `display` service reads and changes the same configuration. A shell opens any of these pages through that service (`open-settings {page}`), which is how the shells' bars reach Displays:
+- **GNOME:** a display button in quick settings' top row, and a Displays page in its own Settings app (GNOME's arrangement, resolution, refresh rate, scale and orientation, primary, mirroring, with GNOME's "Keep Display Changes?" dialog).
+- **niri** and **plain:** a display indicator in the bar or tray (`display.js`) showing how many displays there are. Its popover lists them, turns mirroring on and off, and has "Display settings…" and "All settings…".
+- **Hydra:** Displays and All settings rows in the status cluster's quick settings (T3 patch 0049).
+
 **A window's page:**
 - Open fullscreen, or Leave fullscreen.
 - Pop out to the desktop.
@@ -147,6 +163,15 @@ Shells that the overlay adds aren't on the helper's command line. Each shell pag
 Not tried: the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
 
 **On DRM** (2026-10-26, tty5, niri and plain, two monitors, the user driving): Super+Tab, search, a window fullscreen and back with Super+F, the backup terminal and launching an app all work, with no DCHECKs. Three things fixed after it (patch "the switcher's text fields…"): the search field's text was dark on the dark panel (the overlay's widget now takes the dark theme's colors); a GTK Demo window showed above the backup terminal (the active backup window now goes above floating windows, such as a parked window's popups, and back once something else is active); and a row's hover went off over its labels and didn't come back on a rebuilt list (enter/exit on children, and a check when a row is laid out). Rechecked on DRM the same day (tty5, the user driving): the search text is light, hover is steady, nothing shows over the backup terminal, and no "unsupported command-line flag" infobar.
+
+### Verified: settings and Displays (2026-11-01, X11 slot 37, Xvfb 2560×1000, two host displays 1280×800 with several modes each, dev build)
+
+Display 1's modes were 1280×800 at 60 and 75 Hz, 1024×768 and 800×600, display 2's 1280×800, 1280×720 and 1024×768 (`BOUNDS=…#1280x800%60|…`, `--plutonium-test-displays`).
+- Every settings page drew the real state: the laptop's Wi-Fi networks, Bluetooth, volume, brightness, battery and the displays. The volume slider set the real volume (put back after), and the page followed a change made outside it. A new network's password field took focus, masked what was typed and kept it through live updates (nothing was connected). Do not disturb turned on and off. Restart armed on the first click and wasn't confirmed.
+- Displays: display 2 set to 1024×768 and 1280×720 from its resolution buttons. The banner counted down, and the mode went back by itself after 15 s, or stayed after Keep. Dragging display 2 below display 1, then "Right of 1", moved it there and back. Over the service: 30 and −20 DIP offsets snapped to 0, while 300 stayed. Rotation to 90° (from GNOME's page, then Revert Settings), mirroring on and off, and size 125% (desktop width 1280 → 1024 DIPs) all applied and went back. The shells came back on display 2 after mirroring.
+- From the bars: niri's and plain's display indicators opened their popovers, and "Display settings…" / "All settings…" opened the switcher on those pages. GNOME's (Charon's) quick-settings display button opened its Settings → Displays page. Hydra's quick settings had the two rows, and each opened its page.
+- Found and fixed in that run: on X11 a host window never resizes for its mode, so going back to the native mode was reported as a failure ("couldn't put it back") though it applied; it now counts as done when the active mode is the one asked for. A mode with no refresh rate read "at 0 Hz". Narrow boxes in the drawing clipped their text (they drop the detail line now). Hydra's two buttons had widened its quick-settings popover past the screen's edge, so they're rows now.
+- Not checked on X11 (it can't be): the built-in panel off, real refresh rates and DRM rotation, hotplug while the page is open, and Wi-Fi connect or Bluetooth pairing from the switcher. Those need real hardware.
 
 ### Verified (steps 2–4, Xvfb `:99` and DRM, plain shell at startup, T3 second)
 

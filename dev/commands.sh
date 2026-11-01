@@ -318,6 +318,12 @@ chromium_lock() {
 }
 src_clean() { [[ -z $(git -C "$CHROMIUM_DIR/src" status --porcelain --untracked-files=no) ]]; }
 
+# git commit-tree needs a committer; a neutral one if git has none configured.
+committer() {
+  if git config user.email > /dev/null; then "$@"
+  else GIT_COMMITTER_NAME=Plutonium GIT_COMMITTER_EMAIL=plutonium@localhost "$@"; fi
+}
+
 # This checkout's patch series as a commit on BASE, made without touching the
 # checkout's files: each patch is applied to a scratch index (what git am
 # does, with the same author, date and message), so `chromium export` gives

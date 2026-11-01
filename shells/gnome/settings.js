@@ -44,6 +44,11 @@ body.overview .settings { opacity: 0; pointer-events: none; }
 .st-pill:hover:not(:disabled) { background: #ffffff26; }
 .st-pill.danger { color: #ff7b7b; }
 .st-pill.suggested { background: var(--accent); color: var(--accent-fg); }
+.st-arrange { position: relative; height: 180px; margin: 4px; border-radius: 10px; background: #00000030; touch-action: none; }
+.st-monitor { position: absolute; display: grid; place-content: center; justify-items: center; gap: 2px; border-radius: 6px; background: #ffffff1f; box-shadow: inset 0 0 0 1px #00000060; font-size: 12px; cursor: grab; user-select: none; overflow: hidden; }
+.st-monitor b { font-size: 20px; }
+.st-monitor.cur { background: var(--accent); color: var(--accent-fg); }
+.st-monitor.drag { cursor: grabbing; opacity: .85; z-index: 1; }
 .st-keys { display: flex; gap: 4px; flex-wrap: wrap; justify-content: end; }
 .kbd { padding: 3px 8px; border-radius: 6px; background: #ffffff1a; box-shadow: inset 0 -2px 0 #00000050; font-size: 12.5px; font-weight: 700; white-space: nowrap; }
 .kbd.none { background: none; box-shadow: none; color: #ffffff70; font-weight: 400; }
@@ -86,6 +91,7 @@ export function mountSettings(ctx) {
     { id: "wifi", title: "Network", icon: "wifi", keywords: "wi-fi wifi wireless internet vpn wired ethernet password" },
     { id: "bluetooth", title: "Bluetooth", icon: "bluetooth", keywords: "devices pair headphones mouse keyboard" },
     "-",
+    { id: "displays", title: "Displays", icon: "display", keywords: "monitors screens resolution refresh rate scale size orientation rotation primary mirror arrange" },
     { id: "sound", title: "Sound", icon: "volume", keywords: "audio volume speakers microphone output input" },
     { id: "power", title: "Power", icon: "power", keywords: "battery brightness suspend restart" },
     { id: "privacy", title: "Screen Lock", icon: "lock", keywords: "privacy lock idle blank screen keep awake" },
@@ -102,13 +108,13 @@ export function mountSettings(ctx) {
   const pageById = (id) => PAGES.find((p) => p.id === id);
 
   const states = {};
-  for (const name of ["audio", "power", "network", "bluetooth", "notifications", "session"]) {
+  for (const name of ["audio", "power", "network", "bluetooth", "notifications", "session", "display"]) {
     if (!sys) break;
     states[name] = sys[name].state;
     sys[name].addEventListener("change", (e) => { states[name] = e.detail; if (page === pageFor(name)) render(); });
     sys[name].ready.then((s) => { states[name] = s; if (page === pageFor(name)) render(); }, () => {});
   }
-  const pageFor = (service) => ({ audio: "sound", power: "power", network: "wifi", bluetooth: "bluetooth", notifications: "notifications", session: "privacy" })[service];
+  const pageFor = (service) => ({ audio: "sound", power: "power", network: "wifi", bluetooth: "bluetooth", notifications: "notifications", session: "privacy", display: "displays" })[service];
   const call = async (service, action, args) => {
     try { return await sys[service].call(action, args); }
     catch (error) { ctx.toast(`${service}: ${error.message}`); return null; }
@@ -239,6 +245,36 @@ export function mountSettings(ctx) {
   };
   const unavailable = (what) => group(null, [el("div", "st-empty", what)]);
 
+  // Displays: the display chosen on the page, and GNOME's "Keep Changes?"
+  // for a change Ash puts back by itself unless it's kept.
+  const displayPage = { selected: null, asking: false };
+  async function keepOrRevert(pending) {
+    if (displayPage.asking) return;
+    displayPage.asking = true;
+    const deadline = Date.now() + pending.secondsLeft * 1000;
+    const left = () => Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    const text = el("p", "");
+    const tick = () => { text.textContent = `Settings changes will revert in ${left()} seconds.`; };
+    tick();
+    let timer = null;
+    const answer = await dialog({
+      title: "Keep Display Changes?",
+      body: text,
+      buttons: [{ label: "Revert Settings", value: "revert" }, { label: "Keep Changes", value: "keep", default: true }],
+      onOpen: (box) => {
+        timer = setInterval(() => {
+          tick();
+          // Ash puts it back by itself then.
+          if (!left()) box.closest(".modal-back")?.dispatchEvent(new PointerEvent("pointerdown"));
+        }, 250);
+      },
+    });
+    clearInterval(timer);
+    displayPage.asking = false;
+    if (left() > 0) await call("display", answer === "keep" ? "keep" : "revert");
+  }
+
+
   // ---------------------------------------------------------------- pages
   function render(force = false) {
     if (win.hidden) return;
@@ -316,6 +352,109 @@ export function mountSettings(ctx) {
         g.querySelector("h3").append(" ", button("st-pill", { label: bt.adapter.discovering ? "Searching…" : "Find Devices", onClick: () => call("bluetooth", "discover", { on: !bt.adapter.discovering }) }));
         out.push(g);
       }
+      return out;
+    },
+    displays() {
+      const d = states.display;
+      if (!d?.available) return [unavailable("The display service isn't available.")];
+      const all = d.displays ?? [];
+      const shown = all.filter((x) => x.enabled && !x.mirrorOf);
+      const current = all.find((x) => x.id === displayPage.selected) ?? all.find((x) => x.primary) ?? all[0];
+      if (!current) return [unavailable("No displays.")];
+      displayPage.selected = current.id;
+      const out = [];
+      // A change Ash puts back unless kept: GNOME's "Keep Changes?".
+      const change = async (args) => {
+        const result = await call("display", args.action ?? "configure", { ...args, action: undefined, confirm: true });
+        if (result?.pending) keepOrRevert(result.pending);
+      };
+      if (all.length > 1) {
+        // The arrangement: drag a display; click one to choose it below.
+        const box = el("div", "st-arrange");
+        const place = () => {
+          const minX = Math.min(...shown.map((x) => x.bounds.x)), minY = Math.min(...shown.map((x) => x.bounds.y));
+          const maxX = Math.max(...shown.map((x) => x.bounds.x + x.bounds.width)), maxY = Math.max(...shown.map((x) => x.bounds.y + x.bounds.height));
+          const w = box.clientWidth || 600, h = box.clientHeight || 180;
+          const scale = Math.min((w - 40) / (maxX - minX), (h - 30) / (maxY - minY));
+          return { scale, ox: (w - (maxX - minX) * scale) / 2 - minX * scale, oy: (h - (maxY - minY) * scale) / 2 - minY * scale };
+        };
+        const draw = () => {
+          const { scale, ox, oy } = place();
+          box.replaceChildren(...shown.map((x) => {
+            const m = el("div", `st-monitor ${x.id === current.id ? "cur" : ""}`);
+            m.style.cssText = `left:${ox + x.bounds.x * scale + 1}px;top:${oy + x.bounds.y * scale + 1}px;width:${x.bounds.width * scale - 2}px;height:${x.bounds.height * scale - 2}px`;
+            m.append(el("b", "", String(x.index || "")), el("span", "", x.name));
+            m.addEventListener("pointerdown", (e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              m.setPointerCapture(e.pointerId);
+              const start = { x: e.clientX, y: e.clientY, left: m.offsetLeft, top: m.offsetTop };
+              let moved = false;
+              const move = (ev) => {
+                const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+                if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+                moved = true;
+                m.classList.add("drag");
+                m.style.left = `${start.left + dx}px`;
+                m.style.top = `${start.top + dy}px`;
+              };
+              const up = (ev) => {
+                m.removeEventListener("pointermove", move);
+                m.removeEventListener("pointerup", up);
+                if (!moved) { displayPage.selected = x.id; render(); return; }
+                const dx = (ev.clientX - start.x) / scale, dy = (ev.clientY - start.y) / scale;
+                displayPage.selected = x.id;
+                // Ash puts it against the nearest edge of another display.
+                void call("display", "arrange", { layout: [{ display: x.id, x: Math.round(x.bounds.x + dx), y: Math.round(x.bounds.y + dy) }] });
+              };
+              m.addEventListener("pointermove", move);
+              m.addEventListener("pointerup", up);
+            });
+            return m;
+          }));
+        };
+        requestAnimationFrame(draw);
+        draw();
+        out.push(group(null, [
+          ...(d.mirror ? [] : [box]),
+          row("Display Mode", select(d.mirror ? "mirror" : "join", [["join", "Join Displays"], ["mirror", "Mirror"]], (v) => change({ action: "set-mirror", on: v === "mirror" })), { sub: d.mirror ? "Every display shows the same picture" : "Drag the displays to match your setup" }),
+          d.mirror ? null : row("Primary Display", select(all.find((x) => x.primary)?.id, shown.map((x) => [x.id, `${x.index}  ${x.name}`]), (id) => call("display", "configure", { display: id, primary: true }))),
+          row("More Arrangement Options", pill("Open the Display Tool", () => { close(); call("display", "open-settings", { page: "displays" }); }), { sub: "The switcher's Displays page, with the keyboard too" }),
+        ]));
+        if (!d.mirror) {
+          out.push(group(null, [el("div", "st-choice")], { box: false }));
+          const tabs = out.at(-1).firstChild;
+          tabs.style.cssText = "display:flex;gap:8px;padding:0;flex-wrap:wrap";
+          for (const x of all) tabs.append(pill(`${x.index || ""}  ${x.name}${x.enabled ? "" : " (off)"}`, () => { displayPage.selected = x.id; render(); }, x.id === current.id ? "suggested" : ""));
+        }
+      }
+      const rows = [];
+      if (current.internal && (d.canTurnOffPanel || !current.enabled) && all.length > 1) {
+        rows.push(switchRow("Use This Display", current.enabled, (on) => (on ? call("display", "configure", { display: current.id, enabled: true }) : change({ display: current.id, enabled: false })), "Turning it off is like closing the lid"));
+      }
+      if (current.enabled && !current.mirrorOf) {
+        rows.push(row("Orientation", select(current.rotation, [[0, "Landscape"], [90, "Portrait Right"], [270, "Portrait Left"], [180, "Landscape (Flipped)"]], (v) => change({ display: current.id, rotation: Number(v) }))));
+        const sizes = [];
+        for (const m of current.modes ?? []) if (!sizes.some((s) => s.width === m.width && s.height === m.height)) sizes.push(m);
+        sizes.sort((a, b) => b.width * b.height - a.width * a.height);
+        const ratio = (w, h) => { const g = (a, b) => (b ? g(b, a % b) : a); const k = g(w, h); const r = `${w / k}:${h / k}`; return { "8:5": "16:10", "64:27": "21:9", "43:18": "21:9" }[r] ?? r; };
+        const mode = current.mode ?? sizes[0];
+        if (sizes.length) {
+          rows.push(row("Resolution", select(`${mode.width}x${mode.height}`, sizes.map((m) => [`${m.width}x${m.height}`, `${m.width} × ${m.height} (${ratio(m.width, m.height)})`]), (v) => {
+            const [width, height] = v.split("x").map(Number);
+            return change({ display: current.id, mode: { width, height, refreshRate: mode.refreshRate } });
+          })));
+          const rates = [...new Set((current.modes ?? []).filter((m) => m.width === mode.width && m.height === mode.height).map((m) => m.refreshRate))].sort((a, b) => b - a);
+          if (rates.length > 1) {
+            rows.push(row("Refresh Rate", select(mode.refreshRate, rates.map((r) => [r, `${r.toFixed(2)} Hz`]), (v) => change({ display: current.id, mode: { width: mode.width, height: mode.height, refreshRate: Number(v) } }))));
+          }
+        }
+        if ((current.zooms ?? []).length > 1) {
+          const near = current.zooms.reduce((a, b) => (Math.abs(b - current.zoom) < Math.abs(a - current.zoom) ? b : a));
+          rows.push(row("Scale", select(near, current.zooms.map((z) => [z, `${Math.round(z * 100)} %`]), (v) => change({ display: current.id, zoom: Number(v) })), { sub: `Effective scale ${current.scale}` }));
+        }
+      }
+      out.push(group(`${current.index ? `${current.index}  ` : ""}${current.name}`, rows.length ? rows : [el("div", "st-empty", current.mirrorOf ? "It mirrors another display." : "This display is off.")]));
       return out;
     },
     sound() {

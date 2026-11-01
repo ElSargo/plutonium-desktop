@@ -3,5 +3,5 @@
   "version": "4",
   "description": "Scrollable tiling, after the niri compositor's design and default binds.",
   "static": "index.html",
-  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"]
+  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session", "display"]
 }

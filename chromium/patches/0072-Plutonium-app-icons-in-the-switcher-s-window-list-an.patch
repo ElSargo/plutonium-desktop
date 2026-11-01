@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 18:07:12 +1300
-Subject: [PATCH 72/95] Plutonium: app icons in the switcher's window list and
+Subject: [PATCH 72/96] Plutonium: app icons in the switcher's window list and
  launcher
 
 PlutoniumAppIcons gets an app's icon from the helper (GET /v1/apps/<id>/icon,
