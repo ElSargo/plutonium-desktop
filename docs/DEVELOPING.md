@@ -6,9 +6,20 @@
 |---|---|---|
 | The helper, its API, link opening, MCP tools | `helper/` (TypeScript run by Node 24 directly, no build) | restart the session, or only its helper |
 | The shell library (`/v1/shell.js`) | `helper/web/plutonium-shell.js` | reload the shells; from a worktree, `plutonium live apply shell-lib` |
-| A shell's UI | `shells/<name>/` (what's shipped) | `plutonium shells update <name> [--from <checkout>]` merges it into the installed copy, whose save reloads the shell; or edit `$PLUTO_HOME/shells/<name>` directly ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)) |
-| T3 Code's integration | the checkout in `frontends/t3code/checkout` | `plutonium t3 build`, reload; or `plutonium live apply t3`; commit, then `plutonium t3 export` |
+| A shell's UI | `shells/<name>/` (what's shipped) | the next session merges it into the installed copy; now: `plutonium shells update <name> [--from <checkout>]`, whose save reloads the shell. Or edit `$PLUTO_HOME/shells/<name>` directly, then `plutonium shells export <name>` brings the edits back here ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)) |
+| Hydra: T3 Code's integration | its T3 Code checkout (`T3CODE_DIR`, default `shells/hydra/src/checkout`) | `plutonium hydra build`, reload; or `plutonium hydra live apply`; commit, then `plutonium hydra export` ([shells/hydra/README.md](../shells/hydra/README.md)) |
+| Hydra's launcher: serving, pairing, the database checks | `shells/hydra/bin/hydra` | the next session; now: `plutonium shells update hydra` and `plutonium shells restart hydra` |
 | Chromium: Exo, the broker, elements, tabs, shell mode | the checkout in `$CHROMIUM_DIR/src`, branch `plutonium` | `plutonium chromium build`, restart the session; commit, then `plutonium chromium export` |
+| The `plutonium` command: sessions, shells, setup | `bin/plutonium`, `lib/`: what a release install has too | run it again |
+| A checkout's commands: the container, Chromium builds, `live`, worktrees, the bundle | `dev/commands.sh`, `dev/env.sh` | run it again |
+
+## The core and dev/
+
+`bin/plutonium` and `lib/` are what every install runs: sessions, shells, the login screen, `doctor`. A release install is them with `chrome/` and `node/` beside them, and runs Ash on the host. `dev/` is what only a checkout has, and the release bundle leaves out: the container (`dev/container/`), Chromium builds and the prebuilt image, `HOST=1`'s Nix build (`dev/nix/`), the live frontends, worktrees and the bundle itself (`dev/bundle/`).
+
+No shell is part of either. A shell is its folder in `shells/`, and the core knows it only through its manifest ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)): Hydra's launcher, its T3 Code patches and its release build are all in `shells/hydra/`, and `plutonium hydra …` is the manifest's `cli`.
+
+`lib/common.sh` sources `dev/env.sh` when there is one, and `bin/plutonium` sources `dev/commands.sh`; a command the core doesn't know goes to `dev_cmd`. The core knows nothing of podman: where Ash runs is a few functions in `lib/common.sh` that `dev/env.sh` replaces when Ash runs in the container: `on_ash`, `on_ash_setsid`, `on_ash_daemon` (Xvfb), `need_ash_runtime`, `chrome_built`, `ash_prepare` (the container's fonts and `XAUTHORITY`) and `shell_library` (the live shell library). `doctor`, `status` and `session start` call `dev_doctor`, `dev_status` and `dev_session_start` for a checkout's part.
 
 ## Chromium workflow
 
@@ -62,6 +73,32 @@ plutonium image push                 # that tag and :latest
 
 Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium container create`, then run sessions with the same two variables set.
 
+## The release bundle
+
+A release is one tarball that runs without podman on any x86-64 systemd distribution with a desktop: `dist/plutonium-<version>-x86_64.tar.xz`. The host provides glibc, Mesa and what Mesa links (X11, GLib, systemd's libraries, D-Bus, ALSA); the bundle carries everything else.
+
+```
+plutonium bundle build                # from a commit; chrome from this checkout's prebuilt image
+plutonium bundle check                # install it in clean Ubuntu, Debian, Fedora, Arch, openSUSE containers
+sh dev/bundle/install.sh --from dist/plutonium-<version>-x86_64.tar.xz   # install it here
+```
+
+`check` installs only a desktop's libraries in each container (no NSS, libinput or xkbcommon, no Vulkan driver) and the tools the installer asks for, then installs the bundle with `dev/bundle/install.sh`. It checks that every binary finds its libraries, that chrome, node, the helper and Hydra's server start, that Ash comes up on Xvfb, that `plutonium run --x11 hydra plain` as a user opens both shells, and that `--uninstall` takes it all away again. It doesn't test a DRM session, the GPU, or a real login.
+
+`dev/bundle/install.sh` is what the site's `curl … | sh` runs: it checks the host, downloads the tarball (with its `.sha256`), checks that chrome and node start, and puts the release in `/opt/plutonium` with `chrome-sandbox` setuid root, `plutonium` in `/usr/local/bin`, and the login screen entry. Its `RELEASE_URL` is where a release is published under the fixed name `plutonium-x86_64.tar.xz`.
+
+A release install is the core without `dev/` (above): it runs Ash on the host, from its own directory, with its own chrome, node and Hydra's server build. Its settings are `~/.config/plutonium/plutonium.env` and its logs go to `~/.local/share/plutonium/logs`. It has none of a checkout's commands; `hydra fetch`, `build`, `export` and `live` say they're for a checkout.
+
+It's made from:
+- **chrome:** the release build of exactly this checkout's patches: its prebuilt image (`plutonium image tag`), pulled if it isn't here. `--chrome-image <image>` takes another, and `--chrome-out <dir>` a local release build, which `BUNDLE` can't tie to a patch set. Less what `dev/bundle/exclude.txt` lists (the locales' build metadata and ChromeOS's accessibility extensions). The libraries it needs that the host may lack (NSS, libinput and its stack, xkbcommon) are copied from Ubuntu 22.04 into `chrome/lib`, and every binary finds them through `RUNPATH`, never `LD_LIBRARY_PATH`, which would leak into apps (`dev/bundle/collect-libs.sh`). Which libraries are the host's is `dev/bundle/host-libs.txt`: a library Mesa links has to be the host's, since one process loads both.
+- **node:** the official build in `dev/bundle/node.txt`, checked against its SHA-256.
+- **this checkout:** a commit (one with uncommitted changes needs `--allow-dirty`): the tracked files of `bin/`, `lib/`, `helper/` (with its `node_modules`), `shells/` and `skill/`, less what a shell's manifest `exclude`s (Hydra's `src/`).
+- **the shells' builds:** what a manifest's `bundle` command builds into `shells/<name>/build`. Hydra's (`hydra bundle`) is T3 Code at `shells/hydra/src/BASE` with the patches, in its own checkout in `~/.local/share/plutonium/bundle/t3code`: T3's server bundle (`bin.mjs`), its web app without source maps, and the native packages T3's own CLI archive carries (`shells/hydra/src/runtime.ts`, from T3's lists). `hydra.env` records what `hydra` otherwise reads from T3's source (its database, last migration and pairing scopes). `--no-shell-builds` leaves them out.
+
+`BUNDLE` in the tarball records exactly what it's made of: the commit (and `DIRTY=1` for uncommitted changes), the Chromium build's tag (empty for a local build), each shell's files as their git tree (`SHELLS`, the tree an installed copy's `shipped:` commit names), what each shell's build was made from (Hydra's T3 Code base and patches), node, and the oldest glibc it runs on (2.35 so far: Ubuntu 22.04's libinput). The tarball can't keep `chrome-sandbox` setuid, so the installer sets it. It also carries the keyboard layouts (`chrome/xkb`) and libinput's device quirks (`chrome/libinput`): Chromium reads the layouts from `/usr/share/X11/xkb` only, and the bundled libinput its quirks from `/usr/share/libinput`. NixOS has neither, so there the release's module (`lib/nixos.nix`) links those paths to the copies.
+
+**NixOS** runs the release through nix-ld, which the release's module (`lib/nixos.nix`, what the installer tells NixOS users to import) sets up: `programs.nix-ld.enable = true`, with the libraries `dev/bundle/host-libs.txt` says are the host's in `programs.nix-ld.libraries` (`mesa libgbm libglvnd libdrm wayland expat zlib zstd libffi`, xorg's X11 libraries, `systemd dbus alsa-lib glib`, …), and nothing more: nix-ld's library path is searched before the bundle's own `RUNPATH`. Its Vulkan drivers are in `/run/opengl-driver`, where only NixOS's own Vulkan loader looks, so an X11 session adds `/run/opengl-driver/share` to Ash's `XDG_DATA_DIRS` for chrome's.
+
 ## Putting a change on your own desktop
 
 The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. The bundle tooling (`dev/bundle/`, `--official`) is still on the core-split branch: these steps use its snapshot worktree, `.worktrees/bundle/core-split-main`, with `main` merged in. From a T3 thread, run them with a clean environment: the thread's names the live session's helper, profile and shells.
@@ -99,23 +136,23 @@ systemd-run --user --unit=plutonium-redeploy --collect \
 
 ## Applying changes to a running session
 
-`plutonium live` changes what a running session's shells are made of, with no restart: the helper's `shell.js` (`shell-lib`), and T3 Code's web app (`t3`). niri, plain and the other installed shells need no `live`: the helper serves them from `$PLUTO_HOME/shells` on every request, and a change there reloads them. `plutonium shells update niri --from <worktree>` merges a worktree's version in.
+`plutonium live` changes what a running session's shells are made of, with no restart: the helper's `shell.js` (`shell-lib`). Hydra's web app has its own, `plutonium hydra live`. niri, plain and the other installed shells need no `live`: the helper serves them from `$PLUTO_HOME/shells` on every request, and a change there reloads them. `plutonium shells update niri --from <worktree>` merges a worktree's version in.
 
 ```
 plutonium live apply shell-lib --from ~/.t3/worktrees/plutonium-desktop/t3-60ce77be
-plutonium live apply t3 --from ~/.t3/worktrees/t3code-oauth-popups
+plutonium hydra live apply --from ~/.t3/worktrees/t3code-oauth-popups
 plutonium live status
-plutonium live revert t3
+plutonium hydra live revert
 ```
 
 **How it works.** Ash gives shell rights to origins fixed when it starts (`127.0.0.1:3773`, and so on), so a worktree's own servers, on its slot's ports, can't stand in for them. What's behind those origins can change instead:
 - **The links.** The helper serves `shell.js` from `$DATA_DIR/live/slot<N>/shell-lib/current`. It's a link. Until something is applied, each one points at the checkout's own files, which is how sessions worked before.
-- **T3 Code.** Its server serves its checkout's `apps/web/dist`, read on every request. The first `apply t3` keeps a copy of the build that's there, then makes `dist` a link to the live one.
-- **`apply`** copies the part from a checkout's files as they are (a worktree an agent is working in, uncommitted changes included) or from a commit of this repository. For t3, it builds the checkout's web app into the copy, as the running server's version (about 40 s; the checkout needs its `pnpm install`). It then points `current` at the copy, in one rename, and reloads every page of this slot's sessions that uses the part, bypassing the cache. The page keeps its origin, so it keeps its shell rights. `--follow` points at the checkout's own files instead of a copy, so each reload shows its latest edits. `--no-reload` leaves reloading to you.
+- **Hydra's T3 Code.** Its server serves its checkout's `apps/web/dist`, read on every request. The first `hydra live apply` keeps a copy of the build that's there, then makes `dist` a link to the live one.
+- **`apply`** copies the part from a checkout's files as they are (a worktree an agent is working in, uncommitted changes included) or from a commit of this repository. `hydra live apply` builds a T3 Code checkout's web app into the copy, as the running server's version (about 40 s; the checkout needs its `pnpm install`). It then points `current` at the copy, in one rename, and has this slot's sessions' helpers reload the pages that use it. The page keeps its origin, so it keeps its shell rights. `--follow` points at the checkout's own files instead of a copy, so each reload shows its latest edits. `--no-reload` leaves reloading to you.
 - **`revert`** goes back to the previous one. The newest `LIVE_KEEP` (5) copies of each part are kept, and `live list <part>` shows them.
 
 **What it can't change without a restart:**
-- **The T3 Code server.** Its web app talks to it through `packages/contracts`. `apply t3` refuses a checkout whose `apps/server/src` or `packages/contracts/src` differ from what the running server was started from: restart the server on it instead (`plutonium t3 server`, with `T3CODE_DIR` pointing at it). `--force` applies it anyway. A restart cuts running agent turns, which T3 then continues.
+- **The T3 Code server.** Its web app talks to it through `packages/contracts`. `hydra live apply` refuses a checkout whose `apps/server/src` or `packages/contracts/src` differ from what the running server was started from: restart the server on it instead (`plutonium shells restart hydra`, with `T3CODE_DIR` pointing at it). `--force` applies it anyway. A restart cuts running agent turns, which T3 then continues.
 - **The helper's own code**, and Chromium.
 - **A session from before `live`.** Its helper keeps serving its own `shell.js` until the session restarts; `live status` says so.
 

@@ -1,0 +1,11 @@
+# Files in the release build that the bundle leaves out, as paths in chrome/
+# (shell globs). Each is something a Plutonium session never loads.
+
+# grit's build metadata for each locale pak: 136 MB, read only by the build
+locales/*.pak.info
+
+# ChromeOS's own accessibility extensions (ChromeVox, Select to Speak, Switch
+# Access, dictation): 20 MB. Ash loads them only when its accessibility
+# settings turn them on, which Plutonium has no UI for. Delete this line to
+# ship them.
+resources/chromeos/accessibility

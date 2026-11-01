@@ -1,5 +1,14 @@
 # Installing Plutonium
 
+**The release.** One package, no podman or checkout: the installer puts it in `/opt/plutonium`, sets up Chromium's `chrome-sandbox`, and adds Plutonium to the login screen. It needs x86-64 Linux with systemd, glibc 2.35 or newer, a desktop's libraries (Mesa, X11, GLib, ALSA), and python3, git and curl; it says what's missing. On NixOS the installer puts the release in place, and the rest is a module it carries, `/opt/plutonium/lib/nixos.nix`: copy it beside `configuration.nix` as `plutonium.nix`, add it to `imports`, and `sudo nixos-rebuild switch`. It sets up nix-ld (the release's binaries are generic Linux ones), the login screen's entry, the `plutonium` command, the keyboard layout links, and Python, git, curl, foot and xwayland-satellite.
+
+```
+curl -fsSL https://…/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
+plutonium doctor
+```
+
+Then steps 4 to 6 below, with `~/.config/plutonium/plutonium.env` in place of the checkout's `plutonium.env`. `sh install.sh --uninstall` removes it (your data stays). The rest of this page installs from a checkout instead.
+
 From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the time is the 1.3 GB download. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each. Building Chromium yourself is its own page, [docs/BUILDING.md](docs/BUILDING.md).
 
 ## 1. What you need
@@ -9,7 +18,7 @@ From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the
 - 16 GB of RAM is comfortable (less is untested), and about 3 GB of disk for the image.
 - systemd (logind and a user session), and rootless podman.
 
-**Distributions.** It's developed on NixOS. Fedora 44 and Ubuntu 24.04 are tested in containers, from the packages below up to `plutonium doctor` and the helper's tests; not yet booted on hardware. Others with systemd, podman and Node 24 should work. If yours doesn't, please say so (Reporting a bug, below).
+**Distributions.** It's developed on NixOS, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested in a container, from the packages below up to `plutonium doctor` and the helper's tests; not yet booted on hardware. Others with systemd, podman and Node 24 should work. If yours doesn't, please say so (Reporting a bug, below).
 
 **Packages.** The browser runs in a container, so the host needs only a few things:
 
@@ -39,7 +48,6 @@ environment.systemPackages = with pkgs; [ nodejs_24 python3 git curl foot xwayla
 ```
 
 **Your user**
-- **`input` group** (`sudo usermod -aG input $USER`, then log out and in again). The kill switch reads a key through it.
 - **Subordinate ids** for rootless podman. Most distributions add them for new users; `grep $USER /etc/subuid /etc/subgid` should print two lines. If not: `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER`, then `podman system migrate`.
 
 ## 2. Get it
@@ -68,22 +76,7 @@ The image holds a release build of Plutonium's Chromium and the libraries it nee
 - **After `git pull`**, `doctor` says whether the container still runs this checkout's image. If not: `plutonium image pull`, `plutonium container stop`, `podman rm plutonium`, `plutonium container create`.
 - **After a reboot**, `plutonium container start` (a login session from the login screen entry starts it itself).
 
-## 4. The kill switch
-
-On DRM, Ash takes the display and every input device, and the text console's keyboard is turned off while it runs. If the session hangs, Ctrl+Alt+F*n* won't get you out. The kill switch is a key that kills Ash and switches back to your normal desktop session (or the text console, or the login screen). Pick a key you never use: a laptop's spare hotkey, Scroll Lock, a macro key.
-
-```
-plutonium killswitch find     # press the key; it prints KILLSWITCH_DEVICE=… KILLSWITCH_KEY=…
-# put those two lines in plutonium.env, then:
-plutonium killswitch install  # a systemd user service, started now and at every login
-plutonium killswitch test     # shows what a press would kill, without doing it
-```
-
-`plutonium run` on DRM refuses to start unless the kill switch is listening. There are two exceptions:
-- **`--hold <seconds>`** stops Ash by itself after that long.
-- **`--no-killswitch`** starts anyway. Only use it if you can stop the session another way, such as `plutonium stop --drm` over ssh.
-
-## 5. First session: in a window
+## 4. First session: in a window
 
 On an X11 or Xwayland desktop (Plasma, GNOME and most others provide Xwayland on `:0`):
 
@@ -98,7 +91,7 @@ plutonium run --x11 :0 niri
 
 If apps render in software, `plutonium run` says so, and `logs/helper-*.log` explains why (`docs/features/GPU_X11.md`).
 
-## 6. As the desktop
+## 5. As the desktop
 
 1. Switch to a text console (Ctrl+Alt+F2, or F3…) and log in.
 2. From this repository, run:
@@ -115,7 +108,6 @@ Ash runs in that console's logind session, which hands it the display and input 
 **Leaving the session:**
 - **Ctrl+Alt+Backspace** ends it, and the text console comes back.
 - `plutonium stop --drm` (from ssh, another VT, or a terminal inside Plutonium) does the same.
-- The kill switch kills Ash and switches back to your graphical session. It's for when Ash hangs.
 
 However the session ends, even when Ash crashes or is killed, the text console comes back in working order: logind restores it.
 
@@ -134,9 +126,9 @@ plutonium session install             # /usr/share/wayland-sessions/plutonium.de
 ```
 
 Log out, pick Plutonium at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
-- it starts the container if it isn't running, and waits up to 10 s for the kill switch, which starts with your login;
+- it starts the container if it isn't running;
 - it runs `plutonium run` on the display manager's VT, with your installed shells. `SESSION_SHELLS="niri plain"` in `plutonium.env` names others instead;
-- when the session ends (Ctrl+Alt+Backspace, the kill switch, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
+- when the session ends (Ctrl+Alt+Backspace, `plutonium stop --drm`, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
 
 The display manager's own automatic login, with the Plutonium session, starts it at power-on. `plutonium session uninstall` removes the entry. The entry is new: if it doesn't work with your display manager, please report it, and start from a text console meanwhile.
 
@@ -157,26 +149,26 @@ if [ "$(tty)" = /dev/tty1 ]; then ~/plutonium/bin/plutonium session start; fi
 Not `exec`: when the session ends, or doesn't start, you're at tty1's prompt, rather than logged in again into the same failure.
 
 **Choosing shells.** The first run installs the shipped shells in `~/.pluto/shells` (`plutonium shells list`). With no shells named, `plutonium run` runs the ones that are on there, in order. The switcher's changes (Super+Tab: add, remove, turn off, reorder) are saved for next time. Or list them in order, and the first one is the desktop:
-- installed shells by name: `niri` (Styx), `gnome` (Charon), `plain`, `t3` (Hydra), and any you added;
+- installed shells by name: `niri` (Styx), `gnome` (Charon), `plain`, `hydra`, and any you added;
 - `<name>=<url>` for any web app you've written against the shell API (see `docs/USING.md`).
 
 `plutonium run --safe` runs only the shipped plain shell, whatever your shells do ([docs/features/SHELL_PACKAGES.md](docs/features/SHELL_PACKAGES.md)).
 
-## 7. Optional: Hydra
+## 6. Optional: Hydra
 
 Hydra is the shell built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for coding agents, with Plutonium's patches.
 
 ```
-plutonium t3 fetch            # clone at frontends/t3code/BASE, apply the patches
-plutonium t3 build            # pnpm install + build the web app (the checkout grows to ~4 GB)
-plutonium run t3 niri         # Hydra; the helper starts T3 Code's server, and the shell pairs itself
+plutonium hydra fetch            # clone at shells/hydra/src/BASE, apply the patches
+plutonium hydra build            # pnpm install + build the web app (the checkout grows to ~4 GB)
+plutonium run hydra niri         # Hydra; the helper starts T3 Code's server, and the shell pairs itself
 ```
 
 Hydra runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
 
-Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium t3` (T3's CLI on the same data): `plutonium t3 connect link` for T3 Connect, or `plutonium t3 pair --tailscale`.
+Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium hydra` (T3's CLI on the same data): `plutonium hydra connect link` for T3 Connect, or `plutonium hydra pair --tailscale`.
 
-## 8. Agents
+## 7. Agents
 
 - **Under Hydra:** T3 Code gives its Claude sessions the helper's MCP server.
 - **Any other agent:** run it inside a thread, for example from a terminal you opened in a shell, which already has the thread's environment. Then give it the bridge:
@@ -189,8 +181,7 @@ Styx's launcher (Super+D) has an entry that starts Claude Code with these tools.
 
 ## If it hangs
 
-- **Ash doesn't respond, or the screen is black:** press the kill switch. Ash is killed, and you're back at your other desktop, the text console or the login screen.
-- **No kill switch at hand:** from another machine, `ssh` in and run `plutonium stop --drm`, or `loginctl activate <session>` to switch to another session (`loginctl list-sessions`).
+- **Ash doesn't respond, or the screen is black:** a hung Ash can't switch VTs (the keys go through it), so from another machine, `ssh` in and run `plutonium stop --drm`, or `loginctl activate <session>` to switch to another session (`loginctl list-sessions`). logind gives the text console back however Ash ends.
 - **A shell page misbehaves, but Ash responds:** Super+Tab to another shell, or Ctrl+Alt+Backspace to end the session.
 - **The console stays dark after Ash ends:** switch VTs (Ctrl+Alt+F3, then back). logind restores the console's mode whenever Ash exits, crashes included, so this shouldn't happen; please report it.
 
@@ -200,8 +191,7 @@ In `logs/` in your checkout, one set per session (the name is its Wayland socket
 - `session-*.log`: the launcher: what it checked, and why it stopped;
 - `ash-*.log`: Ash, Plutonium's Chromium, with the previous run kept as `*.prev.log`;
 - `helper-*.log`: the helper (apps, threads, the GPU check);
-- `login-session.log`, and `journalctl -t plutonium-session`: sessions from the login screen;
-- `journalctl --user -u plutonium-killswitch`: the kill switch.
+- `login-session.log`, and `journalctl -t plutonium-session`: sessions from the login screen.
 
 ## Reporting a bug
 
@@ -215,7 +205,7 @@ Open an issue at https://github.com/ElSargo/plutonium-desktop/issues with:
 
 | | |
 |---|---|
-| `podman`: "cannot re-exec process to join the existing user namespace" | `PODMAN=lib/pm.sh` in `plutonium.env` |
+| `podman`: "cannot re-exec process to join the existing user namespace" | `PODMAN=dev/pm.sh` in `plutonium.env` |
 | The container exits a minute after starting | Start it with `plutonium container start`, which runs it from a lasting user unit. Starting it from a short-lived wrapper takes its monitor process down with it |
 | `run`: "… is in no logind session" or "… is not on a seat's VT" | Run it from a text console you logged in on (not a terminal in your desktop), or pass `--vt ttyN` |
 | `run`: "session … is not in front; Ash comes up when it is" | Not an error: the console isn't the one on screen. Switch to it (Ctrl+Alt+F*n*) and Ash comes up |
