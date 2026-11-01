@@ -14,7 +14,18 @@
 # runs in that unit (`plutonium run --vt ttyN`) rather than in the console's
 # shell; `plutonium stop` ends it as usual. Its log: journalctl --user -u
 # plutonium-redeploy, and ~/.local/share/plutonium/logs/redeploy.log.
+#
+# The session it starts gets the user's login environment, not the unit's bare
+# one: it re-runs itself through a login shell (/etc/profile: on NixOS the
+# nix profiles in PATH, XDG_DATA_DIRS for their apps, NIX_LD), plus
+# ~/.local/bin, so apps started on the desktop find what a terminal does.
 set -uo pipefail
+if [[ -z ${REDEPLOY_LOGIN_ENV:-} ]]; then
+  export REDEPLOY_LOGIN_ENV=1
+  exec bash -lc 'exec "$0" "$@"' "$0" "$@"
+fi
+[[ -d $HOME/.local/bin && :$PATH: != *:$HOME/.local/bin:* ]] && PATH=$HOME/.local/bin:$PATH
+export PATH
 tarball=${1:?usage: redeploy.sh <tarball> <install.sh> [ttyN]}
 installer=${2:?usage: redeploy.sh <tarball> <install.sh> [ttyN]}
 vt=${3:-tty2}
