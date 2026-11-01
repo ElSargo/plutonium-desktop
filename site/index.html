@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Plutonium: your desktop is a web page</title>
-<meta name="description" content="Plutonium is a Linux desktop whose shell is a real HTML page on Chromium's engine. Native apps and real browser tabs are elements in it, and agents get full computer use, one thread each.">
+<title>Pluto: your desktop is a web page</title>
+<meta name="description" content="Pluto is a Linux desktop whose shell is a real HTML page on Chromium's engine. Native apps and real browser tabs are elements in it, and agents get full computer use, one thread each.">
 <style>
 :root{
   --bg:#fbfaf8;--fg:#1d1d1f;--soft:#4a4a50;--dim:#7a7a82;--rule:#e4e2dd;--card:#f2f0ec;--accent:#c4503f;--code:#efece6;
@@ -22,17 +22,19 @@ a:hover{text-decoration-thickness:2px}
 code{font-family:var(--mono);font-size:.86em;background:var(--code);padding:.1em .35em;border-radius:4px}
 pre{font-family:var(--mono);font-size:14px;line-height:1.7;background:var(--code);padding:16px 18px;border-radius:8px;overflow-x:auto;margin:0 0 20px}
 pre code{background:none;padding:0;font-size:inherit}
-pre .c{color:var(--dim)}
+pre .c{color:var(--dim);font-style:italic}
+pre .k{color:#a6377c}pre .s{color:#2f7d4f}pre .t{color:#b0462f}pre .a{color:#8a5a00}pre .n{color:#1f6fb2}pre .f{color:#3b55b5}
+@media (prefers-color-scheme:dark){pre .k{color:#e08cc6}pre .s{color:#8fd19e}pre .t{color:#f0917e}pre .a{color:#e6c07b}pre .n{color:#7fb8ec}pre .f{color:#9db0f5}}
 .wrap{max-width:760px;margin:0 auto;padding:0 24px}
 .wide{max-width:1120px;margin:0 auto;padding:0 24px}
 
 header{border-bottom:1px solid var(--rule)}
 header .wide{display:flex;align-items:center;gap:24px;height:60px}
-header .name{font-weight:650;letter-spacing:.02em;color:var(--fg);text-decoration:none;margin-right:auto}
+header .name{font-weight:650;letter-spacing:.02em;color:var(--fg);text-decoration:none;margin-right:auto;display:flex;align-items:center;gap:8px}
 header nav{display:flex;gap:22px;font-size:15px}
 header nav a{color:var(--soft);text-decoration:none}
 header nav a:hover{color:var(--fg)}
-.badge{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);border:1px solid currentColor;border-radius:99px;padding:2px 10px}
+.badge{font-size:8.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);line-height:1}
 
 .hero{padding:72px 0 40px}
 .hero h1{font-size:clamp(34px,5vw,52px);line-height:1.1;letter-spacing:-.02em;margin:0 0 20px;font-weight:700}
@@ -96,16 +98,15 @@ footer a{color:var(--soft)}
 <body>
 
 <header><div class="wide">
-  <a class="name" href="#">Plutonium</a>
-  <nav><a href="#web">The web</a><a href="#shells">Shells</a><a href="#agents">Agents</a><a href="#status">Status</a><a href="#install">Install</a><a href="#faq">FAQ</a></nav>
-  <span class="badge">Public beta</span>
+  <a class="name" href="#">Pluto<span class="badge">beta</span></a>
+  <nav><a href="#web">How it works</a><a href="#agents">Agents</a><a href="#reload">Hot reload</a><a href="#shells">Shells</a><a href="#status">Status</a><a href="#install">Install</a><a href="#faq">FAQ</a></nav>
 </div></header>
 
 <main>
 
 <div class="hero"><div class="wrap">
   <h1>Your desktop is a web page.</h1>
-  <p class="lede">Plutonium is a Linux desktop whose shell (the window manager, the bar, the launcher) is a real HTML page, running on Chromium's browser engine. Your native apps and real browser tabs are elements in that page. You lay them out with CSS, script them with JavaScript, and save to see the change.</p>
+  <p class="lede">Pluto is a Linux desktop whose shell is a web page. Your apps and browser tabs are elements in it, so you can restyle, rearrange or rewrite your whole desktop with HTML, CSS and JavaScript, and see each change the moment you save.</p>
   <div class="buttons">
     <a class="btn primary" href="#install">Install it</a>
     <a class="btn" href="https://github.com/ElSargo/pluto">Source on GitHub</a>
@@ -115,60 +116,86 @@ footer a{color:var(--soft)}
 <div class="wide shot">
   <figure>
     <a href="images/hydra.webp"><img src="images/hydra.webp" width="1920" height="1200" alt="Hydra: a sidebar of agent threads across several projects and a dock of apps, an agent's conversation in the middle, and Minecraft with shaders showing a snowy mountain and coastline in the panel on the right."></a>
-    <figcaption>This is a web page. Hydra is a shell built as a React app. The panel on the right holds Minecraft, running natively on the GPU with shaders, as an element of that page. An agent launched it, created the world, flew to the mountains and took the screenshot for its README. Other agents worked in their own threads at the same time, and the dock at the bottom left puts apps and sites on Super+1…9.</figcaption>
+    <figcaption>This whole screen is a web page. Minecraft, on the right, runs natively with shaders inside it. An agent launched it, built the world and took this screenshot while other agents worked in their own threads.</figcaption>
   </figure>
 </div>
 
 <section id="web"><div class="wrap">
   <h2>A real page, with real apps and real tabs in it</h2>
-  <p class="soft">This isn't a mockup of a desktop drawn in a canvas, and it isn't a browser in kiosk mode. Plutonium is a Wayland compositor, and the thing it composites is a web page.</p>
+  <p class="soft">The compositor is built into the browser engine itself, with no X11 reparenting hacks. Apps run at full speed, and the page treats them like any other element.</p>
   <div class="reasons">
     <div>
       <h3>Native apps are elements</h3>
-      <p>A <code>&lt;native-window&gt;</code> element shows a running app inside the page. The GPU composites it with the rest of the page, with no copying. The app gets the element's size, along with pointer, keyboard, drag and drop, fullscreen and pointer lock. Games, editors and terminals render on the GPU as they would anywhere else.</p>
+      <p>Put an app in a <code>&lt;native-window&gt;</code> element and it goes wherever the element goes. Games, editors and terminals run on the GPU at full speed, with fullscreen, drag and drop and everything else they expect.</p>
     </div>
     <div>
       <h3>Browser tabs are elements too</h3>
-      <p>Tabs are real Chromium tabs, each in its own process, embedded in the page like an iframe. They aren't stuck in a browser window. A link clicked in a terminal opens as a tab next to that terminal, and websites see an ordinary Chromium on Linux.</p>
+      <p>Real Chromium tabs sit in the page next to your apps, not trapped in a browser window. Click a link in a terminal and it opens right beside it.</p>
     </div>
-  </div>
-</div></section>
-
-<section id="know"><div class="wrap">
-  <h2>Everything you know about the web works here</h2>
-  <p class="soft">Your shell runs on the same engine as Chrome. Everything you know about building for the web applies.</p>
-  <div class="reasons">
     <div>
       <h3>HTML, CSS and JavaScript</h3>
-      <p>Grid and flexbox for the layout, transitions and animations for movement, <code>backdrop-filter</code> for the glass. Window management is DOM manipulation, and the window list is an array.</p>
+      <p>Lay out windows with grid and flexbox, animate them with CSS, blur them with <code>backdrop-filter</code>. If you can build a web page, you can build a desktop.</p>
     </div>
     <div>
       <h3>Bring your favourite packages</h3>
-      <p>A shell can be a folder with one HTML file, or a full app with a build step and its own server, which Plutonium runs and supervises for you. Use React, Svelte or plain JavaScript, and anything from npm. Hydra is a full React app.</p>
+      <p>Use React, Svelte, plain JavaScript or anything from npm. Hydra is a full React app, a modified version of <a href="https://github.com/pingdotgg/t3code">T3 Code</a>.</p>
     </div>
     <div>
       <h3>DevTools on your desktop</h3>
-      <p>Inspect the element your terminal is in. Change its CSS live, set breakpoints in your window manager, and profile your animations.</p>
+      <p>Inspect your desktop like any web page: tweak its CSS live, or set a breakpoint in your window manager.</p>
     </div>
     <div>
-      <h3>A few lines to show a window</h3>
-      <p>Ask the helper for a window, put it in an element, and style the element. Plutonium does the rest.</p>
+      <h3>A few lines to show an app</h3>
+      <p>Create an element, hand it a window, style it. That's the whole idea.</p>
     </div>
   </div>
 <pre style="margin-top:28px"><code><span class="c">&lt;!-- a shell is a folder: shell.json and a page --&gt;</span>
-&lt;style&gt;
-  native-window { border-radius: 12px; box-shadow: 0 20px 60px #0008; }
-&lt;/style&gt;
-&lt;script type="module"&gt;
-  const { connect } = await import(`${helper}/v1/shell.js`);
-  const shell = connect({ onFocus: (w) =&gt; show(w.id) });
+<span class="t">&lt;style&gt;</span>
+  <span class="t">native-window</span> { <span class="a">border-radius</span>: <span class="n">12px</span>; <span class="a">box-shadow</span>: <span class="n">0 20px 60px #0008</span>; }
+<span class="t">&lt;/style&gt;</span>
+<span class="t">&lt;script</span> <span class="a">type</span>=<span class="s">"module"</span><span class="t">&gt;</span>
+  <span class="c">// helper: the address Pluto gives the page</span>
+  <span class="k">const</span> { connect } = <span class="k">await</span> <span class="k">import</span>(<span class="s">`${helper}/v1/shell.js`</span>);
+  <span class="k">const</span> shell = <span class="f">connect</span>({ onFocus: (w) <span class="k">=&gt;</span> <span class="f">show</span>(w.id) });  <span class="c">// an app or agent asks to show a window</span>
 
-  async function show(id) {
-    const el = document.createElement("native-window");
-    el.setAttribute("grant", await shell.grantFor(id));
-    document.body.append(el);   <span class="c">// the app is sized to the element</span>
+  <span class="k">async function</span> <span class="f">show</span>(id) {
+    <span class="k">const</span> el = document.<span class="f">createElement</span>(<span class="s">"native-window"</span>);
+    el.<span class="f">setAttribute</span>(<span class="s">"grant"</span>, <span class="k">await</span> shell.<span class="f">grantFor</span>(id));
+    document.body.<span class="f">append</span>(el);   <span class="c">// the app is sized to the element</span>
   }
-&lt;/script&gt;</code></pre>
+<span class="t">&lt;/script&gt;</span></code></pre>
+</div></section>
+
+<section id="agents"><div class="wrap">
+  <h2>Agents that use your computer, one thread each</h2>
+  <p class="soft">Agents can see and use your apps and tabs: launching, clicking, typing and taking screenshots. Each works in its own thread, so several can run at once without getting in each other's way, or yours.</p>
+</div>
+<div class="wide">
+  <figure class="shot">
+    <a href="images/computer-use.webp"><img src="images/computer-use.webp" width="1920" height="1200" loading="lazy" alt="Hydra while an agent works: it explains finding open water to the west and lowering the sun, while Minecraft shows a sunset over a lake, with an 'Agent is working in this app' notice and a Take control button."></a>
+    <figcaption>Asked for a sunset shot, the agent found water facing west, moved there and set the time. <b>Take control</b> hands the app back to you at any point.</figcaption>
+  </figure>
+</div>
+<div class="wrap">
+  <div class="reasons">
+    <div>
+      <h3>A thread is a workspace</h3>
+      <p>Everything an agent opens lands in its thread, whether the agent launched it or one of its scripts did. In Hydra a thread is a conversation; in Styx and Charon it's a workspace.</p>
+    </div>
+    <div>
+      <h3>Full computer use, no borrowed mouse</h3>
+      <p>Agents click and type into their own windows, even off screen. You keep using your mouse and keyboard while they work.</p>
+    </div>
+    <div>
+      <h3>Parallel by default</h3>
+      <p>Three agents get three separate sets of apps, and none can touch the others' work. Even single-instance apps like LibreOffice get a copy per thread.</p>
+    </div>
+    <div>
+      <h3>You stay in charge</h3>
+      <p>Watch any agent work and take over with one click. Its apps stay out of your way until you look.</p>
+    </div>
+  </div>
+  <p class="soft" style="margin-top:28px">Works with any MCP agent, such as Claude Code or Codex, and Hydra sets it up for you. Hydra also works with the T3 Code mobile app.</p>
 </div></section>
 
 <section id="reload"><div class="wrap">
@@ -176,98 +203,66 @@ footer a{color:var(--soft)}
   <div class="reasons">
     <div>
       <h3>Save, and it's there</h3>
-      <p>Every save reloads the shell in place. Your apps keep running through it; only the page around them reloads. There's no compositor to rebuild and no logging out.</p>
+      <p>Every save reloads the shell instantly. Your apps keep running, and there's nothing to rebuild and no logging out.</p>
     </div>
     <div>
       <h3>Breaking it costs nothing</h3>
-      <p>Every shell is a git repository, and every save is a commit. If a change stops a shell from coming up, Plutonium rolls it back and tells you. <code>plutonium run --safe</code> always gets you a plain shell that works.</p>
+      <p>Every save is a git commit. If a change breaks your shell, Pluto rolls it back and tells you, and there's always a plain shell to fall back on.</p>
     </div>
     <div>
       <h3>Run several at once</h3>
-      <p>Tiles for work, floating windows for everything else, an agent's view when you're pairing with one. Super+Tab switches between them without closing anything.</p>
+      <p>Tiling for work, floating for everything else, an agent's view when you're pairing with one. Super+Tab switches between them.</p>
     </div>
     <div>
       <h3>Add one while you're using it</h3>
-      <p>Install a shell from a folder, a git URL or an address, or start a new one from a copy of one you have. It starts beside the others, with no restart.</p>
+      <p>Install a shell from a folder or a git URL, or copy one you have and start changing it. No restart needed.</p>
     </div>
   </div>
 </div></section>
 
 <section id="shells"><div class="wrap">
   <h2>Shells that come with it</h2>
-  <p class="soft">Four, to use as they are or as a starting point.</p>
+  <p class="soft">Four complete shells, ready to use as they are. They're also a good starting point for your own: copy one and change whatever you like, or ask an agent to.</p>
   <table>
-    <tr><th>Styx</th><td>Scrolling tiling after <a href="https://github.com/YaLTeR/niri">niri</a>'s design: windows sit in columns on a strip that scrolls sideways, with niri's default keys.</td></tr>
-    <tr><th>Charon</th><td>Floating windows, an overview and a dock, after GNOME Shell's design, with quick settings, notifications and a Settings app.</td></tr>
-    <tr><th>Hydra</th><td>For coding agents, built on <a href="https://github.com/pingdotgg/t3code">T3 Code</a>. Each conversation is a thread, and its apps, terminals and tabs sit in a panel beside it.</td></tr>
-    <tr><th>Plain</th><td>The smallest working shell. Read it first to see how the others work.</td></tr>
+    <tr><th>Styx</th><td>Scrolling tiling, after <a href="https://github.com/YaLTeR/niri">niri</a>: columns of windows on a strip that scrolls sideways.</td></tr>
+    <tr><th>Charon</th><td>Floating windows, an overview and a dock, after GNOME Shell.</td></tr>
+    <tr><th>Hydra</th><td>For coding agents, built on <a href="https://github.com/pingdotgg/t3code">T3 Code</a>. Each conversation sits beside its apps and tabs.</td></tr>
+    <tr><th>Plain</th><td>The smallest working shell, and the best place to start reading.</td></tr>
   </table>
 </div>
 <div class="wide">
   <figure class="shot" style="margin-top:28px">
     <a href="images/styx.webp"><img src="images/styx.webp" width="1600" height="1000" loading="lazy" alt="Styx, the tiling shell: a terminal listing the shell's own files and git history, beside a Wikipedia tab opened from that terminal."></a>
-    <figcaption>Styx. On the left, a terminal in the shell's own folder: a handful of JavaScript files, with every edit a commit. On the right, a link opened from that terminal with <code>xdg-open</code>. It became a tab beside the terminal.</figcaption>
+    <figcaption>Styx: a terminal in the shell's own folder, with a link from it opened as a tab alongside.</figcaption>
   </figure>
   <div class="pair">
     <figure>
       <a href="images/charon.webp"><img src="images/charon.webp" width="1600" height="1000" loading="lazy" alt="Charon's overview: Firefox and a Chromium tab side by side, with a dock below."></a>
-      <figcaption>Charon's overview, with named workspaces above and the dock below. Firefox, a native app, sits beside two Chromium tabs, and the shell treats them all the same way.</figcaption>
+      <figcaption>Charon's overview. Firefox and Chromium tabs side by side, treated just the same.</figcaption>
     </figure>
     <figure>
       <a href="images/switcher.webp"><img src="images/switcher.webp" width="1600" height="1000" loading="lazy" alt="The Super+Tab switcher, listing shells, windows and tabs, with Charon's details and Customize options."></a>
-      <figcaption>Super+Tab lists every shell, window and tab. Under Customize, <b>Copy a prompt for your agent</b> and <b>Open a terminal</b> take you straight to the shell's folder.</figcaption>
+      <figcaption>Super+Tab lists every shell, window and tab. <b>Customize</b> opens a shell's folder or gives you a prompt for your agent.</figcaption>
     </figure>
   </div>
-</div></section>
-
-<section id="agents"><div class="wrap">
-  <h2>Agents that use your computer, one thread each</h2>
-  <p class="soft">Agents don't only write code and suggest commands. In Plutonium they have full computer use: they can see, launch, click, type into and screenshot real apps and real tabs. Threads keep each agent's work separate, so several can work at once without getting in each other's way, or yours.</p>
-</div>
-<div class="wide">
-  <figure class="shot">
-    <a href="images/computer-use.webp"><img src="images/computer-use.webp" width="1920" height="1200" loading="lazy" alt="Hydra while an agent works: it explains finding open water to the west and lowering the sun, while Minecraft shows a sunset over a lake, with an 'Agent is working in this app' notice and a Take control button."></a>
-    <figcaption>Computer use in action. Asked for a sunset shot, the agent worked out which way the sun sets, found water it could face across, moved there and set the time. The notice at the bottom says an agent is driving the app. <b>Take control</b> hands it back to you.</figcaption>
-  </figure>
-</div>
-<div class="wrap">
-  <div class="reasons">
-    <div>
-      <h3>A thread is a workspace</h3>
-      <p>Every app and tab belongs to a thread: a Hydra conversation, a Styx desktop, a Charon workspace. Whatever is opened from a thread lands in it. That covers an agent's launches, a link clicked in its terminal, and a file opened by its script.</p>
-    </div>
-    <div>
-      <h3>Full computer use, no borrowed mouse</h3>
-      <p>An agent's clicks and keystrokes go straight to its own windows, which get a keyboard focus of their own, whether or not they're on screen. You keep using your mouse and keyboard while it works.</p>
-    </div>
-    <div>
-      <h3>Parallel by default</h3>
-      <p>Start three agents in three threads and they get three separate sets of apps and tabs. Each agent sees only its own thread's windows, so they can't click on each other's work. Even apps that only run once per desktop, like LibreOffice, get a copy per thread.</p>
-    </div>
-    <div>
-      <h3>You stay in charge</h3>
-      <p>Open a thread's panel to watch its agent work, and take control with one click. A thread's apps stay out of your way until you go and look at them. Away from your desk, Hydra on your phone or laptop shows a thread's apps too, and you can drive them from there.</p>
-    </div>
-  </div>
-  <p class="soft" style="margin-top:28px">It works with any agent that speaks MCP: Claude Code, Codex and others. The tools cover apps (<code>launch_app</code>, <code>snapshot_window</code>, <code>click_window</code>, <code>type_window</code>, <code>drag_window</code>, <code>start_recording</code>, …) and tabs (open a page, read it as an accessibility tree, click, type and run scripts). Hydra sets this up for every agent it runs.</p>
 </div></section>
 
 <section id="status"><div class="wrap">
   <h2>Where it's at</h2>
-  <p>Plutonium is a public beta. Its developer uses it every day. It's new to everyone else, and so far it has run on only a handful of machines. Expect rough edges, and please <a href="https://github.com/ElSargo/pluto/issues">report them</a>.</p>
+  <p>Pluto is in public beta. Its developer uses it daily, but it has only run on a handful of machines so far, so expect rough edges and please <a href="https://github.com/ElSargo/pluto/issues">report them</a>.</p>
   <div class="pair" style="margin-top:8px">
     <div>
       <h3>Works</h3>
       <ul class="status yes">
-        <li><b>Several monitors</b>, with windows and tabs dragged across displays</li>
-        <li><b>Notifications</b> from apps and websites, with Do Not Disturb</li>
+        <li><b>Multi-monitor support</b></li>
+        <li><b>Notifications</b>, with Do Not Disturb</li>
         <li><b>Quick settings:</b> volume, brightness, Wi-Fi, Bluetooth and power</li>
         <li><b>Clipboard</b> between apps and pages</li>
-        <li><b>Screen sharing and screenshots</b> through the desktop portal</li>
-        <li><b>File picker and printing</b> for native apps</li>
+        <li><b>Screen sharing and screenshots</b></li>
+        <li><b>File picker and printing</b></li>
         <li><b>Input methods</b> and <b>global shortcuts</b></li>
-        <li><b>Video in tabs</b>, media keys, MPRIS</li>
-        <li><b>Screen lock</b> (Super+L), idle and display power</li>
+        <li><b>Video</b> and media keys</li>
+        <li><b>Screen lock</b> and idle</li>
         <li><b>An installer</b> and a login screen entry</li>
       </ul>
     </div>
@@ -275,63 +270,57 @@ footer a{color:var(--soft)}
       <h3>Not yet</h3>
       <ul class="status no">
         <li><b>Release builds</b> made by CI</li>
-        <li><b>The rest of the desktop portals</b> drawn by the shell, such as opening links from Flatpak apps (GTK's stand in for now)</li>
-        <li><b>A settings page</b> for choosing an input method</li>
-        <li><b>NVIDIA:</b> not tested yet</li>
+        <li><b>Shell-drawn desktop portals</b> (GTK's stand in for now)</li>
+        <li><b>Input method settings</b></li>
+        <li><b>NVIDIA</b> testing</li>
         <li><b>Accessibility and HiDPI</b> polish</li>
       </ul>
     </div>
   </div>
   <h3 style="margin-top:20px">What you need</h3>
-  <p class="soft">x86-64 Linux with systemd and glibc 2.35 or newer, and an AMD or Intel GPU. It's run on real hardware with NixOS, Debian and Fedora, on AMD and Intel graphics. NVIDIA hasn't been tested yet. The installer checks your system and tells you if anything is missing, with the command to install it.</p>
+  <p class="soft">x86-64 Linux with systemd and glibc 2.35 or newer, and an AMD or Intel GPU. It's run on real hardware with NixOS, Debian and Fedora.</p>
 </div></section>
 
 <section id="install"><div class="wrap">
   <h2>Get it</h2>
-  <p class="soft">Plutonium is one package. The installer puts it in <code>/opt/plutonium</code>, links the <code>plutonium</code> command into <code>/usr/local/bin</code>, and adds Plutonium to your login screen. It uses sudo for those, and never touches your data.</p>
+  <p class="soft">The installer puts Pluto in <code>/opt/plutonium</code> and adds it to your login screen. It asks for sudo for that, and never touches your data.</p>
 
   <h3>1. Install it</h3>
 <pre><code>curl -fsSL <span class="site-origin">https://elsargo.github.io/pluto</span>/install.sh | sh
 plutonium doctor                    <span class="c"># checks everything is in place</span></code></pre>
-  <p class="soft">If something is missing, the installer stops and gives you the command that installs it on your distribution.</p>
+  <p class="soft">If anything is missing, it tells you the command to install it.</p>
   <div class="note"><b>On NixOS,</b> the installer puts the release in place and prints the rest: copy its module, <code>/opt/plutonium/lib/nixos.nix</code>, next to your <code>configuration.nix</code>, add it to <code>imports</code>, and run <code>sudo nixos-rebuild switch</code>.</div>
 
   <h3>2. Log in to it</h3>
-  <p class="soft">Log out, pick Plutonium on the login screen, and log in. It runs as your whole desktop, straight on your GPU and displays, with nothing underneath. Your other desktops stay on the login screen, so you can switch back any time.</p>
-  <p class="soft">You start in Hydra, which walks you through setting up your agents, with the plain shell behind it. If you already use T3 Code, Hydra opens your own threads; quit the T3 Code app first. Styx and Charon are installed too: press Super+Tab, pick one and turn it on. In Styx, Super+T opens a terminal, Super+D opens the launcher, and Super+Shift+/ lists every key. Ctrl+Alt+Backspace ends the session and takes you back to the login screen.</p>
+  <p class="soft">Log out, pick Pluto on the login screen and log in. Your other desktops stay there, so you can switch back any time.</p>
+  <p class="soft">You start in Hydra, which helps you set up your agents. If you already use T3 Code, quit it first and Hydra opens your threads. Press Super+Tab to switch to Styx or Charon, and Ctrl+Alt+Backspace to log out.</p>
 
-  <div class="note"><b>Just want a look first?</b> <code>plutonium run --x11 :0 niri</code> opens it as a window on the desktop you're using now, and <code>plutonium stop --x11</code> closes it. It's handy for a quick try or for working on a shell, but the login session is the real thing.</div>
+  <div class="note"><b>Just want a look first?</b> <code>plutonium run --x11 :0 niri</code> opens Styx in a window on your current desktop, and <code>plutonium stop --x11</code> closes it.</div>
 
   <h3>Removing it</h3>
 <pre><code>curl -fsSL <span class="site-origin">https://elsargo.github.io/pluto</span>/install.sh | sh -s -- --uninstall</code></pre>
-  <p class="soft">This removes <code>/opt/plutonium</code>, the command and the login screen entry. Your shells and settings in <code>~/.pluto</code> stay.</p>
+  <p class="soft">Your shells and settings in <code>~/.pluto</code> stay.</p>
 
   <h3>Building it yourself</h3>
-  <p class="soft">You don't have to: the release is all you need. Plutonium's changes to Chromium are kept as patches, one for each part of Plutonium. To build your own, see <a href="https://github.com/ElSargo/pluto/blob/main/docs/BUILDING.md">BUILDING.md</a>. Expect about 100 GB of disk space and an afternoon.</p>
+  <p class="soft">You don't need to, but you can. Pluto's changes to Chromium are kept as patches, one for each part of Pluto. See <a href="https://github.com/ElSargo/pluto/blob/main/docs/BUILDING.md">BUILDING.md</a>, and budget 100 GB of disk and an afternoon.</p>
 </div></section>
 
 <section id="faq"><div class="wrap">
   <h2>Questions</h2>
-  <details><summary>Is this Electron, or a browser in kiosk mode?</summary>
-    <p>Neither. Plutonium is a Wayland compositor. Apps connect to it directly and are composited on the GPU, the same as in any compositor. What's different is that the layout and the interface are a web page instead of compiled code.</p></details>
   <details><summary>Will my apps work?</summary>
-    <p>Native Linux apps run as they would under any Wayland compositor, with the GPU, fullscreen, pointer lock, drag and drop, the clipboard, file pickers, printing and screen sharing. The screenshots on this page show Firefox, foot and Minecraft with shaders. If an app misbehaves, please open an issue.</p></details>
+    <p>Yes. Native Linux apps run as they would on any Wayland desktop, games included. If one misbehaves, please open an issue.</p></details>
   <details><summary>Isn't a web page too slow for a desktop?</summary>
-    <p>Apps aren't drawn by the page. They're GPU surfaces that the compositor places where the page's elements are, the same way a video or a canvas is. The page only draws the shell around them: bars, borders and animations.</p></details>
+    <p>No. Your apps aren't drawn by the page; they go straight to the GPU. The page only draws the shell around them.</p></details>
   <details><summary>Do I have to write a shell to use it?</summary>
-    <p>No. Styx and Charon are complete desktops. You only need to touch the code if you want to change something, and you can ask an agent to do it: the switcher gives you a prompt to paste into one.</p></details>
-  <details><summary>What can an agent reach?</summary>
-    <p>Only the windows and tabs in its own thread: the ones it opened, and ones you add to the thread. It can't see or drive the rest of your desktop.</p></details>
+    <p>No. Styx and Charon are complete desktops. To make your own, start from one of them and change what you want, or have an agent do it.</p></details>
   <details><summary>What if it hangs?</summary>
-    <p>Ctrl+Alt+Backspace ends the session. If that doesn't respond, <code>plutonium stop --drm</code> from another console (Ctrl+Alt+F3) or over ssh does the same, and you're back at the login screen. If a shell you changed won't start, <code>plutonium run --safe</code> always starts the plain shell, and two failed starts in a row fall back to it on their own.</p></details>
-  <details><summary>What's the licence?</summary>
-    <p>MIT. The Chromium patches are under Chromium's BSD-style licence.</p></details>
+    <p>Ctrl+Alt+Backspace logs you out. If that doesn't respond, run <code>plutonium stop --drm</code> from another console (Ctrl+Alt+F3) or over ssh. A broken shell falls back to the plain one by itself.</p></details>
 </div></section>
 
 </main>
 
 <footer><div class="wide">
-  <span>Plutonium · MIT licence</span>
+  <span>Pluto · MIT licence</span>
   <a href="https://github.com/ElSargo/pluto">Source</a>
   <a href="https://github.com/ElSargo/pluto/blob/main/docs/USING.md">Using it</a>
   <a href="https://github.com/ElSargo/pluto/blob/main/docs/ARCHITECTURE.md">Architecture</a>
