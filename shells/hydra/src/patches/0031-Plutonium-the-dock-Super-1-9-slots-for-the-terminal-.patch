@@ -1,0 +1,1283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 11:27:05 +1300
+Subject: [PATCH 31/48] =?UTF-8?q?Plutonium:=20the=20dock:=20Super+1?=
+ =?UTF-8?q?=E2=80=A69=20slots=20for=20the=20terminal,=20apps=20and=20sites?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Nine slots, each T3's terminal drawer, an app or a site, kept in this
+thread, this project or everywhere (a Plutonium tag: t3:thread/<id>,
+t3:project/<id>, t3:global). Super+N starts what the slot names, shows it,
+gives it the keyboard, and goes back to where you were on the next press;
+several copies cycle. A slot is split (beside the chat) or fold (the chat
+folds away: the panel's maximize, or the terminal drawer taking the column);
+Super+Ctrl+N the other way this time, Super+Up switches it for the thread.
+Super+Shift+N, or a panel tab's menu, puts something in a slot. Slot 1 is
+the terminal by default. The keys only apply in the Plutonium shell.
+
+A focused tab's page or app window no longer loses the keyboard to the
+composer when the shell window's focus event follows (EMBED, NATIVE-WINDOW).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../web/src/components/ChatView.logic.test.ts |   9 +-
+ apps/web/src/components/ChatView.logic.ts     |   3 +
+ apps/web/src/components/ChatView.tsx          |  58 +-
+ apps/web/src/components/RightPanelTabs.tsx    |  67 +-
+ .../src/components/ThreadTerminalDrawer.tsx   |  15 +-
+ apps/web/src/keybindings.ts                   |   4 +
+ apps/web/src/plutonium/dock.test.ts           |  50 ++
+ apps/web/src/plutonium/dock.ts                | 612 ++++++++++++++++++
+ apps/web/src/plutonium/panelKeys.ts           |  48 +-
+ apps/web/src/plutonium/threadTag.ts           |   8 +
+ packages/contracts/src/keybindings.ts         |  41 ++
+ packages/shared/src/keybindings.ts            |  21 +
+ 12 files changed, 921 insertions(+), 15 deletions(-)
+ create mode 100644 apps/web/src/plutonium/dock.test.ts
+ create mode 100644 apps/web/src/plutonium/dock.ts
+
+diff --git a/apps/web/src/components/ChatView.logic.test.ts b/apps/web/src/components/ChatView.logic.test.ts
+index f870182b1b..df6a5e3c45 100644
+--- a/apps/web/src/components/ChatView.logic.test.ts
++++ b/apps/web/src/components/ChatView.logic.test.ts
+@@ -1838,9 +1838,12 @@ describe("shouldRefocusComposerOnWindowFocus", () => {
+     expect(shouldRefocusComposerOnWindowFocus(element("DIV", { role: "textbox" }))).toBe(false);
+   });
+ 
+-  it.each(["IFRAME", "WEBVIEW"])("leaves a focused %s preview alone", (tagName) => {
+-    expect(shouldRefocusComposerOnWindowFocus(element(tagName))).toBe(false);
+-  });
++  it.each(["IFRAME", "WEBVIEW", "EMBED", "NATIVE-WINDOW"])(
++    "leaves a focused %s preview alone",
++    (tagName) => {
++      expect(shouldRefocusComposerOnWindowFocus(element(tagName))).toBe(false);
++    },
++  );
+ 
+   it("leaves a focused terminal alone in the drawer and the right panel", () => {
+     expect(
+diff --git a/apps/web/src/components/ChatView.logic.ts b/apps/web/src/components/ChatView.logic.ts
+index 1e79964caa..b76104979f 100644
+--- a/apps/web/src/components/ChatView.logic.ts
++++ b/apps/web/src/components/ChatView.logic.ts
+@@ -1296,6 +1296,9 @@ export function shouldRefocusComposerOnWindowFocus(
+     activeElement.tagName === "SELECT" ||
+     activeElement.tagName === "IFRAME" ||
+     activeElement.tagName === "WEBVIEW" ||
++    // Plutonium: a browser tab's page and an app's window in the panel.
++    activeElement.tagName === "EMBED" ||
++    activeElement.tagName === "NATIVE-WINDOW" ||
+     activeElement.isContentEditable === true ||
+     activeElement.getAttribute("role") === "textbox"
+   ) {
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 2559aa5895..2de4393512 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -275,6 +275,7 @@ import { resolveDiscoveredServerUrl } from "../browser/browserTargetResolver";
+ import { useBrowserPointerStore } from "../browser/browserPointerStore";
+ import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
+ import { addBrowserSurface } from "./preview/addBrowserSurface";
++import { openPreviewSession } from "./preview/openPreviewSession";
+ import { closePreviewSession } from "./preview/closePreviewSession";
+ import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
+ import { usePreviewSession } from "./preview/usePreviewSession";
+@@ -296,6 +297,7 @@ import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
+ import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
+ import { RightPanelTabs } from "./RightPanelTabs";
+ import { usePlutoniumPanelKeys } from "../plutonium/panelKeys";
++import { type DockContext, useTerminalFolded } from "../plutonium/dock";
+ import { importBrowserTab } from "../plutonium/importTab";
+ import {
+   PANEL_MAXIMIZE_REQUEST_EVENT,
+@@ -993,12 +995,15 @@ interface PersistentThreadTerminalDrawerProps {
+   closeShortcutLabel: string | undefined;
+   keybindings: ResolvedKeybindingsConfig;
+   onAddTerminalContext: (selection: TerminalContextSelection) => void;
++  /** Plutonium's dock folded the chat away: the drawer takes the column. */
++  fill?: boolean;
+ }
+ 
+ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDrawer({
+   threadRef,
+   threadId,
+   active,
++  fill = false,
+   launchContext,
+   focusRequestId,
+   splitShortcutLabel,
+@@ -1341,7 +1346,8 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+   return (
+     <div
+       className={cn(
+-        "grid shrink-0 overflow-clip",
++        "grid overflow-clip",
++        fill && active && visible ? "min-h-0 flex-1" : "shrink-0",
+         active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
+         active &&
+           "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
+@@ -1356,6 +1362,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
+           worktreePath={effectiveWorktreePath}
+           runtimeEnv={runtimeEnv}
+           visible={visible}
++          fill={fill && active && visible}
+           height={terminalUiState.terminalHeight}
+           // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
+           terminalIds={canOperateTerminal ? terminalUiState.terminalIds : serverOrderedTerminalIds}
+@@ -2507,6 +2514,9 @@ export default function ChatView(props: ChatViewProps) {
+   );
+   const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
+   const rightPanelMaximized = canMaximizeRightPanel && rightPanelState.maximized === true;
++  // Plutonium: the dock folded the conversation away for the terminal drawer.
++  const terminalFolded = useTerminalFolded(activeThreadRef);
++  const terminalFoldedAway = terminalFolded && terminalUiState.terminalOpen;
+   const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
+   const [threadPanelPresentation, setThreadPanelPresentation] =
+     useState<ThreadPanelPresentation>("inline");
+@@ -5987,7 +5997,45 @@ export default function ChatView(props: ChatViewProps) {
+     }
+   };
+   const activateRightPanelSurfaceStable = useStableCallback(activateRightPanelSurface);
+-  // Plutonium: Alt+1…9, Ctrl+Tab and Ctrl+T for the panel's tabs.
++  // Plutonium: a dock slot's site, opened as a new browser tab.
++  const openDockSite = async (url: string) => {
++    if (!activeThreadRef || !canOperatePreview) return;
++    const threadRef = activeThreadRef;
++    const result = await openPreviewSession({ openPreview, threadRef, url });
++    if (result._tag === "Failure") {
++      if (isAtomCommandInterrupted(result)) return;
++      const error = squashAtomCommandFailure(result);
++      toastManager.add(
++        stackedThreadToast({
++          type: "error",
++          title: "Unable to open browser",
++          description: error instanceof Error ? error.message : String(error),
++        }),
++      );
++      return;
++    }
++    useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
++    useRightPanelStore.getState().show(threadRef);
++  };
++  const openDockSiteStable = useStableCallback(openDockSite);
++  const dockContext: DockContext | null = activeThreadRef
++    ? {
++        threadRef: activeThreadRef,
++        projectId: activeProject?.id ?? null,
++        surfaces: renderedRightPanelSurfaces,
++        activeSurfaceId: renderedRightPanelSurface?.id ?? null,
++        panelOpen: rightPanelOpen,
++        maximized: rightPanelMaximized,
++        terminalOpen: terminalUiState.terminalOpen,
++        openTerminal: toggleTerminalVisibilityStable,
++        closeTerminal: () => setTerminalOpenStable(false),
++        focusTerminal: () => setTerminalFocusRequestId((value) => value + 1),
++        focusComposer: focusComposerStable,
++        activate: activateRightPanelSurfaceStable,
++        openSite: openDockSiteStable,
++      }
++    : null;
++  // Plutonium: Alt+1…9, Ctrl+Tab and Ctrl+T for the panel's tabs, and the dock.
+   usePlutoniumPanelKeys({
+     threadRef: activeThreadRef,
+     keybindings,
+@@ -5995,6 +6043,7 @@ export default function ChatView(props: ChatViewProps) {
+     activeSurfaceId: renderedRightPanelSurface?.id ?? null,
+     activate: activateRightPanelSurfaceStable,
+     newBrowserTab: createBrowserSurfaceStable,
++    dock: dockContext,
+   });
+   const toggleRightPanel = () => {
+     if (!activeThreadRef) return;
+@@ -11274,7 +11323,7 @@ export default function ChatView(props: ChatViewProps) {
+         </header>
+ 
+         {/* Main content area with optional plan sidebar */}
+-        <div className="relative flex min-h-0 min-w-0 flex-1">
++        <div className={cn("relative flex min-h-0 min-w-0 flex-1", terminalFoldedAway && "hidden")}>
+           {/* Chat column */}
+           <ThreadFindCanvas
+             findOptions={{
+@@ -11893,6 +11942,7 @@ export default function ChatView(props: ChatViewProps) {
+             closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
+             keybindings={keybindings}
+             onAddTerminalContext={addTerminalContextToDraft}
++            fill={mountedThreadKey === activeThreadKey && terminalFoldedAway}
+           />
+         ))}
+       </div>
+@@ -11900,6 +11950,7 @@ export default function ChatView(props: ChatViewProps) {
+       {rightPanelPresent && !shouldUsePlanSidebarSheet && activeThreadRef ? (
+         <RightPanelTabs
+           mode="inline"
++          dock={dockContext}
+           open={rightPanelOpen}
+           keybindings={keybindings}
+           getShortcutContext={getShortcutContextStable}
+@@ -11953,6 +12004,7 @@ export default function ChatView(props: ChatViewProps) {
+         >
+           <RightPanelTabs
+             mode="sheet"
++            dock={dockContext}
+             open={rightPanelOpen}
+             keybindings={keybindings}
+             getShortcutContext={getShortcutContextStable}
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index b1d3b26ef9..b6749aa55e 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -103,9 +103,22 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+ import { observeResize } from "~/lib/observeResize";
+ import { windowLabel } from "~/plutonium/PlutoniumWindows";
+ import { type NativeWindowEntry, usePlutoniumWindowStore } from "~/plutonium/windowStore";
++import {
++  assignDockSlot,
++  DOCK_SLOT_NUMBERS,
++  type DockContext,
++  type DockScope,
++  type DockSlotNumber,
++  dockSlotLabel,
++  dockSlotOfSurface,
++  setDockSlotScope,
++  useDockStore,
++} from "~/plutonium/dock";
+ 
+ interface RightPanelTabsProps {
+   mode: PreviewPanelMode;
++  /** Plutonium: the thread, for the tab menu's Dock entries (none: no entries). */
++  dock?: Pick<DockContext, "threadRef" | "projectId"> | null;
+   maximized?: boolean;
+   open?: boolean;
+   keybindings: ResolvedKeybindingsConfig;
+@@ -217,6 +230,9 @@ const SURFACE_UNAVAILABLE_HINTS = {
+ } as const;
+ 
+ type TabContextMenuAction =
++  | `dock-assign-${DockSlotNumber}`
++  | `dock-scope-${DockScope}`
++  | "dock-remove"
+   | "rename"
+   | "copy-path"
+   | "toggle-mute"
+@@ -1090,8 +1106,44 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+           }),
+         });
+       }
++      // Plutonium: put an app or a site in the dock, and keep it per thread,
++      // per project or everywhere.
++      const dock = props.dock;
++      const dockSlots = useDockStore.getState().slots;
++      const inSlot = dock ? dockSlotOfSurface(dockSlots, surface, dock.threadRef) : null;
++      if (dock && (surface.kind === "app" || (surface.kind === "preview" && surface.resourceId))) {
++        items.push({
++          id: "dock-assign-1",
++          label: inSlot ? `In the dock (Super+${inSlot})` : "Add to the dock",
++          children: DOCK_SLOT_NUMBERS.map((number) => ({
++            id: `dock-assign-${number}` as const,
++            label: `Super+${number}: ${dockSlotLabel(dockSlots[number])}`,
++            checked: number === inSlot,
++          })),
++        });
++        if (inSlot && surface.kind === "app") {
++          const scope = dockSlots[inSlot]?.scope;
++          items.push({
++            id: "dock-scope-thread",
++            label: "Keep it",
++            children: (
++              [
++                ["thread", "In this thread"],
++                ["project", "In this project"],
++                ["global", "Everywhere"],
++              ] as const
++            ).map(([value, label]) => ({
++              id: `dock-scope-${value}` as const,
++              label,
++              checked: value === scope,
++              disabled: value === "project" && !dock.projectId,
++            })),
++          });
++        }
++        if (inSlot) items.push({ id: "dock-remove", label: "Remove from the dock" });
++      }
+       items.push(
+-        { id: "close", label: "Close" },
++        { id: "close", label: "Close", separatorBefore: inSlot !== null || items.length > 0 },
+         {
+           id: "close-others",
+           label: "Close others",
+@@ -1110,6 +1162,19 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       );
+ 
+       const action = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
++      if (dock && action?.startsWith("dock-assign-")) {
++        const number = Number(action.slice("dock-assign-".length)) as DockSlotNumber;
++        void assignDockSlot(dock, number, surface);
++        return;
++      }
++      if (dock && inSlot && action?.startsWith("dock-scope-")) {
++        void setDockSlotScope(dock, inSlot, action.slice("dock-scope-".length) as DockScope);
++        return;
++      }
++      if (inSlot && action === "dock-remove") {
++        useDockStore.getState().setSlot(inSlot, null);
++        return;
++      }
+       switch (action) {
+         case "rename":
+           setRenamingDevice(surface.id);
+diff --git a/apps/web/src/components/ThreadTerminalDrawer.tsx b/apps/web/src/components/ThreadTerminalDrawer.tsx
+index 4654f759e8..20fb3bbf40 100644
+--- a/apps/web/src/components/ThreadTerminalDrawer.tsx
++++ b/apps/web/src/components/ThreadTerminalDrawer.tsx
+@@ -1122,6 +1122,8 @@ interface ThreadTerminalDrawerProps {
+   worktreePath?: string | null;
+   runtimeEnv?: Record<string, string>;
+   visible?: boolean;
++  /** Plutonium: take the chat column's height (the dock folded the conversation away). */
++  fill?: boolean;
+   height: number;
+   terminalIds: string[];
+   activeTerminalId: string;
+@@ -1198,6 +1200,7 @@ export default function ThreadTerminalDrawer({
+   worktreePath,
+   runtimeEnv,
+   visible = true,
++  fill = false,
+   height,
+   terminalIds,
+   activeTerminalId,
+@@ -1563,11 +1566,11 @@ export default function ThreadTerminalDrawer({
+         data-terminal-owner={isPanel ? "right-panel" : "drawer"}
+         className={cn(
+           "relative flex min-w-0 flex-col overflow-hidden bg-background",
+-          isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
++          isPanel || fill ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+         )}
+-        style={isPanel ? undefined : { height: `${drawerHeight}px` }}
++        style={isPanel || fill ? undefined : { height: `${drawerHeight}px` }}
+       >
+-        {!isPanel ? (
++        {!isPanel && !fill ? (
+           <div
+             className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+             onPointerDown={handleResizePointerDown}
+@@ -1600,11 +1603,11 @@ export default function ThreadTerminalDrawer({
+       data-terminal-owner={isPanel ? "right-panel" : "drawer"}
+       className={cn(
+         "relative flex min-w-0 flex-col overflow-hidden bg-background",
+-        isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
++        isPanel || fill ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+       )}
+-      style={isPanel ? undefined : { height: `${drawerHeight}px` }}
++      style={isPanel || fill ? undefined : { height: `${drawerHeight}px` }}
+     >
+-      {!isPanel ? (
++      {!isPanel && !fill ? (
+         <div
+           className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+           onPointerDown={handleResizePointerDown}
+diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
+index 92affc39e5..5fc060ce84 100644
+--- a/apps/web/src/keybindings.ts
++++ b/apps/web/src/keybindings.ts
+@@ -54,6 +54,8 @@ function resolvePlatform(options: ShortcutMatchOptions | undefined): string {
+   return options?.platform ?? navigator.platform;
+ }
+ 
++const IS_PLUTONIUM_SHELL = typeof navigator !== "undefined" && "windowBroker" in navigator;
++
+ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatchContext {
+   return {
+     terminalFocus: false,
+@@ -63,6 +65,8 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
+     isWeb: !isElectron,
+     isDesktop: isElectron,
+     editableFocus: false,
++    // Plutonium: the page is the desktop's shell (the dock's keys).
++    plutoniumShell: IS_PLUTONIUM_SHELL,
+     ...options?.context,
+   };
+ }
+diff --git a/apps/web/src/plutonium/dock.test.ts b/apps/web/src/plutonium/dock.test.ts
+new file mode 100644
+index 0000000000..19a82ee555
+--- /dev/null
++++ b/apps/web/src/plutonium/dock.test.ts
+@@ -0,0 +1,50 @@
++import { describe, expect, it, vi } from "vite-plus/test";
++
++vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
++
++import { sameApp, scopeOfWindow, siteMatchOf } from "./dock";
++import type { NativeWindowEntry } from "./windowStore";
++
++const window = (tags: string[]): NativeWindowEntry => ({
++  id: 1,
++  appId: "foot",
++  title: "foot",
++  width: 800,
++  height: 600,
++  deviceScaleFactor: 1,
++  embedded: false,
++  focused: false,
++  pid: 1,
++  threadId: tags[0] ?? null,
++  tags,
++});
++
++describe("the dock", () => {
++  it("matches a desktop entry to its windows' app id", () => {
++    expect(sameApp("foot.desktop", "foot")).toBe(true);
++    expect(sameApp("org.gnome.Nautilus", "org.gnome.Nautilus")).toBe(true);
++    expect(sameApp("nautilus", "org.gnome.Nautilus")).toBe(true);
++    expect(sameApp("firefox", "foot")).toBe(false);
++  });
++
++  it("puts a window in the last scope T3 added", () => {
++    expect(scopeOfWindow(window(["t3:thread/a"]))).toBe("thread");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p"]))).toBe("project");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p", "t3:global"]))).toBe("global");
++    expect(scopeOfWindow(window(["niri:desktop"]))).toBe("thread");
++  });
++
++  it("matches a site by its own prefix, else its origin", () => {
++    expect(siteMatchOf({ kind: "site", url: "https://github.com/a/b/pulls", name: "b" })).toBe(
++      "https://github.com",
++    );
++    expect(
++      siteMatchOf({
++        kind: "site",
++        url: "https://github.com/a/b",
++        match: "https://github.com/a/b",
++        name: "b",
++      }),
++    ).toBe("https://github.com/a/b");
++  });
++});
+diff --git a/apps/web/src/plutonium/dock.ts b/apps/web/src/plutonium/dock.ts
+new file mode 100644
+index 0000000000..65966ecbcc
+--- /dev/null
++++ b/apps/web/src/plutonium/dock.ts
+@@ -0,0 +1,612 @@
++// Plutonium: the dock. Nine slots on Super+1…9, each T3's terminal drawer, an
++// app or a site, kept per thread, per project or everywhere. A slot's key
++// starts what it names, shows it, gives it the keyboard, and goes back to
++// where you were when pressed again (plutonium-desktop
++// docs/features/T3_DOCK.md).
++//
++// A scope is a Plutonium tag: an app started for a slot runs with its scope's
++// tag as PLUTONIUM_THREAD_ID, so its windows carry it, and a window put in a
++// slot from the panel gets the slot scope's tag added.
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import { create } from "zustand";
++import { createJSONStorage, persist } from "zustand/middleware";
++
++import { toastManager } from "~/components/ui/toast";
++import { resolveStorage } from "~/lib/storage";
++import { readThreadPreviewState } from "~/previewStateStore";
++import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
++
++import { focusRightPanelSurface } from "./panelKeys";
++import { GLOBAL_TAG, projectTag } from "./threadTag";
++import {
++  type NativeWindowEntry,
++  plutoniumShell,
++  threadTag,
++  usePlutoniumWindowStore,
++  windowTags,
++} from "./windowStore";
++
++export const DOCK_SLOT_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
++export type DockSlotNumber = (typeof DOCK_SLOT_NUMBERS)[number];
++
++export type DockScope = "thread" | "project" | "global";
++export type DockLayout = "split" | "fold";
++
++export type DockTarget =
++  /** T3's terminal drawer, below the chat. */
++  | { readonly kind: "terminal" }
++  | {
++      readonly kind: "app";
++      /** The desktop entry that starts it; null if none was found (it can't be started). */
++      readonly desktopId: string | null;
++      /** Its windows' app id, once seen. */
++      readonly windowAppId: string | null;
++      readonly name: string;
++    }
++  | {
++      readonly kind: "site";
++      readonly url: string;
++      /** Tabs whose address starts with this belong to the slot (default: the URL's origin). */
++      readonly match?: string;
++      readonly name: string;
++    };
++
++export interface DockSlot {
++  readonly target: DockTarget;
++  readonly scope: DockScope;
++  readonly layout: DockLayout;
++}
++
++const DEFAULT_SLOTS: Partial<Record<DockSlotNumber, DockSlot>> = {
++  1: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++};
++
++/** Where a slot's key came from, to go back to on the next press. */
++interface ReturnPoint {
++  readonly slot: DockSlotNumber;
++  readonly panelOpen: boolean;
++  readonly activeSurfaceId: string | null;
++  readonly maximized: boolean;
++  readonly terminalOpen: boolean;
++  readonly terminalFolded: boolean;
++}
++
++interface DockState {
++  readonly slots: Partial<Record<DockSlotNumber, DockSlot>>;
++  /** A thread's own layout for a slot (Super+Up), by thread key, then slot. */
++  readonly layouts: Readonly<Record<string, Partial<Record<DockSlotNumber, DockLayout>>>>;
++  /** Threads whose terminal drawer has the chat column to itself, by thread key. */
++  readonly terminalFolded: Readonly<Record<string, true>>;
++  /** The slot last raised in each thread and what was showing before, by thread key. */
++  readonly returnTo: Readonly<Record<string, ReturnPoint>>;
++  setSlot(slot: DockSlotNumber, value: DockSlot | null): void;
++  setThreadLayout(threadKey: string, slot: DockSlotNumber, layout: DockLayout): void;
++  setTerminalFolded(threadKey: string, folded: boolean): void;
++  setReturnTo(threadKey: string, point: ReturnPoint | null): void;
++}
++
++export const useDockStore = create<DockState>()(
++  persist(
++    (set) => ({
++      slots: DEFAULT_SLOTS,
++      layouts: {},
++      terminalFolded: {},
++      returnTo: {},
++      setSlot: (slot, value) =>
++        set((state) => {
++          const slots = { ...state.slots };
++          if (value) slots[slot] = value;
++          else delete slots[slot];
++          return { slots };
++        }),
++      setThreadLayout: (threadKey, slot, layout) =>
++        set((state) => ({
++          layouts: {
++            ...state.layouts,
++            [threadKey]: { ...state.layouts[threadKey], [slot]: layout },
++          },
++        })),
++      setTerminalFolded: (threadKey, folded) =>
++        set((state) => {
++          if (Boolean(state.terminalFolded[threadKey]) === folded) return state;
++          const terminalFolded = { ...state.terminalFolded };
++          if (folded) terminalFolded[threadKey] = true;
++          else delete terminalFolded[threadKey];
++          return { terminalFolded };
++        }),
++      setReturnTo: (threadKey, point) =>
++        set((state) => {
++          const returnTo = { ...state.returnTo };
++          if (point) returnTo[threadKey] = point;
++          else delete returnTo[threadKey];
++          return { returnTo };
++        }),
++    }),
++    {
++      name: "t3code:plutonium-dock:v1",
++      version: 1,
++      storage: createJSONStorage(() =>
++        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
++      ),
++      // Where to go back to only holds while the page lives.
++      partialize: (state) => ({
++        slots: state.slots,
++        layouts: state.layouts,
++        terminalFolded: state.terminalFolded,
++      }),
++    },
++  ),
++);
++
++/** Whether `threadRef`'s terminal drawer has the chat column to itself. */
++export function useTerminalFolded(threadRef: ScopedThreadRef | null): boolean {
++  const key = threadRef ? scopedThreadKey(threadRef) : null;
++  return useDockStore((state) => (key ? state.terminalFolded[key] === true : false));
++}
++
++/** What ChatView lends the dock: the active thread and its panel and terminal. */
++export interface DockContext {
++  readonly threadRef: ScopedThreadRef;
++  readonly projectId: string | null;
++  readonly surfaces: readonly RightPanelSurface[];
++  readonly activeSurfaceId: string | null;
++  readonly panelOpen: boolean;
++  readonly maximized: boolean;
++  readonly terminalOpen: boolean;
++  /** Opens the terminal drawer (starting a terminal if there is none) and focuses it. */
++  readonly openTerminal: () => void;
++  readonly closeTerminal: () => void;
++  readonly focusTerminal: () => void;
++  readonly focusComposer: () => void;
++  readonly activate: (surface: RightPanelSurface) => void;
++  /** Opens a browser tab at `url` in the thread's panel. */
++  readonly openSite: (url: string) => Promise<void>;
++}
++
++/** The tag a slot's things carry in `context`'s thread, or null (a project slot with no project). */
++export function scopeTagOf(
++  scope: DockScope,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++): string | null {
++  if (scope === "global") return GLOBAL_TAG;
++  if (scope === "project") return context.projectId ? projectTag(context.projectId) : null;
++  return threadTag(context.threadRef.threadId);
++}
++
++/** The scope a window was put in: the last scope tag T3 added, else its origin's. */
++export function scopeOfWindow(entry: NativeWindowEntry): DockScope {
++  const tags = windowTags(entry);
++  for (let index = tags.length - 1; index >= 0; index -= 1) {
++    const tag = tags[index]!;
++    if (tag === GLOBAL_TAG) return "global";
++    if (tag.startsWith("t3:project/")) return "project";
++    if (tag.startsWith("t3:thread/")) return "thread";
++  }
++  return "thread";
++}
++
++const normalizeAppId = (id: string) => id.toLowerCase().replace(/\.desktop$/, "");
++
++/** Whether window app id `windowAppId` is desktop entry `desktopId`'s (org.gnome.Nautilus ~ nautilus). */
++export function sameApp(desktopId: string, windowAppId: string): boolean {
++  const a = normalizeAppId(desktopId);
++  const b = normalizeAppId(windowAppId);
++  return a === b || a.split(".").at(-1) === b.split(".").at(-1);
++}
++
++function windowMatches(target: Extract<DockTarget, { kind: "app" }>, entry: NativeWindowEntry) {
++  if (target.windowAppId) return entry.appId === target.windowAppId;
++  return target.desktopId !== null && sameApp(target.desktopId, entry.appId);
++}
++
++/** The slot's windows in `tag`, oldest first. */
++function slotWindows(
++  target: Extract<DockTarget, { kind: "app" }>,
++  tag: string,
++): NativeWindowEntry[] {
++  return Object.values(usePlutoniumWindowStore.getState().windows)
++    .filter((entry) => windowTags(entry).includes(tag) && windowMatches(target, entry))
++    .toSorted((a, b) => a.id - b.id);
++}
++
++/** What a site slot matches: its own prefix, else its URL's origin. */
++export function siteMatchOf(target: Extract<DockTarget, { kind: "site" }>): string {
++  if (target.match) return target.match;
++  try {
++    return new URL(target.url).origin;
++  } catch {
++    return target.url;
++  }
++}
++
++/** The thread's browser tabs (server tab ids) that belong to the site slot, oldest first. */
++function slotTabs(target: Extract<DockTarget, { kind: "site" }>, threadRef: ScopedThreadRef) {
++  const prefix = siteMatchOf(target);
++  return Object.values(readThreadPreviewState(threadRef).sessions)
++    .filter((session) => {
++      const status = session.navStatus as { url?: string };
++      return typeof status.url === "string" && status.url.startsWith(prefix);
++    })
++    .map((session) => session.tabId as string);
++}
++
++const appSurface = (entry: NativeWindowEntry): RightPanelSurface => ({
++  id: `app:${entry.id}`,
++  kind: "app",
++  windowId: entry.id,
++  appId: entry.appId,
++});
++
++const browserSurface = (tabId: string): RightPanelSurface => ({
++  id: `browser:${tabId}`,
++  kind: "preview",
++  resourceId: tabId,
++});
++
++function terminalHasKeyboard(): boolean {
++  return (
++    document.activeElement?.closest(
++      '[data-thread-terminal-drawer][data-terminal-owner="drawer"]',
++    ) != null
++  );
++}
++
++function surfaceHasKeyboard(surface: RightPanelSurface): boolean {
++  if (surface.kind === "app") {
++    return usePlutoniumWindowStore.getState().windows[surface.windowId]?.focused === true;
++  }
++  if (surface.kind === "preview" && surface.resourceId) {
++    const active = document.activeElement;
++    return active instanceof HTMLElement && active.dataset.previewServerTab === surface.resourceId;
++  }
++  return false;
++}
++
++/** Slot `slot`'s layout in `threadKey`: the thread's own choice, else the slot's. */
++function layoutOf(state: DockState, threadKey: string, slot: DockSlotNumber): DockLayout {
++  return state.layouts[threadKey]?.[slot] ?? state.slots[slot]?.layout ?? "split";
++}
++
++const otherLayout = (layout: DockLayout): DockLayout => (layout === "fold" ? "split" : "fold");
++
++/** Goes back to what showed before `point.slot`'s key was pressed. */
++function goBack(context: DockContext, point: ReturnPoint): void {
++  const key = scopedThreadKey(context.threadRef);
++  const dock = useDockStore.getState();
++  const panel = useRightPanelStore.getState();
++  dock.setReturnTo(key, null);
++  dock.setTerminalFolded(key, point.terminalFolded);
++  if (!point.terminalOpen && context.terminalOpen) context.closeTerminal();
++  panel.setMaximized(context.threadRef, point.maximized);
++  const before = point.activeSurfaceId
++    ? context.surfaces.find((surface) => surface.id === point.activeSurfaceId)
++    : undefined;
++  if (before) context.activate(before);
++  if (!point.panelOpen) panel.close(context.threadRef);
++  context.focusComposer();
++}
++
++/** Remembers what shows now, unless this slot already did (pressing it again cycles). */
++function rememberReturn(context: DockContext, slot: DockSlotNumber): void {
++  const key = scopedThreadKey(context.threadRef);
++  const dock = useDockStore.getState();
++  if (dock.returnTo[key]?.slot === slot) return;
++  dock.setReturnTo(key, {
++    slot,
++    panelOpen: context.panelOpen,
++    activeSurfaceId: context.activeSurfaceId,
++    maximized: context.maximized,
++    terminalOpen: context.terminalOpen,
++    terminalFolded: dock.terminalFolded[key] === true,
++  });
++}
++
++/** Shows `surface` in the panel, laid out as `layout`, with the keyboard. */
++function raiseSurface(context: DockContext, surface: RightPanelSurface, layout: DockLayout): void {
++  const panel = useRightPanelStore.getState();
++  if (context.surfaces.some((entry) => entry.id === surface.id)) {
++    context.activate(surface);
++  } else if (surface.kind === "app") {
++    panel.openApp(context.threadRef, { windowId: surface.windowId, appId: surface.appId });
++  } else if (surface.kind === "preview" && surface.resourceId) {
++    panel.openBrowser(context.threadRef, surface.resourceId);
++  }
++  panel.show(context.threadRef);
++  panel.setMaximized(context.threadRef, layout === "fold");
++  void focusRightPanelSurface(surface);
++}
++
++const WINDOW_WAIT_MS = 60_000;
++
++/** Starts the slot's app in `tag` and raises its first new window. */
++async function launchSlotApp(
++  context: DockContext,
++  slotNumber: DockSlotNumber,
++  target: Extract<DockTarget, { kind: "app" }>,
++  tag: string,
++  layout: DockLayout,
++): Promise<void> {
++  const shell = await plutoniumShell();
++  if (!shell) return;
++  if (!target.desktopId) {
++    toastManager.add({
++      type: "error",
++      title: `${target.name} isn't running`,
++      description:
++        "No installed app was found to start it. Start it yourself, then Super+Shift+" +
++        `${slotNumber} puts it in the slot again.`,
++    });
++    return;
++  }
++  const known = new Set(Object.keys(usePlutoniumWindowStore.getState().windows).map(Number));
++  let opened = false;
++  const open = () => {
++    const entry = Object.values(usePlutoniumWindowStore.getState().windows)
++      .filter((window) => window.threadId === tag && !known.has(window.id))
++      .toSorted((a, b) => a.id - b.id)[0];
++    if (!entry || opened) return;
++    opened = true;
++    stop();
++    // Its windows are found by their app id from now on.
++    const slot = useDockStore.getState().slots[slotNumber];
++    if (slot?.target.kind === "app" && !slot.target.windowAppId) {
++      useDockStore
++        .getState()
++        .setSlot(slotNumber, { ...slot, target: { ...slot.target, windowAppId: entry.appId } });
++    }
++    raiseSurface(context, appSurface(entry), layout);
++  };
++  const unsubscribe = usePlutoniumWindowStore.subscribe(open);
++  const timer = setTimeout(() => stop(), WINDOW_WAIT_MS);
++  function stop() {
++    unsubscribe();
++    clearTimeout(timer);
++  }
++  toastManager.add({ type: "info", title: `Starting ${target.name}…`, timeout: 2500 });
++  try {
++    await shell.launchApp(tag, target.desktopId);
++  } catch (error) {
++    stop();
++    toastManager.add({
++      type: "error",
++      title: `Could not start ${target.name}`,
++      description: error instanceof Error ? error.message : String(error),
++    });
++  }
++}
++
++/**
++ * Super+N: starts, shows, focuses or puts away slot `slotNumber`'s thing.
++ * `other` lays it out the other way this time (Super+Ctrl+N).
++ */
++export function runDockSlot(
++  context: DockContext,
++  slotNumber: DockSlotNumber,
++  options: { readonly other?: boolean } = {},
++): void {
++  const state = useDockStore.getState();
++  const slot = state.slots[slotNumber];
++  if (!slot) {
++    toastManager.add({
++      type: "info",
++      title: `Super+${slotNumber} is empty`,
++      description: `Super+Shift+${slotNumber} puts what has the keyboard there.`,
++      timeout: 3000,
++    });
++    return;
++  }
++  const key = scopedThreadKey(context.threadRef);
++  const own = layoutOf(state, key, slotNumber);
++  const layout = options.other ? otherLayout(own) : own;
++  const back = state.returnTo[key];
++  const target = slot.target;
++
++  if (target.kind === "terminal") {
++    if (context.terminalOpen && terminalHasKeyboard() && !options.other) {
++      if (back?.slot === slotNumber) goBack(context, back);
++      else context.focusComposer();
++      return;
++    }
++    rememberReturn(context, slotNumber);
++    state.setTerminalFolded(key, layout === "fold");
++    if (context.terminalOpen) context.focusTerminal();
++    else context.openTerminal();
++    return;
++  }
++
++  let candidates: RightPanelSurface[];
++  if (target.kind === "app") {
++    const tag = scopeTagOf(slot.scope, context);
++    if (!tag) {
++      toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++      return;
++    }
++    candidates = slotWindows(target, tag).map(appSurface);
++    if (candidates.length === 0) {
++      rememberReturn(context, slotNumber);
++      void launchSlotApp(context, slotNumber, target, tag, layout);
++      return;
++    }
++  } else {
++    // Sites live in the thread's own browser tabs, whatever the slot's scope.
++    candidates = slotTabs(target, context.threadRef).map(browserSurface);
++    if (candidates.length === 0) {
++      rememberReturn(context, slotNumber);
++      void context.openSite(target.url).then(() => {
++        useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
++      });
++      return;
++    }
++  }
++
++  const showing = context.panelOpen
++    ? candidates.findIndex((surface) => surface.id === context.activeSurfaceId)
++    : -1;
++  const current = showing >= 0 ? candidates[showing]! : undefined;
++  if (current && surfaceHasKeyboard(current) && !options.other) {
++    // Shown and focused: the next copy, or back to where you were.
++    if (candidates.length > 1) {
++      raiseSurface(context, candidates[(showing + 1) % candidates.length]!, layout);
++    } else if (back?.slot === slotNumber) {
++      goBack(context, back);
++    } else {
++      context.focusComposer();
++    }
++    return;
++  }
++  rememberReturn(context, slotNumber);
++  // Shown: give it the keyboard. Not shown: the newest copy.
++  raiseSurface(context, current ?? candidates.at(-1)!, layout);
++}
++
++/**
++ * Super+Up: the slot showing in this thread goes split ↔ fold, and the
++ * thread keeps that for it. With no slot showing, the panel's maximize.
++ */
++export function toggleDockLayout(context: DockContext): void {
++  const key = scopedThreadKey(context.threadRef);
++  const state = useDockStore.getState();
++  const slotNumber = state.returnTo[key]?.slot;
++  const slot = slotNumber ? state.slots[slotNumber] : undefined;
++  if (slotNumber && slot?.target.kind === "terminal" && context.terminalOpen) {
++    const folded = state.terminalFolded[key] === true;
++    state.setTerminalFolded(key, !folded);
++    state.setThreadLayout(key, slotNumber, folded ? "split" : "fold");
++    context.focusTerminal();
++    return;
++  }
++  const panel = useRightPanelStore.getState();
++  if (!context.panelOpen) return;
++  panel.setMaximized(context.threadRef, !context.maximized);
++  if (slotNumber && slot && slot.target.kind !== "terminal") {
++    state.setThreadLayout(key, slotNumber, context.maximized ? "split" : "fold");
++  }
++}
++
++/** What `surface` would be as a slot's target, and the scope it's in now. */
++async function targetOf(
++  surface: RightPanelSurface,
++  threadRef: ScopedThreadRef,
++): Promise<{ target: DockTarget; scope: DockScope } | null> {
++  if (surface.kind === "app") {
++    const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
++    if (!entry) return null;
++    const shell = await plutoniumShell();
++    const apps = shell ? await shell.apps().catch(() => []) : [];
++    const app = apps.find((candidate) => sameApp(candidate.id, entry.appId));
++    return {
++      target: {
++        kind: "app",
++        desktopId: app?.id ?? null,
++        windowAppId: entry.appId,
++        name: app?.name ?? (entry.title || entry.appId),
++      },
++      scope: scopeOfWindow(entry),
++    };
++  }
++  if (surface.kind === "preview" && surface.resourceId) {
++    const session = readThreadPreviewState(threadRef).sessions[surface.resourceId];
++    const status = session?.navStatus as { url?: string; title?: string } | undefined;
++    if (!status?.url) return null;
++    let name = status.title || status.url;
++    try {
++      name = status.title || new URL(status.url).host;
++    } catch {
++      // Keep the address.
++    }
++    return { target: { kind: "site", url: status.url, name }, scope: "thread" };
++  }
++  return null;
++}
++
++/** A short name for slot `slot`'s target. */
++export function dockSlotLabel(slot: DockSlot | undefined): string {
++  if (!slot) return "empty";
++  return slot.target.kind === "terminal" ? "Terminal" : slot.target.name;
++}
++
++const SCOPE_LABEL: Record<DockScope, string> = {
++  thread: "this thread",
++  project: "this project",
++  global: "everywhere",
++};
++
++/** Puts `surface` (null: the terminal drawer) in slot `slotNumber`. */
++export async function assignDockSlot(
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  slotNumber: DockSlotNumber,
++  surface: RightPanelSurface | null,
++): Promise<void> {
++  const state = useDockStore.getState();
++  const previous = state.slots[slotNumber];
++  let next: DockSlot;
++  if (surface === null) {
++    next = { target: { kind: "terminal" }, scope: "thread", layout: previous?.layout ?? "split" };
++  } else {
++    const found = await targetOf(surface, context.threadRef);
++    if (!found) {
++      toastManager.add({
++        type: "info",
++        title: "Only apps, browser tabs and the terminal go in the dock",
++        timeout: 3000,
++      });
++      return;
++    }
++    next = { target: found.target, scope: found.scope, layout: previous?.layout ?? "split" };
++  }
++  state.setSlot(slotNumber, next);
++  toastManager.add({
++    type: "success",
++    title: `Super+${slotNumber}: ${dockSlotLabel(next)}`,
++    description: `Kept ${SCOPE_LABEL[next.scope]}.`,
++    timeout: 3000,
++  });
++}
++
++/**
++ * Keeps slot `slotNumber` in `scope`. For an app, the windows showing in
++ * this thread get the scope's tag, so the slot finds them there.
++ */
++export async function setDockSlotScope(
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  slotNumber: DockSlotNumber,
++  scope: DockScope,
++): Promise<void> {
++  const state = useDockStore.getState();
++  const slot = state.slots[slotNumber];
++  if (!slot) return;
++  const tag = scopeTagOf(scope, context);
++  if (!tag) {
++    toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++    return;
++  }
++  state.setSlot(slotNumber, { ...slot, scope });
++  if (slot.target.kind !== "app") return;
++  const shell = await plutoniumShell();
++  const from = scopeTagOf(slot.scope, context);
++  if (!shell?.tagWindow || !from) return;
++  for (const entry of slotWindows(slot.target, from)) {
++    await shell.tagWindow(entry.id, [tag]).catch(() => undefined);
++  }
++}
++
++/** The slot `surface` is in, if any. */
++export function dockSlotOfSurface(
++  slots: Partial<Record<DockSlotNumber, DockSlot>>,
++  surface: RightPanelSurface,
++  threadRef: ScopedThreadRef,
++): DockSlotNumber | null {
++  for (const number of DOCK_SLOT_NUMBERS) {
++    const target = slots[number]?.target;
++    if (!target) continue;
++    if (target.kind === "app" && surface.kind === "app") {
++      const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
++      if (entry && windowMatches(target, entry)) return number;
++    }
++    if (target.kind === "site" && surface.kind === "preview" && surface.resourceId) {
++      if (slotTabs(target, threadRef).includes(surface.resourceId)) return number;
++    }
++  }
++  return null;
++}
+diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
+index 1b60255590..cf87383e09 100644
+--- a/apps/web/src/plutonium/panelKeys.ts
++++ b/apps/web/src/plutonium/panelKeys.ts
+@@ -1,11 +1,15 @@
+ // Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
+-// Ctrl+Shift+Tab, Ctrl+T for a new browser tab), and moving keyboard focus
+-// into a tab's content (an app's window, a browser tab's page).
++// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
++// dock.ts), and moving keyboard focus into a tab's content (an app's window,
++// a browser tab's page).
+ //
+ // In the Plutonium shell these shortcuts (and the app launcher's) are also
+ // registered with the browser as shell shortcuts, so they reach this page
+ // while an app or browser tab in the panel has the keyboard.
+ import {
++  DOCK_ASSIGN_KEYBINDING_COMMANDS,
++  DOCK_SLOT_KEYBINDING_COMMANDS,
++  DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
+   type KeybindingCommand,
+   type KeybindingShortcut,
+   RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
+@@ -21,9 +25,19 @@ import { resolveShortcutCommand } from "~/keybindings";
+ import { isMacPlatform } from "~/lib/utils";
+ import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+ 
++import {
++  assignDockSlot,
++  type DockContext,
++  type DockSlotNumber,
++  runDockSlot,
++  toggleDockLayout,
++} from "./dock";
+ import { plutoniumShell } from "./windowStore";
+ 
+ const TAB_JUMP: readonly KeybindingCommand[] = RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS;
++const DOCK_SLOT: readonly KeybindingCommand[] = DOCK_SLOT_KEYBINDING_COMMANDS;
++const DOCK_SLOT_OTHER: readonly KeybindingCommand[] = DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS;
++const DOCK_ASSIGN: readonly KeybindingCommand[] = DOCK_ASSIGN_KEYBINDING_COMMANDS;
+ 
+ /** Commands that must reach the page even while an app or tab has the keyboard. */
+ const SHELL_COMMANDS = new Set<KeybindingCommand>([
+@@ -32,6 +46,10 @@ const SHELL_COMMANDS = new Set<KeybindingCommand>([
+   "rightPanel.previousTab",
+   "preview.newTab",
+   "appLauncher.toggle",
++  ...DOCK_SLOT,
++  ...DOCK_SLOT_OTHER,
++  ...DOCK_ASSIGN,
++  "dock.toggleLayout",
+ ]);
+ 
+ const CODE_BY_KEY: Readonly<Record<string, string>> = {
+@@ -185,6 +203,8 @@ export function usePlutoniumPanelKeys(input: {
+   readonly activeSurfaceId: string | null;
+   readonly activate: (surface: RightPanelSurface) => void;
+   readonly newBrowserTab: () => void;
++  /** The thread's panel and terminal, for the dock; null without a thread. */
++  readonly dock: DockContext | null;
+ }): void {
+   const latest = useRef(input);
+   useEffect(() => {
+@@ -207,6 +227,30 @@ export function usePlutoniumPanelKeys(input: {
+         activate(surface);
+         void focusRightPanelSurface(surface);
+       };
++      const dock = latest.current.dock;
++      const slot = DOCK_SLOT.indexOf(command);
++      const slotOther = DOCK_SLOT_OTHER.indexOf(command);
++      const assign = DOCK_ASSIGN.indexOf(command);
++      if (slot >= 0 || slotOther >= 0 || assign >= 0 || command === "dock.toggleLayout") {
++        event.preventDefault();
++        event.stopPropagation();
++        if (!dock || event.repeat) return;
++        if (command === "dock.toggleLayout") toggleDockLayout(dock);
++        else if (assign >= 0) {
++          // What has the keyboard: the terminal drawer, else the panel's tab.
++          const terminal =
++            document.activeElement?.closest(
++              '[data-thread-terminal-drawer][data-terminal-owner="drawer"]',
++            ) != null;
++          const surface = dock.panelOpen
++            ? (surfaces.find((entry) => entry.id === activeSurfaceId) ?? null)
++            : null;
++          if (!terminal && !surface) return;
++          void assignDockSlot(dock, (assign + 1) as DockSlotNumber, terminal ? null : surface);
++        } else if (slot >= 0) runDockSlot(dock, (slot + 1) as DockSlotNumber);
++        else runDockSlot(dock, (slotOther + 1) as DockSlotNumber, { other: true });
++        return;
++      }
+       const jump = TAB_JUMP.indexOf(command);
+       if (jump >= 0) {
+         show(surfaces[jump]);
+diff --git a/apps/web/src/plutonium/threadTag.ts b/apps/web/src/plutonium/threadTag.ts
+index 696e12cf40..6c48e992dd 100644
+--- a/apps/web/src/plutonium/threadTag.ts
++++ b/apps/web/src/plutonium/threadTag.ts
+@@ -14,3 +14,11 @@ export function threadTag(threadId: string): string {
+ export function threadIdOfTag(tag: string | null | undefined): string | null {
+   return tag?.startsWith(THREAD_TAG_PREFIX) ? tag.slice(THREAD_TAG_PREFIX.length) : null;
+ }
++
++/** The tag of what a dock slot keeps per project: `projectId`'s windows. */
++export function projectTag(projectId: string): string {
++  return `t3:project/${projectId}`;
++}
++
++/** The tag of what a dock slot keeps everywhere. */
++export const GLOBAL_TAG = "t3:global";
+diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
+index aded6f94a9..c179cfeb8a 100644
+--- a/packages/contracts/src/keybindings.ts
++++ b/packages/contracts/src/keybindings.ts
+@@ -49,6 +49,43 @@ export const RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS = [
+ export type RightPanelTabJumpKeybindingCommand =
+   (typeof RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS)[number];
+ 
++/** Plutonium: the dock's slots, in their own layout (Super+1…9). */
++export const DOCK_SLOT_KEYBINDING_COMMANDS = [
++  "dock.slot.1",
++  "dock.slot.2",
++  "dock.slot.3",
++  "dock.slot.4",
++  "dock.slot.5",
++  "dock.slot.6",
++  "dock.slot.7",
++  "dock.slot.8",
++  "dock.slot.9",
++] as const;
++/** Plutonium: a dock slot in its other layout this time (Super+Ctrl+1…9). */
++export const DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS = [
++  "dock.slotOther.1",
++  "dock.slotOther.2",
++  "dock.slotOther.3",
++  "dock.slotOther.4",
++  "dock.slotOther.5",
++  "dock.slotOther.6",
++  "dock.slotOther.7",
++  "dock.slotOther.8",
++  "dock.slotOther.9",
++] as const;
++/** Plutonium: put what has the keyboard in a dock slot (Super+Shift+1…9). */
++export const DOCK_ASSIGN_KEYBINDING_COMMANDS = [
++  "dock.assign.1",
++  "dock.assign.2",
++  "dock.assign.3",
++  "dock.assign.4",
++  "dock.assign.5",
++  "dock.assign.6",
++  "dock.assign.7",
++  "dock.assign.8",
++  "dock.assign.9",
++] as const;
++
+ const THREAD_KEYBINDING_COMMANDS = [
+   "thread.stop",
+   "thread.steerQueuedMessage",
+@@ -89,6 +126,10 @@ export const STATIC_KEYBINDING_COMMANDS = [
+   "rightPanel.nextTab",
+   "rightPanel.previousTab",
+   ...RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
++  ...DOCK_SLOT_KEYBINDING_COMMANDS,
++  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  ...DOCK_ASSIGN_KEYBINDING_COMMANDS,
++  "dock.toggleLayout",
+   "pullRequest.copyNumber",
+   "diff.toggle",
+   "preview.toggle",
+diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
+index 52c90465d1..203695f499 100644
+--- a/packages/shared/src/keybindings.ts
++++ b/packages/shared/src/keybindings.ts
+@@ -6,6 +6,9 @@ import {
+   MAX_WHEN_EXPRESSION_DEPTH,
+   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
+   RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
++  DOCK_SLOT_KEYBINDING_COMMANDS,
++  DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  DOCK_ASSIGN_KEYBINDING_COMMANDS,
+   type ResolvedKeybindingRule,
+   type ResolvedKeybindingsConfig,
+   THREAD_JUMP_KEYBINDING_COMMANDS,
+@@ -139,6 +142,24 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "ctrl+shift+tab", command: "rightPanel.previousTab" },
+   { key: "mod+t", command: "preview.newTab" },
+   { key: "meta+space", command: "appLauncher.toggle" },
++  // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
++  // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
++  ...DOCK_SLOT_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+ctrl+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  ...DOCK_ASSIGN_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+shift+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  { key: "meta+arrowup", command: "dock.toggleLayout", when: "plutoniumShell" },
+   { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
+   { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
+   { key: "mod+n", command: "terminal.new", when: "terminalFocus" },

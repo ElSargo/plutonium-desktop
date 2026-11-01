@@ -1,0 +1,776 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 18:49:21 +1300
+Subject: [PATCH 34/48] Plutonium: dock sites kept per project or everywhere
+
+A site slot kept per project or everywhere has one browser tab, tagged with
+its scope's tag (t3:project/<id>, t3:global). Its key or button brings that
+tab into the thread it is pressed in, from the thread showing it (its preview
+there closes without closing the tab), or opens one. The slot editor and the
+tab menu set a site's scope as they do an app's; a tab put in the dock keeps
+the scope it has.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/ChatView.tsx       |  33 ++++
+ apps/web/src/components/RightPanelTabs.tsx |   6 +-
+ apps/web/src/plutonium/PlutoniumDock.tsx   |  23 ++-
+ apps/web/src/plutonium/dock.test.ts        |  51 +++++-
+ apps/web/src/plutonium/dock.ts             | 179 ++++++++++++++++++---
+ apps/web/src/plutonium/previewBridge.ts    |  81 +++++++++-
+ apps/web/src/plutonium/threadTag.ts        |   5 +
+ apps/web/src/plutonium/windowStore.ts      |   4 +-
+ 8 files changed, 345 insertions(+), 37 deletions(-)
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 37daf152ba..f7f9fbea21 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -266,6 +266,7 @@ import {
+   useRightPanelStore,
+ } from "../rightPanelStore";
+ import {
++  beginPreviewSessionClose,
+   isPreviewSupportedInRuntime,
+   setActivePreviewTab,
+   useThreadPreviewState,
+@@ -299,6 +300,7 @@ import { RightPanelTabs } from "./RightPanelTabs";
+ import { usePlutoniumPanelKeys } from "../plutonium/panelKeys";
+ import { type DockContext, publishDockContext, useTerminalFolded } from "../plutonium/dock";
+ import { importBrowserTab } from "../plutonium/importTab";
++import type { BrokerTab } from "../plutonium/previewBridge";
+ import {
+   PANEL_MAXIMIZE_REQUEST_EVENT,
+   PlutoniumAppSurface,
+@@ -6018,6 +6020,35 @@ export default function ChatView(props: ChatViewProps) {
+     useRightPanelStore.getState().show(threadRef);
+   };
+   const openDockSiteStable = useStableCallback(openDockSite);
++  // Plutonium: a dock slot's tab kept per project or everywhere, moving here.
++  const showDockTab = async (tab: BrokerTab): Promise<string | null> => {
++    if (!activeThreadRef || !canOperatePreview) return null;
++    const threadRef = activeThreadRef;
++    const result = await importBrowserTab({ threadRef, tab, openPreview });
++    if (!result || result._tag === "Failure") {
++      if (result && isAtomCommandInterrupted(result)) return null;
++      const error = result ? squashAtomCommandFailure(result) : "No Plutonium browser";
++      toastManager.add(
++        stackedThreadToast({
++          type: "error",
++          title: "Unable to open browser",
++          description: error instanceof Error ? error.message : String(error),
++        }),
++      );
++      return null;
++    }
++    useRightPanelStore.getState().show(threadRef);
++    return (result.value as { tabId: string }).tabId;
++  };
++  const showDockTabStable = useStableCallback(showDockTab);
++  const closeDockPreview = async (threadRef: ScopedThreadRef, tabId: string) => {
++    beginPreviewSessionClose(threadRef, tabId);
++    await closePreview({
++      environmentId: threadRef.environmentId,
++      input: { threadId: threadRef.threadId, tabId },
++    });
++  };
++  const closeDockPreviewStable = useStableCallback(closeDockPreview);
+   const dockContext: DockContext | null = activeThreadRef
+     ? {
+         threadRef: activeThreadRef,
+@@ -6033,6 +6064,8 @@ export default function ChatView(props: ChatViewProps) {
+         focusComposer: focusComposerStable,
+         activate: activateRightPanelSurfaceStable,
+         openSite: openDockSiteStable,
++        showTab: showDockTabStable,
++        closePreview: closeDockPreviewStable,
+       }
+     : null;
+   // The sidebar's dock runs slots in this thread and shows their state.
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index db466cc4a1..3ae8dad5bc 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -1112,7 +1112,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       // per project or everywhere.
+       const dock = props.dock;
+       const dockSlots = useDockStore.getState().slots;
+-      const inSlot = dock ? dockSlotOfSurface(dockSlots, surface, dock.threadRef) : null;
++      const inSlot = dock ? dockSlotOfSurface(dockSlots, surface, dock) : null;
+       if (dock && (surface.kind === "app" || (surface.kind === "preview" && surface.resourceId))) {
+         items.push({
+           id: "dock-assign-1",
+@@ -1123,7 +1123,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             checked: number === inSlot,
+           })),
+         });
+-        if (inSlot && surface.kind === "app") {
++        if (inSlot) {
+           const scope = dockSlots[inSlot]?.scope;
+           items.push({
+             id: "dock-scope-thread",
+@@ -1427,7 +1427,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+                               <span className="truncate">{title}</span>
+                               {(() => {
+                                 const slot = props.dock
+-                                  ? dockSlotOfSurface(dockSlots, surface, props.dock.threadRef)
++                                  ? dockSlotOfSurface(dockSlots, surface, props.dock)
+                                   : null;
+                                 return slot ? (
+                                   <span
+diff --git a/apps/web/src/plutonium/PlutoniumDock.tsx b/apps/web/src/plutonium/PlutoniumDock.tsx
+index a52c4c4c28..e45453be28 100644
+--- a/apps/web/src/plutonium/PlutoniumDock.tsx
++++ b/apps/web/src/plutonium/PlutoniumDock.tsx
+@@ -4,7 +4,7 @@
+ // what it is, where it's kept, how it's laid out (dock.ts).
+ import type { ScopedThreadRef } from "@t3tools/contracts";
+ import { AppWindowIcon, GlobeIcon, SquareTerminalIcon } from "lucide-react";
+-import { memo, useEffect, useId, useMemo, useState } from "react";
++import { memo, useEffect, useId, useMemo, useState, useSyncExternalStore } from "react";
+ 
+ import { useFaviconForThreadUrl } from "~/browserFaviconStore";
+ import { FaviconImage } from "~/components/preview/PreviewFaviconIcon";
+@@ -38,6 +38,7 @@ import {
+   useActiveDockStore,
+   useDockStore,
+ } from "./dock";
++import { type BrokerTab, plutoniumPreview } from "./previewBridge";
+ import {
+   type DesktopApp,
+   isPlutoniumShell,
+@@ -366,7 +367,11 @@ function Section(props: { title: string; children: React.ReactNode; hint?: strin
+ 
+ function scopeHintOf(kind: Kind | null, scope: DockScope): string {
+   if (kind === "terminal") return "The terminal is always the thread's own.";
+-  if (kind === "site") return "Sites open in the thread's own browser tabs for now.";
++  if (kind === "site") {
++    if (scope === "global") return "One tab, which moves to whichever thread you press it in.";
++    if (scope === "project") return "One tab per project, which moves between its threads.";
++    return "Each thread opens its own tab.";
++  }
+   if (scope === "global") return "One copy, shown in whichever thread you press it in.";
+   if (scope === "project") return "One copy per project, shared by its threads.";
+   return "Each thread starts its own.";
+@@ -387,7 +392,7 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+   const save = (target: DockTarget, next: Partial<Pick<DockSlot, "scope" | "layout">> = {}) =>
+     useDockStore.getState().setSlot(number, {
+       target,
+-      scope: target.kind === "app" ? (next.scope ?? scope) : "thread",
++      scope: target.kind === "terminal" ? "thread" : (next.scope ?? scope),
+       layout: next.layout ?? layout,
+     });
+ 
+@@ -486,8 +491,8 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+         <ToggleGroup
+           aria-label="Kept"
+           className="w-full *:flex-1"
+-          disabled={slot?.target.kind !== "app"}
+-          value={[slot?.target.kind === "app" ? scope : "thread"]}
++          disabled={!slot || slot.target.kind === "terminal"}
++          value={[slot && slot.target.kind !== "terminal" ? scope : "thread"]}
+           onValueChange={(next) => {
+             const value = next[0] as DockScope | undefined;
+             if (!value || !slot || value === scope) return;
+@@ -641,8 +646,14 @@ export const PlutoniumDock = memo(function PlutoniumDock() {
+   return <Dock />;
+ });
+ 
++const NO_TABS: readonly BrokerTab[] = [];
++const subscribeTabs = (listener: () => void) => plutoniumPreview()?.onTabs(listener) ?? (() => {});
++const readTabs = () => plutoniumPreview()?.tabList() ?? NO_TABS;
++
+ function Dock() {
+   const slots = useDockStore((state) => state.slots);
++  // The browser's tabs, for sites kept per project or everywhere.
++  const brokerTabs = useSyncExternalStore(subscribeTabs, readTabs);
+   const active = useActiveDockStore((state) => state.active);
+   const windows = usePlutoniumWindowStore((state) => state.windows);
+   const preview = useThreadPreviewState(active?.threadRef ?? null);
+@@ -684,7 +695,7 @@ function Dock() {
+             key={number}
+             number={number}
+             slot={slots[number]}
+-            state={dockSlotState(slots[number], active, windows, tabUrls)}
++            state={dockSlotState(slots[number], active, windows, tabUrls, brokerTabs)}
+             active={active}
+             liveIcon={liveIcons[number] ?? null}
+             onEdit={(slot, anchor) => setEditing({ number: slot, anchor })}
+diff --git a/apps/web/src/plutonium/dock.test.ts b/apps/web/src/plutonium/dock.test.ts
+index 19a82ee555..06b02c3c17 100644
+--- a/apps/web/src/plutonium/dock.test.ts
++++ b/apps/web/src/plutonium/dock.test.ts
+@@ -2,7 +2,16 @@ import { describe, expect, it, vi } from "vite-plus/test";
+ 
+ vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
+ 
+-import { sameApp, scopeOfWindow, siteMatchOf } from "./dock";
++import {
++  type ActiveDock,
++  dockSlotState,
++  sameApp,
++  scopeOfTags,
++  scopeOfWindow,
++  siteMatchOf,
++} from "./dock";
++import type { BrokerTab } from "./previewBridge";
++import { isDockScopeTag } from "./threadTag";
+ import type { NativeWindowEntry } from "./windowStore";
+ 
+ const window = (tags: string[]): NativeWindowEntry => ({
+@@ -47,4 +56,44 @@ describe("the dock", () => {
+       }),
+     ).toBe("https://github.com/a/b");
+   });
++
++  it("keeps a tab in the last dock scope tag it has", () => {
++    expect(scopeOfTags(["t3:thread/a"])).toBe("thread");
++    expect(scopeOfTags(["t3:thread/a", "t3:global"])).toBe("global");
++    expect(scopeOfTags(["t3:global", "t3:thread/b", "t3:project/p"])).toBe("project");
++    expect(isDockScopeTag("t3:global")).toBe(true);
++    expect(isDockScopeTag("t3:project/p")).toBe(true);
++    expect(isDockScopeTag("t3:thread/a")).toBe(false);
++  });
++
++  it("finds a site kept everywhere or per project by its scope's tab, in any thread", () => {
++    const active = {
++      threadKey: "e:a",
++      threadRef: { environmentId: "e", threadId: "a" },
++      projectId: "p",
++      activeSurfaceId: null,
++      panelOpen: false,
++      terminalOpen: false,
++    } as unknown as ActiveDock;
++    const tab = (url: string, tags: string[]) => ({ id: 1, url, tags }) as unknown as BrokerTab;
++    const site = { kind: "site", url: "https://github.com/a/b", name: "b" } as const;
++    const global = { target: site, scope: "global", layout: "split" } as const;
++    const project = { target: site, scope: "project", layout: "split" } as const;
++    expect(dockSlotState(global, active, {}, {}, [])).toBe("idle");
++    // Another thread's tab of the site isn't the slot's.
++    expect(
++      dockSlotState(global, active, {}, {}, [tab("https://github.com/x", ["t3:thread/b"])]),
++    ).toBe("idle");
++    expect(
++      dockSlotState(global, active, {}, {}, [
++        tab("https://github.com/x", ["t3:global", "t3:thread/b"]),
++      ]),
++    ).toBe("running");
++    expect(
++      dockSlotState(project, active, {}, {}, [tab("https://github.com/x", ["t3:project/q"])]),
++    ).toBe("idle");
++    expect(
++      dockSlotState(project, active, {}, {}, [tab("https://github.com/x", ["t3:project/p"])]),
++    ).toBe("running");
++  });
+ });
+diff --git a/apps/web/src/plutonium/dock.ts b/apps/web/src/plutonium/dock.ts
+index a9dd9173be..f536ebabc6 100644
+--- a/apps/web/src/plutonium/dock.ts
++++ b/apps/web/src/plutonium/dock.ts
+@@ -6,18 +6,22 @@
+ //
+ // A scope is a Plutonium tag: an app started for a slot runs with its scope's
+ // tag as PLUTONIUM_THREAD_ID, so its windows carry it, and a window put in a
+-// slot from the panel gets the slot scope's tag added.
+-import type { ScopedThreadRef } from "@t3tools/contracts";
++// slot from the panel gets the slot scope's tag added. A site kept per project
++// or everywhere has one tab with its scope's tag, which moves to the thread
++// whose key asks for it (previewBridge.ts).
++import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+ import { create } from "zustand";
+ import { createJSONStorage, persist } from "zustand/middleware";
+ 
++import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { toastManager } from "~/components/ui/toast";
+ import { resolveStorage } from "~/lib/storage";
+ import { readThreadPreviewState } from "~/previewStateStore";
+ import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+ 
+ import { focusRightPanelSurface } from "./panelKeys";
++import { type BrokerTab, plutoniumPreview, tabTags } from "./previewBridge";
+ import { GLOBAL_TAG, projectTag } from "./threadTag";
+ import {
+   type NativeWindowEntry,
+@@ -174,6 +178,10 @@ export interface DockContext {
+   readonly activate: (surface: RightPanelSurface) => void;
+   /** Opens a browser tab at `url` in the thread's panel. */
+   readonly openSite: (url: string) => Promise<void>;
++  /** Shows browser tab `tab` as a new tab of the thread's panel; its server tab id, or null. */
++  readonly showTab: (tab: BrokerTab) => Promise<string | null>;
++  /** Closes another thread's preview tab `tabId` (its browser tab has moved here). */
++  readonly closePreview: (threadRef: ScopedThreadRef, tabId: string) => Promise<void>;
+ }
+ 
+ /** The tag a slot's things carry in `context`'s thread, or null (a project slot with no project). */
+@@ -188,7 +196,11 @@ export function scopeTagOf(
+ 
+ /** The scope a window was put in: the last scope tag T3 added, else its origin's. */
+ export function scopeOfWindow(entry: NativeWindowEntry): DockScope {
+-  const tags = windowTags(entry);
++  return scopeOfTags(windowTags(entry));
++}
++
++/** The scope of what carries `tags`: the last scope tag among them. */
++export function scopeOfTags(tags: readonly string[]): DockScope {
+   for (let index = tags.length - 1; index >= 0; index -= 1) {
+     const tag = tags[index]!;
+     if (tag === GLOBAL_TAG) return "global";
+@@ -232,17 +244,49 @@ export function siteMatchOf(target: Extract<DockTarget, { kind: "site" }>): stri
+   }
+ }
+ 
+-/** The thread's browser tabs (server tab ids) that belong to the site slot, oldest first. */
+-function slotTabs(target: Extract<DockTarget, { kind: "site" }>, threadRef: ScopedThreadRef) {
++/**
++ * The thread's browser tabs (server tab ids) that belong to the site slot,
++ * oldest first. With `tag` (a slot kept per project or everywhere), only the
++ * ones that carry it: the scope's own tab, when it is in this thread.
++ */
++function slotTabs(
++  target: Extract<DockTarget, { kind: "site" }>,
++  threadRef: ScopedThreadRef,
++  tag: string | null = null,
++): string[] {
+   const prefix = siteMatchOf(target);
+-  return Object.values(readThreadPreviewState(threadRef).sessions)
++  const state = readThreadPreviewState(threadRef);
++  const preview = tag ? plutoniumPreview() : null;
++  if (tag && !preview) return [];
++  return Object.values(state.sessions)
+     .filter((session) => {
+       const status = session.navStatus as { url?: string };
+-      return typeof status.url === "string" && status.url.startsWith(prefix);
++      if (typeof status.url !== "string" || !status.url.startsWith(prefix)) return false;
++      if (!tag || !preview) return true;
++      const tab = preview.tab(previewRuntimeTabId(threadRef, state.serverEpoch, session.tabId));
++      return tab !== null && tabTags(tab).includes(tag);
+     })
+     .map((session) => session.tabId as string);
+ }
+ 
++/** The browser tabs anywhere that are a site slot's in scope `tag`, oldest first. */
++function scopeSiteTabs(
++  target: Extract<DockTarget, { kind: "site" }>,
++  tag: string,
++  tabs: readonly BrokerTab[],
++): BrokerTab[] {
++  const prefix = siteMatchOf(target);
++  return tabs.filter((tab) => tabTags(tab).includes(tag) && tab.url.startsWith(prefix));
++}
++
++/** The tag a site slot's tab carries: null when kept per thread (any of the thread's tabs). */
++function siteTagOf(
++  slot: DockSlot,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++): string | null {
++  return slot.scope === "thread" ? null : scopeTagOf(slot.scope, context);
++}
++
+ const appSurface = (entry: NativeWindowEntry): RightPanelSurface => ({
+   id: `app:${entry.id}`,
+   kind: "app",
+@@ -330,6 +374,53 @@ function raiseSurface(context: DockContext, surface: RightPanelSurface, layout:
+   void focusRightPanelSurface(surface);
+ }
+ 
++/**
++ * Brings a site slot's tab in scope `tag` to this thread: from the thread
++ * showing it, if one does, else a new one.
++ */
++async function bringSiteTab(
++  context: DockContext,
++  target: Extract<DockTarget, { kind: "site" }>,
++  tag: string,
++  layout: DockLayout,
++): Promise<void> {
++  const preview = plutoniumPreview();
++  if (!preview) {
++    await context.openSite(target.url);
++    return;
++  }
++  let tab = scopeSiteTabs(target, tag, preview.tabList()).at(-1);
++  try {
++    if (!tab) {
++      tab = await preview.createDockTab(target.url, tag);
++    } else {
++      const from = preview.previewOf(tab.id);
++      if (from) {
++        const fromRef = {
++          environmentId: from.environmentId as EnvironmentId,
++          threadId: from.threadId as ThreadId,
++        };
++        if (scopedThreadKey(fromRef) === scopedThreadKey(context.threadRef)) {
++          raiseSurface(context, browserSurface(from.tabId), layout);
++          return;
++        }
++        preview.releaseTab(from.runtimeTabId);
++        useRightPanelStore.getState().closeSurface(fromRef, `browser:${from.tabId}`);
++        await context.closePreview(fromRef, from.tabId);
++      }
++    }
++  } catch (error) {
++    toastManager.add({
++      type: "error",
++      title: `Could not open ${target.name}`,
++      description: error instanceof Error ? error.message : String(error),
++    });
++    return;
++  }
++  const tabId = await context.showTab(tab);
++  if (tabId) raiseSurface(context, browserSurface(tabId), layout);
++}
++
+ const WINDOW_WAIT_MS = 60_000;
+ 
+ /** Starts the slot's app in `tag` and raises its first new window. */
+@@ -451,13 +542,23 @@ export function runDockSlot(
+       return;
+     }
+   } else {
+-    // Sites live in the thread's own browser tabs, whatever the slot's scope.
+-    candidates = slotTabs(target, context.threadRef).map(browserSurface);
++    // Per thread: any of the thread's tabs on the site. Per project or
++    // everywhere: the scope's one tab, brought here from where it is.
++    const tag = siteTagOf(slot, context);
++    if (slot.scope !== "thread" && !tag) {
++      toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++      return;
++    }
++    candidates = slotTabs(target, context.threadRef, tag).map(browserSurface);
+     if (candidates.length === 0) {
+       rememberReturn(context, slotNumber);
+-      void context.openSite(target.url).then(() => {
+-        useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
+-      });
++      if (tag) {
++        void bringSiteTab(context, target, tag, layout);
++      } else {
++        void context.openSite(target.url).then(() => {
++          useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
++        });
++      }
+       return;
+     }
+   }
+@@ -544,6 +645,11 @@ async function targetOf(
+     const favicon =
+       readThreadPreviewState(threadRef).desktopByTabId[session?.tabId ?? surface.resourceId]
+         ?.favicon;
++    // A dock slot's tab from elsewhere stays in its scope.
++    const state = readThreadPreviewState(threadRef);
++    const tab = plutoniumPreview()?.tab(
++      previewRuntimeTabId(threadRef, state.serverEpoch, surface.resourceId),
++    );
+     return {
+       target: {
+         kind: "site",
+@@ -551,7 +657,7 @@ async function targetOf(
+         name,
+         ...(favicon?.dataUrl ? { icon: favicon.dataUrl } : {}),
+       },
+-      scope: "thread",
++      scope: tab ? scopeOfTags(tabTags(tab)) : "thread",
+     };
+   }
+   return null;
+@@ -603,7 +709,8 @@ export async function assignDockSlot(
+ 
+ /**
+  * Keeps slot `slotNumber` in `scope`. For an app, the windows showing in
+- * this thread get the scope's tag, so the slot finds them there.
++ * this thread get the scope's tag, so the slot finds them there; for a site,
++ * the thread's tabs of it get it instead of the old scope's.
+  */
+ export async function setDockSlotScope(
+   context: Pick<DockContext, "threadRef" | "projectId">,
+@@ -619,6 +726,21 @@ export async function setDockSlotScope(
+     return;
+   }
+   state.setSlot(slotNumber, { ...slot, scope });
++  if (slot.target.kind === "site") {
++    const preview = plutoniumPreview();
++    if (!preview?.broker.updateTabTags) return;
++    const from = siteTagOf(slot, context);
++    const to = scope === "thread" ? null : tag;
++    const { serverEpoch } = readThreadPreviewState(context.threadRef);
++    for (const tabId of slotTabs(slot.target, context.threadRef, from)) {
++      const tab = preview.tab(previewRuntimeTabId(context.threadRef, serverEpoch, tabId));
++      if (!tab) continue;
++      await preview.broker
++        .updateTabTags(tab.id, to ? [to] : [], from ? [from] : [])
++        .catch(() => undefined);
++    }
++    return;
++  }
+   if (slot.target.kind !== "app") return;
+   const shell = await plutoniumShell();
+   const from = scopeTagOf(slot.scope, context);
+@@ -632,17 +754,24 @@ export async function setDockSlotScope(
+ export function dockSlotOfSurface(
+   slots: Partial<Record<DockSlotNumber, DockSlot>>,
+   surface: RightPanelSurface,
+-  threadRef: ScopedThreadRef,
++  context: Pick<DockContext, "threadRef" | "projectId">,
+ ): DockSlotNumber | null {
+-  for (const number of DOCK_SLOT_NUMBERS) {
+-    const target = slots[number]?.target;
+-    if (!target) continue;
++  // A tab with a scope's tag is that scope's slot's, before any thread's slot of its site.
++  const order = DOCK_SLOT_NUMBERS.toSorted(
++    (a, b) => Number(slots[a]?.scope === "thread") - Number(slots[b]?.scope === "thread"),
++  );
++  for (const number of order) {
++    const slot = slots[number];
++    const target = slot?.target;
++    if (!slot || !target) continue;
+     if (target.kind === "app" && surface.kind === "app") {
+       const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
+       if (entry && windowMatches(target, entry)) return number;
+     }
+     if (target.kind === "site" && surface.kind === "preview" && surface.resourceId) {
+-      if (slotTabs(target, threadRef).includes(surface.resourceId)) return number;
++      const tag = siteTagOf(slot, context);
++      if (slot.scope !== "thread" && !tag) continue;
++      if (slotTabs(target, context.threadRef, tag).includes(surface.resourceId)) return number;
+     }
+   }
+   return null;
+@@ -703,13 +832,15 @@ export type DockSlotState = "empty" | "idle" | "running" | "showing";
+ 
+ /**
+  * Slot `slot`'s state in the active thread: nothing set, set but nothing of it
+- * in its scope, running, or showing now.
++ * in its scope, running, or showing now. `brokerTabs` are the browser's tabs,
++ * for sites kept per project or everywhere.
+  */
+ export function dockSlotState(
+   slot: DockSlot | undefined,
+   active: ActiveDock | null,
+   windows: Readonly<Record<number, NativeWindowEntry>>,
+   tabUrls: Readonly<Record<string, string>>,
++  brokerTabs: readonly BrokerTab[] = [],
+ ): DockSlotState {
+   if (!slot) return "empty";
+   if (!active) return "idle";
+@@ -722,6 +853,14 @@ export function dockSlotState(
+     ids = Object.values(windows)
+       .filter((entry) => windowTags(entry).includes(tag) && windowMatches(target, entry))
+       .map((entry) => `app:${entry.id}`);
++  } else if (slot.scope !== "thread") {
++    // Running wherever the scope's tab is; showing if it is here.
++    const tag = scopeTagOf(slot.scope, active);
++    if (!tag || scopeSiteTabs(target, tag, brokerTabs).length === 0) return "idle";
++    ids = slotTabs(target, active.threadRef, tag).map((tabId) => `browser:${tabId}`);
++    return active.panelOpen && active.activeSurfaceId && ids.includes(active.activeSurfaceId)
++      ? "showing"
++      : "running";
+   } else {
+     const prefix = siteMatchOf(target);
+     ids = Object.entries(tabUrls)
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+index f3b7fac162..e1363c3f2d 100644
+--- a/apps/web/src/plutonium/previewBridge.ts
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -20,6 +20,10 @@
+ // in the Electron build. That tab is the page's own new one, so a sign-in
+ // popup keeps `window.opener` to report back through, and closes its preview
+ // tab when it closes itself.
++//
++// A dock slot kept per project or everywhere has a tab of its own, tagged
++// with the scope's tag (t3:project/<id>, t3:global). It moves to the thread
++// whose dock key or button asks for it (releaseTab, then an import there).
+ import type {
+   DesktopPreviewBridge,
+   DesktopPreviewNavStatus,
+@@ -29,7 +33,7 @@ import type {
+   DesktopPreviewTabState,
+ } from "@t3tools/contracts";
+ 
+-import { threadIdOfTag, threadTag } from "./threadTag";
++import { isDockScopeTag, threadIdOfTag, threadTag } from "./threadTag";
+ import { plutoniumShell } from "./windowStore";
+ 
+ /** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
+@@ -160,12 +164,15 @@ class PlutoniumPreview {
+   private readonly serverTabs = new Map<string, ServerTab>();
+   /** Tabs to open in throwaway storage of their own (the incognito profile). */
+   private readonly incognito = new Set<string>();
++  /** Preview tabs showing a tab brought from elsewhere (imported, or a dock slot's). */
++  private readonly brought = new Set<string>();
+   /**
+    * Imported tabs waiting for their preview tab, by thread tag: the broker
+    * tab, and the server's preview tab id once known (any new one otherwise).
+    */
+   private readonly imports = new Map<string, { tabId: number; serverTabId: string | null }>();
+   private elsewhereTabs: readonly BrokerTab[] = [];
++  private allTabs: readonly BrokerTab[] = [];
+ 
+   constructor(broker: TabBroker) {
+     this.broker = broker;
+@@ -296,13 +303,16 @@ class PlutoniumPreview {
+           !this.pendingPopups.has(tab.id) &&
+           !isBlank(tab.url) &&
+           // Imported tabs whose preview is gone (e.g. after a reload) too.
+-          !isThreadTag(tabTags(tab)[0] ?? ""),
++          !isThreadTag(tabTags(tab)[0] ?? "") &&
++          // A dock slot's, on its way to another thread.
++          !tabTags(tab).some(isDockScopeTag),
+       )
+       .toSorted((a, b) => a.id - b.id);
+     // Unchanged, the list keeps its identity (useSyncExternalStore).
+     if (JSON.stringify(elsewhere) !== JSON.stringify(this.elsewhereTabs)) {
+       this.elsewhereTabs = elsewhere;
+     }
++    this.allTabs = [...this.tabs.values()].toSorted((a, b) => a.id - b.id);
+     for (const listener of this.tabListeners) listener();
+   }
+ 
+@@ -317,6 +327,55 @@ class PlutoniumPreview {
+     return this.runtimeIds.get(tabId) ?? null;
+   }
+ 
++  /** Every tab the browser has, oldest first (a new list when one changes). */
++  tabList(): readonly BrokerTab[] {
++    return this.allTabs;
++  }
++
++  /** The thread and server tab id of the preview tab showing broker tab `tabId`, if one does. */
++  previewOf(tabId: number): {
++    readonly runtimeTabId: string;
++    readonly environmentId: string;
++    readonly threadId: string;
++    readonly tabId: string;
++  } | null {
++    const runtimeTabId = this.runtimeIds.get(tabId);
++    if (runtimeTabId === undefined) return null;
++    const environmentId = runtimePart(runtimeTabId, 0);
++    const threadId = runtimePart(runtimeTabId, 1);
++    const serverTabId = runtimePart(runtimeTabId, 3);
++    return environmentId && threadId && serverTabId
++      ? { runtimeTabId, environmentId, threadId, tabId: serverTabId }
++      : null;
++  }
++
++  /** A new tab at `url` for a dock slot, tagged with its scope's `tag` (shown by none yet). */
++  createDockTab(url: string, tag: string): Promise<BrokerTab> {
++    return this.broker.createTab(url, tag);
++  }
++
++  /**
++   * Lets go of the tab behind `runtimeTabId` without closing it, for a dock
++   * slot's tab moving to another thread: it loses this thread's tag. Its
++   * preview tab is closed after this, and closes nothing then.
++   */
++  releaseTab(runtimeTabId: string): void {
++    const id = this.ids.get(runtimeTabId);
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    this.serverTabs.delete(runtimeTabId);
++    this.incognito.delete(runtimeTabId);
++    this.brought.delete(runtimeTabId);
++    if (serverTab) void plutoniumShell().then((shell) => shell?.releaseServerTab(serverTab));
++    if (id === undefined) return;
++    this.ids.delete(runtimeTabId);
++    this.runtimeIds.delete(id);
++    this.storeIds();
++    const tag = threadOf(runtimeTabId);
++    // A tab opened in the thread keeps its tag (the first is its origin).
++    if (tag) void this.broker.updateTabTags?.(id, [], [tag]).catch(() => {});
++    this.notifyTabs();
++  }
++
+   /** Tabs from elsewhere (another shell's, or nobody's) no preview shows, oldest first. */
+   elsewhere(): readonly BrokerTab[] {
+     return this.elsewhereTabs;
+@@ -382,7 +441,9 @@ class PlutoniumPreview {
+     const id = this.ids.get(runtimeTabId);
+     if (!serverTab || id === undefined) return;
+     const shell = await plutoniumShell();
+-    const shown = await shell?.showServerTab(id, serverTab).catch((error: unknown) => {
++    // A tab brought here is the one, not a tab the helper opened for the server.
++    const replace = this.brought.has(runtimeTabId);
++    const shown = await shell?.showServerTab(id, serverTab, { replace }).catch((error: unknown) => {
+       console.warn(`Plutonium: the server can't drive tab ${id}`, error);
+       return id;
+     });
+@@ -418,6 +479,7 @@ class PlutoniumPreview {
+     );
+     if (renamed) {
+       const [other, id] = renamed;
++      if (this.brought.delete(other)) this.brought.add(runtimeTabId);
+       this.ids.delete(other);
+       this.ids.set(runtimeTabId, id);
+       this.runtimeIds.set(id, runtimeTabId);
+@@ -441,6 +503,7 @@ class PlutoniumPreview {
+               (tab.incognito === true) === incognito,
+           );
+     if (this.ids.has(runtimeTabId)) return;
++    if (adopted && adopted.id !== loadStoredIds()[runtimeTabId]) this.brought.add(runtimeTabId);
+     const entry = adopted ?? (await this.broker.createTab("about:blank", tag, incognito));
+     // A browser without incognito tabs ignores the request: never show the
+     // shared profile's storage as incognito.
+@@ -458,6 +521,7 @@ class PlutoniumPreview {
+     const serverTab = this.serverTabs.get(runtimeTabId);
+     this.serverTabs.delete(runtimeTabId);
+     this.incognito.delete(runtimeTabId);
++    this.brought.delete(runtimeTabId);
+     if (serverTab) void plutoniumShell().then((shell) => shell?.releaseServerTab(serverTab));
+     const id = this.ids.get(runtimeTabId);
+     if (id === undefined) return;
+@@ -466,7 +530,9 @@ class PlutoniumPreview {
+     this.storeIds();
+     const tag = threadOf(runtimeTabId);
+     const tab = this.tabs.get(id);
+-    if (tab && tag && tabTags(tab)[0] !== tag && this.broker.updateTabTags) {
++    // A dock slot's tab may have moved here from the thread it was opened in.
++    const kept = tab && (tabTags(tab)[0] !== tag || tabTags(tab).some(isDockScopeTag));
++    if (tab && tag && kept && this.broker.updateTabTags) {
+       // Imported: it goes back where it came from, unless the same preview
+       // is opened again under a new runtime id (once the server's epoch is
+       // known, the preview's tab is closed and created again).
+@@ -475,8 +541,11 @@ class PlutoniumPreview {
+       window.setTimeout(() => {
+         if (this.imports.get(tag)?.tabId !== id) return;
+         this.imports.delete(tag);
+-        if (!this.runtimeIds.has(id))
+-          void this.broker.updateTabTags?.(id, [], [tag]).catch(() => {});
++        if (this.runtimeIds.has(id)) return;
++        const current = this.tabs.get(id);
++        // A dock slot's tab nobody shows any more is closed, as a thread's is.
++        if (current && tabTags(current).some(isDockScopeTag)) this.broker.tabCommand(id, "close");
++        else void this.broker.updateTabTags?.(id, [], [tag]).catch(() => {});
+       }, REIMPORT_MS);
+     } else {
+       this.broker.tabCommand(id, "close");
+diff --git a/apps/web/src/plutonium/threadTag.ts b/apps/web/src/plutonium/threadTag.ts
+index 6c48e992dd..095df91153 100644
+--- a/apps/web/src/plutonium/threadTag.ts
++++ b/apps/web/src/plutonium/threadTag.ts
+@@ -22,3 +22,8 @@ export function projectTag(projectId: string): string {
+ 
+ /** The tag of what a dock slot keeps everywhere. */
+ export const GLOBAL_TAG = "t3:global";
++
++/** Whether `tag` is a dock scope's (a project's or everywhere), not a thread's. */
++export function isDockScopeTag(tag: string): boolean {
++  return tag === GLOBAL_TAG || tag.startsWith("t3:project/");
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 915dbde223..320f4a3796 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -113,11 +113,13 @@ interface PlutoniumShell extends EventTarget {
+   /**
+    * Lets the server drive browser tab `browserTabId`, shown here as its tab
+    * `serverTab`; resolves to the browser tab to show (another shell page's, if
+-   * it shows the server's tab already).
++   * it shows the server's tab already). With `replace` (a tab brought from
++   * elsewhere), it wins over one the helper opened for the server itself.
+    */
+   showServerTab(
+     browserTabId: number,
+     serverTab: { readonly threadId: string; readonly tabId: string },
++    options?: { readonly replace?: boolean },
+   ): Promise<number>;
+   releaseServerTab(serverTab: { readonly threadId: string; readonly tabId: string }): Promise<void>;
+   /** Windows agents work in (older libraries: missing). */

@@ -71,7 +71,7 @@ A first build takes about two hours on 32 threads, and incremental builds take s
 - the binaries, stripped: 607 MB in all;
 - Chromium's license notices (`LICENSES.chromium.html`).
 
-Google's "official" build (`is_official_build`, with LTO and PGO profiles) isn't used. It's much heavier to build and needs `checkout_pgo_profiles` in `.gclient`.
+**Official build** (`args.official.gn`, `plutonium chromium build --official`, into `out/Official`): the release build optimized the way Google ships Chrome, for a published tarball (`plutonium bundle build --chrome-out ~/chromium/src/out/Official`). It turns on `is_official_build` and ThinLTO (which gn leaves off for a non-device ChromeOS build) and uses ChromeOS's AFDO sample profile for big x86 cores. Chrome's Linux PGO profile is for a different binary, and CFI is off, since a bad cast in a patch would take the session down.
 
 ## Changing Chromium
 

@@ -38,8 +38,10 @@ export interface ServerSpec {
   readonly restart?: "always" | "on-failure" | "never";
   /** Restart it when its folder changes (an edit). */
   readonly restartOnEdit?: boolean;
-  /** Prints the URL to open instead of the url (T3 Code: a one-time pairing token). */
+  /** Prints the URL to open instead of the url (Hydra: a one-time pairing token). */
   readonly entryCommand?: readonly string[];
+  /** Exits 0 if the server can run here; else prints what's missing. */
+  readonly check?: readonly string[];
 }
 
 export interface ShellManifest {
@@ -56,6 +58,14 @@ export interface ShellManifest {
   readonly native?: string;
   /** The desktop services it uses (services.ts): "audio", "network", … */
   readonly uses?: readonly string[];
+  /** Its own command, relative to the folder: `plutonium <name> …` runs it. */
+  readonly cli?: string;
+  /** What a checkout ships but an install doesn't copy: its source, its build. */
+  readonly exclude?: readonly string[];
+  /** Builds what a release needs beside it ({out}: the shipped shell's build/). */
+  readonly bundle?: readonly string[];
+  /** On after a first install, in this order (1 first); off if its server's check fails. */
+  readonly default?: number;
 }
 
 export interface ShellListEntry {
@@ -116,15 +126,36 @@ export function parseManifest(text: string, name: string): ShellManifest {
     ...(value.server ? { server: parseServer(value.server) } : {}),
     ...(value.uses !== undefined ? { uses: parseUses(value.uses) } : {}),
     ...(str("native") ? { native: str("native") } : {}),
+    ...(str("cli") ? { cli: str("cli") } : {}),
+    ...(value.exclude !== undefined ? { exclude: parsePaths(value.exclude, "exclude") } : {}),
+    ...(value.bundle !== undefined ? { bundle: parseCommand(value.bundle, "bundle") } : {}),
+    ...(value.default !== undefined ? { default: parseDefault(value.default) } : {}),
   };
   if (!manifest.static === !manifest.server) throw new ShellError(`${MANIFEST} needs either "static" or "server"`);
   if (manifest.static && (manifest.static.startsWith("/") || manifest.static.split("/").includes(".."))) {
     throw new ShellError(`"static" must be a path inside the shell's folder`);
   }
-  if (manifest.native && (manifest.native.startsWith("/") || manifest.native.split("/").includes(".."))) {
-    throw new ShellError(`"native" must be a path inside the shell's folder`);
+  for (const key of ["native", "cli"] as const) {
+    if (manifest[key] && !isInside(manifest[key]!)) throw new ShellError(`"${key}" must be a path inside the shell's folder`);
   }
   return manifest;
+}
+
+const isInside = (path: string) => path !== "" && !path.startsWith("/") && !path.split("/").includes("..");
+
+function parsePaths(value: unknown, key: string): string[] {
+  if (!isStringArray(value) || !value.every(isInside)) throw new ShellError(`"${key}" is a list of paths inside the shell's folder`);
+  return value;
+}
+
+function parseCommand(value: unknown, key: string): string[] {
+  if (!isStringArray(value) || value.length === 0) throw new ShellError(`"${key}" is a command`);
+  return value;
+}
+
+function parseDefault(value: unknown): number {
+  if (!(Number.isInteger(value) && (value as number) > 0)) throw new ShellError(`"default" is a place: 1, 2, …`);
+  return value as number;
 }
 
 function parseUses(value: unknown): string[] {
@@ -158,9 +189,8 @@ function parseServer(value: unknown): ServerSpec {
   if (server.restart !== undefined && !["always", "on-failure", "never"].includes(server.restart as string)) {
     throw new ShellError(`"server.restart" is "always", "on-failure" or "never"`);
   }
-  if (server.entryCommand !== undefined && !isStringArray(server.entryCommand)) {
-    throw new ShellError(`"server.entryCommand" is a command`);
-  }
+  if (server.entryCommand !== undefined) parseCommand(server.entryCommand, "server.entryCommand");
+  if (server.check !== undefined) parseCommand(server.check, "server.check");
   if (server.url === undefined && server.port === undefined) throw new ShellError(`"server" needs a port or a url`);
   return server as unknown as ServerSpec;
 }
@@ -285,6 +315,30 @@ export function withHelper(url: string, manifest: ShellManifest, context: ShellC
   return `${base}${base.includes("?") ? "&" : "?"}${manifest.helperParam ?? "helper"}=${context.helperUrl}${fragment}`;
 }
 
+/** What a shell's commands run with: PLUTONIUM, the install they run under. */
+export function shellEnv(context: ShellContext, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, PLUTONIUM: context.plutonium, PLUTO_HOME: context.home };
+}
+
+/** Whether a server shell can run here: its check's verdict (undefined: it can). */
+export function checkShell(manifest: ShellManifest, context: ShellContext): string | undefined {
+  const command = manifest.server?.run === "plutonium" ? manifest.server.check : undefined;
+  if (!command) return undefined;
+  const argv = command.map((arg) => expand(arg, manifest, context));
+  try {
+    execFileSync(argv[0]!, argv.slice(1), {
+      cwd: shellDir(context.home, manifest.name),
+      env: shellEnv(context),
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    return undefined;
+  } catch (error) {
+    const out = String((error as { stdout?: Buffer }).stdout ?? "").trim();
+    return out || `its check failed (${argv.join(" ")})`;
+  }
+}
+
 /** The URL a session opens (runs a server shell's entryCommand, if it has one). */
 export function entryUrl(manifest: ShellManifest, context: ShellContext): string {
   let url = baseUrl(manifest, context);
@@ -293,6 +347,7 @@ export function entryUrl(manifest: ShellManifest, context: ShellContext): string
     const argv = command.map((arg) => expand(arg, manifest, context));
     const printed = execFileSync(argv[0]!, argv.slice(1), {
       cwd: shellDir(context.home, manifest.name),
+      env: shellEnv(context),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
       timeout: 60_000,
@@ -355,6 +410,24 @@ export function shippedNames(shippedRoot: string): string[] {
     .sort();
 }
 
+/** Shells shipped under another name before (t3 is Hydra): the user's copy follows. */
+const RENAMED: Readonly<Record<string, string>> = { t3: "hydra" };
+
+/** Moves the user's copies of renamed shells, with their log and place in the list; returns "old → new" for each. */
+export function migrateRenamed(home: string, shippedRoot: string): string[] {
+  const moved: string[] = [];
+  const shipped = shippedNames(shippedRoot);
+  for (const [from, to] of Object.entries(RENAMED)) {
+    if (!existsSync(shellDir(home, from)) || existsSync(shellDir(home, to)) || !shipped.includes(to)) continue;
+    renameSync(shellDir(home, from), shellDir(home, to));
+    if (existsSync(logPath(home, from))) renameSync(logPath(home, from), logPath(home, to));
+    const list = readList(home);
+    if (list) writeList(home, list.map((entry) => (entry.name === from ? { ...entry, name: to } : entry)));
+    moved.push(`${from} → ${to}`);
+  }
+  return moved;
+}
+
 /**
  * Copies a shipped shell into the user's shells as a git repository: main and
  * shipped both start at the shipped version. Does nothing if it's there.
@@ -365,10 +438,13 @@ export function installShell(home: string, shippedRoot: string, name: string): b
   if (existsSync(dir)) return false;
   mkdirSync(shellsDir(home), { recursive: true });
   const temporary = join(shellsDir(home), `.${name}.installing`);
-  cpSync(join(shippedRoot, name), temporary, { recursive: true });
+  const source = join(shippedRoot, name);
+  const excluded = (manifest.exclude ?? []).map((path) => join(source, path));
+  cpSync(source, temporary, { recursive: true, filter: (path) => !excluded.includes(path) });
   git(temporary, ["init", "-q", "-b", "main"]);
   git(temporary, ["add", "-A"]);
-  git(temporary, ["commit", "-q", "--no-verify", "-m", `shipped: ${name} ${manifest.version}`]);
+  const tree = git(temporary, ["write-tree"]).trim();
+  git(temporary, ["commit", "-q", "--no-verify", "-m", `shipped: ${name} ${manifest.version} (${tree.slice(0, 7)})`]);
   git(temporary, ["branch", SHIPPED_BRANCH]);
   renameSync(temporary, dir);
   return true;
@@ -395,21 +471,24 @@ export function updateShell(home: string, shippedRoot: string, name: string): Up
   const index = join(dir, ".git", "plutonium-shipped-index");
   const env = { GIT_INDEX_FILE: index, GIT_WORK_TREE: join(shippedRoot, name) };
   git(dir, ["read-tree", "--empty"], { env });
-  git(dir, ["--work-tree", join(shippedRoot, name), "add", "-A", "."], { env });
+  const exclude = (manifest.exclude ?? []).map((path) => `:(exclude,top)${path}`);
+  git(dir, ["--work-tree", join(shippedRoot, name), "add", "-A", "--", ".", ...exclude], { env });
   const tree = git(dir, ["write-tree"], { env }).trim();
   const parent = git(dir, ["rev-parse", SHIPPED_BRANCH]).trim();
+  // A version is what the files are (their tree); "version" is only its label.
+  const version = `${manifest.version} (${tree.slice(0, 7)})`;
   if (git(dir, ["rev-parse", `${parent}^{tree}`]).trim() !== tree) {
-    const commit = git(dir, ["commit-tree", tree, "-p", parent, "-m", `shipped: ${name} ${manifest.version}`]).trim();
+    const commit = git(dir, ["commit-tree", tree, "-p", parent, "-m", `shipped: ${name} ${version}`]).trim();
     git(dir, ["update-ref", `refs/heads/${SHIPPED_BRANCH}`, commit, parent]);
   }
   if (isMerged(dir)) return { status: "up-to-date" };
   try {
-    git(dir, ["merge", "-q", "--no-edit", "-m", `update: ${name} ${manifest.version}`, SHIPPED_BRANCH]);
-    return { status: "updated", version: manifest.version };
+    git(dir, ["merge", "-q", "--no-edit", "-m", `update: ${name} ${version}`, SHIPPED_BRANCH]);
+    return { status: "updated", version };
   } catch {
     const files = git(dir, ["diff", "--name-only", "--diff-filter=U"]).trim().split("\n").filter(Boolean);
     git(dir, ["merge", "--abort"]);
-    return { status: "conflict", version: manifest.version, files };
+    return { status: "conflict", version, files };
   }
 }
 

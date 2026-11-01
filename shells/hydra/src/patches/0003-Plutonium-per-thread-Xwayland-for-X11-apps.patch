@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Fri, 16 Oct 2026 09:10:39 +1300
+Subject: [PATCH 03/48] Plutonium: per-thread Xwayland for X11 apps
+
+Agents and terminals get DISPLAY for a rootless Xwayland per thread (xwayland-satellite, socket-activated on first X client), so X11 apps land in Exo tagged with the thread instead of on the host desktop.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/shared/src/plutonium.ts | 90 ++++++++++++++++++++++++++++++++
+ 1 file changed, 90 insertions(+)
+
+diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
+index 6ab886b651..0beabc2a5e 100644
+--- a/packages/shared/src/plutonium.ts
++++ b/packages/shared/src/plutonium.ts
+@@ -1,9 +1,13 @@
++// @effect-diagnostics nodeBuiltinImport:off - agent and terminal environments are built synchronously at spawn
+ // Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
+ // native Wayland apps that agents start show up as page elements.
+ //
+ // Only active when the server is started with PLUTONIUM_WAYLAND_DISPLAY (the
+ // Exo socket, e.g. "wayland-cros"). Agents then get that display plus their
+ // thread id in their environment, and every process they start inherits both.
++import { spawn, type ChildProcess } from "node:child_process";
++import { existsSync, unlinkSync, writeFileSync } from "node:fs";
++import { delimiter, join } from "node:path";
+ 
+ export const PLUTONIUM_THREAD_ID_VARIABLE = "PLUTONIUM_THREAD_ID";
+ 
+@@ -17,15 +21,101 @@ export function plutoniumAgentEnvironment(
+ ): Readonly<Record<string, string>> {
+   const display = plutoniumWaylandDisplay();
+   if (!display || !threadId) return {};
++  const xDisplay = threadXDisplay(threadId, display);
+   return {
+     [PLUTONIUM_THREAD_ID_VARIABLE]: threadId,
+     WAYLAND_DISPLAY: display,
+     GDK_BACKEND: "wayland",
+     QT_QPA_PLATFORM: "wayland",
+     MOZ_ENABLE_WAYLAND: "1",
++    // X11-only apps (e.g. games on GLFW) get the thread's own X server rather
++    // than the host desktop's.
++    ...(xDisplay ? { DISPLAY: xDisplay } : {}),
+   };
+ }
+ 
++// X11 apps: one rootless Xwayland per thread, through xwayland-satellite,
++// which shows X windows as Wayland toplevels on Exo. Exo sees the satellite as
++// the client, so its windows resolve to the thread through the satellite's
++// own PLUTONIUM_THREAD_ID. systemd-socket-activate holds the X socket and only
++// starts the satellite (in its own process) when an X client first connects.
++const X_DISPLAY_FIRST = 200;
++const X_DISPLAY_LAST = 299;
++const xDisplays = new Map<string, { display: number; process: ChildProcess }>();
++
++function findExecutable(name: string): string | undefined {
++  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
++    if (directory && existsSync(join(directory, name))) return join(directory, name);
++  }
++  return undefined;
++}
++
++const xSocketPath = (display: number) => `/tmp/.X11-unix/X${display}`;
++const xLockPath = (display: number) => `/tmp/.X${display}-lock`;
++
++function releaseXDisplay(display: number): void {
++  for (const path of [xSocketPath(display), xLockPath(display)]) {
++    try {
++      unlinkSync(path);
++    } catch {
++      // Already gone.
++    }
++  }
++}
++
++function threadXDisplay(threadId: string, waylandDisplay: string): string | undefined {
++  const existing = xDisplays.get(threadId);
++  if (existing) return `:${existing.display}`;
++  if (process.platform !== "linux") return undefined;
++  const satellite =
++    process.env.PLUTONIUM_XWAYLAND_SATELLITE || findExecutable("xwayland-satellite");
++  const activate = findExecutable("systemd-socket-activate");
++  if (!satellite || !activate) return undefined;
++  for (let display = X_DISPLAY_FIRST; display <= X_DISPLAY_LAST; display++) {
++    if (existsSync(xSocketPath(display)) || existsSync(xLockPath(display))) continue;
++    try {
++      // Reserves the number; the format is what X servers write.
++      writeFileSync(xLockPath(display), `${String(process.pid).padStart(10)}\n`, { flag: "wx" });
++    } catch {
++      continue;
++    }
++    const child = spawn(
++      activate,
++      [
++        ...["XDG_RUNTIME_DIR", "PATH", "WAYLAND_DISPLAY", PLUTONIUM_THREAD_ID_VARIABLE].flatMap((name) => [
++          "-E",
++          name,
++        ]),
++        "-l",
++        xSocketPath(display),
++        satellite,
++        `:${display}`,
++        "-listenfd",
++        "3",
++      ],
++      {
++        env: { ...process.env, WAYLAND_DISPLAY: waylandDisplay, [PLUTONIUM_THREAD_ID_VARIABLE]: threadId },
++        stdio: "ignore",
++      },
++    );
++    xDisplays.set(threadId, { display, process: child });
++    child.once("exit", () => {
++      if (xDisplays.get(threadId)?.process === child) xDisplays.delete(threadId);
++      releaseXDisplay(display);
++    });
++    return `:${display}`;
++  }
++  return undefined;
++}
++
++process.once("exit", () => {
++  for (const { display, process: child } of xDisplays.values()) {
++    child.kill();
++    releaseXDisplay(display);
++  }
++});
++
++
+ /** `env` with the Plutonium variables for `threadId` (`env` itself when off). */
+ export function withPlutoniumAgentEnvironment(
+   env: NodeJS.ProcessEnv | undefined,

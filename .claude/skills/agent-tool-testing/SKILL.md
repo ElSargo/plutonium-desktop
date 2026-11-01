@@ -27,7 +27,7 @@ Fixers send `BUILD REQUEST` (you run the Chromium build: `~/chromium-wt/BRIEF.md
 
 Pick the target from what changed:
 
-- **Live** (T3 Code's web app, the shells, the helper's `shell.js`: what `plutonium live apply` swaps). Apply it from the fixer's checkout (`plutonium live apply t3 --from <t3 worktree>`, or `niri`, `plain`, `shell-lib`), then `tools/agent-tests/run.sh <scenario>`. No need to ask. Afterwards `plutonium live revert …` unless the change is landing.
+- **Live** (Hydra's web app, the shells, the helper's `shell.js`). Apply it from the fixer's checkout: `plutonium hydra live apply --from <t3 worktree>` for Hydra's web app, `plutonium shells update <shell> --from <worktree>` for a shell, `plutonium live apply shell-lib` for `shell.js`; then `tools/agent-tests/run.sh <scenario>`. No need to ask. Afterwards `plutonium hydra live revert` or `plutonium live revert shell-lib` unless the change is landing.
 - **Session** (the helper and its MCP tools, T3 Code's server and its preview tools, Chromium and Exo, or anything that needs a restart). This takes over the screen, so:
   1. Ask, and fail open: tell the user in one short message what you're about to do (the test session on tty5, which switches the screen for the run, then back), and that replying "no" or `touch logs/agent-tests/veto` stops it. Send a `PushNotification` too. Then start `tools/agent-tests/grace.sh 150` with `run_in_background`, and end your turn.
   2. If the user answers no before the timer ends, don't run it. Kill the timer and ask how they want it tested. If the timer ends with no answer (or "vetoed" doesn't show), go ahead.
@@ -49,7 +49,7 @@ A round passes when the problems it targeted are gone and the review shows no ne
 
 ## 6. Land, then the final test
 
-When the fixes are merged into main (and the T3 checkout's `plutonium` branch, with `plutonium t3 export`):
+When the fixes are merged into main (and the T3 checkout's `plutonium` branch, with `plutonium hydra export`):
 1. Ask with the grace timer, as in step 3.
 2. Run `session.sh up` with no `--ref` or `--t3`. That gives main's patches, a Chromium build of exactly them, T3 Code built from `plutonium`, and a fresh T3 server.
 3. Run every scenario, have each run reviewed, then `session.sh down`.
@@ -63,5 +63,5 @@ Report to the user:
 ## Rules
 
 - The tester gets the scenario's prompt and nothing else. Never message the tester thread during a run.
-- Don't test on the live desktop what needs a restart. Never restart the live T3 server (`plutonium t3 server` on slot 0): it cuts the user's running agents, this one included.
+- Don't test on the live desktop what needs a restart. Never restart the live T3 server (`plutonium shells restart hydra` on slot 0): it cuts the user's running agents, this one included.
 - The test session's worktree is `.worktrees/agent-tests`. Leave it to `session.sh`.

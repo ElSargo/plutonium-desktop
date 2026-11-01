@@ -1,8 +1,8 @@
 # The dock in Hydra
 
-**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope"). Since 2026-11-01 a slot holds one window or tab, not every one that looks like it ("Identity-based slots", patch 0046).
+**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope"). Since 2026-11-01 a slot holds one window or tab, not every one that looks like it ("Identity-based slots", patch 0048).
 
-Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a tray in the sidebar's footer, it makes Hydra a desktop without changing how its chat works.
+Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a status cluster at the title bar's right end, it makes Hydra a desktop without changing how its chat works.
 
 ## Slots
 
@@ -88,7 +88,14 @@ Until that's built, project- and global-scoped windows are out of every agent's 
 
 ## The tray
 
-The sidebar's footer gets a row: the clock and date on the left; network, volume, battery, Bluetooth, the tray and power on the right, each opening a popover. They are the plain shell's modules (`shells/plain/{audio,battery,…}.js`, each `default(shell, container)`), on the shell library T3 already loads; `osd.js` shows volume and brightness keys over everything. With the sidebar hidden, the clock moves to the panel's header.
+**Changed 2026-10-30 (patch 0047):** not the sidebar's footer, which hides with the sidebar, but the title bar's right end, the one place that shows whatever else is open (sidebar hidden, panel open or maximized, chat folded, settings).
+
+- **Always shown:** the time; the battery when it isn't on AC (or is low and not charging). An icon only for something wrong: offline, muted. The date is in the button's label and the popover.
+- **A click** opens quick settings: the time and date (click: a calendar), volume (the icon mutes; an output picker with several outputs) and brightness, Wi-Fi and Bluetooth (a switch each; open for the networks in range, a password for a new one, wired and VPN connections, or the paired devices), what's playing, the battery's line, and lock, suspend, log out, restart and power off (asked first, as in the plain shell).
+- **Room for it:** its width is `--plutonium-status-width` on the document; `--workspace-controls-right` adds it, so the panel and terminal toggles sit left of it, and the chat header, the panel's tab strip and the settings pages' headers reserve it.
+- Only in the Plutonium shell (`isPlutoniumShell()`): a remote client or a browser paired to the server doesn't show the host's battery.
+- `apps/web/src/plutonium/PlutoniumStatus.tsx` over `systemServices.ts` (`useSystemService`, the shell library's `shell.system.<name>`). Hydra's `shell.json` uses audio, power, media, network, bluetooth and session (version 4).
+- Not yet: an OSD for the volume and brightness keys, the StatusNotifier tray, pairing new Bluetooth devices, notifications in the popover.
 
 ## Steps
 
@@ -97,7 +104,7 @@ The sidebar's footer gets a row: the clock and date on the left; network, volume
 3. Groups, `"rest"`, the group picker.
 4. Agents' reach and the permission prompt.
 5. The folded chat's strip.
-6. The tray (independent of the rest).
+6. The tray (independent of the rest): the status cluster, patch 0047.
 
 ## Step 1 as built (2026-10-27)
 
@@ -143,7 +150,7 @@ Verified on Xvfb (slot 14), through the dock's buttons in the page:
 | This project, from A's own example.com tabs: they get `t3:project/<id>`; the other thread of the project takes the newest; closing it there closes it | ✅ |
 | On DRM, an agent driving a moved tab | not yet |
 
-## Identity-based slots (patch 0046, 2026-11-01)
+## Identity-based slots (patch 0048, 2026-11-01)
 
 Before, a slot kept a description and claimed whatever fit it: a site slot every tab whose address started with its prefix (the editor's "Tabs start with", else the site's origin), an app slot every window of the app in its scope, cycling when there were several. Unrelated tabs of the same site joined the slot (the button showed "showing" for them, the tab menu labelled them, presses cycled through them); a docked tab that left the site dropped out, and the next press opened a new one; changing a slot's scope tagged every matching tab; two slots with overlapping prefixes both claimed a tab; and starting an app bound the first new window with the scope's tag, whatever app it was.
 

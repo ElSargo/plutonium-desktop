@@ -12,10 +12,12 @@ import { type ShellNotice, ShellPackages } from "../src/shellPackages.ts";
 import { ShellServer } from "../src/shellServers.ts";
 import {
   addShell,
+  checkShell,
   effectiveList,
   previewShell,
   entryUrl,
   installShell,
+  migrateRenamed,
   parseManifest,
   readList,
   serveStaticShell,
@@ -41,7 +43,7 @@ const context = (home: string): ShellContext => ({
   slot: 2,
   shellsPort: 8970,
   helperUrl: "http://127.0.0.1:3981",
-  plutonium: "/opt/plutonium",
+  plutonium: "/nonexistent/plutonium",
   waylandDisplay: "wayland-test",
 });
 
@@ -114,7 +116,7 @@ describe("installing and updating", () => {
     const root = shipped();
     assert.equal(installShell(home, root, "demo"), true);
     assert.equal(installShell(home, root, "demo"), false);
-    assert.deepEqual(gitLog(shellDir(home, "demo")), ["shipped: demo 1"]);
+    assert.match(gitLog(shellDir(home, "demo")).join(), /^shipped: demo 1 \([0-9a-f]{7}\)$/);
     assert.deepEqual(effectiveList(home), [{ name: "demo", enabled: false }]);
     writeList(home, [{ name: "demo", enabled: true }, { name: "gone", enabled: true }]);
     assert.deepEqual(effectiveList(home), [{ name: "demo", enabled: true }]);
@@ -129,9 +131,55 @@ describe("installing and updating", () => {
     assert.deepEqual(updateShell(home, shipped("1", "<h1>one</h1>\n<p>body</p>\n"), "demo"), { status: "up-to-date" });
     assert.equal(gitLog(dir)[0], "edit: mine.css");
     const result = updateShell(home, shipped("2", "<h1>two</h1>\n<p>body</p>\n"), "demo");
-    assert.deepEqual(result, { status: "updated", version: "2" });
+    assert.equal(result.status, "updated");
+    assert.match(result.status === "updated" ? result.version : "", /^2 \([0-9a-f]{7}\)$/);
     assert.match(readFileSync(join(dir, "index.html"), "utf8"), /two/);
     assert.equal(readFileSync(join(dir, "mine.css"), "utf8"), "body {}\n");
+  });
+
+  test("what the manifest excludes (a shell's source, its build) is neither installed nor merged", () => {
+    const root = fresh("shipped");
+    const source = join(root, "hydra");
+    mkdirSync(join(source, "src", "patches"), { recursive: true });
+    mkdirSync(join(source, "bin"));
+    const manifest = { title: "Hydra", version: "1", exclude: ["src", "README.md"], server: { run: "plutonium", argv: ["x"], port: 1 } };
+    writeFileSync(join(source, "shell.json"), JSON.stringify(manifest));
+    writeFileSync(join(source, "bin", "hydra"), "one\n");
+    writeFileSync(join(source, "src", "patches", "0001.patch"), "patch\n");
+    writeFileSync(join(source, "README.md"), "read me\n");
+    const home = fresh("home");
+    installShell(home, root, "hydra");
+    const dir = shellDir(home, "hydra");
+    assert.deepEqual(execFileSync("git", ["-C", dir, "ls-files"], { encoding: "utf8" }).trim().split("\n"), ["bin/hydra", "shell.json"]);
+    writeFileSync(join(source, "bin", "hydra"), "two\n");
+    writeFileSync(join(source, "src", "patches", "0002.patch"), "patch\n");
+    assert.equal(updateShell(home, root, "hydra").status, "updated");
+    assert.equal(readFileSync(join(dir, "bin", "hydra"), "utf8"), "two\n");
+    assert.deepEqual(execFileSync("git", ["-C", dir, "ls-files"], { encoding: "utf8" }).trim().split("\n"), ["bin/hydra", "shell.json"]);
+  });
+
+  test("a renamed shell's copy moves, with its log and its place in the list (t3 is hydra)", () => {
+    const root = fresh("shipped");
+    mkdirSync(join(root, "hydra"));
+    writeFileSync(join(root, "hydra", "shell.json"), JSON.stringify({ static: "index.html" }));
+    const home = fresh("home");
+    mkdirSync(shellDir(home, "t3"), { recursive: true });
+    mkdirSync(join(home, "logs"));
+    writeFileSync(join(home, "logs", "t3.log"), "log\n");
+    writeList(home, [{ name: "t3", enabled: true }, { name: "plain", enabled: true }]);
+    assert.deepEqual(migrateRenamed(home, root), ["t3 → hydra"]);
+    assert.deepEqual(readList(home), [{ name: "hydra", enabled: true }, { name: "plain", enabled: true }]);
+    assert.equal(readFileSync(join(home, "logs", "hydra.log"), "utf8"), "log\n");
+    assert.deepEqual(migrateRenamed(home, root), []);
+  });
+
+  test("a server's check says why it can't run; its commands get PLUTONIUM", () => {
+    const home = fresh("home");
+    mkdirSync(shellDir(home, "s"), { recursive: true });
+    const check = (argv: string[]) =>
+      checkShell(parseManifest(JSON.stringify({ server: { run: "plutonium", argv: ["x"], port: 1, check: argv } }), "s"), context(home));
+    assert.equal(check(["sh", "-c", '[ "$PLUTONIUM" = /nonexistent/plutonium ]']), undefined);
+    assert.equal(check(["sh", "-c", "echo not built; exit 1"]), "not built");
   });
 
   test("a conflicting update is reported and leaves the copy as it was", () => {
@@ -359,7 +407,7 @@ describe("new shells", () => {
     assert.deepEqual(readList(home)?.at(-1), { name: "mine", enabled: true });
     assert.throws(() => packages.create({ name: "mine" }), ShellError);
     assert.throws(() => packages.create({ name: "Not OK" }), ShellError);
-    assert.match(packages.newShellPrompt(), /^Read the Plutonium skill at \/opt\/plutonium\/skill\/SKILL\.md first\. /);
+    assert.match(packages.newShellPrompt(), /^Read the Plutonium skill at \/nonexistent\/plutonium\/skill\/SKILL\.md first\. /);
     assert.match(packages.status().find((shell) => shell.name === "mine")?.prompt ?? "", /shell "mine", in .*\/mine\./);
   });
 });

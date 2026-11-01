@@ -1,0 +1,19 @@
+# The release bundle's builder (bundle/build.sh): the libraries the bundle
+# carries beside chrome, and the tools that collect and patch them.
+#
+# Ubuntu 22.04, for its glibc (2.35): what the bundled libraries were built
+# against is the oldest glibc the bundle runs on (bundle/check.sh measures it).
+FROM docker.io/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      # Collecting and patching: ldd, readelf, strip, patchelf
+      binutils patchelf file xz-utils ca-certificates \
+      # What chrome links (readelf -d) and dlopen()s. bundle/host-libs.txt
+      # says which of them the host provides instead.
+      libnss3 libnspr4 libxkbcommon0 libinput10 \
+      libasound2 libdbus-1-3 libexpat1 libgbm1 libudev1 \
+      libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
+      # The keyboard layouts, for hosts without them (bundle/build.sh)
+      xkb-data \
+ && rm -rf /var/lib/apt/lists/*

@@ -402,7 +402,7 @@ off, and the lock itself.
   drops every event that isn't for it, so no key, click or touch reaches a
   shell, a tab or an app, and the Plutonium keys (Super+Tab, Super+F, the
   backup terminal) are off. The hardware keys (volume, brightness) still
-  work, and so do VT switching, Ctrl+Alt+Backspace and the kill switch,
+  work, and so do VT switching and Ctrl+Alt+Backspace,
   which are taken before Ash. A window that comes up meanwhile doesn't get
   the keyboard: the lock takes it back and stays in front. Only the
   password typed on it takes it down: Ash hands it to the helper (`POST

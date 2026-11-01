@@ -7,7 +7,7 @@ Plan, agreed on 2026-10-17:
 1. **Browser: several live shells** (done, below). Steps 2–4 are done too. Every enabled shell's page runs all the time, one is visible, and switching is instant.
 2. **Tags and group labels.** Every window and tab gets a set of namespaced tags (`t3:thread/<id>`, `plain:thread/<id>`, `wm:workspace/2`, …), and a table of groups (tag → label, owning shell). Items with the same tag belong together, so a workspace window manager and a thread-based shell can understand each other's grouping. Importing an item into a thread adds the thread's tag. The thread an app was started in stays as a fixed tag. Only shells and the native UI may set tags, and a tag also gives that thread's agent access.
 3. **Native overlay** (Ash, views): Super+Tab opens it, arrows move, Enter acts. It lists the shells: switch, add, edit, turn off. It also lists every window and tab grouped by label, with search, and actions: focus in its shell, pop out, add to thread, close.
-4. **Frontends:** Hydra (`t3`) and the plain shell register their threads, tag what they open, and get an "Elsewhere" area for importing items from other shells.
+4. **Frontends:** Hydra (`hydra`) and the plain shell register their threads, tag what they open, and get an "Elsewhere" area for importing items from other shells.
 
 ## Step 1: several live shells
 
@@ -17,7 +17,7 @@ Tested on 2026-10-17. On Xvfb (`:99`) the plain shell was the startup shell, wit
 
 ```
 # DRM: T3 at startup, the plain shell second
-plutonium run t3 plain
+plutonium run hydra plain
 
 # Xvfb: the plain shell at startup, T3 second
 plutonium run --x11 plain t3
@@ -146,7 +146,7 @@ Shells that the overlay adds aren't on the helper's command line. Each shell pag
 
 Not tried: the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
 
-**On DRM** (2026-10-26, tty5, niri and plain, two monitors, the user driving): Super+Tab, search, a window fullscreen and back with Super+F, the backup terminal and launching an app all work, with no DCHECKs. Three things fixed after it (patch "the switcher's text fields…"): the search field's text was dark on the dark panel (the overlay's widget now takes the dark theme's colors); a GTK Demo window showed above the backup terminal (the active backup window now goes above floating windows, such as a parked window's popups, and back once something else is active); and a row's hover went off over its labels and didn't come back on a rebuilt list (enter/exit on children, and a check when a row is laid out). Those fixes aren't checked on DRM yet.
+**On DRM** (2026-10-26, tty5, niri and plain, two monitors, the user driving): Super+Tab, search, a window fullscreen and back with Super+F, the backup terminal and launching an app all work, with no DCHECKs. Three things fixed after it (patch "the switcher's text fields…"): the search field's text was dark on the dark panel (the overlay's widget now takes the dark theme's colors); a GTK Demo window showed above the backup terminal (the active backup window now goes above floating windows, such as a parked window's popups, and back once something else is active); and a row's hover went off over its labels and didn't come back on a rebuilt list (enter/exit on children, and a check when a row is laid out). Rechecked on DRM the same day (tty5, the user driving): the search text is light, hover is steady, nothing shows over the backup terminal, and no "unsupported command-line flag" infobar.
 
 ### Verified (steps 2–4, Xvfb `:99` and DRM, plain shell at startup, T3 second)
 

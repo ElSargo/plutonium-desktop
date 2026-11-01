@@ -1,9 +1,9 @@
 # Shells as installed packages
 
-The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (`niri` is Styx, `gnome` Charon, `plain`, and `t3` Hydra; the folder names stay as they were) are copied there on the first `plutonium run`. From then on the folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
+The shells a session runs aren't in the repository checkout. Each one is installed in its own folder, `~/.pluto/shells/<name>/`: a git repository with a `shell.json` manifest. The shells Plutonium ships (`niri` is Styx, `gnome` Charon, `plain`, and `hydra`; the folder names of Styx and Charon stay as they were) are copied there on the first `plutonium run`, and every later run merges in what's shipped since. The folder is yours. You can edit it yourself or ask an agent to, and every change can be undone.
 
 - A shell that is just a web page is served by the session's helper.
-- A shell with a server (Hydra, T3 Code's) says how to run it, and the helper runs and supervises it.
+- A shell with a server (Hydra, T3 Code's) says how to run it, and the helper runs and supervises it. Everything about it is in its folder: Hydra's launcher, its T3 Code patches and its release build are in `shells/hydra/`, and Plutonium knows it only through its manifest.
 - A shell you run yourself is just an address.
 
 Code: `helper/src/shells.ts` (manifests, installing, updating, URLs, the built-in server), `shellPackages.ts` (the helper's side: servers, edits, safety, adding), `shellServers.ts` (supervision), `shellsCli.ts` (`plutonium shells`). The switcher's parts are in Chromium patch "the switcher's installed shells…".
@@ -41,6 +41,10 @@ A shell's name is its folder's name: `a-z`, `0-9` and `-`, because it's also a h
 | `helperParam` | the query parameter that names the helper: `helper` (default), or T3's `plutoniumHelper` |
 | `native` | a module the helper runs for the shell, its native side; and every installed shell has storage ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md#a-native-side-and-storage)) |
 | `uses` | the desktop services it uses: `["audio", "network", …]` ([DESKTOP_SERVICES.md](DESKTOP_SERVICES.md)) |
+| `default` | on after a first install, at this place: Hydra 1, plain 2. A server shell whose `check` fails stays off. |
+| `cli` | its own command, relative to the folder: `plutonium <name> …` runs it (Hydra's `bin/hydra`). In a checkout it's the checkout's, else the installed copy's. |
+| `exclude` | paths the checkout ships that an install doesn't copy or merge: Hydra's `src/` (T3 Code's patches and checkout), `build/` (its release build) |
+| `bundle` | builds what a release needs beside the shipped shell: run in the checkout's folder by `plutonium bundle build`, `{out}` is the release's `shells/<name>/build` |
 
 Every page a session opens gets `?<helperParam>=http://127.0.0.1:<helper port>`. You don't write it in the manifest.
 
@@ -49,12 +53,13 @@ Every page a session opens gets `?<helperParam>=http://127.0.0.1:<helper port>`.
 ```json
 "server": {
   "run": "plutonium",
-  "argv": ["{plutonium}/bin/plutonium", "t3", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],
+  "argv": ["{shell}/bin/hydra", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],
+  "check": ["{shell}/bin/hydra", "check"],
   "port": 3773,
   "health": "http://127.0.0.1:{port}/",
   "restart": "on-failure",
   "restartOnEdit": false,
-  "entryCommand": ["{plutonium}/bin/plutonium", "t3", "pair-url", "--port", "{port}"]
+  "entryCommand": ["{shell}/bin/hydra", "pair-url", "--port", "{port}"]
 }
 ```
 
@@ -62,15 +67,16 @@ Every page a session opens gets `?<helperParam>=http://127.0.0.1:<helper port>`.
 |---|---|
 | `argv` | the command, run detached, in its own process group |
 | `cwd` | default: the shell's folder |
-| `env` | extra variables. It also gets `PORT` and `PLUTONIUM_SHELL_SERVER` (the helper finds it again by that). |
+| `env` | extra variables. It also gets `PORT`, `PLUTONIUM_SHELL_SERVER` (the helper finds it again by that), `PLUTONIUM` (the Plutonium it runs under: a checkout or a release install) and `PLUTO_HOME`. |
 | `port` | its port in slot 0; slot N adds 100 × N, as every Plutonium port does |
 | `url` | the page (default `http://127.0.0.1:{port}/`) |
 | `health` | polled until it answers, with any HTTP status (default: `url`) |
 | `restart` | `on-failure` (default): after a non-zero exit. `always`, or `never`. |
 | `restartOnEdit` | restart it when its folder changes |
-| `entryCommand` | prints the URL to open instead of `url`. T3 prints one with a one-time pairing token. |
+| `entryCommand` | prints the URL to open instead of `url`. Hydra prints one with a one-time pairing token. |
+| `check` | exits 0 if the server can run here; else prints what's missing (Hydra: T3 Code isn't built). `plutonium doctor` and `plutonium shells check` show it. |
 
-Placeholders, in `argv`, `env`, `cwd`, `url`, `health` and `entryCommand`: `{port}`, `{plutonium}` (the checkout the helper runs from), `{shell}` (the folder), `{home}`, `{helper}`, `{helperSocket}`, `{waylandDisplay}`, `{slot}`.
+Placeholders, in `argv`, `env`, `cwd`, `url`, `health`, `entryCommand` and `check`: `{port}`, `{plutonium}` (the checkout the helper runs from), `{shell}` (the folder), `{home}`, `{helper}`, `{helperSocket}`, `{waylandDisplay}`, `{slot}`.
 
 **An address you run yourself** (`"run": "external"`): `"server": {"run": "external", "url": "http://localhost:5173/"}`.
 
@@ -85,9 +91,13 @@ The launcher passes every origin that's on to the browser and the helper, as bef
 
 ## Lifecycle
 
-**Installing.** `plutonium shells install`, and the first `plutonium run`, copy the checkout's `shells/<name>` into `$PLUTO_HOME/shells/<name>`. Each becomes a git repository with one commit, `shipped: <name> <version>`. Its branches `main` (yours) and `shipped` both start there. The first run also writes `shells.json`: T3 then plain if T3 Code is built, else plain. niri and gnome are installed, off. A later run installs shells the checkout ships that you don't have yet.
+**Installing.** `plutonium shells install`, and the first `plutonium run`, copy the checkout's `shells/<name>` (less its `exclude`) into `$PLUTO_HOME/shells/<name>`. Each becomes a git repository with one commit, `shipped: <name> <version>`. Its branches `main` (yours) and `shipped` both start there. The first run also writes `shells.json`: the shells whose manifest has a `default`, in that order (Hydra, if its check passes, then plain). niri and gnome are installed, off.
 
-**Updating.** `plutonium shells update [name…] [--from <checkout>]` merges the checkout's version into yours:
+**Every session start** (`plutonium shells sync`) installs the shells the checkout ships that you don't have yet, and updates the others, so a session runs what its Plutonium ships, with your edits on top. It says which ones changed; a conflict leaves that copy as it was, and says so. A shell shipped under another name before moves with its log and its place in the list (`t3` is `hydra`).
+
+**Versions** are what the files are: `shipped: <name> <version> (<tree>)`, where `<tree>` is the shipped files' git tree, and `version` only a label. A change to a shipped shell is a new version without anyone bumping a number, and a release's `BUNDLE` lists the trees it ships (`SHELLS`).
+
+**Updating.** `plutonium shells update [name…] [--from <checkout>]` merges the checkout's version into yours now:
 1. Your uncommitted changes are committed.
 2. The shipped files become a commit on `shipped`, made with a scratch index, so your files aren't touched.
 3. `shipped` is merged into `main`. If the merge conflicts, it's undone, and the files are reported. Your copy stays as it was. `git merge shipped` in the folder does it by hand.
@@ -102,7 +112,9 @@ The launcher passes every origin that's on to the browser and the helper, as bef
 - **Restarts.** A server that exits on its own is started again as `restart` says, after 1 s, doubling up to 30 s. More than 5 exits in 2 minutes and it's left failed.
 - **It outlives the helper.** A session restart doesn't cut T3 Code's agents off: the next helper of the same session (same Wayland display and `$PLUTO_HOME`) adopts the running server, found by its pid file and `PLUTONIUM_SHELL_SERVER`.
 - **On and off.** Turning a shell off in the switcher stops its server. The switcher's and the shells page's Stop keep it stopped until Start.
-- `plutonium t3 server|stop [--x11]` ask the session's helper to restart or stop T3's server.
+- `plutonium shells start|stop|restart <name> [--x11]` ask the session's helper to start, stop or restart a shell's server; `plutonium shells reload <name>` reloads its pages.
+
+**Your edits back into a checkout.** `plutonium shells export <name>` (in a checkout) updates your copy first, then applies its commits since the shipped version to the checkout's `shells/<name>`, uncommitted, for you to review and commit.
 
 ## Customizing
 
@@ -173,7 +185,7 @@ By hand, on 2026-10-26, with a helper in slot 6 and a scratch `T3_HOME`:
 - T3's server starts under the helper in about 1 s;
 - after a SIGKILL of its node process, it's restarted ("restarted 1 time");
 - a new helper adopts the running server (same pid);
-- stop and start work through the API, and the log is in `logs/t3.log`;
+- stop and start work through the API, and the log is in `logs/hydra.log`;
 - an edit to the plain shell with no page connected is rolled back after 20 s, with a notice, the failed commit and its diff.
 
 In an X11 session (slot 6, Xvfb, dev build with patches 0061–0062), on 2026-10-26:

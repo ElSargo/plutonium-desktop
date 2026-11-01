@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One Plutonium session: the helper (plutoniumd, on the host) and Ash (in the
-# container, or on the host with HOST=1) with the given shells. `plutonium run`
+# One Plutonium session: the helper (plutoniumd, on the host) and Ash (on the
+# host, or in a checkout's container: on_ash, lib/common.sh) with the given shells. `plutonium run`
 # sets the variables below and execs this; see `plutonium run --help`.
 #
 #   MODE         drm (Ash owns the display and input on a VT) or x11 (Ash in an
@@ -12,7 +12,7 @@
 #   SAFE_MODE    the shipped plain shell only (plutonium run --safe)
 #   SOCKET       Exo's Wayland socket name; CDP_PORT, HELPER_PORT, PROFILE
 #   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
-#         seconds), NO_KILLSWITCH
+#         seconds)
 #   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
 #         (--ash-host-window-bounds: several, comma-separated, for several
 #         displays), XVFB_SIZE (the private Xvfb's screen, default 1600x1000)
@@ -93,14 +93,7 @@ restore_portal() {
 }
 
 start_helper() {
-  # A new session serves this checkout's shell library. A copy pinned with
-  # `plutonium live apply` was for a session that has ended, and would hide
-  # every change since (it hid a week's, 2026-10-19 to 26). PLUTONIUM_LIVE_KEEP=1 keeps it.
-  local lib=$LIVE_DIR/shell-lib/current
-  if [[ -z ${PLUTONIUM_LIVE_KEEP:-} && -L $lib && $(readlink -f "$lib") != "$(readlink -f "$ROOT/helper/web")" ]]; then
-    log "shell library: was pinned to $(readlink "$lib"); serving this checkout's again"
-    ln -sfn "$ROOT/helper/web" "$lib"
-  fi
+  shell_library
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
   mkdir -p "$RUN_DIR/plutonium"
   ensure_helper_deps
@@ -114,21 +107,28 @@ start_helper() {
   # Apps the helper launches inherit its environment: leave out an agent
   # session's own variables when this runs from one (Claude Code).
   setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') "${logind[@]}" \
-    PLUTONIUM_SHELL_LIBRARY="$(live_current shell-lib "$ROOT/helper/web")/plutonium-shell.js" \
-    node "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
+    PLUTONIUM_SHELL_LIBRARY="$SHELL_LIBRARY/plutonium-shell.js" \
+    "$NODE" "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
     --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" \
     --shells-port "$SHELLS_PORT" --slot "$SLOT" --pluto-home "$PLUTO_HOME" ${PERSIST_SHELLS:+--persist-shells} \
     > "$HELPER_LOG" 2>&1 < /dev/null &
   echo $! > "$pidfile"
 }
 
-# The servers of the session's installed shells (T3 Code's) start with the
+# The servers of the session's installed shells (Hydra's) start with the
 # helper: wait for them before the browser opens their pages.
 wait_shell_servers() {
   local sock=$RUN_DIR/plutonium/$SOCKET.sock
   for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
   curl -s -m 120 --unix-socket "$sock" http://helper/v1/shells/wait | grep -o '"detail":"[^"]*"' | cut -d'"' -f4 |
     grep -v '^Stopped' | sed 's/^/shell server: /' | while read -r line; do log "$line"; done
+}
+
+# A Vulkan driver (an ICD manifest, where the loader looks for one) where Ash runs.
+vulkan_driver() {
+  on_ash sh -c '[ -n "${VK_ICD_FILENAMES:-}${VK_DRIVER_FILES:-}" ] ||
+    ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json /run/opengl-driver/share/vulkan/icd.d/*.json \
+      "${XDG_DATA_HOME:-$HOME/.local/share}"/vulkan/icd.d/*.json 2> /dev/null | grep -q .'
 }
 
 report_gpu() {
@@ -158,47 +158,25 @@ FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
 # speechSynthesis through the host's speech-dispatcher, when it has one
 # (LINUX_COMPAT.md, "Speech synthesis"): Chromium dlopen()s libspeechd and
 # talks to its socket in $XDG_RUNTIME_DIR, which the container shares. Usually
-# a socket-activated user unit; else one started here (-t 0: it stays, as the
+# a socket-activated user unit; else one started here (-t 0: it stays, as a
 # container can't autospawn one).
 SPEECHD_SOCKET=$RUN_DIR/speech-dispatcher/speechd.sock
 if [[ ! -S $SPEECHD_SOCKET ]] && command -v speech-dispatcher > /dev/null; then
   speech-dispatcher --spawn -t 0 > /dev/null 2>&1 || true
 fi
 [[ -S $SPEECHD_SOCKET ]] && FLAGS+=(--enable-speech-dispatcher)
-# Pages see the host's timezone and language, which the container doesn't
-# have (it says UTC): a zone name the container's tzdata knows.
+# Pages see the host's timezone and language, which a container doesn't have
+# (it says UTC): a zone name the container's tzdata knows.
 HOST_TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
 [[ -n $HOST_TZ ]] || HOST_TZ=$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
 ASH_ENV=(-e "TZ=${HOST_TZ:-UTC}" -e "LANG=${LANG:-C.UTF-8}")
 # The desktop session's bus, for MPRIS (LINUX_COMPAT.md, "Media sessions").
 [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] && ASH_ENV+=(-e "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
-# Pages and shells use the host's fonts (LINUX_COMPAT.md, "Fonts"). In the
-# container, /etc/fonts is the host's when the container was made with it
-# (plutonium container create); this adds the user's own fonts and settings,
-# which the container's $HOME doesn't have. On the host, fontconfig is its own.
-if [[ -z ${HOST:-} ]]; then
-  FONTS_CONF=$DATA_DIR/fonts-$SOCKET.conf
-  data_home=${XDG_DATA_HOME:-$HOME/.local/share} config_home=${XDG_CONFIG_HOME:-$HOME/.config}
-  cat > "$FONTS_CONF" <<FONTS
-<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-<fontconfig>
-  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
-  <dir>$data_home/fonts</dir>
-  <dir>$HOME/.fonts</dir>
-  <include ignore_missing="yes">$config_home/fontconfig/conf.d</include>
-  <include ignore_missing="yes">$config_home/fontconfig/fonts.conf</include>
-</fontconfig>
-FONTS
-  ASH_ENV+=(-e "FONTCONFIG_FILE=$FONTS_CONF")
-  [[ $($PODMAN container inspect --format '{{index .Config.Labels "plutonium.host-fonts"}}' "$CONTAINER" 2> /dev/null) == 1 ]] ||
-    HOST_FONTS_NOTE="$CONTAINER has the image's fonts, not the host's: make it again for the host's (podman rm -f $CONTAINER; plutonium container create)"
-fi
 
 : > "$LOG"
 need_ash_runtime
-[[ -n ${HOST_FONTS_NOTE:-} ]] && log "note: $HOST_FONTS_NOTE"
-chrome_built || { log "ABORT: no Chromium at $CHROME_BIN (plutonium chromium build, or PREBUILT=1 and plutonium image pull)"; exit 1; }
+ash_prepare
+chrome_built || { log "ABORT: no Chromium at $CHROME_BIN ($CHROME_FIX)"; exit 1; }
 ash_running && { log "ABORT: an Ash with profile $PROFILE is already running (plutonium stop)"; exit 1; }
 mkdir -p "$PROFILE"
 log "$MODE session: $SHELL_URL${SHELLS:+ + $SHELLS}; socket $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT"
@@ -209,9 +187,20 @@ if [[ $MODE == x11 ]]; then
   XDISP=${XDISP:-$PRIVATE_XDISP}
   # GPU path (docs/features/GPU_X11.md): Skia and ANGLE on Vulkan sharing one
   # device, native GPU memory buffers, so Exo offers dmabufs with the render node.
-  FLAGS+=(--enable-native-gpu-memory-buffers --use-angle=vulkan
-          --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan
-          --use-system-clipboard "--ash-host-window-bounds=${BOUNDS:-0+0-1600x1000}")
+  # It needs a Vulkan driver where Ash runs (the host's, for a release install):
+  # without one, the GPU process can't start, and Ash has no software fallback.
+  FLAGS+=(--use-system-clipboard "--ash-host-window-bounds=${BOUNDS:-0+0-1600x1000}")
+  # NixOS keeps its drivers in /run/opengl-driver, where only its own Vulkan
+  # loader looks; chrome's (a release's) looks in XDG_DATA_DIRS.
+  if on_ash test -d /run/opengl-driver/share/vulkan/icd.d; then
+    ASH_ENV+=(-e "XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/run/opengl-driver/share")
+  fi
+  if vulkan_driver; then
+    FLAGS+=(--enable-native-gpu-memory-buffers --use-angle=vulkan
+            --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan)
+  else
+    log "WARNING: no Vulkan driver where Ash runs: it draws with GL, and apps can't share its GPU buffers (plutonium doctor)"
+  fi
   # shellcheck disable=SC2206
   FLAGS+=(${EXTRA_FLAGS:-})
   # A crashed Xvfb leaves its socket (in /tmp/.X11-unix, shared with the host
@@ -222,32 +211,28 @@ if [[ $MODE == x11 ]]; then
     on_ash rm -f "/tmp/.X11-unix/X${XDISP#:}" "/tmp/.X${XDISP#:}-lock"
   fi
   if [[ $XDISP == "$PRIVATE_XDISP" ]] && ! on_ash test -S "/tmp/.X11-unix/X${XDISP#:}"; then
-    # Detached: a background process of an attached exec keeps its session
-    # (and pm's systemd-run --wait) from ever ending. Under a shell: as the
-    # detached exec's own process, Xvfb dies within a second.
-    xvfb=(sh -c '"$@" > /dev/null 2>&1' sh Xvfb "$XDISP" -screen 0 "${XVFB_SIZE:-1600x1000}x24" +extension XInputExtension)
-    if [[ -n ${HOST:-} ]]; then setsid "${xvfb[@]}" </dev/null >/dev/null 2>&1 &
-    else pm exec -d "$CONTAINER" "${xvfb[@]}" > /dev/null; fi
+    on_ash_daemon Xvfb "$XDISP" -screen 0 "${XVFB_SIZE:-1600x1000}x24" +extension XInputExtension
     for _ in $(seq 1 20); do on_ash test -S "/tmp/.X11-unix/X${XDISP#:}" && break; sleep 0.5; done
-  fi
-  # The container sees the runtime dir, not the rest of $HOME.
-  if [[ -z ${HOST:-} && -n ${XAUTHORITY:-} && $XAUTHORITY != "$RUN_DIR"/* && -f $XAUTHORITY ]]; then
-    mkdir -p "$RUN_DIR/plutonium"
-    cp "$XAUTHORITY" "$RUN_DIR/plutonium/xauthority"
-    XAUTHORITY=$RUN_DIR/plutonium/xauthority
   fi
   start_helper
   wait_shell_servers
-  if [[ -n ${HOST:-} ]]; then
-    setsid env DISPLAY="$XDISP" "TZ=${HOST_TZ:-UTC}" "LANG=${LANG:-C.UTF-8}" "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
-  else
-    setsid $PODMAN exec -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "${ASH_ENV[@]}" "$CONTAINER" \
-      "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
-  fi
-  for _ in $(seq 1 40); do
-    [[ -S $RUN_DIR/$SOCKET ]] && curl -s "localhost:$CDP_PORT/json/version" > /dev/null && break
+  on_ash_setsid -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "${ASH_ENV[@]}" \
+    "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
+  # Until it answers, or it has exited (after 5 s: a container's exec takes a
+  # moment to start it).
+  up=
+  for i in $(seq 1 40); do
     sleep 1
+    [[ -S $RUN_DIR/$SOCKET ]] && curl -s "localhost:$CDP_PORT/json/version" > /dev/null && { up=1; break; }
+    (( i < 5 )) || ash_running || break
   done
+  if [[ -z $up ]]; then
+    log "ABORT: Ash didn't come up. The end of its log ($ASH_LOG):"
+    grep -E 'FATAL|ERROR' "$ASH_LOG" | tail -n 5 | cut -c1-300 | tee -a "$LOG"
+    stop_ash KILL
+    kill "$(cat "$RUN_DIR/plutonium/helper-$TAG.pid" 2>/dev/null)" 2>/dev/null
+    exit 1
+  fi
   sleep 2
   report_gpu
   log "Ash is up (log $ASH_LOG, helper log $HELPER_LOG). Stop it with: plutonium stop"
@@ -270,11 +255,6 @@ session_id() {
   done
 }
 session_prop() { loginctl show-session "$SID" -p "$1" --value 2>/dev/null; }
-killswitch_ok() {
-  [[ $(systemctl --user is-active plutonium-killswitch 2>/dev/null) == active ]] &&
-    journalctl --user -u plutonium-killswitch -o cat --no-pager -n 50 |
-      grep -E 'killswitch starting|listening on|lost |device not found' | tail -1 | grep -q 'listening on'
-}
 
 SID=$(session_id)
 if [[ -z $SID ]]; then
@@ -287,13 +267,8 @@ if [[ -z $(session_prop Seat) || $(session_prop VTNr) == 0 ]]; then
   exit 1
 fi
 on_ash test -S /run/dbus/system_bus_socket ||
-  { log "ABORT: no system D-Bus where Ash runs; make the container again (plutonium container stop; podman rm $CONTAINER; plutonium container create), with /run/dbus"; exit 1; }
-if ! killswitch_ok; then
-  if [[ -n ${HOLD_S:-} ]]; then log "no kill switch; Ash stops by itself after $HOLD_S s"
-  elif [[ -n ${NO_KILLSWITCH:-} ]]; then log "WARNING: no kill switch; if Ash hangs, only stopping it from elsewhere (ssh: plutonium stop --drm) gets the VT back"
-  else log "ABORT: the kill switch is not listening (plutonium killswitch install), and no --hold or --no-killswitch"; exit 1
-  fi
-fi
+  { log "ABORT: no system D-Bus where Ash runs (/run/dbus/system_bus_socket)${ASH_RUNTIME_FIX:+; $ASH_RUNTIME_FIX}"; exit 1; }
+[[ -n ${HOLD_S:-} ]] && log "Ash stops by itself after $HOLD_S s"
 # A session that isn't in front starts too: Ash waits for it with the
 # displays and input devices untouched.
 [[ $(session_prop Active) == yes ]] ||
