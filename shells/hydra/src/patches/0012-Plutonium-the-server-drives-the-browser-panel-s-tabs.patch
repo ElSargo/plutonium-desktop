@@ -1,0 +1,702 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sun, 18 Oct 2026 17:17:30 +1300
+Subject: [PATCH 12/46] Plutonium: the server drives the browser panel's tabs
+ through Plutonium's helper
+
+T3 Code 0.1 drives every browser tab from the server with Playwright: the
+desktop app's own tabs over the desktop browser channel, everything else in
+a headless Chrome that clients watch as a stream. The Plutonium shell now
+takes the desktop app's part, with the browser's real tabs:
+
+- DesktopBrowserChannel also speaks over the Plutonium helper's socket
+  (GET /v1/desktop-browser, upgraded), when the server runs in a Plutonium
+  session; it reconnects when the helper restarts, and is only available
+  while connected (a new tab otherwise starts headless at once).
+- rendersServerTabNatively: the Plutonium shell renders this server's tabs,
+  as the desktop app does.
+- previewBridge: createTab with a server tab hands that tab to the server
+  (showServerTab in the helper's shell library); several shell pages share
+  one tab. The agent's cursor arrives as pointer events, and what a page
+  opens in a new tab or window opens as another tab of its thread
+  (onOpenLink), as in the desktop app.
+- PlutoniumBrowserHost renders server tabs as ElectronBrowserHost does.
+
+Agents use T3's own preview tools, unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014h4c1E1y66mTWH3DAr58sR
+---
+ .../src/preview/DesktopBrowserChannel.ts      | 170 ++++++++++++++----
+ apps/web/src/browser/previewRuntime.ts        |   5 +-
+ .../src/plutonium/PlutoniumBrowserHost.tsx    |  83 +++++++--
+ apps/web/src/plutonium/previewBridge.ts       | 115 +++++++++++-
+ apps/web/src/plutonium/windowStore.ts         |  10 ++
+ 5 files changed, 321 insertions(+), 62 deletions(-)
+
+diff --git a/apps/server/src/preview/DesktopBrowserChannel.ts b/apps/server/src/preview/DesktopBrowserChannel.ts
+index 000fe95080..7337d6e41e 100644
+--- a/apps/server/src/preview/DesktopBrowserChannel.ts
++++ b/apps/server/src/preview/DesktopBrowserChannel.ts
+@@ -6,6 +6,10 @@
+  * desktop tab gets a loopback endpoint with an unguessable path. Its frames
+  * cross the bootstrap file descriptors to the desktop's relay, which owns the
+  * tab's `webContents.debugger`. The endpoint only bridges to that one tab.
++ *
++ * Plutonium: in a Plutonium session the same messages travel over the
++ * Plutonium helper's socket instead (`GET /v1/desktop-browser`, upgraded), and
++ * the helper relays each tab the shell shows to that tab of the real browser.
+  */
+ import * as NodeStream from "@effect/platform-node/NodeStream";
+ import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
+@@ -15,6 +19,7 @@ import {
+   type DesktopBrowserCommand as DesktopBrowserCommandType,
+ } from "@t3tools/contracts";
+ import * as Context from "effect/Context";
++import * as Data from "effect/Data";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+@@ -29,6 +34,8 @@ import * as Ndjson from "effect/encoding/Ndjson";
+ import * as NodeCrypto from "node:crypto";
+ import * as NodeNet from "node:net";
+ 
++import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++
+ import * as ServerConfig from "../config.ts";
+ import { writeAllToFileDescriptor } from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+ 
+@@ -70,17 +77,60 @@ export class DesktopBrowserChannel extends Context.Service<
+   }
+ >()("t3/preview/DesktopBrowserChannel") {}
+ 
++class PlutoniumHelperConnectError extends Data.TaggedError("PlutoniumHelperConnectError")<{
++  readonly message: string;
++}> {}
++
++/** Plutonium: the helper's desktop browser connection, after its upgrade handshake. */
++const connectPlutoniumHelper = (socketPath: string) =>
++  Effect.callback<NodeNet.Socket, PlutoniumHelperConnectError>((resume) => {
++    const socket = NodeNet.connect(socketPath);
++    let head = Buffer.alloc(0);
++    const fail = (error: { readonly message: string }) => {
++      socket.destroy();
++      resume(Effect.fail(new PlutoniumHelperConnectError({ message: error.message })));
++    };
++    const onData = (chunk: Buffer) => {
++      head = Buffer.concat([head, chunk]);
++      const end = head.indexOf("\r\n\r\n");
++      if (end < 0) return;
++      socket.off("data", onData);
++      socket.off("error", fail);
++      if (!head.subarray(0, end).toString("latin1").startsWith("HTTP/1.1 101")) {
++        fail({ message: "The Plutonium helper has no server-driven tabs." });
++        return;
++      }
++      // Nothing reads until the channel's stream does.
++      socket.pause();
++      const rest = head.subarray(end + 4);
++      if (rest.length > 0) socket.unshift(rest);
++      resume(Effect.succeed(socket));
++    };
++    socket.once("error", fail);
++    socket.on("data", onData);
++    socket.once("connect", () =>
++      socket.write(
++        "GET /v1/desktop-browser HTTP/1.1\r\nHost: plutonium\r\n" +
++          "Connection: Upgrade\r\nUpgrade: plutonium-desktop-browser\r\n\r\n",
++      ),
++    );
++    return Effect.sync(() => socket.destroy());
++  });
++
+ const make = Effect.gen(function* () {
+   const config = yield* ServerConfig.ServerConfig;
+   const inputFd = config.desktopBrowserFd;
+   const controlFd = config.desktopBrowserControlFd;
+   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
+-  const attachedTabs = new Set<string>();
++  const attachedTabs = new Map<string, DesktopTabKey>();
+   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
+   const inbound = new Map<string, Queue.Queue<string>>();
+   const writeLock = yield* Semaphore.make(1);
+ 
+-  if (inputFd === undefined || controlFd === undefined) {
++  // Plutonium: the helper's socket, when no desktop app started this server.
++  const helperSocket =
++    inputFd === undefined || controlFd === undefined ? plutoniumHelperSocket() : undefined;
++  if ((inputFd === undefined || controlFd === undefined) && helperSocket === undefined) {
+     return DesktopBrowserChannel.of({
+       available: false,
+       awaitAttached: () => Effect.succeed(false),
+@@ -92,54 +142,98 @@ const make = Effect.gen(function* () {
+     });
+   }
+ 
++  let helperConnection: NodeNet.Socket | null = null;
++  const writeLine = (line: string) =>
++    helperSocket !== undefined
++      ? Effect.sync(() => void helperConnection?.write(`${line}\n`))
++      : writeAllToFileDescriptor(controlFd!, Buffer.from(`${line}\n`));
+   const command = (message: DesktopBrowserCommandType) =>
+     writeLock.withPermits(1)(
+       encodeCommand(message).pipe(
+-        Effect.flatMap((line) => writeAllToFileDescriptor(controlFd, Buffer.from(`${line}\n`))),
++        Effect.flatMap(writeLine),
+         Effect.catchCause((cause) =>
+           Effect.logWarning("desktop browser command failed", { cause }),
+         ),
+       ),
+     );
+ 
+-  // Socket reads can be cancelled while the desktop keeps its write end open.
+-  // Filesystem reads on this pipe keep Node alive after scope shutdown.
+-  const readable = yield* Effect.acquireRelease(
+-    Effect.sync(() => new NodeNet.Socket({ fd: inputFd, readable: true, writable: false })),
+-    (stream) => Effect.sync(() => stream.destroy()),
+-  );
+-  yield* NodeStream.fromReadable<Uint8Array, Error>({
+-    evaluate: () => readable,
+-    closeOnDone: true,
+-    onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+-  }).pipe(
+-    Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
+-    Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
+-    Stream.runForEach((decoded) => {
+-      if (Option.isNone(decoded)) return Effect.void;
+-      const event = decoded.value;
+-      const key = { threadId: event.threadId, tabId: event.tabId };
+-      const id = keyOf(key);
+-      switch (event.type) {
+-        case "cdp": {
+-          const queue = inbound.get(id);
+-          return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
++  const consume = (readable: NodeNet.Socket) =>
++    NodeStream.fromReadable<Uint8Array, Error>({
++      evaluate: () => readable,
++      closeOnDone: true,
++      onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
++    }).pipe(
++      Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
++      Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
++      Stream.runForEach((decoded) => {
++        if (Option.isNone(decoded)) return Effect.void;
++        const event = decoded.value;
++        const key = { threadId: event.threadId, tabId: event.tabId };
++        const id = keyOf(key);
++        switch (event.type) {
++          case "cdp": {
++            const queue = inbound.get(id);
++            return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
++          }
++          case "attached":
++            attachedTabs.set(id, key);
++            return PubSub.publish(changes, { key, attached: true });
++          case "detached": {
++            attachedTabs.delete(id);
++            const queue = inbound.get(id);
++            return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
++              Effect.andThen(PubSub.publish(changes, { key, attached: false })),
++            );
++          }
+         }
+-        case "attached":
+-          attachedTabs.add(id);
+-          return PubSub.publish(changes, { key, attached: true });
+-        case "detached": {
++      }),
++      Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
++    );
++
++  if (helperSocket === undefined) {
++    // Socket reads can be cancelled while the desktop keeps its write end open.
++    // Filesystem reads on this pipe keep Node alive after scope shutdown.
++    const readable = yield* Effect.acquireRelease(
++      Effect.sync(() => new NodeNet.Socket({ fd: inputFd, readable: true, writable: false })),
++      (stream) => Effect.sync(() => stream.destroy()),
++    );
++    yield* consume(readable).pipe(Effect.forkScoped);
++  } else {
++    // Plutonium: the helper can start after this server, and restart; its tabs
++    // go with it.
++    const detachAll = Effect.suspend(() =>
++      Effect.forEach(
++        [...attachedTabs],
++        ([id, key]) => {
+           attachedTabs.delete(id);
+           const queue = inbound.get(id);
+           return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
+             Effect.andThen(PubSub.publish(changes, { key, attached: false })),
+           );
+-        }
+-      }
+-    }),
+-    Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
+-    Effect.forkScoped,
+-  );
++        },
++        { discard: true },
++      ),
++    );
++    yield* Effect.acquireRelease(connectPlutoniumHelper(helperSocket), (socket) =>
++      Effect.sync(() => socket.destroy()),
++    ).pipe(
++      Effect.flatMap((socket) => {
++        helperConnection = socket;
++        return consume(socket);
++      }),
++      Effect.scoped,
++      Effect.ignore,
++      Effect.andThen(
++        Effect.sync(() => {
++          helperConnection = null;
++        }),
++      ),
++      Effect.andThen(detachAll),
++      Effect.andThen(Effect.sleep(Duration.seconds(2))),
++      Effect.forever,
++      Effect.forkScoped,
++    );
++  }
+ 
+   const endpoint = (key: DesktopTabKey) =>
+     Effect.gen(function* () {
+@@ -202,7 +296,11 @@ const make = Effect.gen(function* () {
+     });
+ 
+   return DesktopBrowserChannel.of({
+-    available: true,
++    // Plutonium: only while the helper is connected; a new tab otherwise
++    // starts headless at once rather than waiting for a shell.
++    get available() {
++      return helperSocket === undefined || helperConnection !== null;
++    },
+     awaitAttached: (key, timeout) =>
+       Effect.scoped(
+         Effect.gen(function* () {
+diff --git a/apps/web/src/browser/previewRuntime.ts b/apps/web/src/browser/previewRuntime.ts
+index 435eb07bbc..9228f3bab8 100644
+--- a/apps/web/src/browser/previewRuntime.ts
++++ b/apps/web/src/browser/previewRuntime.ts
+@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
+ import type { EnvironmentId, PreviewRuntime, PreviewSessionSnapshot } from "@t3tools/contracts";
+ 
+ import { isElectron } from "~/env";
++import { isPlutoniumShell } from "~/plutonium/windowStore";
+ import { isPreviewSupportedInRuntime } from "~/previewStateStore";
+ import { appAtomRegistry } from "~/rpc/atomRegistry";
+ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+@@ -57,6 +58,8 @@ export function usePreviewAvailable(environmentId: EnvironmentId | null): boolea
+  * Whether this client draws a server tab with its own `<webview>`. The desktop
+  * app renders tabs of the server it launched, which drives them over the
+  * desktop browser channel; every other client and environment streams them.
++ * Plutonium: so does the Plutonium shell, with the browser's own tabs (the
++ * server drives them through Plutonium's helper).
+  */
+ export function rendersServerTabNatively(
+   environmentId: EnvironmentId,
+@@ -64,7 +67,7 @@ export function rendersServerTabNatively(
+   snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
+ ): boolean {
+   return (
+-    isElectron &&
++    (isElectron || isPlutoniumShell()) &&
+     snapshot?.runtime === "server" &&
+     primaryEnvironmentId !== null &&
+     environmentId === primaryEnvironmentId
+diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+index bcebb7d00f..f6efa993f9 100644
+--- a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
++++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+@@ -4,7 +4,8 @@
+ // open preview session gets a browser tab (previewBridge.ts) shown where the
+ // right panel's browser surface is, with an <embed> instead of a <webview>.
+ // The tab belongs to the browser: removing the <embed> only hides it, and the
+-// next one shows it again.
++// next one shows it again. As in the Electron build, this server's tabs
++// render here and the server drives them; other environments' stream.
+ 
+ import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+ import {
+@@ -12,6 +13,7 @@ import {
+   type PreviewViewportSetting,
+   type ScopedThreadRef,
+ } from "@t3tools/contracts";
++import { useAtomValue } from "@effect/atom-react";
+ import { createElement, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+ import { useShallow } from "zustand/react/shallow";
+ 
+@@ -19,7 +21,10 @@ import {
+   resolveBrowserSurfacePanelRect,
+   useBrowserSurfaceStore,
+ } from "~/browser/browserSurfaceStore";
++import { useBrowserPointerStore } from "~/browser/browserPointerStore";
+ import { acquireDesktopTab } from "~/browser/desktopTabLifetime";
++import { openUrlInPreview } from "~/browser/openFileInPreview";
++import { rendersServerTabNatively } from "~/browser/previewRuntime";
+ import {
+   browserViewportSettingKey,
+   resolveBrowserViewportLayout,
+@@ -28,31 +33,71 @@ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
+ import { useClientSettingsHydrated } from "~/hooks/useSettings";
+ import { useActivePreviewSessions } from "~/previewStateStore";
++import { previewEnvironment } from "~/state/preview";
++import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
++import { useAtomCommand } from "~/state/use-atom-command";
+ 
+ import { isBlank, plutoniumPreview, type BrokerTab } from "./previewBridge";
+ 
+ export function PlutoniumBrowserHost() {
+   const previewByThreadKey = useActivePreviewSessions();
++  const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
+   const sessions = useMemo(
+     () =>
+       Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
+         const threadRef = parseScopedThreadKey(threadKey);
+         return threadRef
+-          ? Object.values(previewState.sessions).map((snapshot) => ({
+-              threadRef,
+-              tabId: snapshot.tabId,
+-              runtimeTabId: previewRuntimeTabId(
++          ? Object.values(previewState.sessions)
++              .filter(
++                (snapshot) =>
++                  snapshot.runtime !== "server" ||
++                  rendersServerTabNatively(threadRef.environmentId, primaryEnvironmentId, snapshot),
++              )
++              .map((snapshot) => ({
+                 threadRef,
+-                previewState.serverEpoch,
+-                snapshot.tabId,
+-              ),
+-              url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
+-              viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
+-            }))
++                tabId: snapshot.tabId,
++                runtimeTabId: previewRuntimeTabId(
++                  threadRef,
++                  previewState.serverEpoch,
++                  snapshot.tabId,
++                ),
++                url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
++                viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
++                serverDriven: snapshot.runtime === "server",
++                profileId: snapshot.profileId,
++              }))
+           : [];
+       }),
+-    [previewByThreadKey],
++    [previewByThreadKey, primaryEnvironmentId],
+   );
++
++  // The agent's cursor in tabs the server drives.
++  useEffect(
++    () =>
++      plutoniumPreview()?.onPointerEvent((event) => {
++        useBrowserPointerStore.getState().apply(event);
++      }),
++    [],
++  );
++
++  // What a tab's page opens in a new tab or window opens as another tab of
++  // its thread, with the same profile.
++  const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: true });
++  useEffect(() => {
++    const byRuntimeTabId = new Map(sessions.map((session) => [session.runtimeTabId, session]));
++    return plutoniumPreview()?.onOpenLink(({ tabId, url, background }) => {
++      const source = byRuntimeTabId.get(tabId);
++      if (!source) return;
++      void openUrlInPreview({
++        threadRef: source.threadRef,
++        url,
++        openPreview,
++        profileId: source.profileId,
++        background,
++      });
++    });
++  }, [openPreview, sessions]);
++
+   if (!plutoniumPreview()) return null;
+   return (
+     <div className="contents" data-plutonium-browser-host>
+@@ -78,8 +123,11 @@ function PlutoniumBrowserTab(props: {
+   readonly runtimeTabId: string;
+   readonly url: string | null;
+   readonly viewport: PreviewViewportSetting;
++  /** The server drives this tab (its own tabs); else it is this page's. */
++  readonly serverDriven: boolean;
++  readonly profileId?: string | undefined;
+ }) {
+-  const { threadRef, tabId, runtimeTabId, url, viewport } = props;
++  const { threadRef, tabId, runtimeTabId, url, viewport, serverDriven } = props;
+   const clientSettingsHydrated = useClientSettingsHydrated();
+   const [initialUrl] = useState(url);
+   const presentation = useBrowserSurfaceStore(
+@@ -96,12 +144,15 @@ function PlutoniumBrowserTab(props: {
+     (state) => (state.activityByTabId[runtimeTabId] ?? 0) > 0,
+   );
+   const tab = useBrokerTab(runtimeTabId);
+-  usePreviewBridge({ threadRef, tabId, runtimeTabId });
++  usePreviewBridge({ threadRef, tabId, runtimeTabId, serverDriven });
+ 
+   // The tab lives while the session does; the first URL is the session's.
+   useEffect(() => {
+     if (!clientSettingsHydrated) return;
+-    const lease = acquireDesktopTab(runtimeTabId);
++    const lease = acquireDesktopTab(
++      runtimeTabId,
++      serverDriven ? { threadId: threadRef.threadId, tabId } : undefined,
++    );
+     let disposed = false;
+     void lease.ready.then(() => {
+       // An adopted tab (after a reload of this page) already shows its page.
+@@ -114,7 +165,7 @@ function PlutoniumBrowserTab(props: {
+       disposed = true;
+       lease.release();
+     };
+-  }, [clientSettingsHydrated, initialUrl, runtimeTabId]);
++  }, [clientSettingsHydrated, initialUrl, runtimeTabId, serverDriven, tabId, threadRef.threadId]);
+ 
+   const active = presentation.visible && presentation.rect !== null;
+   if (!tab || (!active && !backgroundActivity)) return null;
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+index 159c33ba99..4ed53a417f 100644
+--- a/apps/web/src/plutonium/previewBridge.ts
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -8,19 +8,27 @@
+ // (PlutoniumBrowserHost). This file implements the DesktopPreviewBridge
+ // contract on top of the broker, so the rest of the preview UI is unchanged.
+ //
++// The server drives its tabs itself, as it drives the Electron build's: the
++// shell shows the tab, and Plutonium's helper hands the server that one tab's
++// DevTools (showServerTab). Agents reach it through the server's browser tools.
++//
+ // Tabs are tagged with their thread's tag, which is how Plutonium's helper
+ // lets that thread's agent reach them. A tab from elsewhere (another shell's,
+ // or nobody's) can be imported: it gets the thread's tag and backs a new
+-// preview tab, and closing that preview takes the tag off again. A tab's page
+-// can't open windows of its own: like the Electron build, what it opens loads
+-// in the same tab.
++// preview tab, and closing that preview takes the tag off again. What a tab's
++// page opens in a new tab or window opens as another tab of its thread, as
++// in the Electron build.
+ import type {
+   DesktopPreviewBridge,
+   DesktopPreviewNavStatus,
++  DesktopPreviewOpenLinkEvent,
++  DesktopPreviewPointerEvent,
++  DesktopPreviewTabDefaults,
+   DesktopPreviewTabState,
+ } from "@t3tools/contracts";
+ 
+ import { threadIdOfTag, threadTag } from "./threadTag";
++import { plutoniumShell } from "./windowStore";
+ 
+ /** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
+ export interface BrokerTab {
+@@ -59,6 +67,9 @@ interface TabBroker extends EventTarget {
+   updateTabTags?(tabId: number, add: readonly string[], remove?: readonly string[]): Promise<void>;
+ }
+ 
++/** The server's name for a tab it drives. */
++type ServerTab = NonNullable<DesktopPreviewTabDefaults["serverTab"]>;
++
+ /** A tab's tags (before the browser had tags: just its creation tag). */
+ export function tabTags(tab: BrokerTab): readonly string[] {
+   return tab.tags ?? (tab.tag ? [tab.tag] : []);
+@@ -119,6 +130,12 @@ class PlutoniumPreview {
+     (tabId: string, state: DesktopPreviewTabState) => void
+   >();
+   private readonly tabListeners = new Set<() => void>();
++  private readonly openLinkListeners = new Set<(event: DesktopPreviewOpenLinkEvent) => void>();
++  private readonly pointerListeners = new Set<(event: DesktopPreviewPointerEvent) => void>();
++  private pointerSequence = 0;
++  private listeningForPointer = false;
++  /** The server tabs among the preview tabs, by runtime tab id. */
++  private readonly serverTabs = new Map<string, ServerTab>();
+   /**
+    * Imported tabs waiting for their preview tab, by thread tag: the broker
+    * tab, and the server's preview tab id once known (any new one otherwise).
+@@ -157,7 +174,7 @@ class PlutoniumPreview {
+ 
+   private update(entry: BrokerTab): void {
+     this.tabs.set(entry.id, entry);
+-    // What a preview's page opens loads in the preview itself.
++    // What a preview's page opens becomes another preview tab of its thread.
+     const opener =
+       entry.openedBy === "page"
+         ? (this.pendingPopups.get(entry.id) ??
+@@ -169,7 +186,12 @@ class PlutoniumPreview {
+       } else {
+         this.pendingPopups.delete(entry.id);
+         this.broker.tabCommand(entry.id, "close");
+-        if (this.runtimeIds.has(opener)) void this.broker.navigateTab(opener, entry.url);
++        const source = this.runtimeIds.get(opener);
++        if (source !== undefined) {
++          for (const listener of this.openLinkListeners) {
++            listener({ tabId: source, url: entry.url, background: false });
++          }
++        }
+       }
+       return;
+     }
+@@ -260,7 +282,38 @@ class PlutoniumPreview {
+     }
+   }
+ 
+-  async createTab(runtimeTabId: string): Promise<void> {
++  async createTab(runtimeTabId: string, serverTab?: ServerTab): Promise<void> {
++    if (serverTab) this.serverTabs.set(runtimeTabId, serverTab);
++    await this.attachTab(runtimeTabId);
++    await this.showServerTab(runtimeTabId);
++  }
++
++  /**
++   * Lets the server drive the tab behind `runtimeTabId`, if it is a server
++   * tab. Another shell page may show it already (several shells run at once):
++   * then this page shows that page's tab too.
++   */
++  private async showServerTab(runtimeTabId: string): Promise<void> {
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    const id = this.ids.get(runtimeTabId);
++    if (!serverTab || id === undefined) return;
++    const shell = await plutoniumShell();
++    const shown = await shell?.showServerTab(id, serverTab).catch((error: unknown) => {
++      console.warn(`Plutonium: the server can't drive tab ${id}`, error);
++      return id;
++    });
++    if (shown === undefined || shown === id || this.ids.get(runtimeTabId) !== id) return;
++    this.runtimeIds.delete(id);
++    this.ids.set(runtimeTabId, shown);
++    this.runtimeIds.set(shown, runtimeTabId);
++    this.storeIds();
++    this.broker.tabCommand(id, "close");
++    const entry =
++      this.tabs.get(shown) ?? (await this.broker.getTabs()).find((tab) => tab.id === shown);
++    if (entry) this.update(entry);
++  }
++
++  private async attachTab(runtimeTabId: string): Promise<void> {
+     if (this.ids.has(runtimeTabId)) return;
+     const tag = threadOf(runtimeTabId);
+     const pending = this.imports.get(tag);
+@@ -306,6 +359,9 @@ class PlutoniumPreview {
+   }
+ 
+   closeTab(runtimeTabId: string): void {
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    this.serverTabs.delete(runtimeTabId);
++    if (serverTab) void plutoniumShell().then((shell) => shell?.releaseServerTab(serverTab));
+     const id = this.ids.get(runtimeTabId);
+     if (id === undefined) return;
+     this.ids.delete(runtimeTabId);
+@@ -332,7 +388,7 @@ class PlutoniumPreview {
+   }
+ 
+   async navigate(runtimeTabId: string, url: string): Promise<void> {
+-    if (!this.ids.has(runtimeTabId)) await this.createTab(runtimeTabId);
++    if (!this.ids.has(runtimeTabId)) await this.attachTab(runtimeTabId);
+     await this.broker.navigateTab(this.require(runtimeTabId), url);
+   }
+ 
+@@ -345,6 +401,44 @@ class PlutoniumPreview {
+     return this.broker.snapshotTab(this.require(runtimeTabId));
+   }
+ 
++  // Where the agent is about to click in a tab the server drives.
++  private listenForPointer(): void {
++    void plutoniumShell().then((shell) =>
++      shell?.addEventListener("agentpointer", (event) => {
++        const pointer = (
++          event as CustomEvent<ServerTab & { phase: "move" | "click"; x: number; y: number }>
++        ).detail;
++        const runtimeTabId = [...this.serverTabs].find(
++          ([, tab]) => tab.threadId === pointer.threadId && tab.tabId === pointer.tabId,
++        )?.[0];
++        if (runtimeTabId === undefined) return;
++        const pointerEvent: DesktopPreviewPointerEvent = {
++          tabId: runtimeTabId,
++          phase: pointer.phase,
++          x: pointer.x,
++          y: pointer.y,
++          sequence: ++this.pointerSequence,
++          createdAt: new Date().toISOString(),
++        };
++        for (const listener of this.pointerListeners) listener(pointerEvent);
++      }),
++    );
++  }
++
++  onOpenLink(listener: (event: DesktopPreviewOpenLinkEvent) => void): () => void {
++    this.openLinkListeners.add(listener);
++    return () => this.openLinkListeners.delete(listener);
++  }
++
++  onPointerEvent(listener: (event: DesktopPreviewPointerEvent) => void): () => void {
++    if (!this.listeningForPointer) {
++      this.listeningForPointer = true;
++      this.listenForPointer();
++    }
++    this.pointerListeners.add(listener);
++    return () => this.pointerListeners.delete(listener);
++  }
++
+   onStateChange(listener: (tabId: string, state: DesktopPreviewTabState) => void): () => void {
+     this.stateListeners.add(listener);
+     // Like the Electron bridge, a new listener learns the current state.
+@@ -396,7 +490,7 @@ export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
+   const p = plutoniumPreview();
+   if (!p) return null;
+   return {
+-    createTab: (tabId) => p.createTab(tabId),
++    createTab: (tabId, defaults) => p.createTab(tabId, defaults?.serverTab),
+     closeTab: async (tabId) => p.closeTab(tabId),
+     registerWebview: ignored,
+     navigate: (tabId, url) => p.navigate(tabId, url),
+@@ -407,6 +501,7 @@ export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
+     zoomIn: ignored,
+     zoomOut: ignored,
+     resetZoom: ignored,
++    setZoomFactor: ignored,
+     setColorScheme: ignored,
+     setAudioMuted: ignored,
+     openDevTools: ignored,
+@@ -416,6 +511,7 @@ export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
+     listBrowserImportSources: async () => [],
+     importBrowserCookies: unsupported("Importing cookies"),
+     setAnnotationTheme: ignored,
++    setAnnotationSendEnabled: ignored,
+     pickElement: unsupported("Picking elements"),
+     cancelPickElement: ignored,
+     captureScreenshot: unsupported("Saving screenshots"),
+@@ -430,6 +526,7 @@ export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
+       onFrame: () => () => undefined,
+     },
+     onStateChange: (listener) => p.onStateChange(listener),
+-    onPointerEvent: () => () => undefined,
++    onPointerEvent: (listener) => p.onPointerEvent(listener),
++    onOpenLink: (listener) => p.onOpenLink(listener),
+   };
+ }
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 6f64dd1ffd..7dc9fd919c 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -83,6 +83,16 @@ interface PlutoniumShell extends EventTarget {
+   readonly groups?: ReadonlyMap<string, PlutoniumGroup>;
+   tagWindow?(windowId: number, add: readonly string[], remove?: readonly string[]): Promise<void>;
+   setGroups?(groups: readonly { tag: string; label: string }[]): void;
++  /**
++   * Lets the server drive browser tab `browserTabId`, shown here as its tab
++   * `serverTab`; resolves to the browser tab to show (another shell page's, if
++   * it shows the server's tab already).
++   */
++  showServerTab(
++    browserTabId: number,
++    serverTab: { readonly threadId: string; readonly tabId: string },
++  ): Promise<number>;
++  releaseServerTab(serverTab: { readonly threadId: string; readonly tabId: string }): Promise<void>;
+ }
+ 
+ interface PlutoniumWindowState {

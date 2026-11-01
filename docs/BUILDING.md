@@ -32,13 +32,13 @@ plutonium chromium build      # out/Plutonium/chrome
 
 - **`fetch`** clones depot_tools and writes a `.gclient` for Chromium with `target_os = ['chromeos']`. It then syncs straight to the pinned revision with no history and 4 jobs (googlesource rate-limits the default), and runs the hooks. If it stops partway, run it again; it resumes.
 - **`patch`** refuses to touch a checkout with uncommitted changes. Run it again with `--force` to reset the `plutonium` branch.
-- **`build`** copies `chromium/args.gn` into the build dir and runs `autoninja`. Incremental builds after that take seconds to minutes. It's a development build: faster to rebuild, and it stops on internal assertion failures. `--release` builds `out/Release` with `args.release.gn`, which is what the prebuilt image holds. It runs one compile job per 2 GiB of RAM (`BUILD_JOBS` in plutonium.env changes that), and if memory still runs out, the kernel kills the build rather than a running session.
+- **`build`** copies `chromium/args.gn` into the build dir and runs `autoninja`. Incremental builds after that take seconds to minutes. It's a development build: faster to rebuild, and it stops on internal assertion failures. `--release` builds `out/Release` with `args.release.gn`, which is what the prebuilt image holds. `--official` builds `out/Official` with `args.official.gn`: the release build with ThinLTO and an AFDO profile, for published tarballs, and several times slower to build. It runs one compile job per 2 GiB of RAM (`BUILD_JOBS` in plutonium.env changes that), and if memory still runs out, the kernel kills the build rather than a running session.
 
-`plutonium doctor` checks each step. Then go on with INSTALL.md's kill switch step. [DEVELOPING.md](DEVELOPING.md) covers changing Chromium, and publishing the prebuilt image.
+`plutonium doctor` checks each step. Then go on with INSTALL.md's first session. [DEVELOPING.md](DEVELOPING.md) covers changing Chromium, and publishing the prebuilt image.
 
 ## On the host, without the container
 
-Nix only for now (`HOST=1`): a release build, from the prebuilt image or your own `out/Release`, with its libraries from your system's nixpkgs (`nix/chrome.nix`). Ash then runs as a normal host process, with no user namespace in between. Podman is only needed to copy the binary out of the prebuilt image:
+Nix only for now (`HOST=1`): a release build, from the prebuilt image or your own `out/Release`, with its libraries from your system's nixpkgs (`dev/nix/chrome.nix`). Ash then runs as a normal host process, with no user namespace in between. Podman is only needed to copy the binary out of the prebuilt image:
 
 ```
 plutonium image pull          # with PREBUILT=1; or: plutonium chromium build --release

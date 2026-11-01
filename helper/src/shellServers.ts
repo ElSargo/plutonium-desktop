@@ -11,7 +11,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { expand, logPath, serverPort, shellDir, type ShellContext, type ShellManifest } from "./shells.ts";
+import { expand, logPath, serverPort, shellDir, shellEnv, type ShellContext, type ShellManifest } from "./shells.ts";
 
 export type ServerState = "stopped" | "starting" | "running" | "restarting" | "failed";
 
@@ -188,7 +188,7 @@ export class ShellServer {
     mkdirSync(dirname(log), { recursive: true });
     mkdirSync(dirname(this.pidFile), { recursive: true });
     const fd = openSync(log, "a");
-    const env: NodeJS.ProcessEnv = { ...process.env };
+    const env = shellEnv(this.context);
     for (const name of THREAD_VARIABLES) delete env[name];
     for (const [name, value] of Object.entries(server.env ?? {})) env[name] = expand(value, this.manifest, this.context);
     env[MARKER_VARIABLE] = this.marker;

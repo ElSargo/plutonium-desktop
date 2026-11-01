@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Sun, 18 Oct 2026 20:31:31 +1300
+Subject: [PATCH 13/46] Plutonium: pair from a browser over the addresses the
+ server reports
+
+T3's pairing QR lists only the desktop app's endpoints, so a browser on
+loopback (the Plutonium shell) had none and showed no QR code. Without a
+desktop bridge, Settings, Connections now uses ServerConfig.directEndpoints:
+the server's LAN and tailnet addresses, and its Tailscale Serve name once it
+answers. A loopback server with Tailscale Serve says so instead of "only this
+machine can connect".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../settings/ConnectionsSettings.tsx          | 17 +++++-
+ apps/web/src/plutonium/directEndpoints.ts     | 56 +++++++++++++++++++
+ 2 files changed, 71 insertions(+), 2 deletions(-)
+ create mode 100644 apps/web/src/plutonium/directEndpoints.ts
+
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 1ff650a9b7..826ba34e2a 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -1,4 +1,5 @@
+ import { SessionPermissions } from "./SessionPermissions";
++import { serverDirectAdvertisedEndpoints } from "../../plutonium/directEndpoints";
+ import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@t3tools/shared/authScopeOptions";
+ import {
+   ChevronRightIcon,
+@@ -2299,8 +2300,18 @@ export function ConnectionsSettings() {
+     desktopBridge !== undefined &&
+     (isLoadingDiscoveredSshHosts || unsavedDiscoveredSshHosts.length > 0);
+   const desktopServerExposureState = desktopNetworkAccess.data?.serverExposureState ?? null;
++  // Plutonium: a browser has no desktop endpoints; it pairs over the addresses
++  // the server reports.
++  const serverDirectEndpoints = primaryEnvironment?.serverConfig?.directEndpoints;
++  const browserAdvertisedEndpoints = useMemo(
++    () =>
++      desktopBridge
++        ? EMPTY_ADVERTISED_ENDPOINTS
++        : serverDirectAdvertisedEndpoints(serverDirectEndpoints),
++    [desktopBridge, serverDirectEndpoints],
++  );
+   const desktopAdvertisedEndpoints =
+-    desktopNetworkAccess.data?.advertisedEndpoints ?? EMPTY_ADVERTISED_ENDPOINTS;
++    desktopNetworkAccess.data?.advertisedEndpoints ?? browserAdvertisedEndpoints;
+   const desktopServerExposureError =
+     desktopServerExposureMutationError ?? desktopNetworkAccess.error;
+   const desktopAccessManagementError =
+@@ -3589,7 +3600,9 @@ export function ConnectionsSettings() {
+           : currentAuthPolicy === "remote-reachable"
+             ? "Remote access is already configured. Change network exposure where the server starts."
+             : currentAuthPolicy === "loopback-browser"
+-              ? "Only this machine can connect. Restart with a non-loopback host for remote pairing."
++              ? tailscaleHttpsEndpoint
++                ? `Other devices on your tailnet can connect through Tailscale HTTPS (${tailscaleHttpsEndpoint.httpBaseUrl}). Restart with a non-loopback host for LAN pairing.`
++                : "Only this machine can connect. Restart with a non-loopback host, or with Tailscale Serve, for remote pairing."
+               : "Network exposure information is unavailable."
+       }
+       control={
+diff --git a/apps/web/src/plutonium/directEndpoints.ts b/apps/web/src/plutonium/directEndpoints.ts
+new file mode 100644
+index 0000000000..ae69c8fc68
+--- /dev/null
++++ b/apps/web/src/plutonium/directEndpoints.ts
+@@ -0,0 +1,56 @@
++/**
++ * Pairing endpoints for a browser client, from the addresses the server
++ * reports (ServerConfig.directEndpoints).
++ *
++ * T3's pairing QR only lists the desktop app's own endpoints, so a browser on
++ * loopback (the Plutonium shell) had nothing to put in it. The server lists
++ * its LAN and tailnet addresses, and its Tailscale Serve name once that answers,
++ * which is what another device can dial.
++ */
++import type { AdvertisedEndpoint, ServerDirectEndpoint } from "@t3tools/contracts";
++import { createAdvertisedEndpoint } from "@t3tools/shared/advertisedEndpoint";
++
++const SERVER_ENDPOINT_PROVIDER = {
++  id: "server",
++  label: "Server",
++  kind: "private-network",
++  isAddon: false,
++} as const;
++
++const TAILSCALE_ENDPOINT_PROVIDER = {
++  id: "tailscale",
++  label: "Tailscale",
++  kind: "private-network",
++  isAddon: true,
++} as const;
++
++export function serverDirectAdvertisedEndpoints(
++  directEndpoints: ReadonlyArray<ServerDirectEndpoint> | undefined,
++): ReadonlyArray<AdvertisedEndpoint> {
++  return (directEndpoints ?? []).map((endpoint) => {
++    const https = endpoint.httpBaseUrl.startsWith("https:");
++    if (endpoint.kind === "tailnet" && https) {
++      // The id prefix is the one T3 gives the desktop app's Tailscale Serve
++      // endpoint, so the page shows it as it does there.
++      return createAdvertisedEndpoint({
++        provider: TAILSCALE_ENDPOINT_PROVIDER,
++        source: "server",
++        id: `tailscale-magicdns:${endpoint.httpBaseUrl}`,
++        label: "Tailscale HTTPS",
++        httpBaseUrl: endpoint.httpBaseUrl,
++        reachability: "private-network",
++        hostedHttpsCompatibility: "compatible",
++        description: "HTTPS endpoint served by Tailscale Serve.",
++      });
++    }
++    return createAdvertisedEndpoint({
++      provider:
++        endpoint.kind === "tailnet" ? TAILSCALE_ENDPOINT_PROVIDER : SERVER_ENDPOINT_PROVIDER,
++      source: "server",
++      id: `server-${endpoint.kind}:${endpoint.httpBaseUrl}`,
++      label: endpoint.kind === "tailnet" ? "Tailscale IP" : "Local network",
++      httpBaseUrl: endpoint.httpBaseUrl,
++      reachability: endpoint.kind === "tailnet" ? "private-network" : "lan",
++    });
++  });
++}

@@ -36,7 +36,7 @@ Everything it starts is in the thread `niri:desktop`. The full list of binds is 
 - **Each thread** can launch apps, open web pages as tabs, and start Claude Code with the thread's tools.
 - **"Elsewhere"** lists windows and tabs from other shells; a click brings one into the current thread.
 
-**Hydra** (`plutonium run t3`), built on [T3 Code](https://github.com/pingdotgg/t3code): coding agents' chat threads. Each thread's apps, terminals and browser tabs are in its right panel ([frontends/t3code](../frontends/t3code/README.md)).
+**Hydra** (`plutonium run hydra`), built on [T3 Code](https://github.com/pingdotgg/t3code): coding agents' chat threads. Each thread's apps, terminals and browser tabs are in its right panel ([frontends/t3code](../shells/hydra/README.md)).
 - Alt+1…9 and Ctrl+Tab move between panel tabs.
 - Ctrl+T opens a browser tab.
 - Super+Space opens the app launcher.

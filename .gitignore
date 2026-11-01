@@ -6,9 +6,12 @@
 /.plutonium-slot
 # Run logs
 /logs/
-# T3 Code checkout (plutonium t3 fetch)
-/frontends/t3code/checkout/
+# Hydra's T3 Code checkout (plutonium hydra fetch), and its release build
+/shells/hydra/src/checkout/
+/shells/hydra/build/
 __pycache__/
 *.pyc
 # The helper's dependencies (npm ci, at session start)
 /helper/node_modules/
+# Release bundles (plutonium bundle build)
+/dist/

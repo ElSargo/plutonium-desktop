@@ -15,7 +15,7 @@
 #       --t3-ref REF  the T3 Code commit to build and serve (default: the T3
 #                     checkout's plutonium branch); built in its own worktree
 #       --t3 DIR      serve this T3 Code checkout as it is instead (a fixer's
-#                     worktree, already built: plutonium t3 build)
+#                     worktree, already built: plutonium hydra build)
 #       --vt N        the spare VT (default 5; not 6, logind's reserved VT, unless the
 #                     user is logged in there: its getty would replace ours). If the user is logged in on it,
 #                     the session runs in that login; otherwise in one of its own.
@@ -31,6 +31,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MAIN=$(dirname "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)")
 # shellcheck source=../../lib/common.sh
 . "$MAIN/lib/common.sh"
+. "$MAIN/shells/hydra/lib/env.sh"   # T3CODE_DIR, T3_HOME
 name=agent-tests
 [[ ${1:-} == --name ]] && { name=$2; shift 2; }
 WT=$MAIN/.worktrees/$name
@@ -84,16 +85,16 @@ T3_TAILSCALE=
 EOF
   if [[ $t3dir == "$T3WT" && $(cat "$STATE/t3-built" 2>/dev/null) != "$(git -C "$T3WT" rev-parse HEAD)" ]]; then
     say "building T3 Code $(git -C "$T3WT" log --oneline -1)"
-    "$WT/bin/plutonium" t3 build > "$STATE/t3-build.log" 2>&1 || die "T3 Code didn't build ($STATE/t3-build.log)"
+    "$WT/bin/plutonium" hydra build > "$STATE/t3-build.log" 2>&1 || die "T3 Code didn't build ($STATE/t3-build.log)"
     git -C "$T3WT" rev-parse HEAD > "$STATE/t3-built"
   fi
   # A fixer's checkout: rebuild its web app if it's older than the last commit.
   if [[ $t3dir != "$T3WT" ]] && { [[ ! -f $t3dir/apps/web/dist/index.html ]] ||
        (( $(stat -c %Y "$t3dir/apps/web/dist/index.html") < $(git -C "$t3dir" log -1 --format=%ct) )); }; then
     say "building T3 Code in $t3dir (its build is older than its last commit)"
-    "$WT/bin/plutonium" t3 build > "$STATE/t3-build.log" 2>&1 || die "T3 Code didn't build ($STATE/t3-build.log)"
+    "$WT/bin/plutonium" hydra build > "$STATE/t3-build.log" 2>&1 || die "T3 Code didn't build ($STATE/t3-build.log)"
   fi
-  [[ -f $t3dir/apps/web/dist/index.html ]] || die "$t3dir isn't built (plutonium t3 build)"
+  [[ -f $t3dir/apps/web/dist/index.html ]] || die "$t3dir isn't built (plutonium hydra build)"
 
   # The same provider accounts as the user's T3 Code (only those settings), so
   # testers can run on whichever isn't at its limit (run.sh --instance).
@@ -146,7 +147,7 @@ EOF
   # turned up mid-run and asked them to write docs).
   systemd-run --user --unit="$UNIT" --collect -p WorkingDirectory="$WT" --setenv=PATH="$PATH" \
     --setenv=ENABLE_CLAUDEAI_MCP_SERVERS=false \
-    "$WT/bin/plutonium" run --vt "tty$vt" t3 > /dev/null
+    "$WT/bin/plutonium" run --vt "tty$vt" hydra > /dev/null
   sleep 3
   sudo -n chvt "$vt"
 
@@ -177,7 +178,7 @@ logged_in() {
 down_session() {
   [[ -d $WT ]] || return 0
   "$WT/bin/plutonium" stop --drm > /dev/null 2>&1 || true
-  "$WT/bin/plutonium" t3 stop > /dev/null 2>&1 || true
+  "$WT/bin/plutonium" shells stop hydra > /dev/null 2>&1 || true
   systemctl --user stop "$UNIT" 2>/dev/null || true
 }
 

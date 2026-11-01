@@ -1,0 +1,1011 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Wed, 28 Oct 2026 23:21:09 +1300
+Subject: [PATCH 41/46] Plutonium: remote clients see native windows
+
+Away from the desktop (another machine's browser) the Apps panel has no
+<native-window>. The server streams windows instead, through the helper's
+socket: /api/window-stream/ws sends the window list, and with ?windowId the
+window's JPEG frames; the client sends mouse and key input back
+(preview:operate). The web app fills the window store from that list outside
+the shell and draws a window's tab on a canvas (RemoteWindowView).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../server/src/plutonium/windowStream.test.ts |  32 ++
+ apps/server/src/plutonium/windowStream.ts     | 304 ++++++++++++++++++
+ apps/server/src/server.ts                     |   2 +
+ apps/web/src/plutonium/PlutoniumWindows.tsx   |  56 ++--
+ apps/web/src/plutonium/RemoteWindowView.tsx   | 218 +++++++++++++
+ apps/web/src/plutonium/remoteWindows.test.ts  |  64 ++++
+ apps/web/src/plutonium/remoteWindows.ts       | 187 +++++++++++
+ apps/web/src/plutonium/windowStore.ts         |   7 +-
+ 8 files changed, 847 insertions(+), 23 deletions(-)
+ create mode 100644 apps/server/src/plutonium/windowStream.test.ts
+ create mode 100644 apps/server/src/plutonium/windowStream.ts
+ create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
+ create mode 100644 apps/web/src/plutonium/remoteWindows.test.ts
+ create mode 100644 apps/web/src/plutonium/remoteWindows.ts
+
+diff --git a/apps/server/src/plutonium/windowStream.test.ts b/apps/server/src/plutonium/windowStream.test.ts
+new file mode 100644
+index 0000000000..2d31d61b1c
+--- /dev/null
++++ b/apps/server/src/plutonium/windowStream.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from "vitest";
++
++import { FrameReader, inputRequest } from "./windowStream.ts";
++
++const frame = (jpeg: string, width: number, height: number) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(jpeg.length, 0);
++  header.writeUInt16BE(width, 4);
++  header.writeUInt16BE(height, 6);
++  return Buffer.concat([header, Buffer.from(jpeg)]);
++};
++
++describe("window stream", () => {
++  it("splits the helper's frames however they arrive", () => {
++    const bytes = Buffer.concat([frame("first", 640, 480), frame("2", 1, 1)]);
++    for (let cut = 0; cut <= bytes.length; cut++) {
++      const reader = new FrameReader();
++      const got = [...reader.push(bytes.subarray(0, cut)), ...reader.push(bytes.subarray(cut))];
++      expect(got.map(String)).toEqual(["first", "2"]);
++    }
++  });
++
++  it("forwards only mouse and key input", () => {
++    const event = { type: "mousePressed", x: 1, y: 2, button: "left", clickCount: 1 };
++    expect(inputRequest({ type: "mouse", event })).toEqual({ path: "mouse", body: event });
++    const events = [{ type: "keyDown", code: "KeyA" }];
++    expect(inputRequest({ type: "keys", events })).toEqual({ path: "keys", body: { events } });
++    expect(inputRequest({ type: "keys", events: "KeyA" })).toBeNull();
++    expect(inputRequest({ type: "close" })).toBeNull();
++    expect(inputRequest(null)).toBeNull();
++  });
++});
+diff --git a/apps/server/src/plutonium/windowStream.ts b/apps/server/src/plutonium/windowStream.ts
+new file mode 100644
+index 0000000000..db155515dc
+--- /dev/null
++++ b/apps/server/src/plutonium/windowStream.ts
+@@ -0,0 +1,304 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - the Plutonium helper is a Unix socket, polled from Node callbacks
++/**
++ * Plutonium: native windows for clients away from the desktop.
++ *
++ * The Plutonium shell shows a thread's windows with <native-window> elements,
++ * which only exist in the session's own browser. Another machine's browser
++ * gets them from here, through the helper (its Unix socket):
++ *
++ *   /api/window-stream/ws               {type:"windows", windows} whenever
++ *                                       the window list changes.
++ *   /api/window-stream/ws?windowId=N    the window's frames, as binary JPEG
++ *                                       messages; `maxWidth`, `maxHeight`,
++ *                                       `quality`. The client sends
++ *                                       {type:"mouse", event} and
++ *                                       {type:"keys", events} (the helper's
++ *                                       WindowMouseEvent, WindowKeyEvent).
++ *
++ * Watching needs orchestration:read; input needs preview:operate, as driving
++ * a preview does. A closed window closes the socket with WINDOW_GONE_CODE;
++ * no helper (or one without these routes), with WINDOWS_UNAVAILABLE_CODE.
++ */
++import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
++import { AuthOrchestrationReadScope, AuthPreviewOperateScope } from "@t3tools/contracts";
++import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Queue from "effect/Queue";
++import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
++import * as Socket from "effect/socket/Socket";
++import * as NodeHttp from "node:http";
++
++import { authenticateMediaRequest } from "../auth/http.ts";
++
++export const WINDOW_STREAM_ROUTE_PREFIX = "/api/window-stream";
++/** Matches the client's. */
++export const WINDOW_GONE_CODE = 4404;
++export const WINDOWS_UNAVAILABLE_CODE = 4503;
++
++const LIST_INTERVAL_MS = 1000;
++const REQUEST_TIMEOUT_MS = 10_000;
++const MAX_SOCKET_BUFFER_BYTES = 4 * 1024 * 1024;
++const FRAME_HEADER_BYTES = 8;
++const textDecoder = new TextDecoder();
++
++/** Splits the helper's frame stream (helper/src/windowStream.ts) into JPEGs. */
++export class FrameReader {
++  private pending: Buffer = Buffer.alloc(0);
++
++  push(chunk: Buffer): Buffer[] {
++    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk;
++    const frames: Buffer[] = [];
++    while (this.pending.length >= FRAME_HEADER_BYTES) {
++      const length = this.pending.readUInt32BE(0);
++      if (this.pending.length < FRAME_HEADER_BYTES + length) break;
++      frames.push(this.pending.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length));
++      this.pending = this.pending.subarray(FRAME_HEADER_BYTES + length);
++    }
++    return frames;
++  }
++}
++
++/** A client message as the helper's input request, or null if it isn't one. */
++export const inputRequest = (
++  message: unknown,
++): { readonly path: "mouse" | "keys"; readonly body: unknown } | null => {
++  if (typeof message !== "object" || message === null || !("type" in message)) return null;
++  if (message.type === "mouse" && "event" in message && typeof message.event === "object") {
++    return { path: "mouse", body: message.event };
++  }
++  if (message.type === "keys" && "events" in message && Array.isArray(message.events)) {
++    return { path: "keys", body: { events: message.events } };
++  }
++  return null;
++};
++
++const intParam = (params: URLSearchParams, name: string, fallback: number, max: number) => {
++  const value = Number(params.get(name));
++  return Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), max) : fallback;
++};
++
++const parseMessage = (chunk: Uint8Array | string): unknown => {
++  try {
++    return JSON.parse(typeof chunk === "string" ? chunk : textDecoder.decode(chunk));
++  } catch {
++    return null;
++  }
++};
++
++/** A request to the helper: its status and body. */
++const helperRequest = (
++  socketPath: string,
++  method: "GET" | "POST",
++  path: string,
++  body?: unknown,
++): Promise<{ readonly status: number; readonly text: string }> =>
++  new Promise((resolve, reject) => {
++    const request = NodeHttp.request(
++      {
++        socketPath,
++        method,
++        path,
++        timeout: REQUEST_TIMEOUT_MS,
++        headers: body === undefined ? {} : { "Content-Type": "application/json" },
++      },
++      (response) => {
++        let text = "";
++        response.setEncoding("utf8");
++        response.on("data", (chunk: string) => (text += chunk));
++        response.on("end", () => resolve({ status: response.statusCode ?? 500, text }));
++      },
++    );
++    request.on("timeout", () => request.destroy());
++    request.on("error", reject);
++    request.end(body === undefined ? undefined : JSON.stringify(body));
++  });
++
++type Output =
++  | { readonly _tag: "frame"; readonly data: Uint8Array }
++  | { readonly _tag: "text"; readonly text: string }
++  | { readonly _tag: "close"; readonly code: number; readonly reason: string };
++
++/** Sends the window list on `output` whenever it changes; returns a stop function. */
++const watchWindows = (socketPath: string, output: Queue.Queue<Output>): (() => void) => {
++  let last = "";
++  let stopped = false;
++  const poll = () => {
++    helperRequest(socketPath, "GET", "/v1/windows").then(
++      ({ status, text }) => {
++        if (stopped) return;
++        if (status !== 200) {
++          Queue.offerUnsafe(output, {
++            _tag: "close",
++            code: WINDOWS_UNAVAILABLE_CODE,
++            reason: `helper said ${status}`,
++          });
++          return;
++        }
++        if (text !== last) {
++          last = text;
++          Queue.offerUnsafe(output, { _tag: "text", text: `{"type":"windows","windows":${text}}` });
++        }
++        timer = setTimeout(poll, LIST_INTERVAL_MS);
++      },
++      () => {
++        if (!stopped)
++          Queue.offerUnsafe(output, {
++            _tag: "close",
++            code: WINDOWS_UNAVAILABLE_CODE,
++            reason: "no helper",
++          });
++      },
++    );
++  };
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  poll();
++  return () => {
++    stopped = true;
++    clearTimeout(timer);
++  };
++};
++
++/** Sends window `windowId`'s frames on `output`; returns a stop function. */
++const watchFrames = (
++  socketPath: string,
++  windowId: number,
++  query: URLSearchParams,
++  output: Queue.Queue<Output>,
++  congested: () => boolean,
++): (() => void) => {
++  const reader = new FrameReader();
++  const request = NodeHttp.request(
++    { socketPath, method: "GET", path: `/v1/windows/${windowId}/stream?${query.toString()}` },
++    (response) => {
++      if (response.statusCode !== 200) {
++        response.resume();
++        Queue.offerUnsafe(
++          output,
++          response.statusCode === 404
++            ? { _tag: "close", code: WINDOW_GONE_CODE, reason: "no such window" }
++            : {
++                _tag: "close",
++                code: WINDOWS_UNAVAILABLE_CODE,
++                reason: `helper said ${response.statusCode}`,
++              },
++        );
++        return;
++      }
++      response.on("data", (chunk: Buffer) => {
++        for (const frame of reader.push(chunk)) {
++          // A slow viewer loses frames rather than falling behind.
++          if (!congested()) Queue.offerUnsafe(output, { _tag: "frame", data: frame });
++        }
++      });
++      response.on("end", () =>
++        Queue.offerUnsafe(output, {
++          _tag: "close",
++          code: WINDOW_GONE_CODE,
++          reason: "window closed",
++        }),
++      );
++    },
++  );
++  request.on("error", () =>
++    Queue.offerUnsafe(output, {
++      _tag: "close",
++      code: WINDOWS_UNAVAILABLE_CODE,
++      reason: "no helper",
++    }),
++  );
++  request.end();
++  return () => request.destroy();
++};
++
++const handler = Effect.gen(function* () {
++  const request = yield* HttpServerRequest.HttpServerRequest;
++  const url = HttpServerRequest.toURL(request);
++  if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
++  if (
++    url.value.pathname !== `${WINDOW_STREAM_ROUTE_PREFIX}/ws` ||
++    request.headers.upgrade?.toLowerCase() !== "websocket"
++  ) {
++    return HttpServerResponse.text("Not Found", { status: 404 });
++  }
++  const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
++  const canOperate = session.scopes.includes(AuthPreviewOperateScope);
++  const params = url.value.searchParams;
++  const windowId = Number(params.get("windowId") ?? NaN);
++  const socketPath = plutoniumHelperSocket();
++  return yield* Effect.scoped(
++    Effect.gen(function* () {
++      const incoming = NodeHttpServerRequest.toIncomingMessage(request);
++      // JPEGs are already compressed.
++      delete incoming.headers["sec-websocket-extensions"];
++      const transport = incoming.socket;
++      const socket = yield* request.upgrade;
++      const reader = yield* socket.reader;
++      const writer = yield* socket.writer;
++      if (socketPath === undefined) {
++        yield* writer.write(new Socket.CloseEvent(WINDOWS_UNAVAILABLE_CODE, "no helper"));
++        return HttpServerResponse.empty();
++      }
++      const output = yield* Queue.unbounded<Output>();
++      const stop = Number.isInteger(windowId)
++        ? watchFrames(
++            socketPath,
++            windowId,
++            new URLSearchParams({
++              maxWidth: String(intParam(params, "maxWidth", 1920, 7680)),
++              maxHeight: String(intParam(params, "maxHeight", 1200, 4320)),
++              quality: String(intParam(params, "quality", 70, 100)),
++            }),
++            output,
++            () => transport.writableLength > MAX_SOCKET_BUFFER_BYTES,
++          )
++        : watchWindows(socketPath, output);
++      yield* Effect.addFinalizer(() => Effect.sync(stop));
++
++      const send = Queue.take(output).pipe(
++        Effect.flatMap((item) => {
++          switch (item._tag) {
++            case "frame":
++              return writer.write(item.data);
++            case "text":
++              return writer.write(item.text);
++            case "close":
++              return writer
++                .write(new Socket.CloseEvent(item.code, item.reason))
++                .pipe(Effect.andThen(Effect.interrupt));
++          }
++        }),
++      );
++      // Input goes to the helper in order, one request at a time.
++      let inputs: Promise<unknown> = Promise.resolve();
++      const receive = (chunk: Uint8Array | string) =>
++        Effect.sync(() => {
++          const input =
++            canOperate && Number.isInteger(windowId) ? inputRequest(parseMessage(chunk)) : null;
++          if (!input) return;
++          inputs = inputs
++            .then(() =>
++              helperRequest(
++                socketPath,
++                "POST",
++                `/v1/windows/${windowId}/${input.path}`,
++                input.body,
++              ),
++            )
++            .catch(() => {});
++        });
++      const receiveInput = reader.pull.pipe(
++        Effect.flatMap((chunks) => Effect.forEach(chunks, receive, { discard: true })),
++      );
++      return yield* Effect.raceFirst(Effect.forever(send), Effect.forever(receiveInput));
++    }),
++  ).pipe(
++    // A dropped socket is a normal end of viewing.
++    Effect.catch(() => Effect.succeed(HttpServerResponse.empty())),
++  );
++});
++
++export const routeLayer = process.env.PLUTONIUM_T3
++  ? HttpRouter.add("GET", `${WINDOW_STREAM_ROUTE_PREFIX}/*`, handler)
++  : Layer.empty;
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 7d35c8cc84..d648dcf8a5 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -33,6 +33,7 @@ import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
+ import { fixPath } from "./os-jank.ts";
+ import * as Ws from "./ws.ts";
+ import * as PlutoniumNetworkAccess from "./plutonium/networkAccess.ts";
++import * as PlutoniumWindowStream from "./plutonium/windowStream.ts";
+ import * as PlutoniumThreadPermissions from "./plutonium/threadPermissions.ts";
+ import * as AgentScopeLive from "./process/agentScope.ts";
+ import * as ExternalLauncher from "./process/externalLauncher.ts";
+@@ -719,6 +720,7 @@ const layerMakeRoutes = Layer.mergeAll(
+     ServerHttp.layerAttachmentUploadRoute,
+     DeviceHubProxy.layer,
+     PlutoniumNetworkAccess.layer,
++    PlutoniumWindowStream.routeLayer,
+     ServerBrowserStream.routeLayer,
+     ServerHttp.layerStaticAndDevRoute,
+     Ws.layer,
+diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
+index d77106c92b..274ae1012e 100644
+--- a/apps/web/src/plutonium/PlutoniumWindows.tsx
++++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
+@@ -32,12 +32,15 @@ import { buildThreadRouteParams, resolveThreadRouteTarget } from "~/threadRoutes
+ import { importBrowserTab } from "./importTab";
+ import { setOpenedItemContext, startOpenedItems } from "./openedItems";
+ import { openAndFocusApp } from "./panelKeys";
++import { RemoteWindowView } from "./RemoteWindowView";
++import { startRemoteWindows } from "./remoteWindows";
+ 
+ import { plutoniumPreview, tabTags, type BrokerTab } from "./previewBridge";
+ import {
+   addWindowToThread,
+   describeThreads,
+   grantFor,
++  isPlutoniumShell,
+   labelOfTag,
+   releaseWindow,
+   setPlutoniumFocusHandler,
+@@ -62,6 +65,12 @@ export function PlutoniumWindowsStarter() {
+   const environmentId = usePrimaryEnvironmentId();
+   const threads = useThreadShells();
+   useEffect(startPlutoniumWindows, []);
++  // Away from the desktop, the server streams the windows.
++  useEffect(
++    () =>
++      environmentId === null || isPlutoniumShell() ? undefined : startRemoteWindows(environmentId),
++    [environmentId],
++  );
+   // Other shells and the browser's overlay label T3's thread tags with these.
+   useEffect(() => {
+     describeThreads(
+@@ -499,6 +508,7 @@ export function PlutoniumAppSurface({
+   onPopOut: () => void;
+ }) {
+   const entry = usePlutoniumWindowStore((state) => state.windows[windowId]);
++  const remote = usePlutoniumWindowStore((state) => state.remote);
+   // A tab restored from storage may name a window id that a new Ash session
+   // gave to a different app.
+   if (!entry || entry.appId !== appId) {
+@@ -514,28 +524,32 @@ export function PlutoniumAppSurface({
+         <span className="truncate font-medium text-foreground">{windowLabel(entry)}</span>
+         <span className="truncate text-muted-foreground">{entry.appId}</span>
+         <AgentHeaderBadge windowId={windowId} />
+-        <Tooltip>
+-          <TooltipTrigger
+-            render={
+-              <Button
+-                aria-label="Pop out to desktop"
+-                className="ml-auto"
+-                size="icon-xs"
+-                variant="ghost-muted"
+-                onClick={() => {
+-                  showOnDesktop(windowId);
+-                  onPopOut();
+-                }}
+-              />
+-            }
+-          >
+-            <SquareArrowOutUpRightIcon className="size-3.5" />
+-          </TooltipTrigger>
+-          <TooltipPopup>Pop out to desktop</TooltipPopup>
+-        </Tooltip>
+-        <ToDisplayButtons windowId={windowId} />
++        {remote ? null : (
++          <>
++            <Tooltip>
++              <TooltipTrigger
++                render={
++                  <Button
++                    aria-label="Pop out to desktop"
++                    className="ml-auto"
++                    size="icon-xs"
++                    variant="ghost-muted"
++                    onClick={() => {
++                      showOnDesktop(windowId);
++                      onPopOut();
++                    }}
++                  />
++                }
++              >
++                <SquareArrowOutUpRightIcon className="size-3.5" />
++              </TooltipTrigger>
++              <TooltipPopup>Pop out to desktop</TooltipPopup>
++            </Tooltip>
++            <ToDisplayButtons windowId={windowId} />
++          </>
++        )}
+       </div>
+-      <NativeWindowView windowId={windowId} />
++      {remote ? <RemoteWindowView entry={entry} /> : <NativeWindowView windowId={windowId} />}
+     </div>
+   );
+ }
+diff --git a/apps/web/src/plutonium/RemoteWindowView.tsx b/apps/web/src/plutonium/RemoteWindowView.tsx
+new file mode 100644
+index 0000000000..ce66d4b17f
+--- /dev/null
++++ b/apps/web/src/plutonium/RemoteWindowView.tsx
+@@ -0,0 +1,218 @@
++// Plutonium: a native window away from the desktop, drawn from the server's
++// stream of its frames (remoteWindows.ts). Pointer and keyboard input on the
++// canvas go back to the window. The window keeps its size: the frame is
++// scaled down to fit the panel.
++import { useEffect, useRef, useState } from "react";
++
++import { usePrimaryEnvironmentId } from "~/state/environments";
++
++import {
++  inputModifiers,
++  mouseButton,
++  readWindowStreamAccess,
++  WINDOW_GONE_CODE,
++  WINDOWS_UNAVAILABLE_CODE,
++  wheelNotches,
++  windowPoint,
++  windowStreamUrl,
++} from "./remoteWindows";
++import type { NativeWindowEntry } from "./windowStore";
++
++const RECONNECT_MS = 1000;
++
++export function RemoteWindowView({ entry }: { entry: NativeWindowEntry }) {
++  const environmentId = usePrimaryEnvironmentId();
++  const canvasRef = useRef<HTMLCanvasElement | null>(null);
++  const socketRef = useRef<WebSocket | null>(null);
++  // The latest size, for mapping input (the list updates it).
++  const sizeRef = useRef({ width: entry.width, height: entry.height });
++  sizeRef.current = { width: entry.width, height: entry.height };
++  const [status, setStatus] = useState<string | null>("Connecting…");
++  const windowId = entry.id;
++
++  // Frames in, drawn as they decode (a frame that arrives while one decodes
++  // replaces the waiting one).
++  useEffect(() => {
++    if (environmentId === null) return;
++    let stopped = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let decoding = false;
++    let waiting: Blob | null = null;
++    const draw = (blob: Blob) => {
++      if (decoding) {
++        waiting = blob;
++        return;
++      }
++      decoding = true;
++      void createImageBitmap(blob)
++        .then((bitmap) => {
++          const canvas = canvasRef.current;
++          if (!canvas || stopped) return bitmap.close();
++          if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
++          if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
++          canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
++          bitmap.close();
++          setStatus(null);
++        })
++        .catch(() => {})
++        .finally(() => {
++          decoding = false;
++          const next = waiting;
++          waiting = null;
++          if (next && !stopped) draw(next);
++        });
++    };
++    const connect = async (refresh: boolean) => {
++      const access = await readWindowStreamAccess(environmentId, refresh);
++      if (stopped) return;
++      if (!access) {
++        timer = setTimeout(() => void connect(true), RECONNECT_MS);
++        return;
++      }
++      const socket = new WebSocket(windowStreamUrl(access, { windowId: String(windowId) }));
++      socket.binaryType = "blob";
++      socketRef.current = socket;
++      socket.addEventListener("message", (event) => {
++        if (event.data instanceof Blob) draw(new Blob([event.data], { type: "image/jpeg" }));
++      });
++      socket.addEventListener("close", (event) => {
++        if (socketRef.current === socket) socketRef.current = null;
++        if (stopped) return;
++        if (event.code === WINDOW_GONE_CODE) return setStatus("This app is no longer running.");
++        if (event.code === WINDOWS_UNAVAILABLE_CODE)
++          return setStatus("The desktop can't stream this window.");
++        setStatus("Reconnecting…");
++        timer = setTimeout(() => void connect(true), RECONNECT_MS);
++      });
++    };
++    void connect(false);
++    return () => {
++      stopped = true;
++      clearTimeout(timer);
++      socketRef.current?.close();
++      socketRef.current = null;
++    };
++  }, [environmentId, windowId]);
++
++  // Input out.
++  useEffect(() => {
++    const canvas = canvasRef.current;
++    if (!canvas) return;
++    const send = (message: object) => {
++      const socket = socketRef.current;
++      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
++    };
++    const point = (event: MouseEvent) =>
++      windowPoint(event.clientX, event.clientY, canvas.getBoundingClientRect(), sizeRef.current);
++    // Moves go at most once a frame.
++    let move: MouseEvent | null = null;
++    let moveFrame = 0;
++    const sendMove = () => {
++      moveFrame = 0;
++      if (!move) return;
++      const event = move;
++      move = null;
++      send({
++        type: "mouse",
++        event: {
++          type: "mouseMoved",
++          ...point(event),
++          button: "none",
++          buttons: event.buttons,
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    const onMove = (event: MouseEvent) => {
++      move = event;
++      moveFrame ||= requestAnimationFrame(sendMove);
++    };
++    const onButton = (event: MouseEvent) => {
++      event.preventDefault();
++      if (event.type === "mousedown") canvas.focus();
++      sendMove();
++      send({
++        type: "mouse",
++        event: {
++          type: event.type === "mousedown" ? "mousePressed" : "mouseReleased",
++          ...point(event),
++          button: mouseButton(event.button),
++          buttons: event.buttons,
++          clickCount: Math.max(1, event.detail),
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    // Drags keep going outside the canvas.
++    const onPointerDown = (event: PointerEvent) => canvas.setPointerCapture(event.pointerId);
++    const onWheel = (event: WheelEvent) => {
++      event.preventDefault();
++      send({
++        type: "mouse",
++        event: {
++          type: "mouseWheel",
++          ...point(event),
++          deltaX: wheelNotches(event.deltaX, event.deltaMode),
++          deltaY: wheelNotches(event.deltaY, event.deltaMode),
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    const onKey = (event: KeyboardEvent) => {
++      if (!event.code) return;
++      event.preventDefault();
++      event.stopPropagation();
++      send({
++        type: "keys",
++        events: [
++          {
++            type: event.type === "keydown" ? "keyDown" : "keyUp",
++            code: event.code,
++            modifiers: inputModifiers(event),
++          },
++        ],
++      });
++    };
++    const onContextMenu = (event: Event) => event.preventDefault();
++    canvas.addEventListener("pointerdown", onPointerDown);
++    canvas.addEventListener("mousedown", onButton);
++    canvas.addEventListener("mouseup", onButton);
++    canvas.addEventListener("mousemove", onMove);
++    canvas.addEventListener("wheel", onWheel, { passive: false });
++    canvas.addEventListener("keydown", onKey);
++    canvas.addEventListener("keyup", onKey);
++    canvas.addEventListener("contextmenu", onContextMenu);
++    return () => {
++      cancelAnimationFrame(moveFrame);
++      canvas.removeEventListener("pointerdown", onPointerDown);
++      canvas.removeEventListener("mousedown", onButton);
++      canvas.removeEventListener("mouseup", onButton);
++      canvas.removeEventListener("mousemove", onMove);
++      canvas.removeEventListener("wheel", onWheel);
++      canvas.removeEventListener("keydown", onKey);
++      canvas.removeEventListener("keyup", onKey);
++      canvas.removeEventListener("contextmenu", onContextMenu);
++    };
++  }, []);
++
++  return (
++    <div
++      className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/30"
++      data-plutonium-remote-window={windowId}
++    >
++      <canvas
++        ref={canvasRef}
++        tabIndex={0}
++        width={entry.width}
++        height={entry.height}
++        aria-label={entry.title || entry.appId}
++        className="max-h-full max-w-full outline-none"
++      />
++      {status && (
++        <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
++          {status}
++        </p>
++      )}
++    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/remoteWindows.test.ts b/apps/web/src/plutonium/remoteWindows.test.ts
+new file mode 100644
+index 0000000000..0dc73b65d6
+--- /dev/null
++++ b/apps/web/src/plutonium/remoteWindows.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  inputModifiers,
++  mouseButton,
++  remoteWindowEntries,
++  wheelNotches,
++  windowPoint,
++  windowStreamUrl,
++} from "./remoteWindows";
++
++const window = {
++  id: 7,
++  appId: "org.gnome.TextEditor",
++  title: "Untitled",
++  width: 800,
++  height: 600,
++  deviceScaleFactor: 1,
++  embedded: false,
++  focused: false,
++  pid: 42,
++};
++
++describe("remote windows", () => {
++  it("files a window under the first T3 thread among its tags", () => {
++    const entries = remoteWindowEntries([
++      { ...window, tags: ["niri:workspace/1", "t3:thread/abc", "t3:thread/def"] },
++      { ...window, id: 8, tags: [] },
++    ]);
++    expect(entries[7]?.threadId).toBe("abc");
++    expect(entries[8]?.threadId).toBeNull();
++  });
++
++  it("maps a point on the scaled frame to the window's DIPs", () => {
++    const rect = { left: 100, top: 50, width: 400, height: 300 };
++    expect(windowPoint(300, 200, rect, window)).toEqual({ x: 400, y: 300 });
++    // Drags outside the frame stay on the window's edge.
++    expect(windowPoint(0, 1000, rect, window)).toEqual({ x: 0, y: 600 });
++  });
++
++  it("speaks the helper's input", () => {
++    expect(inputModifiers({ altKey: true, ctrlKey: true, metaKey: false, shiftKey: true })).toBe(
++      11,
++    );
++    expect([0, 1, 2, 9].map(mouseButton)).toEqual(["left", "middle", "right", "none"]);
++    expect(wheelNotches(0, 0)).toBe(0);
++    expect(wheelNotches(4, 0)).toBe(1);
++    expect(wheelNotches(-250, 0)).toBe(-3);
++    expect(wheelNotches(3, 1)).toBe(1);
++  });
++
++  it("puts the ticket on the socket's URL", () => {
++    const access = {
++      httpBase: "https://desk.example/api/window-stream",
++      wsBase: "wss://desk.example/api/window-stream",
++      query: { wsTicket: "t" },
++      credentials: false,
++    };
++    expect(windowStreamUrl(access, { windowId: "7" })).toBe(
++      "wss://desk.example/api/window-stream/ws?windowId=7&wsTicket=t",
++    );
++    expect(windowStreamUrl(access)).toBe("wss://desk.example/api/window-stream/ws?wsTicket=t");
++  });
++});
+diff --git a/apps/web/src/plutonium/remoteWindows.ts b/apps/web/src/plutonium/remoteWindows.ts
+new file mode 100644
+index 0000000000..ce62701cd9
+--- /dev/null
++++ b/apps/web/src/plutonium/remoteWindows.ts
+@@ -0,0 +1,187 @@
++// Plutonium: native windows for a client away from the desktop (another
++// machine's browser). The shell shows windows with <native-window>, which only
++// the session's own browser has; here the server streams them instead
++// (/api/window-stream on T3's server, through the helper): the window list
++// fills the same store, and a window's tab draws its frames on a canvas and
++// sends pointer and keyboard input back.
++import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
++import {
++  type DeviceHubAccess,
++  withDeviceHubQuery,
++} from "@t3tools/client-runtime/device/hub-access";
++import type { EnvironmentId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import { Atom, AtomRegistry } from "effect/reactivity";
++
++import { connectionAtomRuntime } from "~/connection/runtime";
++import { appAtomRegistry } from "~/rpc/atomRegistry";
++import { useRightPanelStore } from "~/rightPanelStore";
++import { environmentSession } from "~/state/session";
++
++import { threadIdOfTag } from "./threadTag";
++import { type NativeWindowEntry, usePlutoniumWindowStore } from "./windowStore";
++
++export const WINDOW_STREAM_BASE_PATH = "/api/window-stream";
++/** The server's close codes (apps/server/src/plutonium/windowStream.ts). */
++export const WINDOW_GONE_CODE = 4404;
++export const WINDOWS_UNAVAILABLE_CODE = 4503;
++const RECONNECT_MS = 2000;
++
++const windowStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
++  connectionAtomRuntime
++    .atom((get) => {
++      const prepared = Option.getOrNull(
++        get(environmentSession.preparedConnectionValueAtom(environmentId)),
++      );
++      if (prepared === null) return Effect.never;
++      return resolveDeviceHubAccess({ prepared, hubBasePath: WINDOW_STREAM_BASE_PATH });
++    })
++    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`window-stream-access:${environmentId}`)),
++);
++
++/** Access to the window stream (a fresh ticket with `refresh`); null if there is none. */
++export function readWindowStreamAccess(
++  environmentId: EnvironmentId,
++  refresh: boolean,
++): Promise<DeviceHubAccess | null> {
++  const atom = windowStreamAccessAtom(environmentId);
++  if (refresh) appAtomRegistry.refresh(atom);
++  return Effect.runPromise(
++    AtomRegistry.getResult(appAtomRegistry, atom, { suspendOnWaiting: true }).pipe(
++      Effect.timeout("10 seconds"),
++      Effect.orElseSucceed(() => null),
++    ),
++  );
++}
++
++/** A WebSocket URL on the window stream. */
++export function windowStreamUrl(
++  access: DeviceHubAccess,
++  query: Readonly<Record<string, string>> = {},
++): string {
++  const search = new URLSearchParams(query).toString();
++  return withDeviceHubQuery(`${access.wsBase}/ws${search ? `?${search}` : ""}`, access);
++}
++
++/** The helper's window list as store entries (the thread is the first T3 thread tag's). */
++export function remoteWindowEntries(
++  list: readonly Omit<NativeWindowEntry, "threadId">[],
++): Record<number, NativeWindowEntry> {
++  return Object.fromEntries(
++    list.map((window) => [
++      window.id,
++      {
++        ...window,
++        threadId: (window.tags ?? []).map(threadIdOfTag).find((id) => id !== null) ?? null,
++      },
++    ]),
++  );
++}
++
++/**
++ * Fills the window store from the server's list, kept current, unless this
++ * page is the shell. Returns a function that stops.
++ */
++export function startRemoteWindows(environmentId: EnvironmentId): () => void {
++  let socket: WebSocket | null = null;
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  let stopped = false;
++  let reconciled = false;
++  // Refused upgrades (a server without the route) close before opening.
++  let refusals = 0;
++  const connect = async (refresh: boolean) => {
++    const access = await readWindowStreamAccess(environmentId, refresh);
++    if (stopped) return;
++    if (!access) {
++      timer = setTimeout(() => void connect(true), RECONNECT_MS);
++      return;
++    }
++    socket = new WebSocket(windowStreamUrl(access));
++    let opened = false;
++    socket.addEventListener("open", () => {
++      opened = true;
++      refusals = 0;
++    });
++    socket.addEventListener("message", (event) => {
++      if (typeof event.data !== "string") return;
++      const message = JSON.parse(event.data) as {
++        type?: string;
++        windows?: Omit<NativeWindowEntry, "threadId">[];
++      };
++      if (message.type !== "windows" || !message.windows) return;
++      const windows = remoteWindowEntries(message.windows);
++      usePlutoniumWindowStore.setState({ available: true, remote: true, windows });
++      // As in the shell: a tab whose window is gone (or is another app now) closes.
++      useRightPanelStore
++        .getState()
++        .reconcileAppSurfaces((id, appId) =>
++          reconciled ? id in windows : windows[id]?.appId === appId,
++        );
++      reconciled = true;
++    });
++    socket.addEventListener("close", (event) => {
++      socket = null;
++      if (stopped) return;
++      if (!opened) refusals++;
++      if (event.code === WINDOWS_UNAVAILABLE_CODE || refusals >= 3) {
++        // No Plutonium session behind this server: no Apps panel.
++        usePlutoniumWindowStore.setState({ available: false, windows: {} });
++        useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++        return;
++      }
++      timer = setTimeout(() => void connect(true), RECONNECT_MS);
++    });
++  };
++  void connect(false);
++  return () => {
++    stopped = true;
++    clearTimeout(timer);
++    socket?.close();
++  };
++}
++
++/** Alt=1, Ctrl=2, Meta=4, Shift=8, as the helper's input takes them. */
++export function inputModifiers(
++  event: Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey">,
++): number {
++  return (
++    (event.altKey ? 1 : 0) |
++    (event.ctrlKey ? 2 : 0) |
++    (event.metaKey ? 4 : 0) |
++    (event.shiftKey ? 8 : 0)
++  );
++}
++
++const BUTTONS = ["left", "middle", "right", "back", "forward"] as const;
++
++/** A DOM mouse button as the helper names it. */
++export function mouseButton(button: number): (typeof BUTTONS)[number] | "none" {
++  return BUTTONS[button] ?? "none";
++}
++
++/** Wheel pixels (or lines) as notches, at least one in the direction scrolled. */
++export function wheelNotches(delta: number, deltaMode: number): number {
++  if (delta === 0) return 0;
++  const notches = deltaMode === 0 ? delta / 100 : deltaMode === 1 ? delta / 3 : delta * 10;
++  return Math.sign(notches) * Math.max(1, Math.round(Math.abs(notches)));
++}
++
++/**
++ * A point on the drawn frame (`rect`, CSS px) in the window's DIPs; the
++ * frame shows the whole window, scaled.
++ */
++export function windowPoint(
++  clientX: number,
++  clientY: number,
++  rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
++  window: Pick<NativeWindowEntry, "width" | "height">,
++): { x: number; y: number } {
++  const clamp = (value: number, max: number) => Math.min(Math.max(value, 0), max);
++  return {
++    x: Math.round(clamp(((clientX - rect.left) / (rect.width || 1)) * window.width, window.width)),
++    y: Math.round(
++      clamp(((clientY - rect.top) / (rect.height || 1)) * window.height, window.height),
++    ),
++  };
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+index 320f4a3796..3906ea03bd 100644
+--- a/apps/web/src/plutonium/windowStore.ts
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -132,6 +132,8 @@ interface PlutoniumShell extends EventTarget {
+ 
+ interface PlutoniumWindowState {
+   readonly available: boolean;
++  /** The windows come from the server's stream (remoteWindows.ts), not this page's shell. */
++  readonly remote: boolean;
+   readonly windows: Readonly<Record<number, NativeWindowEntry>>;
+   /** Every shell's groups, by tag. */
+   readonly groups: Readonly<Record<string, PlutoniumGroup>>;
+@@ -143,6 +145,7 @@ interface PlutoniumWindowState {
+ 
+ export const usePlutoniumWindowStore = create<PlutoniumWindowState>(() => ({
+   available: false,
++  remote: false,
+   windows: {},
+   groups: {},
+   agentWindows: {},
+@@ -267,8 +270,8 @@ export function startPlutoniumWindows(): void {
+   started = true;
+   const dropAppTabs = () => useRightPanelStore.getState().reconcileAppSurfaces(() => false);
+   if (!("windowBroker" in navigator)) {
+-    // App tabs restored from storage have nothing to show outside the shell.
+-    dropAppTabs();
++    // Outside the shell the server streams the windows, if it can
++    // (startRemoteWindows); its list keeps or drops app tabs restored from storage.
+     void plutoniumShell();
+     resolveShell?.(null);
+     return;

@@ -22,4 +22,4 @@ The Plutonium shell shows a thread's windows with `<native-window>` elements, wh
 
 ## Verified (2026-10-28, slot 25, X11)
 
-T3 opened at `http://localhost:6273` (a non-shell origin, paired with `plutonium t3 pair`) in the session's browser: Apps listed a KWrite started in the thread; its tab showed the window's frames; a click on "New File" and typed keys reached it (the title became "Untitled (hi remote) *"). Unit tests: `helper/test/windowStream.test.ts`, T3's `windowStream.test.ts` (server) and `remoteWindows.test.ts` (web).
+T3 opened at `http://localhost:6273` (a non-shell origin, paired with `plutonium hydra pair`) in the session's browser: Apps listed a KWrite started in the thread; its tab showed the window's frames; a click on "New File" and typed keys reached it (the title became "Untitled (hi remote) *"). Unit tests: `helper/test/windowStream.test.ts`, T3's `windowStream.test.ts` (server) and `remoteWindows.test.ts` (web).

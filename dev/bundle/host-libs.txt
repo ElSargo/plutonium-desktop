@@ -1,0 +1,43 @@
+# Libraries the bundle takes from the host, one soname pattern (an extended
+# regex, matched whole) per line. Everything else chrome needs is copied into
+# chrome/lib.
+#
+# The rule: what every Linux desktop has, and whatever the host's Mesa links.
+# Mesa's libEGL and libgbm are loaded into the same process as the bundled
+# libraries, and one soname is only loaded once, so a library both use has to
+# be the host's: Mesa was built against it, and may need newer symbols than an
+# older copy has.
+
+# glibc, and the compiler's runtime
+ld-linux-x86-64\.so\.2
+lib(c|m|dl|pthread|rt|resolv|util)\.so\.[0-9]+
+libgcc_s\.so\.1
+libstdc\+\+\.so\.6
+
+# Mesa, and what it links: the GPU stack must match the host's kernel driver
+lib(gbm|EGL|GL|GLX|GLdispatch|GLESv2)\.so\.[0-9]+
+libdrm(_[a-z]+)?\.so\.2
+libwayland-(client|server)\.so\.0
+libexpat\.so\.1
+lib(z|zstd)\.so\.1
+libffi\.so\.(7|8)
+
+# X11 (Xwayland and Mesa link them)
+libX11(-xcb)?\.so\.6
+libX(au|dmcp|composite|damage|ext|fixes|randr|render|i|tst)\.so\.[0-9]+
+libxcb(-[a-z0-9]+)?\.so\.[0-9]+
+libbsd\.so\.0
+libmd\.so\.0
+
+# systemd's libraries (udev's database and logind are the host's), D-Bus, ALSA
+lib(udev|systemd)\.so\.[01]
+libdbus-1\.so\.3
+libasound\.so\.2
+
+# GLib, which the host's libraries that chrome dlopen()s link (speech-dispatcher,
+# libsecret), and libwacom and gudev need
+lib(glib|gobject|gio|gmodule)-2\.0\.so\.0
+libpcre2?(-8)?\.so\.[0-9]+
+libselinux\.so\.1
+libmount\.so\.1
+libblkid\.so\.1

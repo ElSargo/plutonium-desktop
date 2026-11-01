@@ -1,0 +1,604 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 27 Oct 2026 20:08:06 +1300
+Subject: [PATCH 36/46] Plutonium: agents get the helper's tab tools on T3's
+ tabs
+
+T3's MCP server offered only the helper's window tools, so its agents had no
+find, permissions, file pickers, printing or downloads in their tabs. Now it
+also offers tab_requests (what a tab waits on: pending.permission, print,
+fileChooser, and what it was refused or uses), find_in_tab,
+answer_permission, request_permission, choose_files, print_tab,
+cancel_print, list_printers, list_downloads and download_action.
+
+They take T3's tabId, as preview tools do, and default to the tab preview
+tools act on without one. The server finds the browser's id for it
+(ServerBrowser.plutoniumTabId, from Plutonium.getTabs on the tab's own
+connection) and the helper runs its tool on that tab for the thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/mcp/McpHttpServer.ts          |   1 +
+ apps/server/src/plutonium/windowTools.test.ts |  94 +++++-
+ apps/server/src/plutonium/windowTools.ts      | 274 +++++++++++++++++-
+ apps/server/src/preview/ServerBrowser.ts      |  48 ++-
+ .../src/preview/ServerBrowserStream.test.ts   |   5 +
+ 5 files changed, 412 insertions(+), 10 deletions(-)
+
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index 52f4fca62d..8ccad976b2 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -887,6 +887,7 @@ export const layerPlutoniumWindowToolkit = Layer.unwrap(
+             PlutoniumWindowTools.layerStandard,
+           ),
+           imageToolRegistration(registerWindowSnapshot(), PlutoniumWindowTools.layerSnapshot),
++          toolkitRegistration(PlutoniumWindowTools.TabToolkit, PlutoniumWindowTools.layerTabs),
+         )
+       : Layer.empty,
+   ),
+diff --git a/apps/server/src/plutonium/windowTools.test.ts b/apps/server/src/plutonium/windowTools.test.ts
+index 576961fa66..dfa35803f7 100644
+--- a/apps/server/src/plutonium/windowTools.test.ts
++++ b/apps/server/src/plutonium/windowTools.test.ts
+@@ -12,6 +12,7 @@ import * as NodePath from "node:path";
+ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+ import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
++import * as ServerBrowser from "../preview/ServerBrowser.ts";
+ 
+ const threadId = ThreadId.make("thread-windows-test");
+ const invocation = (thread: boolean) => ({
+@@ -68,7 +69,24 @@ const fakeHelper = Effect.acquireRelease(
+               ? { content: [{ type: "image", data: PNG, mimeType: "image/png" }] }
+               : name === "type_window"
+                 ? { content: [{ type: "text", text: "Can't type 'é'." }], isError: true }
+-                : { content: [{ type: "text", text: '[{"id":3}]' }] },
++                : name === "list_tabs"
++                  ? {
++                      content: [
++                        {
++                          type: "text",
++                          text: JSON.stringify([
++                            { id: 41, url: "https://b.test/" },
++                            {
++                              id: 42,
++                              url: "https://a.test/",
++                              pending: { permission: { origin: "https://a.test" } },
++                              state: { inUse: { camera: true } },
++                            },
++                          ]),
++                        },
++                      ],
++                    }
++                  : { content: [{ type: "text", text: '[{"id":3}]' }] },
+           ),
+         );
+       });
+@@ -171,6 +189,80 @@ it.effect("offers the window tools and runs them on the helper for the calling t
+   ),
+ );
+ 
++it.effect("runs the helper's tab tools on the browser's id for T3's tab", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const helper = yield* fakeHelper;
++      yield* withEnv("PLUTONIUM_HELPER", helper.socketPath);
++      const asked: Array<{ readonly tabId?: string | undefined }> = [];
++      const browser = {
++        plutoniumTabId: (input: { readonly tabId?: string | undefined }) =>
++          Effect.sync(() => {
++            asked.push(input);
++            return input.tabId === undefined || input.tabId === "tab-1" ? 42 : null;
++          }),
++      } as unknown as ServerBrowser.ServerBrowser["Service"];
++      const server = yield* buildServer.pipe(
++        Effect.provideService(ServerBrowser.ServerBrowser, browser),
++      );
++      const names = server.tools.map(({ tool }) => tool.name);
++      for (const name of [
++        "tab_requests",
++        "find_in_tab",
++        "answer_permission",
++        "request_permission",
++        "choose_files",
++        "print_tab",
++        "cancel_print",
++        "list_printers",
++        "list_downloads",
++        "download_action",
++      ]) {
++        expect(names).toContain(name);
++      }
++      const call = (name: string, args: Record<string, unknown>) =>
++        server
++          .callTool({ name, arguments: args })
++          .pipe(
++            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(true)),
++            Effect.provideService(McpSchema.McpServerClient, client),
++          );
++
++      const found = yield* call("find_in_tab", { tabId: "tab-1", text: "hello" });
++      expect(found.isError).toBe(false);
++      expect(helper.calls.at(-1)!.body).toEqual({
++        name: "find_in_tab",
++        arguments: { text: "hello", tab_id: 42 },
++      });
++      expect(asked.at(-1)).toMatchObject({ threadId, tabId: "tab-1" });
++
++      const printed = yield* call("print_tab", { save_to: "~/a.pdf" });
++      expect(printed.isError).toBe(false);
++      expect(helper.calls.at(-1)!.body).toEqual({
++        name: "print_tab",
++        arguments: { save_to: "~/a.pdf", tab_id: 42 },
++      });
++
++      const requests = yield* call("tab_requests", {});
++      expect(requests.structuredContent).toEqual({
++        result: {
++          pending: { permission: { origin: "https://a.test" } },
++          state: { inUse: { camera: true } },
++        },
++      });
++
++      const before = helper.calls.length;
++      const missing = yield* call("answer_permission", { tabId: "tab-9" });
++      expect(missing.isError).toBe(true);
++      expect(JSON.stringify(missing.content)).toContain("No preview tab tab-9");
++      expect(helper.calls).toHaveLength(before);
++
++      yield* call("list_downloads", {});
++      expect(helper.calls.at(-1)!.body).toEqual({ name: "list_downloads", arguments: {} });
++    }),
++  ),
++);
++
+ it.effect("offers nothing outside a Plutonium session", () =>
+   Effect.scoped(
+     Effect.gen(function* () {
+diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
+index 698b598146..c229c785bb 100644
+--- a/apps/server/src/plutonium/windowTools.ts
++++ b/apps/server/src/plutonium/windowTools.ts
+@@ -3,7 +3,10 @@
+  * Plutonium: the native window tools (find_apps, launch_app, snapshot_window,
+  * click_window, type_window, ...) on T3 Code's own MCP server, so every
+  * provider's agents can use the apps of their thread. Tabs are T3's preview
+- * tools' already.
++ * tools' already; of the helper's tab tools, those preview tools have no
++ * counterpart for (find, permissions, file pickers, printing, downloads) are
++ * here too, on T3's tab ids: the server finds the browser's id for the tab
++ * (ServerBrowser.plutoniumTabId) and the helper runs the tool on it.
+  *
+  * T3 declares the tools and who may call them, as for its other toolkits:
+  * each acts as the calling thread (`McpToolAccess`). The helper runs them for
+@@ -19,6 +22,7 @@ import { Tool, Toolkit } from "effect/ai";
+ import * as NodeHttp from "node:http";
+ 
+ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
++import * as ServerBrowser from "../preview/ServerBrowser.ts";
+ import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+ 
+@@ -317,6 +321,201 @@ export const WindowStandardToolkit = Toolkit.make(
+ 
+ export const WindowSnapshotToolkit = Toolkit.make(SnapshotWindowTool);
+ 
++// The helper's tab tools, on T3's tabs.
++
++const tabId = Schema.optional(
++  Schema.String.annotate({
++    description:
++      "A tabId from preview_open or preview_status (default: the tab preview tools act on without one).",
++  }),
++);
++
++const tabTool = <const Name extends string, P extends Schema.Struct.Fields>(
++  name: Name,
++  description: string,
++  parameters: P,
++  hints: { readonly title: string; readonly readonly?: boolean },
++) =>
++  Tool.make(name, {
++    description,
++    parameters: Schema.Struct({ tabId, ...parameters }),
++    success: WindowToolResult,
++    failure: WindowToolFailure,
++    dependencies,
++  })
++    .annotate(Tool.Title, hints.title)
++    .annotate(Tool.Readonly, hints.readonly === true)
++    .annotate(Tool.Destructive, false)
++    .annotate(Tool.Idempotent, hints.readonly === true)
++    .annotate(Tool.OpenWorld, true);
++
++const TabRequestsTool = tabTool(
++  "tab_requests",
++  "What one of this thread's preview tabs is waiting on in Plutonium's browser: a permission request (pending.permission: the site, the permissions, the scopes), a print (pending.print) or a file picker the browser shows (pending.fileChooser), and its state: permissions it was refused (blocked) and camera, microphone or screen in use (inUse).",
++  {},
++  { title: "Tab requests", readonly: true },
++);
++
++const FindInTabTool = tabTool(
++  "find_in_tab",
++  "Find text in one of this thread's preview tabs, as Ctrl+F does: every match is highlighted and the page scrolls to the next one (call again with the same text for the one after). Returns the number of matches and which one is active. Use it to show the user a place in the page; to read the page, use preview_snapshot. An empty text clears the highlights.",
++  {
++    text: Schema.String,
++    match_case: Schema.optional(
++      Schema.Boolean.annotate({ description: "Match upper and lower case (default false)." }),
++    ),
++    backwards: Schema.optional(
++      Schema.Boolean.annotate({
++        description: "Go to the previous match instead (default false).",
++      }),
++    ),
++  },
++  { title: "Find in tab" },
++);
++
++const AnswerPermissionTool = tabTool(
++  "answer_permission",
++  "Answer the permission request (camera, notifications, location, ...) a preview tab's page is waiting on (tab_requests shows it as pending.permission). An agent may only deny or dismiss it: to allow one, ask the user with request_permission.",
++  {
++    answer: Schema.optional(
++      Schema.Literals(["deny", "dismiss"]).annotate({
++        description:
++          "dismiss (the default) stores nothing, so the page may ask again; deny refuses it.",
++      }),
++    ),
++    scope: Schema.optional(
++      Schema.Literals(["once", "thread", "everywhere"]).annotate({
++        description:
++          "For deny: once (the default) stores nothing; thread blocks it in this thread; everywhere blocks it in the user's browser settings.",
++      }),
++    ),
++  },
++  { title: "Answer permission request" },
++);
++
++const RequestPermissionTool = tabTool(
++  "request_permission",
++  "Ask the user to allow permissions (camera, microphone, geolocation, notifications, clipboard-read, midi-sysex, storage-access, local-fonts, window-management, idle-detection, sensors, ...) for a site in one of this thread's preview tabs. The user sees a prompt marked as yours and chooses this thread or everywhere, or refuses; this waits for the answer ({answer, scope}).",
++  {
++    permissions: Schema.Array(Schema.String).annotate({ description: "At least one." }),
++    origin: Schema.optional(
++      Schema.String.annotate({
++        description: "The site, such as https://meet.example.com (default: the tab's page).",
++      }),
++    ),
++  },
++  { title: "Ask for permissions" },
++);
++
++const ChooseFilesTool = tabTool(
++  "choose_files",
++  "Answer a file picker the browser shows for a preview tab's page (tab_requests shows it as pending.fileChooser, with its mode: open, open-multiple, folder or save). A picker preview_status shows as fileChooser is preview_upload's instead. Give absolute paths on this machine: one for open, folder and save (the file to write), one or more for open-multiple. Pass no paths to cancel the picker.",
++  {
++    paths: Schema.Array(Schema.String).annotate({
++      description: "Absolute paths; empty to cancel.",
++    }),
++  },
++  { title: "Choose files" },
++);
++
++const PrintTabTool = tabTool(
++  "print_tab",
++  "Print one of this thread's preview tabs on a printer (the default one unless you name one), or save it as a PDF file with save_to. A print the page is waiting on (tab_requests shows pending.print, from window.print() or Ctrl+P) is finished by this; cancel_print dismisses it instead.",
++  {
++    printer: Schema.optional(
++      Schema.String.annotate({
++        description: "A printer name from list_printers; the default one if left out.",
++      }),
++    ),
++    save_to: Schema.optional(
++      Schema.String.annotate({
++        description:
++          "Save a PDF to this absolute path (or ~/...) instead of printing. An existing file isn't overwritten: the name gets (1), (2), ...",
++      }),
++    ),
++    copies: Schema.optional(Schema.Int.annotate({ description: "1 to 999." })),
++    duplex: Schema.optional(
++      Schema.Literals(["none", "long-edge", "short-edge"]).annotate({
++        description: "Two-sided printing.",
++      }),
++    ),
++    color: Schema.optional(Schema.Boolean.annotate({ description: "false for black and white." })),
++    paper: Schema.optional(Schema.Literals(["letter", "legal", "tabloid", "a3", "a4", "a5"])),
++    landscape: Schema.optional(Schema.Boolean),
++    scale: Schema.optional(Schema.Number.annotate({ description: "0.1 to 2; 1 is 100%." })),
++    margins: Schema.optional(Schema.Literals(["default", "none", "minimum"])),
++    background: Schema.optional(
++      Schema.Boolean.annotate({ description: "Print background colours and images." }),
++    ),
++    header_footer: Schema.optional(
++      Schema.Boolean.annotate({
++        description: "Print the date, title, URL and page numbers.",
++      }),
++    ),
++    page_ranges: Schema.optional(
++      Schema.String.annotate({
++        description: 'Pages to print, such as "1-3, 5"; all if left out.',
++      }),
++    ),
++  },
++  { title: "Print tab" },
++);
++
++const CancelPrintTool = tabTool(
++  "cancel_print",
++  "Dismiss the print a preview tab's page is waiting on (pending.print in tab_requests), without printing.",
++  {},
++  { title: "Cancel print" },
++);
++
++const ListPrintersTool = Tool.make("list_printers", {
++  description: "List the printers of this machine (CUPS), with the default one, for print_tab.",
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "List printers")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const ListDownloadsTool = Tool.make("list_downloads", {
++  description:
++    "List this thread's downloads in Plutonium's browser (files its tabs downloaded): id, filename, path, url, state (in-progress, paused, complete, cancelled, interrupted), bytes, and danger when a dangerous file waits for the user to keep or discard it. Files go where the user's downloads for this thread go.",
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "List downloads")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const DownloadActionTool = windowTool(
++  "download_action",
++  "Act on one of this thread's downloads: pause, resume, cancel, open (the file, with its default app), show (its folder), discard (a dangerous file) or remove (from the list; the file stays). Keeping a dangerous file is the user's decision.",
++  {
++    download_id: Schema.Int.annotate({ description: "A download id from list_downloads." }),
++    action: Schema.Literals(["pause", "resume", "cancel", "open", "show", "discard", "remove"]),
++  },
++  { title: "Act on download" },
++);
++
++export const TabToolkit = Toolkit.make(
++  TabRequestsTool,
++  FindInTabTool,
++  AnswerPermissionTool,
++  RequestPermissionTool,
++  ChooseFilesTool,
++  PrintTabTool,
++  CancelPrintTool,
++  ListPrintersTool,
++  ListDownloadsTool,
++  DownloadActionTool,
++);
++
+ // The helper runs them.
+ 
+ type HelperContent =
+@@ -425,6 +624,79 @@ export const layerStandard = McpToolAccess.toLayer(WindowStandardToolkit, {
+   close_window: McpToolAccess.actsAsCaller(forward("close_window")),
+ });
+ 
++/**
++ * The browser's id for the caller's tab `tabId` (default: the one preview
++ * tools act on without a tabId, as PreviewAutomationBroker names the caller).
++ */
++const browserTab = (
++  browser: Option.Option<ServerBrowser.ServerBrowser["Service"]>,
++  tabId: string | undefined,
++) =>
++  Effect.gen(function* () {
++    if (Option.isNone(browser)) {
++      return yield* failure("This T3 Code server has no browser for preview tabs.");
++    }
++    const scope = yield* McpInvocationContext.McpInvocationContext;
++    const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "This tool");
++    const id = yield* browser.value.plutoniumTabId({
++      threadId: thread.threadId,
++      tabId,
++      agentSessionId: `${scope.environmentId}\u0000${thread.providerSessionId}`,
++    });
++    if (id !== null) return id;
++    return yield* failure(
++      tabId === undefined
++        ? "No preview tab is open for this thread in Plutonium's browser. Call preview_open first."
++        : `No preview tab ${tabId} is open for this thread in Plutonium's browser.`,
++    );
++  });
++
++/** Runs the helper's tool `name` on the browser's tab for `tabId`. */
++const forwardTab =
++  (browser: Option.Option<ServerBrowser.ServerBrowser["Service"]>, name: string) =>
++  ({ tabId, ...args }: { readonly tabId?: string | undefined }) =>
++    browserTab(browser, tabId).pipe(Effect.flatMap((id) => forward(name)({ ...args, tab_id: id })));
++
++export const layerTabs = McpToolAccess.toLayer(
++  TabToolkit,
++  Effect.gen(function* () {
++    // Optional, so the toolkit builds without one (tests of other toolkits).
++    const browser = yield* Effect.serviceOption(ServerBrowser.ServerBrowser);
++    return {
++      tab_requests: McpToolAccess.readsAsCaller(
++        ({ tabId }: { readonly tabId?: string | undefined }) =>
++          browserTab(browser, tabId).pipe(
++            Effect.flatMap((id) =>
++              forward("list_tabs")({}).pipe(
++                Effect.map(({ result }) => {
++                  const tab = Array.isArray(result)
++                    ? (result as ReadonlyArray<{ readonly id?: unknown }>).find(
++                        (entry) => entry.id === id,
++                      )
++                    : undefined;
++                  const { pending, state } = (tab ?? {}) as {
++                    readonly pending?: unknown;
++                    readonly state?: unknown;
++                  };
++                  return { result: { pending: pending ?? {}, ...(state ? { state } : {}) } };
++                }),
++              ),
++            ),
++          ),
++      ),
++      find_in_tab: McpToolAccess.actsAsCaller(forwardTab(browser, "find_in_tab")),
++      answer_permission: McpToolAccess.actsAsCaller(forwardTab(browser, "answer_permission")),
++      request_permission: McpToolAccess.actsAsCaller(forwardTab(browser, "request_permission")),
++      choose_files: McpToolAccess.actsAsCaller(forwardTab(browser, "choose_files")),
++      print_tab: McpToolAccess.actsAsCaller(forwardTab(browser, "print_tab")),
++      cancel_print: McpToolAccess.actsAsCaller(forwardTab(browser, "cancel_print")),
++      list_printers: McpToolAccess.readsAsCaller(forward("list_printers")),
++      list_downloads: McpToolAccess.readsAsCaller(forward("list_downloads")),
++      download_action: McpToolAccess.actsAsCaller(forward("download_action")),
++    };
++  }),
++);
++
+ export const layerSnapshot = McpToolAccess.toLayer(WindowSnapshotToolkit, {
+   snapshot_window: McpToolAccess.readsAsCaller((input) =>
+     callHelper("snapshot_window", input).pipe(
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index cf20224467..29ac2cddf9 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -263,6 +263,16 @@ export class ServerBrowser extends Context.Service<
+      * clients report again on connect and whenever the list changes.
+      */
+     readonly reportProfiles: (input: PreviewReportProfilesInput) => Effect.Effect<void>;
++    /**
++     * Plutonium: the browser's id for a live tab of the thread (`tabId`, or the
++     * one a preview tool without a tabId would act on), for the helper's tab
++     * tools. Null when there is none, or it isn't a tab of Plutonium's browser.
++     */
++    readonly plutoniumTabId: (input: {
++      readonly threadId: string;
++      readonly tabId?: string | undefined;
++      readonly agentSessionId?: string | undefined;
++    }) => Effect.Effect<number | null>;
+   }
+ >()("t3/preview/ServerBrowser") {}
+ 
+@@ -322,6 +332,8 @@ interface ServerTab {
+     readonly close: () => Promise<void>;
+     /** Whether the desktop shows the page now. False where it cannot tell. */
+     readonly shown: () => Promise<boolean>;
++    /** Plutonium: the browser's id for the tab. */
++    readonly browserTabId: () => Promise<number | null>;
+   } | null;
+   /** Plutonium: what `desktop.shown()` last said (the idle sweep refreshes it). */
+   shownByDesktop: boolean;
+@@ -783,6 +795,16 @@ const make = Effect.gen(function* () {
+       );
+       const connected = await contexts.connectDesktopPage(endpoint);
+       let browserSession: Promise<CDPSession> | undefined;
++      const plutoniumTab = async () => {
++        browserSession ??= connected.browser.newBrowserCDPSession();
++        const session = (await browserSession) as unknown as {
++          send: (
++            method: string,
++          ) => Promise<{ tabs?: ReadonlyArray<{ id?: number; embedded?: boolean }> }>;
++        };
++        const { tabs: shownTabs } = await session.send("Plutonium.getTabs");
++        return shownTabs?.[0];
++      };
+       return {
+         page: connected.page,
+         close: async () => {
+@@ -791,13 +813,10 @@ const make = Effect.gen(function* () {
+         },
+         // Plutonium: its relay answers Plutonium.getTabs with this tab alone;
+         // `embedded` is whether a shell page shows it.
+-        shown: async () => {
+-          browserSession ??= connected.browser.newBrowserCDPSession();
+-          const session = (await browserSession) as unknown as {
+-            send: (method: string) => Promise<{ tabs?: ReadonlyArray<{ embedded?: boolean }> }>;
+-          };
+-          const { tabs: shownTabs } = await session.send("Plutonium.getTabs");
+-          return shownTabs?.[0]?.embedded === true;
++        shown: async () => (await plutoniumTab())?.embedded === true,
++        browserTabId: async () => {
++          const id = (await plutoniumTab())?.id;
++          return typeof id === "number" ? id : null;
+         },
+       };
+     } catch (cause) {
+@@ -855,7 +874,10 @@ const make = Effect.gen(function* () {
+       actionTimeline: [],
+       control,
+       isolatedContext,
+-      desktop: desktop === null ? null : { close: desktop.close, shown: desktop.shown },
++      desktop:
++        desktop === null
++          ? null
++          : { close: desktop.close, shown: desktop.shown, browserTabId: desktop.browserTabId },
+       shownByDesktop: false,
+       profileId: snapshot.profileId,
+       openerTabId: adopted?.openerTabId,
+@@ -2758,8 +2780,18 @@ const make = Effect.gen(function* () {
+       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
+     });
+ 
++  const plutoniumTabId: ServerBrowser["Service"]["plutoniumTabId"] = (input) =>
++    Effect.promise(async () => {
++      const tab =
++        input.tabId === undefined
++          ? latestThreadTab(input.threadId, input.agentSessionId)
++          : tabs.get(tabKey(input.threadId, input.tabId));
++      return (await tab?.desktop?.browserTabId().catch(() => null)) ?? null;
++    });
++
+   return ServerBrowser.of({
+     attachViewer,
++    plutoniumTabId,
+     clearProfile,
+     reportProfiles,
+     openDownload,
+diff --git a/apps/server/src/preview/ServerBrowserStream.test.ts b/apps/server/src/preview/ServerBrowserStream.test.ts
+index 8fc153d9e2..3858d6b4d5 100644
+--- a/apps/server/src/preview/ServerBrowserStream.test.ts
++++ b/apps/server/src/preview/ServerBrowserStream.test.ts
+@@ -89,6 +89,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       reportProfiles: () => Effect.void,
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: (input) =>
+@@ -166,6 +167,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       reportProfiles: () => Effect.void,
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: () => {
+@@ -207,6 +209,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       reportProfiles: () => Effect.void,
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: (input) =>
+         Effect.sync(() => {
+           requests.push(input);
+@@ -255,6 +258,7 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       reportProfiles: () => Effect.void,
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: (input) =>
+         Effect.sync(() => {
+@@ -324,6 +328,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       reportProfiles: () => Effect.void,
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: () => Effect.fail(new ServerBrowser.ServerBrowserLaunchError({ cause: error })),

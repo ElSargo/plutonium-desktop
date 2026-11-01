@@ -53,6 +53,7 @@ done
 # The session's settings: its T3 Code server, data and logs.
 # shellcheck source=../../lib/common.sh
 . "$checkout/lib/common.sh"
+. "$checkout/shells/hydra/lib/env.sh"   # T3CODE_DIR, T3_HOME, T3_PORT
 live=; (( SLOT )) || live=1
 [[ -n $show && -n $live ]] && die "--show drives the shell's page; not on the live desktop"
 capture=${capture:-$([[ -n $live ]] && echo 0 || echo 1)}

@@ -1,0 +1,386 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sarol263@student.otago.ac.nz>
+Date: Mon, 19 Oct 2026 13:39:28 +1300
+Subject: [PATCH 16/46] Plutonium: network access from the shell's settings
+
+T3's desktop app switches "Network access" by restarting its backend on
+another host. The Plutonium shell is a browser page, so the switch was
+disabled ("restart with a non-loopback host"), and other devices and T3
+apps couldn't pair with this machine from the UI.
+
+- The server, in a Plutonium session, answers /api/plutonium/network-access:
+  GET reports the mode; POST (environment:maintain, JSON only) saves it in
+  $T3CODE_HOME/plutonium-network-access and stops the server. Plutonium's
+  launcher runs it under a supervisor that starts it again on 0.0.0.0 or
+  127.0.0.1. T3_HOST in Plutonium's settings pins the host.
+- Settings, Connections in the shell shows the desktop app's switch, its
+  confirmation and its LAN endpoints, and waits for the server to return.
+- The session cookie keeps its loopback name on either host, so the shell
+  stays signed in across the switch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6om1snsq3fUBJ3KL9ASFL
+---
+ apps/server/src/auth/utils.ts                 |  13 ++-
+ apps/server/src/plutonium/networkAccess.ts    | 108 ++++++++++++++++++
+ apps/server/src/server.ts                     |   2 +
+ .../settings/ConnectionsSettings.tsx          |  71 +++++++++++-
+ apps/web/src/plutonium/networkAccess.ts       |  68 +++++++++++
+ 5 files changed, 251 insertions(+), 11 deletions(-)
+ create mode 100644 apps/server/src/plutonium/networkAccess.ts
+ create mode 100644 apps/web/src/plutonium/networkAccess.ts
+
+diff --git a/apps/server/src/auth/utils.ts b/apps/server/src/auth/utils.ts
+index 3da688e22c..4af2d7deb5 100644
+--- a/apps/server/src/auth/utils.ts
++++ b/apps/server/src/auth/utils.ts
+@@ -35,16 +35,17 @@ export function resolveSessionCookieName(input: {
+     return `${SESSION_COOKIE_NAME}_${input.port}`;
+   }
+ 
++  // Plutonium: the shell's Network access switch restarts the server on
++  // another host (plutonium/networkAccess.ts). The name stays the loopback
++  // one either way, so the shell's session survives the switch.
++  const remote =
++    !input.development && isRemoteReachableHost(input.host) && !process.env.PLUTONIUM_T3;
+   const instanceHash = NodeCrypto.createHash("sha256")
+-    .update(
+-      !input.development && isRemoteReachableHost(input.host)
+-        ? input.environmentId
+-        : input.instanceKey,
+-    )
++    .update(remote ? input.environmentId : input.instanceKey)
+     .digest("hex")
+     .slice(0, 12);
+ 
+-  if (!input.development && isRemoteReachableHost(input.host)) {
++  if (remote) {
+     return `${SESSION_COOKIE_NAME}_${instanceHash}`;
+   }
+ 
+diff --git a/apps/server/src/plutonium/networkAccess.ts b/apps/server/src/plutonium/networkAccess.ts
+new file mode 100644
+index 0000000000..c3a2bfd040
+--- /dev/null
++++ b/apps/server/src/plutonium/networkAccess.ts
+@@ -0,0 +1,108 @@
++/**
++ * Plutonium: network access from Settings, Connections in the shell.
++ *
++ * T3's desktop app switches "Network access" by restarting its backend on
++ * another host. In a Plutonium session the shell is a browser page, and the
++ * server is started by Plutonium's launcher, which runs it under a supervisor
++ * (PLUTONIUM_T3_SUPERVISED): the supervisor binds it to 0.0.0.0 or 127.0.0.1
++ * from the file this route writes, and starts it again when the file changes
++ * while it runs. So switching saves the choice and stops the server, and the
++ * supervisor starts it on the new host. T3_HOST in Plutonium's settings pins
++ * the host (PLUTONIUM_T3_HOST_PINNED): then this only reports it.
++ *
++ *   GET  /api/plutonium/network-access  {mode, switchable}
++ *   POST /api/plutonium/network-access  {mode}: environment:maintain, as the
++ *        desktop app's switch.
++ */
++import { AuthEnvironmentMaintainScope, type DesktopServerExposureMode } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
++import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
++
++import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
++import { isRemoteReachableHost } from "../auth/utils.ts";
++import * as ServerConfig from "../config.ts";
++
++export const PLUTONIUM_NETWORK_ACCESS_ROUTE = "/api/plutonium/network-access";
++/** In T3's home; the launcher's supervisor reads it. */
++export const PLUTONIUM_NETWORK_ACCESS_FILE = "plutonium-network-access";
++
++/** Long enough for the response to reach the page before the server stops. */
++const RESTART_DELAY_MS = 300;
++const NO_STORE = { "cache-control": "no-store" };
++
++const isSupervised = () => process.env.PLUTONIUM_T3_SUPERVISED === "1";
++const isHostPinned = () => process.env.PLUTONIUM_T3_HOST_PINNED === "1";
++
++const currentMode = (host: string | undefined): DesktopServerExposureMode =>
++  isRemoteReachableHost(host) ? "network-accessible" : "local-only";
++
++const handler = Effect.gen(function* () {
++  const request = yield* HttpServerRequest.HttpServerRequest;
++  const config = yield* ServerConfig.ServerConfig;
++  const switchable = isSupervised() && !isHostPinned();
++  const state = { mode: currentMode(config.host), switchable, pinned: isHostPinned() };
++  if (request.method === "GET") return HttpServerResponse.jsonUnsafe(state, { headers: NO_STORE });
++  if (request.method !== "POST")
++    return HttpServerResponse.text("Method Not Allowed", { status: 405 });
++
++  // A form can't send JSON across origins without a preflight, which this
++  // route doesn't answer; the session cookie is SameSite=Lax besides.
++  if (!request.headers["content-type"]?.startsWith("application/json")) {
++    return HttpServerResponse.text("Expected application/json.", { status: 415 });
++  }
++  const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
++  const session = yield* serverAuth
++    .authenticateHttpRequest(request)
++    .pipe(Effect.orElseSucceed(() => null));
++  if (session === null) return HttpServerResponse.text("Unauthorized", { status: 401 });
++  if (!session.scopes.includes(AuthEnvironmentMaintainScope)) {
++    return HttpServerResponse.text(`Requires ${AuthEnvironmentMaintainScope}.`, { status: 403 });
++  }
++  if (!switchable) {
++    return HttpServerResponse.text(
++      isHostPinned()
++        ? "T3_HOST in Plutonium's settings sets the server's host."
++        : "This server wasn't started by Plutonium's launcher.",
++      { status: 409 },
++    );
++  }
++  const body = yield* request.json.pipe(Effect.orElseSucceed(() => null));
++  const mode = (body as { mode?: unknown } | null)?.mode;
++  if (mode !== "network-accessible" && mode !== "local-only") {
++    return HttpServerResponse.text('mode is "network-accessible" or "local-only".', {
++      status: 400,
++    });
++  }
++  if (mode === state.mode)
++    return HttpServerResponse.jsonUnsafe({ ...state, restarting: false }, { headers: NO_STORE });
++
++  const fileSystem = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const failed = yield* fileSystem
++    .writeFileString(path.join(config.baseDir, PLUTONIUM_NETWORK_ACCESS_FILE), `${mode}\n`)
++    .pipe(
++      Effect.as(false),
++      Effect.catch((error) =>
++        Effect.logError("plutonium: couldn't save network access", { cause: error }).pipe(
++          Effect.as(true),
++        ),
++      ),
++    );
++  if (failed) {
++    return HttpServerResponse.text("Couldn't save the setting.", { status: 500 });
++  }
++  yield* Effect.logInfo(`plutonium: network access ${mode}; restarting`);
++  // The supervisor starts it again on the new host.
++  yield* Effect.sleep(RESTART_DELAY_MS).pipe(
++    Effect.andThen(Effect.sync(() => process.kill(process.pid, "SIGTERM"))),
++    Effect.forkDetach,
++  );
++  return HttpServerResponse.jsonUnsafe({ ...state, mode, restarting: true }, { headers: NO_STORE });
++});
++
++export const layer = process.env.PLUTONIUM_T3
++  ? HttpRouter.add("*", PLUTONIUM_NETWORK_ACCESS_ROUTE, handler)
++  : Layer.empty;
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 23981a932e..d3e284e9b6 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -32,6 +32,7 @@ import * as ServerHttp from "./http.ts";
+ import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
+ import { fixPath } from "./os-jank.ts";
+ import * as Ws from "./ws.ts";
++import * as PlutoniumNetworkAccess from "./plutonium/networkAccess.ts";
+ import * as AgentScopeLive from "./process/agentScope.ts";
+ import * as ExternalLauncher from "./process/externalLauncher.ts";
+ import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
+@@ -714,6 +715,7 @@ const layerMakeRoutes = Layer.mergeAll(
+     ServerHttp.layerAssetRoute,
+     ServerHttp.layerAttachmentUploadRoute,
+     DeviceHubProxy.layer,
++    PlutoniumNetworkAccess.layer,
+     ServerBrowserStream.routeLayer,
+     ServerHttp.layerStaticAndDevRoute,
+     Ws.layer,
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 826ba34e2a..a5861edfcb 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -1,5 +1,9 @@
+ import { SessionPermissions } from "./SessionPermissions";
+ import { serverDirectAdvertisedEndpoints } from "../../plutonium/directEndpoints";
++import {
++  setPlutoniumNetworkAccess,
++  usePlutoniumNetworkAccess,
++} from "../../plutonium/networkAccess";
+ import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@t3tools/shared/authScopeOptions";
+ import {
+   ChevronRightIcon,
+@@ -2299,7 +2303,27 @@ export function ConnectionsSettings() {
+   const hasSshHostSuggestionContent =
+     desktopBridge !== undefined &&
+     (isLoadingDiscoveredSshHosts || unsavedDiscoveredSshHosts.length > 0);
+-  const desktopServerExposureState = desktopNetworkAccess.data?.serverExposureState ?? null;
++  // Plutonium: the shell is a browser page; its server's launcher switches
++  // network access as the desktop app does (plutonium/networkAccess.ts).
++  const plutoniumNetworkAccess = usePlutoniumNetworkAccess(canManageLocalBackend && !desktopBridge);
++  const plutoniumExposureMode = plutoniumNetworkAccess.state?.switchable
++    ? plutoniumNetworkAccess.state.mode
++    : null;
++  const plutoniumServerExposureState = useMemo(
++    () =>
++      plutoniumExposureMode === null
++        ? null
++        : {
++            mode: plutoniumExposureMode,
++            endpointUrl: null,
++            advertisedHost: null,
++            tailscaleServeEnabled: false,
++            tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
++          },
++    [plutoniumExposureMode],
++  );
++  const desktopServerExposureState =
++    desktopNetworkAccess.data?.serverExposureState ?? plutoniumServerExposureState;
+   // Plutonium: a browser has no desktop endpoints; it pairs over the addresses
+   // the server reports.
+   const serverDirectEndpoints = primaryEnvironment?.serverConfig?.directEndpoints;
+@@ -2336,9 +2360,10 @@ export function ConnectionsSettings() {
+       ),
+     );
+   }, [authAccessChanges.data]);
+-  const isLocalBackendNetworkAccessible = desktopBridge
+-    ? desktopServerExposureState?.mode === "network-accessible"
+-    : currentAuthPolicy === "remote-reachable";
++  const isLocalBackendNetworkAccessible =
++    desktopBridge || plutoniumServerExposureState
++      ? desktopServerExposureState?.mode === "network-accessible"
++      : currentAuthPolicy === "remote-reachable";
+   const trimmedTailscaleServePortInput = tailscaleServePortInput.trim();
+   const parsedTailscaleServePort = Number(trimmedTailscaleServePortInput);
+   const isTailscaleServePortValid =
+@@ -2362,8 +2387,31 @@ export function ConnectionsSettings() {
+     }
+   }, [isTailscaleServePortValid, parsedTailscaleServePort, pendingTailscaleServeEndpoint]);
+ 
++  const refreshPlutoniumNetworkAccess = plutoniumNetworkAccess.refresh;
+   const handleDesktopServerExposureChange = useCallback(
+     async (checked: boolean) => {
++      if (!desktopBridge && plutoniumServerExposureState !== null) {
++        setIsUpdatingDesktopServerExposure(true);
++        setDesktopServerExposureMutationError(null);
++        try {
++          await setPlutoniumNetworkAccess(checked ? "network-accessible" : "local-only");
++        } catch (error) {
++          const message =
++            error instanceof Error ? error.message : "Failed to update network exposure.";
++          setDesktopServerExposureMutationError(message);
++          toastManager.add(
++            stackedThreadToast({
++              type: "error",
++              title: "Could not update network access",
++              description: message,
++            }),
++          );
++        }
++        refreshPlutoniumNetworkAccess();
++        setIsDesktopServerExposureDialogOpen(false);
++        setIsUpdatingDesktopServerExposure(false);
++        return;
++      }
+       if (
+         !desktopBridge ||
+         primaryEnvironmentId === null ||
+@@ -2392,7 +2440,12 @@ export function ConnectionsSettings() {
+         setIsUpdatingDesktopServerExposure(false);
+       }
+     },
+-    [desktopBridge, primaryEnvironmentId],
++    [
++      desktopBridge,
++      plutoniumServerExposureState,
++      primaryEnvironmentId,
++      refreshPlutoniumNetworkAccess,
++    ],
+   );
+ 
+   const handleConfirmDesktopServerExposureChange = useCallback(() => {
+@@ -3732,6 +3785,14 @@ export function ConnectionsSettings() {
+                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
+                 ) : null}
+               </>
++            ) : canManageLocalBackend && plutoniumServerExposureState ? (
++              <>
++                {renderNetworkAccessRow()}
++                {renderEndpointRows("endpoint-rail")}
++                {canReadRelay || canManageRelay ? (
++                  <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
++                ) : null}
++              </>
+             ) : canManageLocalBackend ? (
+               <>
+                 {renderDisabledNetworkAccessRow()}
+diff --git a/apps/web/src/plutonium/networkAccess.ts b/apps/web/src/plutonium/networkAccess.ts
+new file mode 100644
+index 0000000000..ecd2fd6847
+--- /dev/null
++++ b/apps/web/src/plutonium/networkAccess.ts
+@@ -0,0 +1,68 @@
++/**
++ * Network access for the server this page is served by, in a Plutonium
++ * session (the server's plutonium/networkAccess.ts): the Settings switch the
++ * desktop app has, for the shell, which is a browser page. Switching restarts
++ * the server on the other host, as in the desktop app.
++ */
++import type { DesktopServerExposureMode } from "@t3tools/contracts";
++import { useCallback, useEffect, useState } from "react";
++
++const ROUTE = "/api/plutonium/network-access";
++
++export interface PlutoniumNetworkAccess {
++  readonly mode: DesktopServerExposureMode;
++  /** False when T3_HOST pins the host, or the server isn't supervised. */
++  readonly switchable: boolean;
++  readonly pinned: boolean;
++}
++
++async function request(
++  init?: RequestInit,
++): Promise<PlutoniumNetworkAccess & { restarting?: boolean }> {
++  // Never from the cache, and never for long: a request that reaches the
++  // server while it restarts may get no answer at all, and Chrome would hold
++  // every later one for the same URL behind it.
++  const response = await fetch(ROUTE, {
++    credentials: "same-origin",
++    cache: "no-store",
++    signal: AbortSignal.timeout(init?.method === "POST" ? 10_000 : 3_000),
++    ...init,
++  });
++  if (!response.ok) throw new Error((await response.text()) || response.statusText);
++  return response.json();
++}
++
++/** The server's state, or null where it isn't a Plutonium server (or not yet known). */
++export function usePlutoniumNetworkAccess(enabled: boolean) {
++  const [state, setState] = useState<PlutoniumNetworkAccess | null>(null);
++  const refresh = useCallback(() => {
++    if (!enabled) return;
++    request()
++      .then(setState)
++      .catch(() => setState(null));
++  }, [enabled]);
++  useEffect(refresh, [refresh]);
++  return { state, refresh };
++}
++
++/** Saves |mode| and restarts the server; resolves once it answers again. */
++export async function setPlutoniumNetworkAccess(mode: DesktopServerExposureMode): Promise<void> {
++  const result = await request({
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ mode }),
++  });
++  if (!result.restarting) return;
++  // It stops within a moment, and starts again in a few seconds.
++  await new Promise((resolve) => setTimeout(resolve, 1000));
++  const deadline = Date.now() + 60_000;
++  while (Date.now() < deadline) {
++    try {
++      if ((await request()).mode === mode) return;
++    } catch {
++      // Not up yet.
++    }
++    await new Promise((resolve) => setTimeout(resolve, 500));
++  }
++  throw new Error("The server didn't come back within a minute.");
++}

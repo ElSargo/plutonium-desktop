@@ -7,7 +7,7 @@ On DRM, Ash is the controller of a logind session on a VT, like any Wayland comp
 | **Start** | `plutonium run` from a text console you logged in on runs Ash in that console's session. `--vt ttyN` runs it in the session on ttyN, from any other shell. If that VT isn't in front, Ash starts and waits with the display and input untouched, and comes up when you switch to it. |
 | **Switch away** | Ctrl+Alt+F1…F12. logind takes DRM master and the input devices away from Ash, then switches. The other VT's desktop or console gets the display and keyboard. Ash keeps running and stops drawing. |
 | **Switch back** | Ctrl+Alt+F*n* to Ash's VT, from wherever you are. Ash gets the devices back, sets the display up again, and opens the input devices again. The page and apps are as they were. |
-| **Stop** | Ctrl+Alt+Backspace, `plutonium stop --drm`, or the kill switch. However Ash ends, crashes and SIGKILL included, logind puts the VT back in text mode with the keyboard on, so the console works again. |
+| **Stop** | Ctrl+Alt+Backspace, or `plutonium stop --drm`. However Ash ends, crashes and SIGKILL included, logind puts the VT back in text mode with the keyboard on, so the console works again. |
 
 **From a login screen.** A display manager starts a Wayland session on a VT of its own, in a logind session like a text console's, so `plutonium session start` (the entry `plutonium session install` writes) runs `plutonium run` in it as it is. When Ash exits, the launcher does too, and the display manager's login screen comes back. The kill switch leaves that session alone when it looks for one to switch to (its `Desktop` is `plutonium`).
 
@@ -66,5 +66,5 @@ Not tried: a real keyboard by hand, a graphical desktop on the other VT (it was 
 ## Limits
 
 - **A session started in the background lays out on a provisional display** (the card's connectors as the host sees them, before the GPU process is up) until it is first in front. A display plugged in or unplugged meanwhile is found at that first configuration.
-- **A hung Ash can't switch VTs.** The keys go through Ash's UI thread. Use the kill switch, or `loginctl activate <session>` over ssh. logind switches anyway, and the other session gets the devices: logind takes master and revokes input devices even from a controller that doesn't answer.
+- **A hung Ash can't switch VTs.** The keys go through Ash's UI thread. Use `plutonium stop --drm` or `loginctl activate <session>` over ssh. logind switches anyway, and the other session gets the devices: logind takes master and revokes input devices even from a controller that doesn't answer.
 - **Hotplugged input devices** are still ignored in the container (`BACKLOG.md`), but a device that was there before a switch is opened again after it.
