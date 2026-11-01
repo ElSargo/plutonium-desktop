@@ -1,6 +1,6 @@
 // The on-screen level for the hardware keys (the shell's systemkey event):
 // volume, the microphone, brightness, or what's playing, for a moment.
-import { icon, style } from "./tray.js";
+import { icon, style } from "../widgets.js";
 
 const CSS = `
 .tray-osd {

@@ -1,7 +1,7 @@
 // Now playing (shell.system.media): the active player's title and a
 // play/pause button; click for every player with previous, play/pause and
 // next. Hidden when nothing plays. The media keys control the same player.
-import { button, icon, item, popover, refill, style, watch } from "./tray.js";
+import { button, icon, item, popover, refill, style, watch } from "../widgets.js";
 
 const MAX_LABEL = 40;
 

@@ -13,6 +13,7 @@
 - [features/CONTROLS.md](features/CONTROLS.md): fullscreen, shell shortcuts, pointer capture, the app launcher
 - [features/SHELLS.md](features/SHELLS.md): several shells, tags and groups, the Super+Tab overlay
 - [features/STYX_SHELL.md](features/STYX_SHELL.md): Styx, the scrollable tiling shell; keyboard, touchpad and scrolling fixes
+- [features/UI_LIBRARY.md](features/UI_LIBRARY.md): the shells' UI library: the dock, keys, settings, dragging and widgets Styx, Charon and the plain shell share
 - [features/DRAG_AND_DROP.md](features/DRAG_AND_DROP.md): drag and drop between apps, tabs and pages
 - [features/WINDOW_SIZING.md](features/WINDOW_SIZING.md): who sizes a window, object-fit, the resize cross-fade, windowrequest
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread

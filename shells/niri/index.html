@@ -193,6 +193,11 @@
     box-shadow: 0 6px 30px #0008; transition: opacity 200ms; opacity: 0; pointer-events: none;
   }
   #notice.shown { opacity: 1; }
+  /* The dock's Settings popover (the UI library's form and key editor). */
+  .tray-popover.niri-settings { width: 420px; max-width: 420px; max-height: calc(100vh - 60px); overflow: auto; }
+  .tray-popover.niri-settings > button { width: auto; justify-self: end; }
+  .bar-dock { display: contents; }
+  #bar .pl-dock { margin: 0 6px; --pl-dock-pad: 2px; }
   #empty-hint {
     position: fixed; inset: 0; display: grid; place-items: center; color: #ffffff40; font-size: 14px;
     pointer-events: none; text-align: center; transition: opacity var(--anim);
@@ -256,6 +261,24 @@ const helper =
   params.get("helper") ||
   (await navigator.windowBroker?.getHelperUrl?.().catch(() => "")) ||
   "http://127.0.0.1:3780";
+// The UI library every shell shares (helper/web/ui, UI_LIBRARY.md): keys,
+// settings, dragging, widgets and the dock. Without it there's no shell.
+let ui;
+try {
+  const names = ["keys", "settings", "drag", "widgets", "dock/core", "dock/dock"];
+  const modules = await Promise.all(names.map((name) => import(`${helper}/v1/ui/${name}.js`)));
+  const [keys, settings, drag, widgets, dockCore, dockView] = modules;
+  ui = { keys, settings, drag, widgets, dockCore, dockView };
+} catch (error) {
+  document.body.append(Object.assign(document.createElement("p"), {
+    textContent: `Styx: the helper's UI library didn't load (${helper}): ${error.message}`,
+    style: "position:fixed;inset:auto 0 0;padding:1em;color:#fff;background:#600;font:14px system-ui",
+  }));
+  throw error;
+}
+// The settings (the dock's and the user's keys), kept with the shell; loaded once it's connected.
+const NIRI_DEFAULTS = { ...ui.dockCore.DOCK_DEFAULTS, iconSize: 20, keys: {} };
+let prefs = null;
 // Several displays: this page's output (see the comment at the top).
 const OUTPUT_PREFIX = "niri:output/";
 const LAYOUT_KEY = params.get("display") ? `niri-shell.layout.${params.get("display")}` : "niri-shell.layout";
@@ -710,6 +733,7 @@ function styleTile(tile, active) {
 }
 
 function render() {
+  scheduleDock();
   const world = $("world");
   document.body.classList.toggle("overview", overview);
   const z = CONFIG.overviewZoom;
@@ -858,11 +882,14 @@ function renderTabDialog(tile) {
 
 // ---------------------------------------------------------------- keyboard focus
 let appliedFocus = undefined;
+let focusHistory = [];
 let modal = null; // "launcher" | "hotkeys" | null
 function syncKeyboard() {
   if (!shell?.available || modal || document.visibilityState !== "visible") return;
   const key = focusedKey();
   if (key === appliedFocus) return;
+  // What had the keyboard before, for the dock's "back".
+  if (appliedFocus) focusHistory = [appliedFocus, ...focusHistory.filter((k) => k !== appliedFocus && k !== key)].slice(0, 20);
   appliedFocus = key;
   const tile = key && tiles.get(key);
   if (!tile) {
@@ -1226,7 +1253,7 @@ const actions = {
     quitting = true;
     for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
     try {
-      const { confirm } = await import("./tray.js");
+      const { confirm } = await import(`${helper}/v1/ui/widgets.js`);
       if (await confirm("Are you sure you want to exit Styx? This ends the Plutonium session and closes its apps.", "Exit")) {
         await shell.system.power.call("log-out");
       }
@@ -1293,10 +1320,15 @@ function displayToward(dir) {
 }
 
 // ---------------------------------------------------------------- binds
-// niri's default binds (its default config.kdl), with Mod = Super.
-const binds = [];
+// niri's default binds (its default config.kdl), with Mod = Super, in the UI
+// library's keymap (keys.js): every one can be rebound (the dock's menu,
+// Settings…), and the dock's own are there too (Super+1…9, below). The
+// user's keys are kept in the settings ("keys").
+const keymap = new ui.keys.Keymap({ onOverrides: (keys) => prefs?.set("keys", keys) });
+let bindGroup = "Styx";
 function bind(keys, label, action, { repeat = true, hotkey = false } = {}) {
-  binds.push({ keys: [].concat(keys), label, action, repeat, hotkey });
+  const id = `niri.${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  keymap.define(id, { group: bindGroup, label, keys: [].concat(keys), run: action, repeat, hotkey });
 }
 bind("Super+Shift+Slash", "Show Important Hotkeys", () => actions.hotkeys(), { repeat: false, hotkey: true });
 bind("Super+KeyT", "Spawn Terminal", () => actions.spawn(CONFIG.terminal), { repeat: false, hotkey: true });
@@ -1329,9 +1361,10 @@ bind(["Super+Ctrl+PageDown", "Super+Ctrl+KeyU"], "Move Column to Workspace Down"
 bind(["Super+Ctrl+PageUp", "Super+Ctrl+KeyI"], "Move Column to Workspace Up", () => actions.moveColumnToWorkspaceDelta(-1), { hotkey: true });
 bind(["Super+Shift+PageDown", "Super+Shift+KeyU"], "Move Workspace Down", () => actions.moveWorkspace(1));
 bind(["Super+Shift+PageUp", "Super+Shift+KeyI"], "Move Workspace Up", () => actions.moveWorkspace(-1));
+// Workspace N is Super+Alt+N (niri's Super+N), as in Charon: Super+N is the dock's.
 for (let n = 1; n <= 9; n++) {
-  bind(`Super+Digit${n}`, `Focus Workspace ${n}`, () => actions.focusWorkspace(n - 1), { repeat: false });
-  bind(`Super+Ctrl+Digit${n}`, `Move Column to Workspace ${n}`, () => actions.moveColumnToWorkspace(n - 1), { repeat: false });
+  bind(`Super+Alt+Digit${n}`, `Focus Workspace ${n}`, () => actions.focusWorkspace(n - 1), { repeat: false });
+  bind(`Super+Ctrl+Alt+Digit${n}`, `Move Column to Workspace ${n}`, () => actions.moveColumnToWorkspace(n - 1), { repeat: false });
 }
 bind("Super+BracketLeft", "Consume or Expel Window Left", () => actions.consumeOrExpel(-1));
 bind("Super+BracketRight", "Consume or Expel Window Right", () => actions.consumeOrExpel(1));
@@ -1358,31 +1391,24 @@ bind(["PrintScreen", "Super+Shift+KeyS"], "Take a Screenshot", () => actions.scr
 bind(["Ctrl+PrintScreen", "Super+Ctrl+Shift+KeyS"], "Screenshot the Screen", () => actions.screenshotScreen(), { repeat: false });
 bind(["Alt+PrintScreen", "Super+Alt+Shift+KeyS"], "Screenshot the Focused Window", () => actions.screenshotWindow(), { repeat: false });
 
-const byCombo = new Map(binds.flatMap((b) => b.keys.map((k) => [k, b])));
-const comboOf = (e) =>
-  `${e.metaKey ? "Super+" : ""}${e.ctrlKey ? "Ctrl+" : ""}${e.altKey ? "Alt+" : ""}${e.shiftKey ? "Shift+" : ""}${e.code}`;
-// Normalize "Super+Shift+KeyR" etc. to comboOf's order.
-const normalizeCombo = (text) => {
-  const parts = text.split("+");
-  const code = parts.pop();
-  const has = (m) => parts.includes(m);
-  return `${has("Super") ? "Super+" : ""}${has("Ctrl") ? "Ctrl+" : ""}${has("Alt") ? "Alt+" : ""}${has("Shift") ? "Shift+" : ""}${code}`;
-};
-for (const [k, b] of [...byCombo]) { byCombo.delete(k); byCombo.set(normalizeCombo(k), b); }
+bind([], "Settings", () => openSettings(), { repeat: false });
 
 // Keys this page keeps while an app or tab has the keyboard: every bind,
 // Super itself (so Super+drag and Super+wheel reach the page), and Escape and
 // Enter while the overview is open.
 function updateShortcuts() {
   shell?.setShellShortcuts([
-    ...byCombo.keys(),
+    ...keymap.combos(),
     "MetaLeft", "MetaRight", "Super+MetaLeft", "Super+MetaRight",
     ...(overview ? ["Escape", "Enter", "KeyO"] : []),
   ]);
 }
+keymap.addEventListener("change", () => updateShortcuts());
 
 addEventListener("keydown", (e) => {
   if (e.code === "MetaLeft" || e.code === "MetaRight") { setMod(true); return; }
+  // The key editor is recording, or a field of the shell's own has the keyboard.
+  if (ui.keys.isRecording()) return;
   if (modal === "hotkeys") { closeModal(); if (!e.metaKey) { e.preventDefault(); return; } }
   if (overview && !e.metaKey && (e.code === "Escape" || e.code === "Enter")) {
     e.preventDefault();
@@ -1391,13 +1417,11 @@ addEventListener("keydown", (e) => {
     commit();
     return;
   }
-  const b = byCombo.get(comboOf(e));
-  if (!b) return;
-  e.preventDefault();
-  e.stopPropagation();
-  if (e.repeat && !b.repeat) return;
-  if (modal === "launcher" && b.action !== actions.launcher) closeModal();
-  b.action();
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && e.target.closest?.("input, select, textarea")) return;
+  const action = keymap.actionFor(ui.keys.comboOf(e));
+  if (!action) return;
+  if (modal === "launcher" && action.id !== "niri.run-an-application") closeModal();
+  keymap.handle(e);
   commit();
 }, true);
 addEventListener("keyup", (e) => { if (e.code === "MetaLeft" || e.code === "MetaRight") setMod(false); }, true);
@@ -1453,11 +1477,9 @@ function moveDrag(x, y) {
     const upDown = /top|bottom/.test(d.edge);
     document.body.classList.add("noanim");
     if (d.float) {
-      if (sideways) d.float.w = clamp(d.startW + sx, MIN, W());
-      if (upDown) d.float.h = clamp(d.startH + sy, MIN, H());
-      // The opposite edge stays put.
-      if (d.edge.includes("left")) d.float.x = d.startFX + d.startW - d.float.w;
-      if (d.edge.includes("top")) d.float.y = d.startFY + d.startH - d.float.h;
+      // The opposite edge stays put (the UI library's resizeRect).
+      const r = ui.drag.resizeRect({ x: d.startFX, y: d.startFY, w: d.startW, h: d.startH }, d.edge, dx, dy, { min: { w: MIN, h: MIN }, max: { w: W(), h: H() } });
+      Object.assign(d.float, { x: r.x, y: r.y, w: r.w, h: r.h });
     } else {
       if (sideways) { d.col.full = false; d.col.width = { px: clamp(d.startW + sx, MIN, W() - 2 * g) }; }
       if (upDown && d.col.items.length > 1 && !d.col.tabbed) {
@@ -1726,12 +1748,8 @@ function bindPointer(hit, key) {
     const resize = e.button === 2 && !overview;
     let edge = "bottom-right";
     if (resize) {
-      // From the edge or corner nearest the pointer, as niri.
-      const r = hit.getBoundingClientRect();
-      const fx = (e.clientX - r.left) / r.width;
-      const fy = (e.clientY - r.top) / r.height;
-      edge = [fy < 1 / 3 ? "top" : fy > 2 / 3 ? "bottom" : "", fx < 1 / 3 ? "left" : fx > 2 / 3 ? "right" : ""]
-        .filter(Boolean).join("-") || (fx < 0.5 ? "left" : "right");
+      // From the edge or corner nearest the pointer, as niri (the UI library's nearestEdge).
+      edge = ui.drag.nearestEdge(hit.getBoundingClientRect(), e.clientX, e.clientY);
     }
     beginDrag(key, e.clientX, e.clientY, resize, edge);
   });
@@ -2113,7 +2131,8 @@ function openModal(name) {
 }
 function closeModal() {
   if (!modal) return;
-  $(modal).hidden = true;
+  const box = $(modal);
+  if (box) box.hidden = true;
   modal = null;
   refocus();
 }
@@ -2211,21 +2230,19 @@ addEventListener("pointerdown", (e) => {
 }, true);
 
 // ---------------------------------------------------------------- hotkey overlay
-const pretty = (combo) => combo.split("+").map((p) => ({
-  Super: "Super", Ctrl: "Ctrl", Shift: "Shift", Alt: "Alt", ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓",
-  Slash: "/", Comma: ",", Period: ".", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", PageDown: "Page Down", PageUp: "Page Up",
-})[p] ?? p.replace(/^Key|^Digit/, "")).join(" + ");
+const pretty = (combo) => ui.keys.prettyCombo(combo);
 function showHotkeys() {
   const box = $("hotkeys");
-  const rows = binds.filter((b) => b.hotkey).map((b) => {
+  const rows = keymap.list().filter((b) => b.hotkey && keymap.keysOf(b.id).length && !b.id.startsWith("dock.")).map((b) => {
     const tr = document.createElement("tr");
     const keys = document.createElement("td");
-    keys.append(Object.assign(document.createElement("kbd"), { textContent: pretty(b.keys[0]) }));
+    keys.append(Object.assign(document.createElement("kbd"), { textContent: pretty(keymap.keysOf(b.id)[0]) }));
     tr.append(keys, Object.assign(document.createElement("td"), { textContent: b.label }));
     return tr;
   });
   const extra = [
-    ["Super + 1…9", "Focus Workspace"], ["Super + drag", "Move Window (a column, into one, a tab)"],
+    ["Super + 1…9", "Dock: Open, Focus or Go Back"], ["Super + Shift + 1…9", "Dock: Put the Focused Window There"],
+    ["Super + Alt + 1…9", "Focus Workspace"], ["Super + drag", "Move Window (a column, into one, a tab)"],
     ["Super + right-drag", "Resize Window"], ["Super + middle-drag", "Drag the View"],
     ["Three-finger swipe (or Super + two-finger scroll)", "Columns and Workspaces"],
     ["Four-finger swipe up / down", "Open / Close the Overview"],
@@ -2307,6 +2324,163 @@ function takeTab(tab) {
   return true;
 }
 
+// ---------------------------------------------------------------- the dock
+// The UI library's dock (dock/core.js, dock/dock.js) in the bar, after the
+// minimap: Super+1…9, each a terminal, an app or a site, kept on this
+// workspace or everywhere. A slot's window is a tile like any other; what
+// holds it is its tag (niri:dock/<id>). "This workspace" is where it is in
+// the layout, so moving it moves it out of the workspace's slot; one kept
+// everywhere carries niri:global and comes to the workspace you press it on.
+const GLOBAL = "niri:global";
+let dock = null;
+let dockView = null;
+let dockQueued = false;
+// Columns the dock maximized ("Maximized" layout), to put back for "Normal".
+const dockMaximized = new Set();
+function scheduleDock() {
+  if (dockQueued || !dock) return;
+  dockQueued = true;
+  requestAnimationFrame(() => { dockQueued = false; dock?.changed(); });
+}
+const keyOfThing = (thing) => (thing.kind === "window" ? `w:${thing.entry.id}` : `t:${thing.tab.id}`);
+const itemOfKey = (key) => {
+  const [kind, raw] = key?.split(":") ?? [];
+  return kind === "w" ? { kind: "window", id: Number(raw) } : kind === "t" ? { kind: "tab", id: Number(raw) } : null;
+};
+let dockApps = null;
+const appsNow = () => (dockApps ??= shell.apps().catch(() => { dockApps = null; return []; }));
+let appList = [];
+const niriDockHost = {
+  ns: "niri",
+  scopes: ["thread", "global"],
+  world() {
+    const keys = live();
+    return {
+      windows: [...shell.windows.values()].filter((w) => keys.has(`w:${w.id}`)).map((w) => ({ id: w.id, appId: w.appId, title: w.title, pid: w.pid, tags: tagsOf(w) })),
+      tabs: shell.tabsAvailable ? [...shell.tabs.values()].filter((t) => keys.has(`t:${t.id}`)).map((t) => ({ id: t.id, url: t.url, title: t.title, tags: t.tags, openedBy: t.openedBy, openerId: t.openerId })) : [],
+    };
+  },
+  contextKey: () => curWs().id,
+  scopeTag: (scope) => (scope === "global" ? GLOBAL : null),
+  inScope(item, scope, kind) {
+    if (scope === "global") return (item.tags ?? []).includes(GLOBAL);
+    const at = find(`${kind === "window" ? "w" : "t"}:${item.id}`);
+    return !!at && at.wi === layout.cur;
+  },
+  launchThread: () => TAG,
+  retag: (item, add, remove) => (item.kind === "window" ? shell.tagWindow(item.id, add, remove) : shell.tagTab(item.id, add, remove)),
+  launchApp: (desktopId, thread) => shell.launchApp(thread, desktopId),
+  launchTerminal: (thread) => shell.launch(thread, CONFIG.terminal, { show: true }),
+  async openTab(url, tags) {
+    // A tab here carries this shell's tag, whatever its scope.
+    const tab = await shell.createTab(TAG, url);
+    const extra = tags.filter((tag) => tag !== TAG);
+    if (tab && extra.length) await shell.tagTab(tab.id, extra).catch(() => {});
+    return tab ? { ...tab, tags: [...(tab.tags ?? [TAG]), ...extra] } : null;
+  },
+  presence(thing) {
+    const key = keyOfThing(thing);
+    if (!overview && focusedKey() === key && !modal) return "focused";
+    const at = find(key);
+    return at && at.wi === layout.cur ? "shown" : "hidden";
+  },
+  show(thing, { layout: how, scope }) {
+    const key = keyOfThing(thing);
+    if (!find(key)) {
+      const item = thing.kind === "window" ? shell.windows.get(thing.entry.id) : shell.tabs.get(thing.tab.id);
+      if (!item) return;
+      if (thing.kind === "window") takeWindow(item); else takeTab(item);
+    }
+    const at = find(key);
+    // Kept everywhere: it comes here.
+    if (at && scope === "global" && at.wi !== layout.cur && !drag) { detach(key); addItem(key); }
+    if (modal === "hotkeys") closeModal();
+    overview = false;
+    updateShortcuts();
+    focusItem(key);
+    const now = find(key);
+    const col = now && now.fi === undefined ? layout.workspaces[now.wi].columns[now.ci] : null;
+    if (col && how === "fold" && !col.full) { col.full = true; dockMaximized.add(key); ensureVisible(); }
+    else if (col && how === "split" && dockMaximized.has(key)) { col.full = false; dockMaximized.delete(key); ensureVisible(); }
+    refocus();
+    commit();
+  },
+  hide(thing) {
+    // No minimizing in niri: back to what had the keyboard before, else the column on its left.
+    const key = keyOfThing(thing);
+    if (focusedKey() !== key) return;
+    const before = focusHistory.find((k) => k !== key && find(k)?.wi === layout.cur);
+    if (before) focusItem(before);
+    else actions.focusColumn(-1);
+    refocus();
+    commit();
+  },
+  close(thing) {
+    if (thing.kind === "window") shell.close(thing.entry.id);
+    else shell.tabCommand(thing.tab.id, "close");
+  },
+  snapshot: () => ({ key: focusedKey(), ws: curWs().id }),
+  restore(point, own) {
+    const ownKey = own ? keyOfThing(own) : null;
+    if (point?.key && point.key !== ownKey && find(point.key)) {
+      focusItem(point.key);
+      refocus();
+      commit();
+    } else if (own) niriDockHost.hide(own);
+    else {
+      const wi = layout.workspaces.findIndex((ws) => ws.id === point?.ws);
+      if (wi >= 0) { actions.focusWorkspace(wi); commit(); }
+    }
+  },
+  focusedItem: () => itemOfKey(focusedKey()),
+  apps: () => appsNow(),
+  toast: (text, options = {}) => ui.widgets.toast(text, options),
+  groupOf(item, kind) {
+    if (kind === "tab") {
+      const host = ui.dockCore.hostOf(item.url ?? "");
+      return host ? { key: `site:${host}`, name: host.replace(/^www\./, ""), url: item.url } : null;
+    }
+    const app = appList.find((a) => ui.dockCore.sameApp(a.id, item.appId));
+    return { key: `app:${item.appId || item.id}`, name: app?.name ?? (item.appId || item.title || "App"), desktopId: app?.id ?? null, windowAppId: item.appId };
+  },
+};
+
+/** Gives the page the keyboard (the dock's editor, Settings); returns what gives it back. */
+function takePageKeyboard() {
+  if (modal && modal !== "popover") closeModal();
+  modal = "popover";
+  for (const t of tiles.values()) if (t.kind === "w" && t.content.windowFocused) t.content.blurWindow();
+  // A tab has no blur: hidden for two frames, it lets go.
+  const tab = [...tiles.values()].find((t) => t.kind === "t" && shell.tabs.get(t.id)?.focused);
+  if (tab) {
+    tab.content.style.visibility = "hidden";
+    requestAnimationFrame(() => requestAnimationFrame(() => { tab.content.style.visibility = ""; }));
+  }
+  return () => { if (modal === "popover") { modal = null; refocus(); } };
+}
+
+// Settings: the dock's, and every key (the UI library's form and key editor).
+function openSettings(anchor = dockView?.root ?? document.body) {
+  if (!prefs) return;
+  const giveBack = takePageKeyboard();
+  ui.widgets.popover(anchor, (box) => {
+    box.append(Object.assign(document.createElement("h3"), { textContent: "Dock" }));
+    box.append(ui.settings.settingsForm(prefs, ui.dockCore.dockSettingsSchema({ sizes: [14, 24] })));
+    box.append(Object.assign(document.createElement("h3"), { textContent: "Keyboard Shortcuts" }));
+    const filter = Object.assign(document.createElement("input"), { type: "search", placeholder: "Search shortcuts", className: "pl-input" });
+    const editor = ui.widgets.keyEditor(keymap, {
+      onClash: (action, combo) => ui.widgets.toast(`${ui.keys.prettyCombo(combo)} was “${action.label}”: that one has no key now`),
+    });
+    filter.addEventListener("input", () => editor.setFilter(filter.value));
+    filter.addEventListener("keydown", (e) => e.stopPropagation());
+    const reset = Object.assign(document.createElement("button"), { textContent: "Reset All Shortcuts" });
+    reset.addEventListener("click", async () => {
+      if (await ui.widgets.confirm("Every shortcut goes back to its default.", "Reset")) keymap.resetAll();
+    });
+    box.append(filter, editor, reset);
+  }, { className: "niri-settings", onClose: giveBack });
+}
+
 // ---------------------------------------------------------------- start
 addEventListener("resize", () => { for (const ws of layout.workspaces) ensureVisible(ws); render(); });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refocus(); });
@@ -2320,6 +2494,20 @@ try {
     onOpenTab: () => TAG,
     onFocusTab: (tab) => takeTab(tab),
   });
+  // The settings and the dock (the UI library), before the bar shows them.
+  const store = ui.settings.shellStore(shell, "niri.");
+  prefs = new ui.settings.Settings({ store, key: "prefs", defaults: NIRI_DEFAULTS });
+  await prefs.load().catch(() => {});
+  keymap.setOverrides(prefs.get("keys"));
+  dock = new ui.dockCore.Dock({
+    host: niriDockHost, store, key: "dock", settings: prefs,
+    // At first, Super+1 is the terminal (Super+T's), as Hydra's dock starts.
+    defaults: [{ target: { kind: "terminal" }, scope: "thread", layout: "split" }],
+  });
+  ui.dockCore.defineDockActions(keymap, dock, { group: "Dock" });
+  await dock.load().catch(() => {});
+  prefs.subscribe((key) => { if (key !== "keys") dock.changed(); });
+  appsNow().then((list) => { appList = list; dock.changed(); });
   // The bar, and in it the status indicators over the desktop services
   // (shell.json's "uses"), each its own module.
   try {
@@ -2356,15 +2544,35 @@ try {
     } catch (error) {
       console.error(error);
     }
-    indicator("./media.js", bar.left);
-    indicator("./network.js", bar.right);
-    indicator("./bluetooth.js", bar.right);
-    indicator("./audio.js", bar.right);
-    indicator("./brightness.js", bar.right);
-    indicator("./display.js", bar.right);
-    indicator("./battery.js", bar.right);
-    indicator("./power.js", bar.right);
-    indicator("./osd.js");
+    // The dock, after the minimap (as waybar's taskbar follows its workspaces).
+    try {
+      const slot = document.createElement("span");
+      slot.className = "bar-dock";
+      bar.left.append(slot);
+      dockView = ui.dockView.mountDock(slot, dock, {
+        side: "top",
+        icons: {
+          app: (id) => shell.appIcon(id),
+          site: (url) => shell.siteIcon?.(url) ?? Promise.resolve(null),
+          window: (entry) => shell.windowIcon(shell.windows.get(entry.id) ?? entry).catch(() => null),
+        },
+        scopeLabels: { thread: "This workspace", global: "Everywhere" },
+        layoutLabels: { split: "Normal column", fold: "Maximized column" },
+        takeKeyboard: takePageKeyboard,
+        onSettings: () => openSettings(),
+      });
+    } catch (error) {
+      console.error(error);
+    }
+    indicator(`${helper}/v1/ui/indicators/media.js`, bar.left);
+    indicator(`${helper}/v1/ui/indicators/network.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/bluetooth.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/audio.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/brightness.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/display.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/battery.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/power.js`, bar.right);
+    indicator(`${helper}/v1/ui/indicators/osd.js`);
   } catch (error) {
     console.error(error);
   }

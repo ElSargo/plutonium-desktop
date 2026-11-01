@@ -39,6 +39,7 @@ It's an installed shell (`~/.pluto/shells/niri`, [SHELL_PACKAGES.md](SHELL_PACKA
 - **Animations.** Column, view and workspace movement use a spring-like ease of about 280 ms. Opening a window scales its tile (border and window together) in from 0.5, from its center, and fades it in. Resizes animate as in niri. A layout change asks the windows for their new sizes and waits until they have drawn at new sizes (at most 300 ms, a niri transaction), holding each window scaled back to its old size. Then the tiles ease to their new sizes, each window is scaled along (FLIP), and its old frame cross-fades into its new one, all with the same duration and easing (`WINDOW_SIZING.md`). An interactive resize (Super+right drag) is live, without animations.
 - **The app's own maximize button** maximizes its column (Super+M), and unmaximize restores it.
 - **Launcher** (Super+D), in place of fuzzel. It searches the helper's desktop apps, with icons and recently used ones first. It can also run a command line, open a web address as a browser tab, or start Claude Code with Plutonium's MCP tools.
+- **Dock** in the top bar, after the minimap: Super+1…9, each a terminal, an app or a site, as Hydra's dock is, with Dash to Dock's clicks and running apps. It's the UI library's ([UI_LIBRARY.md](UI_LIBRARY.md), "The dock"); Super+Shift+N puts the focused window in slot N, Super+Ctrl+N opens it maximized. At first slot 1 is the terminal.
 - **The hotkey overlay** (Super+Shift+/) is shown at startup, as in niri.
 - **Browser tabs are tiles too.** Their page dialogs are drawn over the tile.
 - **Which windows it shows:**
@@ -48,7 +49,7 @@ It's an installed shell (`~/.pluto/shells/niri`, [SHELL_PACKAGES.md](SHELL_PACKA
 
 ## Binds
 
-These are niri's default `config.kdl` binds, with Mod = Super:
+These are niri's default `config.kdl` binds, with Mod = Super. They live in the UI library's keymap ([UI_LIBRARY.md](UI_LIBRARY.md)), so each can be rebound in the dock's settings (its menu → Dock Settings…); the user's keys are kept in the shell's storage.
 
 | Keys | Action |
 |---|---|
@@ -57,7 +58,7 @@ These are niri's default `config.kdl` binds, with Mod = Super:
 | Super+Ctrl+the same | move column left/right, window down/up |
 | Super+Home/End, +Ctrl | focus / move to the first or last column |
 | Super+PageDown/PageUp, Super+U/I | workspace down/up; +Ctrl moves the column, +Shift moves the workspace |
-| Super+1…9, Super+Ctrl+1…9 | focus workspace N, move the column there |
+| Super+Alt+1…9, Super+Ctrl+Alt+1…9 | focus workspace N, move the column there (niri's Super+1…9, which are the dock's here) |
 | Super+[ / ] | consume or expel window left/right |
 | Super+, / . | consume window into column / expel it |
 | Super+R, Super+Shift+R, Super+Ctrl+R | preset column widths (1/3, 1/2, 2/3), preset window heights, reset heights |

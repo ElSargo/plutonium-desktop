@@ -21,7 +21,7 @@ node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3773[,<origin>â€
 
 `--cdp-port` is the browser's `--remote-debugging-port`; without it there are no server-driven tabs. `PLUTONIUM_DEBUG_TABS=1` logs their traffic.
 
-`/v1/shell.js` is `web/plutonium-shell.js`, or the file in `PLUTONIUM_SHELL_LIBRARY` (a session sets it to its live one, `plutonium live`), read on every request.
+`/v1/shell.js` is `web/plutonium-shell.js`, or the file in `PLUTONIUM_SHELL_LIBRARY` (a session sets it to its live one, `plutonium live`), read on every request. `/v1/ui/<path>` serves the shells' UI library, `web/ui/` next to that file (src/uiLibrary.ts, `docs/features/UI_LIBRARY.md`): the dock, keys, settings, dragging, widgets and status indicators, as ES modules.
 
 A session can have several shells (`docs/features/SHELLS.md`): `--shell-origin` takes all their origins, comma-separated.
 
@@ -43,7 +43,7 @@ Clients find the socket in `$PLUTONIUM_HELPER`, else `$XDG_RUNTIME_DIR/plutonium
 ## Listeners and access
 
 - **Unix socket** (`$XDG_RUNTIME_DIR/plutonium/<wayland-display>.sock`, mode 0600) for local processes: the frontend's server and agents.
-- **`127.0.0.1:<port>`** for the shell page. Apart from `GET /v1/shell.js`, a request is only served if both hold:
+- **`127.0.0.1:<port>`** for the shell page. Apart from `GET /v1/shell.js` and `GET /v1/ui/â€¦`, a request is only served if both hold:
   - its `Origin` is one of the shell origins, which blocks other pages in the browser;
   - the connecting socket belongs to this user (checked in `/proc/net/tcp`), which blocks other users on the machine.
 

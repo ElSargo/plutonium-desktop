@@ -1,6 +1,6 @@
 // The brightness indicator (shell.system.power's backlight): scroll to change
 // it, click for a slider. Hidden without a backlight (a desktop monitor).
-import { button, icon, popover, refill, slider, style, watch } from "./tray.js";
+import { button, icon, popover, refill, slider, style, watch } from "../widgets.js";
 
 export default function brightness(shell, container) {
   style();
