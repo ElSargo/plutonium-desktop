@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Tue, 20 Oct 2026 15:28:56 +1300
-Subject: [PATCH 18/46] Plutonium: windows held at an agent's size, Take
+Subject: [PATCH 18/47] Plutonium: windows held at an agent's size, Take
  control; read_window and act_window
 
 launch_app takes a width and height, and an agent's windows keep the size

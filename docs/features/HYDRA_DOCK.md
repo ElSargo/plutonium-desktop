@@ -88,7 +88,7 @@ Until that's built, project- and global-scoped windows are out of every agent's 
 
 ## The tray
 
-**Changed 2026-10-30 (patch 0046):** not the sidebar's footer, which hides with the sidebar, but the title bar's right end, the one place that shows whatever else is open (sidebar hidden, panel open or maximized, chat folded, settings).
+**Changed 2026-10-30 (patch 0047):** not the sidebar's footer, which hides with the sidebar, but the title bar's right end, the one place that shows whatever else is open (sidebar hidden, panel open or maximized, chat folded, settings).
 
 - **Always shown:** the time; the battery when it isn't on AC (or is low and not charging). An icon only for something wrong: offline, muted. The date is in the button's label and the popover.
 - **A click** opens quick settings: the time and date (click: a calendar), volume (the icon mutes; an output picker with several outputs) and brightness, Wi-Fi and Bluetooth (a switch each; open for the networks in range, a password for a new one, wired and VPN connections, or the paired devices), what's playing, the battery's line, and lock, suspend, log out, restart and power off (asked first, as in the plain shell).
@@ -104,7 +104,7 @@ Until that's built, project- and global-scoped windows are out of every agent's 
 3. Groups, `"rest"`, the group picker.
 4. Agents' reach and the permission prompt.
 5. The folded chat's strip.
-6. The tray (independent of the rest): the status cluster, patch 0046.
+6. The tray (independent of the rest): the status cluster, patch 0047.
 
 ## Step 1 as built (2026-10-27)
 

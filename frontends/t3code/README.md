@@ -62,7 +62,8 @@ The log is `logs/t3-server.log`. The server needs Node 24.13+ and pnpm. If pnpm 
 | 0037 | An archived or deleted thread's permission grants are forgotten: the server asks the helper, which has a shell page call `forgetThreadPermissions` ([TAB_FEATURES](../../docs/features/TAB_FEATURES.md)) |
 | 0038 | `orchestrator_capabilities` gives each provider instance near (80%) or at a subscription usage limit a `usageWarning`: the window, how much is used, when it resets |
 | 0044 | The app names itself Hydra (title, sidebar, welcome, settings and errors that mean this app) with a mark of its own instead of T3's wordmark and icons; text about T3 Code itself (its desktop and mobile apps, T3 Connect, the `t3` CLI, privacy and license notices) keeps its name |
-| 0046 | The status cluster at the title bar's right end, always shown: the time, the battery when not on AC, offline and muted icons; a click opens quick settings (calendar, volume, brightness, Wi-Fi, Bluetooth, media, lock and power) over the helper's desktop services. The panel toggles and headers make room for it ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md#the-tray)) |
+| 0046 | The welcome wizard's "Connect your computers" step keeps the computer serving the app selected; its box is disabled |
+| 0047 | The status cluster at the title bar's right end, always shown: the time, the battery when not on AC, offline and muted icons; a click opens quick settings (calendar, volume, brightness, Wi-Fi, Bluetooth, media, lock and power) over the helper's desktop services. The panel toggles and headers make room for it ([HYDRA_DOCK](../../docs/features/HYDRA_DOCK.md#the-tray)) |
 
 Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/history/T3_SHELL_TEST.md), [docs/features/TABS.md](../../docs/features/TABS.md) ("In T3 Code"), [docs/features/CONTROLS.md](../../docs/features/CONTROLS.md) and [docs/features/SHELLS.md](../../docs/features/SHELLS.md).
 
