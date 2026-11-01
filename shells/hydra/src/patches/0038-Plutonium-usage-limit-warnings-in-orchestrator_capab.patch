@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 20:08:08 +1300
-Subject: [PATCH 38/49] Plutonium: usage-limit warnings in
+Subject: [PATCH 38/50] Plutonium: usage-limit warnings in
  orchestrator_capabilities
 
 Agents choosing a provider instance for a new thread or child task couldn't

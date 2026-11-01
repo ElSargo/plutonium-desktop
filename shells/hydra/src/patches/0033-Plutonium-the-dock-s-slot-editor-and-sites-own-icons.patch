@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 13:05:40 +1300
-Subject: [PATCH 33/49] Plutonium: the dock's slot editor, and sites' own icons
+Subject: [PATCH 33/50] Plutonium: the dock's slot editor, and sites' own icons
 
 A right click on a dock button (or a click on an empty one) opens a popover
 above the dock with the slot's settings: what it opens (the terminal, an app

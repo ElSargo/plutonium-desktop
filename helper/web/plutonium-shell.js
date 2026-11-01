@@ -260,6 +260,8 @@ export class PlutoniumShell extends EventTarget {
     this._events = null;
     /** @type {Map<string, Promise<string | null>>} */
     this._appIcons = new Map();
+    /** @type {Map<string, Promise<string | null>>} */
+    this._siteIcons = new Map();
     /** This page's id with the helper (its request stream's). */
     this._pageId = crypto.randomUUID();
     /**
@@ -1239,6 +1241,33 @@ export class PlutoniumShell extends EventTarget {
         .then(async (response) => (response.ok ? URL.createObjectURL(await response.blob()) : null))
         .catch(() => null);
       this._appIcons.set(appId, icon);
+    }
+    return icon;
+  }
+
+  /**
+   * An object URL for the icon of the website `pageUrl` is on, or null if the
+   * helper finds none: the one its front page names, else its /favicon.ico.
+   * Fetched by the helper, since a page can't show every site's icon itself
+   * (some forbid other origins). Cached per origin for the page's lifetime.
+   * @param {string} pageUrl
+   * @returns {Promise<string | null>}
+   */
+  siteIcon(pageUrl) {
+    let origin;
+    try {
+      const url = new URL(pageUrl);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return Promise.resolve(null);
+      origin = url.origin;
+    } catch {
+      return Promise.resolve(null);
+    }
+    let icon = this._siteIcons.get(origin);
+    if (!icon) {
+      icon = fetch(`${HELPER}/v1/sites/icon?url=${encodeURIComponent(origin)}`)
+        .then(async (response) => (response.ok ? URL.createObjectURL(await response.blob()) : null))
+        .catch(() => null);
+      this._siteIcons.set(origin, icon);
     }
     return icon;
   }

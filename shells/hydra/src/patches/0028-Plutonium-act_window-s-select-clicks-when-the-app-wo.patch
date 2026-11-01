@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sat, 24 Oct 2026 19:42:14 +1300
-Subject: [PATCH 28/49] Plutonium: act_window's select clicks when the app
+Subject: [PATCH 28/50] Plutonium: act_window's select clicks when the app
  won't select; set_text leaves the keyboard where it was
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
