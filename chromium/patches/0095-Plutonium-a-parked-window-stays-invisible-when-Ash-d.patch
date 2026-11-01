@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 1 Nov 2026 18:14:26 +1300
-Subject: [PATCH 95/95] Plutonium: a parked window stays invisible when Ash
+Subject: [PATCH 95/96] Plutonium: a parked window stays invisible when Ash
  demotes it
 
 A parked window is hidden by its layer's opacity alone, and floats above

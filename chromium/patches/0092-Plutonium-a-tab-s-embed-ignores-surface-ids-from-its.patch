@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 29 Oct 2026 00:42:05 +1300
-Subject: [PATCH 92/95] Plutonium: a tab's <embed> ignores surface ids from its
+Subject: [PATCH 92/96] Plutonium: a tab's <embed> ignores surface ids from its
  last embedding
 
 A tab moving between <embed>s could have its renderer's id from the last

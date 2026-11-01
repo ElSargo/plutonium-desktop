@@ -3,7 +3,7 @@
   "version": "4",
   "description": "Coding agents' chat threads, each with its apps, terminals and browser tabs. Built on T3 Code.",
   "helperParam": "plutoniumHelper",
-  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session"],
+  "uses": ["notifications", "audio", "power", "media", "network", "bluetooth", "session", "display"],
   "server": {
     "run": "plutonium",
     "argv": ["{plutonium}/bin/plutonium", "t3", "serve", "--port", "{port}", "--wayland-display", "{waylandDisplay}"],

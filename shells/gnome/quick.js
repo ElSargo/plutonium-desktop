@@ -1,7 +1,8 @@
 // GNOME's quick settings: the status icons at the right of the top bar and
 // the menu they open: volume, microphone and brightness sliders, Wi-Fi,
 // Bluetooth, Do Not Disturb, Keep Awake and Airplane Mode toggles, each with
-// its submenu, and the battery, screenshot, settings, lock and power buttons.
+// its submenu, and the battery, screenshot, display settings, settings, lock
+// and power buttons.
 // Everything is over the desktop services (shell.system.<name>).
 
 import { icon, batteryIcon, wifiIcon, volumeIcon, duration } from "./icons.js";
@@ -136,6 +137,7 @@ export function mountQuick(ctx) {
     top.append(el("span", "qs-spacer"));
     top.append(
       button("qs-round", { icon: "screenshot", title: "Take a Screenshot", onClick: () => { close(); setTimeout(() => ctx.actions.screenshot(), 200); } }),
+      button("qs-round", { icon: "display", title: "Display Settings", onClick: () => { close(); ctx.actions.settings("displays"); } }),
       button("qs-round", { icon: "settings", title: "Settings", onClick: () => { close(); ctx.actions.settings(); } }),
       button("qs-round", { icon: "lock", title: "Lock", onClick: () => { close(); ctx.actions.lock(); } }),
       button("qs-round", { icon: "power", title: "Power Off / Log Out", onClick: () => openSub("power") }),

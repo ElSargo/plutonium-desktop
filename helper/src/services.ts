@@ -39,6 +39,7 @@ export const SERVICE_NAMES = [
   "media",
   "notifications",
   "session",
+  "display",
 ] as const;
 
 export class DesktopServices {

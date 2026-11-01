@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 26 Oct 2026 08:18:18 +1300
-Subject: [PATCH 59/95] Plutonium: the switcher's text fields are light on
+Subject: [PATCH 59/96] Plutonium: the switcher's text fields are light on
  dark, its rows hover steadily, the backup window is in front
 
 EXO-SHELLS: the overlay's widget takes the dark theme's colors, so its
