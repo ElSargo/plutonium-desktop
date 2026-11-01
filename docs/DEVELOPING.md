@@ -64,20 +64,38 @@ Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium conta
 
 ## Putting a change on your own desktop
 
-The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. The bundle tooling (`dev/bundle/`, `--official`) is still on the core-split branch: these steps use its snapshot worktree, `.worktrees/bundle/core-split-main`, with `main` merged in. Run the commands outside a T3 thread's environment (it names the live session's helper, profile and shells): `env -i HOME=$HOME USER=$USER PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 LANG=C.UTF-8 <command>`.
+The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. The bundle tooling (`dev/bundle/`, `--official`) is still on the core-split branch: these steps use its snapshot worktree, `.worktrees/bundle/core-split-main`, with `main` merged in. From a T3 thread, run them with a clean environment: the thread's names the live session's helper, profile and shells.
 
-1. **The patch.** Commit in `$CHROMIUM_DIR/src` (branch `plutonium`), then from a checkout of this repository on a branch: `bin/plutonium chromium export`, commit `chromium/patches` and the docs, and merge the branch into `main`.
-2. **The official build** (LTO: a few minutes for a change to one component, mostly the link): in the bundle worktree, `bin/plutonium chromium build --official --bg`, then `bin/plutonium chromium wait`. It builds the Chromium checkout as it is, into `out/Official`.
-3. **The bundle:** in the bundle worktree, `git merge main`, then `bin/plutonium bundle build --chrome-out $CHROMIUM_DIR/src/out/Official`. The tarball is `dist/plutonium-<version>-x86_64.tar.xz`.
-4. **Install and restart.** The installer refuses while a session runs from `/opt/plutonium`, so stopping, installing and starting again run as one detached unit (`tools/redeploy.sh`), which outlives the session (and an agent in one of its threads):
+```
+R=~/projects/plutonium-desktop B=$R/.worktrees/bundle/core-split-main S=~/chromium/src
+E="env -i HOME=$HOME USER=$USER PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) LANG=C.UTF-8"
 
-   ```
-   systemd-run --user --unit=plutonium-redeploy --collect \
-     --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin \
-     tools/redeploy.sh <tarball> .worktrees/bundle/core-split-main/dev/bundle/install.sh tty2
-   ```
+# 1. The patch: commit in the Chromium checkout, export, merge into main.
+git -C $S commit …                                   # branch plutonium; a new commit is a new patch
+cd $R/.worktrees/<branch> && $E bin/plutonium chromium export
+git add chromium/patches docs … && git commit …      # then, in $R: git merge --no-ff <branch>
 
-   `tty2` is the console you're logged in on. The session comes back in the unit, `plutonium run --vt tty2`, even if the install fails; `plutonium status` names the release. Its log: `journalctl --user -u plutonium-redeploy`.
+# 2. The bundle worktree takes main first (its patches name the build).
+cd $B && git merge main
+
+# 3. The official (LTO) build, of the Chromium checkout as it is. A change to
+#    one component is a few minutes, mostly the link. It doesn't label
+#    out/Official; the bundle's BUNDLE reads the label, so write it.
+$E bin/plutonium chromium build --official --bg && $E bin/plutonium chromium wait 3600
+echo "official $(cat chromium/BASE chromium/args.gn chromium/patches/*.patch | sha256sum | cut -c1-12)" > $S/out/Official/.plutonium-build
+
+# 4. The bundle. Each run leaves pnpm-lock.yaml changed in its T3 Code checkout,
+#    and the next refuses to start on it: put it back first.
+git -C ~/.local/share/plutonium/bundle/t3code checkout -- pnpm-lock.yaml
+$E bin/plutonium bundle build --chrome-out $S/out/Official   # → dist/plutonium-<version>-x86_64.tar.xz
+
+# 5. Install and restart, as one detached unit (below).
+systemd-run --user --unit=plutonium-redeploy --collect \
+  --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+  $R/tools/redeploy.sh $B/dist/plutonium-<version>-x86_64.tar.xz $B/dev/bundle/install.sh tty2
+```
+
+**Step 5.** The installer refuses while a session runs from `/opt/plutonium`, so `tools/redeploy.sh` stops the DRM session, installs, and starts it again with `plutonium run --vt tty2` (`tty2`: the console you're logged in on), even if the install failed. As a transient unit it outlives the session it stops, and so an agent in one of that session's threads; the agent's turn is cut, and T3 continues it once the session is back. The session then runs in the unit rather than in the console's shell; `plutonium stop` ends it as usual. Its log: `journalctl --user -u plutonium-redeploy` and `~/.local/share/plutonium/logs/redeploy.log`. `plutonium status` names the release afterwards.
 
 ## Applying changes to a running session
 
