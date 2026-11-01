@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Tue, 20 Oct 2026 20:17:34 +1300
-Subject: [PATCH 30/94] Plutonium: embedded focus follows modal dialogs
+Subject: [PATCH 30/95] Plutonium: embedded focus follows modal dialogs
  (xdg_dialog_v1)
 
 EXO-MODAL: Exo implements xdg_wm_dialog_v1 (GTK 4, Qt 6), so it knows a

@@ -62,6 +62,23 @@ plutonium image push                 # that tag and :latest
 
 Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium container create`, then run sessions with the same two variables set.
 
+## Putting a change on your own desktop
+
+The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. The bundle tooling (`dev/bundle/`, `--official`) is still on the core-split branch: these steps use its snapshot worktree, `.worktrees/bundle/core-split-main`, with `main` merged in. Run the commands outside a T3 thread's environment (it names the live session's helper, profile and shells): `env -i HOME=$HOME USER=$USER PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 LANG=C.UTF-8 <command>`.
+
+1. **The patch.** Commit in `$CHROMIUM_DIR/src` (branch `plutonium`), then from a checkout of this repository on a branch: `bin/plutonium chromium export`, commit `chromium/patches` and the docs, and merge the branch into `main`.
+2. **The official build** (LTO: a few minutes for a change to one component, mostly the link): in the bundle worktree, `bin/plutonium chromium build --official --bg`, then `bin/plutonium chromium wait`. It builds the Chromium checkout as it is, into `out/Official`.
+3. **The bundle:** in the bundle worktree, `git merge main`, then `bin/plutonium bundle build --chrome-out $CHROMIUM_DIR/src/out/Official`. The tarball is `dist/plutonium-<version>-x86_64.tar.xz`.
+4. **Install and restart.** The installer refuses while a session runs from `/opt/plutonium`, so stopping, installing and starting again run as one detached unit (`tools/redeploy.sh`), which outlives the session (and an agent in one of its threads):
+
+   ```
+   systemd-run --user --unit=plutonium-redeploy --collect \
+     --setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin \
+     tools/redeploy.sh <tarball> .worktrees/bundle/core-split-main/dev/bundle/install.sh tty2
+   ```
+
+   `tty2` is the console you're logged in on. The session comes back in the unit, `plutonium run --vt tty2`, even if the install fails; `plutonium status` names the release. Its log: `journalctl --user -u plutonium-redeploy`.
+
 ## Applying changes to a running session
 
 `plutonium live` changes what a running session's shells are made of, with no restart: the helper's `shell.js` (`shell-lib`), and T3 Code's web app (`t3`). niri, plain and the other installed shells need no `live`: the helper serves them from `$PLUTO_HOME/shells` on every request, and a change there reloads them. `plutonium shells update niri --from <worktree>` merges a worktree's version in.
