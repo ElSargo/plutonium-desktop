@@ -19,41 +19,36 @@ A public beta: usable day to day by its developer, new to everyone else. Working
 - a settings page to choose an input method;
 - the other desktop portals (notifications, settings, OpenURI).
 
-**Supported:** x86-64 Linux with systemd and rootless podman, and an AMD or Intel GPU on Mesa. It's developed on NixOS with AMD graphics, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested as far as a container allows; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
+**Supported:** x86-64 Linux with systemd and glibc 2.35 or newer, and an AMD or Intel GPU on Mesa (a checkout also needs rootless podman). It's developed on NixOS with AMD graphics, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested as far as a container allows; Intel should work, and NVIDIA is untested. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Quick start
 
-With the prebuilt Chromium; [INSTALL.md](INSTALL.md) explains each step, and [docs/BUILDING.md](docs/BUILDING.md) builds it from source.
+The release is one package, with no podman or checkout. [INSTALL.md](INSTALL.md) says what it needs and explains each step.
 
-1. Install podman, Node.js 24, Python 3, git and curl, and add yourself to the `input` group ([INSTALL.md](INSTALL.md) has the command for your distribution). Then get Plutonium:
-
-   ```sh
-   git clone https://github.com/ElSargo/plutonium-desktop.git plutonium
-   cd plutonium
-   echo PREBUILT=1 > plutonium.env
-   bin/plutonium doctor              # what's missing, and the command that fixes each
-   ```
-
-2. Download Chromium, and make its container:
+1. Install it. The installer puts it in `/opt/plutonium` and adds Plutonium to your login screen, and says if anything is missing. On NixOS, it ends with the module to add to your configuration (INSTALL.md).
 
    ```sh
-   bin/plutonium image pull          # ~1.3 GB
-   bin/plutonium container create
+   curl -fsSL https://…/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
+   plutonium doctor                          # what's missing, and the command that fixes each
    ```
 
-3. Try it in a window on your current desktop:
+2. Try it in a window on your current desktop:
 
    ```sh
-   bin/plutonium run --x11 :0 niri   # Styx; bin/plutonium stop --x11 ends it
+   plutonium run --x11 :0 niri   # Styx; plutonium stop --x11 ends it
    ```
 
-4. To run it as your whole desktop, either switch to a text console (Ctrl+Alt+F2), log in, and run `bin/plutonium run` (the first run installs the shells; after that it runs the ones you left on); or add it to your login screen with `bin/plutonium session install`, log out, and pick Plutonium.
+3. To run it as your whole desktop, log out and pick Plutonium at the login screen. Or switch to a text console (Ctrl+Alt+F2), log in, and run `plutonium run`.
 
 In Styx, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
-The first run installs the shells in `~/.pluto/shells`. From then on, `bin/plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `bin/plutonium run --safe` always gets you the plain shell.
+The first run installs the shells in `~/.pluto/shells`. From then on, `plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `plutonium run --safe` always gets you the plain shell.
 
-**If it hangs,** `plutonium stop --drm` over ssh ends it, and the text console comes back. **Logs** are in `logs/` in the checkout. To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug").
+**If it hangs,** `plutonium stop --drm` over ssh ends it, and the text console comes back. **Logs** are in `~/.local/share/plutonium/logs` (a checkout: `logs/`). To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug"). `sh install.sh --uninstall` removes Plutonium; your data stays.
+
+## Developing
+
+To work on Plutonium itself, run it from a checkout, with Chromium from the prebuilt image in a podman container, or [built from source](docs/BUILDING.md). [INSTALL.md](INSTALL.md) walks through it (podman, Node.js 24, `plutonium image pull`, `plutonium container create`), and [docs/DEVELOPING.md](docs/DEVELOPING.md) covers testing, worktrees, and making a release.
 
 ## Repository
 

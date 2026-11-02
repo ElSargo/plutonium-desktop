@@ -49,6 +49,14 @@ Done in Phase 2: window broker and grants, grant-checked embedding and input,
 shell-only broker API (`--plutonium-shell-origin`), push events instead of the
 JSON registry, viz hit-test rewrite limited to browser-linked children.
 
+- [x] **DevTools only for this user.** S · The session's browser served
+  DevTools on 127.0.0.1:9224, which any local process (another user, a
+  sandboxed app with network access) could use to drive the whole browser.
+  Now it's a Unix socket that takes only the user's own processes
+  (`--plutonium-remote-debugging-socket`, `chromium/patches/0097`, SO_PEERCRED),
+  in the 0700 `$XDG_RUNTIME_DIR/plutonium`. `DEVTOOLS=port` gets the port back
+  for tools that need one. It's no boundary against the user's own processes,
+  agents included: they can reach the socket, and read the profile anyway.
 - [x] **Unit and browser tests for the broker and grant checks.** M · Phase 2
   Done 2026-10-20 (`chromium/patches/0032`, `features/BROKER.md`): unit
   tests, not browser tests. `plutonium_unittests` is a target of its own
@@ -934,12 +942,13 @@ shell find it.
   apply to pinned upstream commits; the container, CLI and install guide are here.
 - [x] **A release build and a prebuilt image** (`ghcr.io/elsargo/plutonium`),
   so users needn't build Chromium.
-- [ ] **Rebuild and push the prebuilt image.** S (hours of build) · It lacks
-  patches 0031–0042 (broker follow-ups, DRM on a background VT, all the tab
-  features): `plutonium chromium build --release`, `image build`,
-  `image push`. Then recreate `plutonium-prebuilt` (`podman rm -f`, then
-  `plutonium container create`) so the live desktop gets the same-path home
-  mount that file pickers and downloads rely on.
+- [ ] **Rebuild and push the prebuilt image.** S (hours of build) · Its tag
+  is a hash of the patch series (`chromium-<hash>`, `dev/env.sh`), and the
+  newest one pushed is from before patch 0031, so `plutonium image pull` in a
+  checkout of `main` finds nothing: the checkout path in INSTALL.md needs a
+  pushed image of the current series (`plutonium chromium build --release`,
+  `image build`, `image push`). Releases don't use it: their chrome is the
+  official build (`DEVELOPING.md`, "Putting a change on your own desktop").
 - [ ] **Build and push the image from CI** (GitHub Actions can't build Chromium
   in its time limits on free runners; a self-hosted runner could). M
 - [x] **Start from a display manager.** M · `plutonium session install`
@@ -947,8 +956,16 @@ shell find it.
   `plutonium session start`: the container and the kill switch first, then
   `plutonium run` in the display manager's logind session, and back to the
   login screen when it ends, with why in the journal (`journalctl -t
-  plutonium-session`). Checked with dry runs and a session that fails to
-  start; not yet tried with a real display manager (GDM, SDDM).
-- [ ] **A login screen entry for every user.** S · The entry runs one
-  checkout's `bin/plutonium`, so it's for the user who installed it.
+  plutonium-session`). The release's installer writes the same entry.
+- [ ] **Try the login screen entry with a real display manager** (GDM, SDDM,
+  LightDM). S · Checked so far with dry runs, a session that fails to start,
+  and the release in `check-distro.sh`'s containers; v0.1's notes say so.
+- [ ] **A login screen entry for every user, from a checkout.** S · A
+  checkout's entry runs its own `bin/plutonium`, so it's for the user who
+  installed it. A release's runs `/usr/local/bin/plutonium`, for everyone.
+- [x] **Releases on GitHub.** `plutonium bundle publish` (`dev/bundle/publish.sh`)
+  puts a tagged, clean bundle up under the names `install.sh` downloads,
+  with `docs/releases/v<version>.md` as its notes.
+- [ ] **Serve `install.sh` at a short address** (the site), and put it in
+  `INSTALL.md`, the README and the site in place of `https://…/install.sh`.
 - [x] **A license:** MIT.

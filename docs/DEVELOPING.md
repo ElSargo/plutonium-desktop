@@ -99,6 +99,27 @@ It's made from:
 
 **NixOS** runs the release through nix-ld, which the release's module (`lib/nixos.nix`, what the installer tells NixOS users to import) sets up: `programs.nix-ld.enable = true`, with the libraries `dev/bundle/host-libs.txt` says are the host's in `programs.nix-ld.libraries` (`mesa libgbm libglvnd libdrm wayland expat zlib zstd libffi`, xorg's X11 libraries, `systemd dbus alsa-lib glib`, …), and nothing more: nix-ld's library path is searched before the bundle's own `RUNPATH`. Its Vulkan drivers are in `/run/opengl-driver`, where only NixOS's own Vulkan loader looks, so an X11 session adds `/run/opengl-driver/share` to Ash's `XDG_DATA_DIRS` for chrome's.
 
+### Publishing a release
+
+A release is a bundle of a tagged commit, built from a clean tree, with its notes in `docs/releases/v<version>.md`:
+
+```
+git tag -a v0.1.0 -m "Plutonium 0.1.0"              # on main, with docs/releases/v0.1.0.md committed
+bin/plutonium bundle build --chrome-out ~/chromium/src/out/Official   # → dist/plutonium-0.1.0-x86_64.tar.xz
+bin/plutonium bundle check dist/plutonium-0.1.0-x86_64.tar.xz
+git push <remote> main v0.1.0
+bin/plutonium bundle publish --draft dist/plutonium-0.1.0-x86_64.tar.xz   # --dry-run first, to see it
+```
+
+- **The version** is the tag without its `v`. `bundle build` reads it from `git describe`, so build from the tagged commit, with nothing uncommitted (no `--allow-dirty`).
+- **Chrome** is the official build of exactly that commit's patches (steps 2 and 3 below, with `.plutonium-build` written).
+- **`publish`** refuses a bundle that's dirty, untagged, or has no notes. It uploads the tarball twice: under its own name, and as `plutonium-x86_64.tar.xz`, the fixed name `install.sh` downloads. Each copy has a `.sha256` beside it. It also uploads `install.sh` as of the tag. `--draft` lets you look the release over on GitHub before publishing it.
+- **Licenses:** the bundle has to carry Chromium's license notices, and `publish` checks for them. `out/Official` doesn't get them from the build, so make them before `bundle build`, in the build container (`plutonium`):
+
+  ```
+  podman exec -w ~/chromium plutonium sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir out/Official out/Official/LICENSES.chromium.html"
+  ```
+
 ## Putting a change on your own desktop
 
 The desktop runs a release install (`/opt/plutonium`, `plutonium status` names it), not a checkout, so a Chromium change reaches it as a new release. These steps run in the main checkout, on `main`: the bundle is made from its commit. From a T3 thread, run them with a clean environment: the thread's names the live session's helper, profile and shells.

@@ -187,7 +187,7 @@ Styx's launcher (Super+D) has an entry that starts Claude Code with these tools.
 
 ## Logs
 
-In `logs/` in your checkout, one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
+In `~/.local/share/plutonium/logs` for the release (`logs/` in a checkout), one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
 - `session-*.log`: the launcher: what it checked, and why it stopped;
 - `ash-*.log`: Ash, Plutonium's Chromium, with the previous run kept as `*.prev.log`;
 - `helper-*.log`: the helper (apps, threads, the GPU check);

@@ -20,7 +20,7 @@
 #   --chrome-out <dir>      or from a release out dir: a local build, which
 #                           BUNDLE can't tie to a patch set
 #   --allow-dirty           build from uncommitted changes
-#   --version <v>           default: git describe
+#   --version <v>           default: git describe (a tag v0.1.0 is 0.1.0)
 #   --out <dir>             where the tarball goes (default: dist/)
 #   --no-shell-builds       leave the shells' builds out (Hydra can't run then)
 set -euo pipefail
@@ -49,7 +49,9 @@ if [[ -z $chrome_image && -z $chrome_out ]]; then
   pm image exists "$chrome_image" || pm pull "$chrome_image" ||
     die "bundle build: no prebuilt image $chrome_image for this checkout's chromium/ (plutonium image build and push it), or --chrome-out <a release out dir>"
 fi
+# A tag v0.1.0 is version 0.1.0.
 version=${version:-$(git -C "$ROOT" describe --tags --always --dirty)}
+version=${version#v}
 name=plutonium-$version-x86_64
 . "$ROOT/dev/bundle/node.txt"
 

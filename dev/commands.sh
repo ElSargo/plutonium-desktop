@@ -42,6 +42,8 @@ Development:
                              (dev/bundle/build.sh has the options)
   bundle check [tarball]     install it (dev/bundle/install.sh) in clean containers of several
                              distributions, check its binaries, run a session from it, uninstall
+  bundle publish <tarball>   a release on GitHub, from a tagged clean build, under the names
+                             install.sh downloads (dev/bundle/publish.sh has the options)
   worktree add <name> [ref]  a git worktree in .worktrees/<name> with its own slot (ports, sockets)
   worktree setup             give a worktree made elsewhere its slot and plutonium.env
   worktree info|list         this checkout's slot and ports / every worktree's slot
@@ -65,6 +67,7 @@ dev_cmd() {
       case "${1:-}" in
         build) shift; exec "$ROOT/dev/bundle/build.sh" "$@" ;;
         check) shift; exec "$ROOT/dev/bundle/check.sh" "$@" ;;
+        publish) shift; exec "$ROOT/dev/bundle/publish.sh" "$@" ;;
         *) usage; exit 2 ;;
       esac ;;
     # tools/cdp.py from the main checkout, which the container mounts.
