@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Fri, 30 Oct 2026 10:15:17 +1300
-Subject: [PATCH 44/50] Plutonium: the app is Hydra
+Subject: [PATCH 44/51] Plutonium: the app is Hydra
 
 In Plutonium, T3 Code's web app is the Hydra shell. It names itself Hydra
 (the page title, the sidebar, the welcome wizard, messages it sends, the

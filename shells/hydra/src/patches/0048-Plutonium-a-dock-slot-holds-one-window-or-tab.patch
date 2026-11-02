@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 1 Nov 2026 13:08:31 +1300
-Subject: [PATCH 48/50] Plutonium: a dock slot holds one window or tab
+Subject: [PATCH 48/51] Plutonium: a dock slot holds one window or tab
 
 A slot used to claim whatever fit its description: a site slot every tab
 whose address started with its prefix, an app slot every window of the app

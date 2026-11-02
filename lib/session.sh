@@ -76,8 +76,43 @@ setup_portal() {
   export XDG_CURRENT_DESKTOP=Plutonium
   dbus-update-activation-environment --systemd XDG_CURRENT_DESKTOP=Plutonium 2>/dev/null ||
     log "WARNING: couldn't pass XDG_CURRENT_DESKTOP to D-Bus activation: apps' screen capture may not reach the helper"
+  start_graphical_session
   systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
   log "portal: xdg-desktop-portal uses the helper for screen capture (XDG_CURRENT_DESKTOP=Plutonium; PORTAL_SESSION=0 to leave it)"
+}
+
+# xdg-desktop-portal.service is Requisite= on graphical-session.target, so
+# with no desktop's session up (Plutonium the only one since boot) every
+# activation fails ("Dependency failed") and apps get no file picker, screen
+# capture or print dialog. That target refuses a manual start; a desktop
+# brings it up with its own target bound to it, as niri and sway do. Ours
+# lives in the runtime dir and is stopped with the session. If another
+# desktop already has it up, it's left alone.
+GRAPHICAL_SESSION_STARTED=0
+start_graphical_session() {
+  systemctl --user is-active --quiet graphical-session.target 2>/dev/null && return 0
+  local dir=$RUN_DIR/systemd/user
+  mkdir -p "$dir"
+  cat >"$dir/plutonium-session.target" <<'UNIT'
+[Unit]
+Description=Plutonium session
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+UNIT
+  systemctl --user daemon-reload 2>/dev/null
+  if systemctl --user start plutonium-session.target 2>/dev/null; then
+    GRAPHICAL_SESSION_STARTED=1
+    log "portal: started graphical-session.target (plutonium-session.target), which xdg-desktop-portal needs"
+  else
+    log "WARNING: couldn't start graphical-session.target: xdg-desktop-portal won't run (no file pickers, capture or printing for apps)"
+  fi
+}
+
+stop_graphical_session() {
+  [[ $GRAPHICAL_SESSION_STARTED == 1 ]] || return 0
+  systemctl --user stop plutonium-session.target 2>/dev/null || true
+  GRAPHICAL_SESSION_STARTED=0
 }
 
 restore_portal() {
@@ -88,6 +123,7 @@ restore_portal() {
     dbus-update-activation-environment XDG_CURRENT_DESKTOP= 2>/dev/null
     systemctl --user unset-environment XDG_CURRENT_DESKTOP 2>/dev/null
   fi
+  stop_graphical_session
   systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
   log "portal: XDG_CURRENT_DESKTOP back to ${PORTAL_PREVIOUS:-unset}"
 }
