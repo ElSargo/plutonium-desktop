@@ -14,7 +14,7 @@ Apps run on the host, not in the container, with the host's Mesa. Mesa finds the
    - ChromeOS builds leave out `ExternalVkImageBackingFactory`, which is `IS_LINUX` only.
 
    With ANGLE on the same Vulkan device, WebGL and canvases need no sharing at all.
-3. **Chromium fix (`gpu/vulkan/vulkan_device_queue.cc`):** `InitializeFromANGLE` never set `drm_device_id_`, so with step 2 Exo fell back to dmabuf v3 again. It now copies it, as `Initialize` does. Patch: `chromium/patches/0009-*.patch`.
+3. **Chromium fix (`gpu/vulkan/vulkan_device_queue.cc`):** `InitializeFromANGLE` never set `drm_device_id_`, so with step 2 Exo fell back to dmabuf v3 again. It now copies it, as `Initialize` does. Patch: Chromium's DRM patch.
 
 What else I tried:
 
@@ -67,7 +67,7 @@ The helper asks Exo what a GL client would be told (`helper/src/gpu.ts`, a small
 
 **What happened.** In X11-hosted sessions (ANGLE on Vulkan), Qt apps such as kwrite draw into `wl_shm` buffers in `XRGB8888`, which Exo makes into `BGRX_8888` shared images. No backing on that GPU path can create `BGRX_8888` from shared memory. A shared image that fails to create makes the GPU process stop the client's whole GPU channel (`SharedImageStub::OnError()`), and that client is the browser: every context was lost, including the display compositor's, and rebuilt. Exo tried the same import again at the app's next commit. So one app stalled the whole display: other windows' snapshots and DevTools screenshots hung. Within a few minutes the Ash log had over 42,000 `Could not find SharedImageBackingFactory … format: BGRX_8888` lines.
 
-**The fix** (`chromium/patches/0028-*.patch`, EXO-IMPORT):
+**The fix** (Chromium's DRM patch, EXO-IMPORT):
 - The GPU process says which 32-bit RGB formats it can import from shared memory (`SharedImageCapabilities::shared_memory_import_formats`). It finds them the way `SharedImageFactory::CreateSharedImage()` does: a backing factory that takes the buffer, or else a GPU backing for a `CompoundImageBacking`.
 - Exo checks the list before creating a shared image. An `X` format the GPU can't import is imported as its `A` twin (`BGRX` as `BGRA`). The alpha byte is padding, so the surface counts as opaque (`Buffer::alpha_is_padding()`).
 - A format with no importable twin isn't advertised by `wl_shm`. A client that uses it anyway gets a `wl_shm.invalid_format` error at `create_buffer`. Exo doesn't fail again on every commit.

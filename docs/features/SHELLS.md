@@ -157,8 +157,8 @@ Shells that the overlay adds aren't on the helper's command line. Each shell pag
 | App icons (2026-10-27, Xvfb): foot's SVG icon on its window's row; the launcher's apps with their PNG and SVG icons | ✓ |
 | A tab's page: snapshot, details, group toggles | ✓ |
 | No DCHECKs in Ash's log | ✓ |
-| (patch 0024) Left click on a tab: the page itself fullscreen; a click in it navigates it | ✓ |
-| (patch 0024) A tab Plain showed, opened fullscreen, then Super+F: back in Plain's `<embed>`, painting | ✓ |
+| Left click on a tab: the page itself fullscreen; a click in it navigates it | ✓ |
+| A tab Plain showed, opened fullscreen, then Super+F: back in Plain's `<embed>`, painting | ✓ |
 
 Not tried: the tab page's DevTools and backup-browser buttons, and a shell's DevTools button.
 

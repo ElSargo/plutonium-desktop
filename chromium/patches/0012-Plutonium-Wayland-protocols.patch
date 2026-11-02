@@ -1,0 +1,2144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 12/13] Plutonium: Wayland protocols
+
+Protocols apps expect from a desktop: zwp_text_input_v3, xdg_activation_v1, wp_cursor_shape_v1, ext_idle_notify_v1, ext_data_control_v1, and server-side decorations.
+
+It holds these changes:
+- zwp_text_input_v3 in Exo, for GTK 4, Qt 6 and foot
+- xdg_activation_v1, apps raise their windows through the shell
+- wp_cursor_shape_v1, cursors by name for GTK 4, Qt 6 and foot
+- ext_idle_notify_v1, apps hear when the user is idle
+- ext_data_control_v1, the clipboard for clipboard managers
+
+and the parts in these files of:
+- Exo embedding (Phase 1) and window broker (Phase 2)
+- agent keyboard focus beside the user's; the compositor decorates every window
+- ext-image-copy-capture-v1 in Exo, for grim
+---
+ .../input_method_configuration.cc             |   7 +-
+ components/exo/session_idle.cc                |  36 ++
+ components/exo/session_idle.h                 |  49 ++
+ components/exo/wayland/ext_data_control.cc    | 318 ++++++++++++
+ components/exo/wayland/ext_data_control.h     |  29 ++
+ components/exo/wayland/ext_idle_notify.cc     | 185 +++++++
+ components/exo/wayland/ext_idle_notify.h      |  28 +
+ .../wayland/org_kde_kwin_server_decoration.cc | 114 +++++
+ .../wayland/org_kde_kwin_server_decoration.h  |  24 +
+ components/exo/wayland/wp_cursor_shape.cc     | 179 +++++++
+ components/exo/wayland/wp_cursor_shape.h      |  27 +
+ components/exo/wayland/xdg_activation.cc      | 176 +++++++
+ components/exo/wayland/xdg_activation.h       |  29 ++
+ .../exo/wayland/zwp_text_input_manager.cc     | 483 ++++++++++++++++++
+ .../exo/wayland/zwp_text_input_manager.h      |   6 +
+ .../zwp_text_input_manager_unittest.cc        | 221 ++++++++
+ third_party/wayland-protocols/BUILD.gn        |  21 +
+ 17 files changed, 1931 insertions(+), 1 deletion(-)
+ create mode 100644 components/exo/session_idle.cc
+ create mode 100644 components/exo/session_idle.h
+ create mode 100644 components/exo/wayland/ext_data_control.cc
+ create mode 100644 components/exo/wayland/ext_data_control.h
+ create mode 100644 components/exo/wayland/ext_idle_notify.cc
+ create mode 100644 components/exo/wayland/ext_idle_notify.h
+ create mode 100644 components/exo/wayland/org_kde_kwin_server_decoration.cc
+ create mode 100644 components/exo/wayland/org_kde_kwin_server_decoration.h
+ create mode 100644 components/exo/wayland/wp_cursor_shape.cc
+ create mode 100644 components/exo/wayland/wp_cursor_shape.h
+ create mode 100644 components/exo/wayland/xdg_activation.cc
+ create mode 100644 components/exo/wayland/xdg_activation.h
+ create mode 100644 components/exo/wayland/zwp_text_input_manager_unittest.cc
+
+diff --git a/chrome/browser/ash/input_method/input_method_configuration.cc b/chrome/browser/ash/input_method/input_method_configuration.cc
+index 9ea554e955..4e717f349c 100644
+--- a/chrome/browser/ash/input_method/input_method_configuration.cc
++++ b/chrome/browser/ash/input_method/input_method_configuration.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ 
++#include "base/command_line.h"
+ #include "base/system/sys_info.h"
+ #include "chrome/browser/ash/input_method/accessibility.h"
+ #include "chrome/browser/ash/input_method/component_extension_ime_manager_delegate_impl.h"
+@@ -31,7 +32,11 @@ Accessibility* g_accessibility = nullptr;
+ void Initialize(PrefService* local_state,
+                 ApplicationLocaleStorage* application_locale_storage) {
+   std::unique_ptr<ImeKeyboard> ime_keyboard;
+-  if (base::SysInfo::IsRunningOnChromeOS()) {
++  // EXO-VIABILITY experiment: on Ozone DRM the evdev keyboard path needs a
++  // real ImeKeyboard to load an XKB layout.
++  if (base::SysInfo::IsRunningOnChromeOS() ||
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "exo-viability-real-displays")) {
+     ime_keyboard = std::make_unique<ImeKeyboardImpl>(
+         ui::OzonePlatform::GetInstance()->GetInputController());
+   } else {
+diff --git a/components/exo/session_idle.cc b/components/exo/session_idle.cc
+new file mode 100644
+index 0000000000..811d600356
+--- /dev/null
++++ b/components/exo/session_idle.cc
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/session_idle.h"
++
++namespace exo {
++
++// static
++SessionIdle* SessionIdle::Get() {
++  static base::NoDestructor<SessionIdle> instance;
++  return instance.get();
++}
++
++SessionIdle::SessionIdle() = default;
++SessionIdle::~SessionIdle() = default;
++
++void SessionIdle::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void SessionIdle::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void SessionIdle::SetInhibited(bool inhibited) {
++  if (inhibited_ == inhibited) {
++    return;
++  }
++  inhibited_ = inhibited;
++  for (Observer& observer : observers_) {
++    observer.OnIdleInhibitedChanged(inhibited);
++  }
++}
++
++}  // namespace exo
+diff --git a/components/exo/session_idle.h b/components/exo/session_idle.h
+new file mode 100644
+index 0000000000..67c6a7e7b5
+--- /dev/null
++++ b/components/exo/session_idle.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_SESSION_IDLE_H_
++#define COMPONENTS_EXO_SESSION_IDLE_H_
++
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++
++namespace exo {
++
++// PLUTONIUM (EXO-LOCK): whether something holds the session's idle off, for
++// ext_idle_notify_v1 (wayland/ext_idle_notify.h). The helper's session
++// service knows every inhibitor (the shells', apps' over D-Bus and the
++// portal, the browser's wake locks, Wayland apps' zwp_idle_inhibit) and says
++// when there are some and when the last one goes (Plutonium.setIdleInhibited).
++class SessionIdle {
++ public:
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnIdleInhibitedChanged(bool inhibited) = 0;
++  };
++
++  static SessionIdle* Get();
++
++  SessionIdle(const SessionIdle&) = delete;
++  SessionIdle& operator=(const SessionIdle&) = delete;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  bool inhibited() const { return inhibited_; }
++  void SetInhibited(bool inhibited);
++
++ private:
++  friend class base::NoDestructor<SessionIdle>;
++
++  SessionIdle();
++  ~SessionIdle();
++
++  bool inhibited_ = false;
++  base::ObserverList<Observer> observers_;
++};
++
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_SESSION_IDLE_H_
+diff --git a/components/exo/wayland/ext_data_control.cc b/components/exo/wayland/ext_data_control.cc
+new file mode 100644
+index 0000000000..cb0a57e0a5
+--- /dev/null
++++ b/components/exo/wayland/ext_data_control.cc
+@@ -0,0 +1,318 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/ext_data_control.h"
++
++#include <ext-data-control-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/files/scoped_file.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "components/exo/data_device.h"
++#include "components/exo/data_offer.h"
++#include "components/exo/data_offer_delegate.h"
++#include "components/exo/data_source.h"
++#include "components/exo/data_source_delegate.h"
++#include "components/exo/display.h"
++#include "components/exo/seat.h"
++#include "components/exo/wayland/server_util.h"
++#include "ui/base/clipboard/clipboard.h"
++#include "ui/base/clipboard/clipboard_buffer.h"
++#include "ui/base/clipboard/clipboard_monitor.h"
++#include "ui/base/clipboard/clipboard_observer.h"
++#include "ui/base/data_transfer_policy/data_transfer_endpoint.h"
++
++namespace exo {
++namespace wayland {
++
++namespace {
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_data_control_source_v1 interface:
++
++class DataControlSourceDelegate : public DataSourceDelegate {
++ public:
++  DataControlSourceDelegate(wl_client* client, wl_resource* resource)
++      : client_(client), resource_(resource) {}
++  DataControlSourceDelegate(const DataControlSourceDelegate&) = delete;
++  DataControlSourceDelegate& operator=(const DataControlSourceDelegate&) =
++      delete;
++
++  // DataSourceDelegate:
++  void OnDataSourceDestroying(DataSource* source) override { delete this; }
++  base::WeakPtr<DataSourceDelegate> GetWeakPtr() override {
++    return weak_ptr_factory_.GetWeakPtr();
++  }
++  void OnTarget(const std::optional<std::string>& mime_type) override {}
++  void OnSend(const std::string& mime_type, base::ScopedFD fd) override {
++    ext_data_control_source_v1_send_send(resource_, mime_type.c_str(),
++                                         fd.get());
++    wl_client_flush(client_);
++  }
++  void OnCancelled() override {
++    ext_data_control_source_v1_send_cancelled(resource_);
++    wl_client_flush(client_);
++  }
++  void OnDndDropPerformed() override {}
++  void OnDndFinished() override {}
++  void OnAction(DndAction dnd_action) override {}
++  // Not a surface's: wl_data_device can't take it.
++  bool CanAcceptDataEventsForSurface(Surface* surface) const override {
++    return false;
++  }
++  SecurityDelegate* GetSecurityDelegate() const override {
++    return ::exo::wayland::GetSecurityDelegate(client_);
++  }
++
++ private:
++  const raw_ptr<wl_client> client_;
++  const raw_ptr<wl_resource> resource_;
++  base::WeakPtrFactory<DataControlSourceDelegate> weak_ptr_factory_{this};
++};
++
++struct DataControlSource {
++  DataControlSource(wl_client* client, wl_resource* resource)
++      : source(new DataControlSourceDelegate(client, resource)) {}
++
++  DataSource source;
++  // Given to set_selection or set_primary_selection.
++  bool used = false;
++};
++
++void data_control_source_offer(wl_client* client,
++                               wl_resource* resource,
++                               const char* mime_type) {
++  auto* data = GetUserDataAs<DataControlSource>(resource);
++  if (data->used) {
++    wl_resource_post_error(resource,
++                           EXT_DATA_CONTROL_SOURCE_V1_ERROR_INVALID_OFFER,
++                           "offer sent after set_selection");
++    return;
++  }
++  data->source.Offer(mime_type);
++}
++
++void data_control_source_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct ext_data_control_source_v1_interface
++    data_control_source_implementation = {data_control_source_offer,
++                                          data_control_source_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_data_control_offer_v1 interface:
++
++class DataControlOfferDelegate : public DataOfferDelegate {
++ public:
++  DataControlOfferDelegate(wl_client* client, wl_resource* resource)
++      : client_(client), resource_(resource) {}
++  DataControlOfferDelegate(const DataControlOfferDelegate&) = delete;
++  DataControlOfferDelegate& operator=(const DataControlOfferDelegate&) =
++      delete;
++
++  // DataOfferDelegate:
++  void OnDataOfferDestroying(DataOffer* offer) override { delete this; }
++  base::WeakPtr<DataOfferDelegate> GetWeakPtr() override {
++    return weak_ptr_factory_.GetWeakPtr();
++  }
++  void OnOffer(const std::string& mime_type) override {
++    ext_data_control_offer_v1_send_offer(resource_, mime_type.c_str());
++  }
++  void OnSourceActions(
++      const base::flat_set<DndAction>& source_actions) override {}
++  void OnAction(DndAction action) override {}
++  SecurityDelegate* GetSecurityDelegate() const override {
++    return ::exo::wayland::GetSecurityDelegate(client_);
++  }
++
++ private:
++  const raw_ptr<wl_client> client_;
++  const raw_ptr<wl_resource> resource_;
++  base::WeakPtrFactory<DataControlOfferDelegate> weak_ptr_factory_{this};
++};
++
++void data_control_offer_receive(wl_client* client,
++                                wl_resource* resource,
++                                const char* mime_type,
++                                int fd) {
++  GetUserDataAs<DataOffer>(resource)->Receive(mime_type, base::ScopedFD(fd));
++}
++
++void data_control_offer_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct ext_data_control_offer_v1_interface
++    data_control_offer_implementation = {data_control_offer_receive,
++                                         data_control_offer_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_data_control_device_v1 interface:
++
++// Offers the clipboard when made and whenever it changes.
++class DataControlDevice : public ui::ClipboardObserver {
++ public:
++  DataControlDevice(wl_client* client, wl_resource* resource, Seat* seat)
++      : client_(client), resource_(resource), seat_(seat) {
++    ui::ClipboardMonitor::GetInstance()->AddObserver(this);
++    OnClipboardDataChanged();
++  }
++  DataControlDevice(const DataControlDevice&) = delete;
++  DataControlDevice& operator=(const DataControlDevice&) = delete;
++  ~DataControlDevice() override {
++    ui::ClipboardMonitor::GetInstance()->RemoveObserver(this);
++  }
++
++  Seat* seat() { return seat_; }
++
++  // ui::ClipboardObserver:
++  void OnClipboardDataChanged() override {
++    wl_resource* offer_resource =
++        wl_resource_create(client_, &ext_data_control_offer_v1_interface,
++                           wl_resource_get_version(resource_), 0);
++    if (!offer_resource) {
++      wl_client_post_no_memory(client_);
++      return;
++    }
++    auto data_offer = std::make_unique<DataOffer>(
++        new DataControlOfferDelegate(client_, offer_resource));
++    DataOffer* offer = data_offer.get();
++    SetImplementation(offer_resource, &data_control_offer_implementation,
++                      std::move(data_offer));
++    ext_data_control_device_v1_send_data_offer(resource_, offer_resource);
++    // As DataDevice offers it to a focused app (whose offer events also come
++    // before its selection event).
++    offer->SetClipboardData(seat_->data_exchange_delegate(),
++                            *ui::Clipboard::GetForCurrentThread(),
++                            ui::EndpointType::kUnknownVm);
++    ext_data_control_device_v1_send_selection(resource_, offer_resource);
++    wl_client_flush(client_);
++  }
++
++ private:
++  const raw_ptr<wl_client> client_;
++  const raw_ptr<wl_resource> resource_;
++  const raw_ptr<Seat> seat_;
++};
++
++// The source, if it may be given now; else posts used_source.
++DataControlSource* TakeSource(wl_resource* resource,
++                              wl_resource* source_resource) {
++  auto* data = GetUserDataAs<DataControlSource>(source_resource);
++  if (data->used) {
++    wl_resource_post_error(resource,
++                           EXT_DATA_CONTROL_DEVICE_V1_ERROR_USED_SOURCE,
++                           "the source was used before");
++    return nullptr;
++  }
++  data->used = true;
++  return data;
++}
++
++void data_control_device_set_selection(wl_client* client,
++                                       wl_resource* resource,
++                                       wl_resource* source_resource) {
++  Seat* seat = GetUserDataAs<DataControlDevice>(resource)->seat();
++  if (!source_resource) {
++    ui::Clipboard::GetForCurrentThread()->Clear(
++        ui::ClipboardBuffer::kCopyPaste);
++    return;
++  }
++  if (DataControlSource* data = TakeSource(resource, source_resource)) {
++    seat->SetSelectionFromDataControl(&data->source);
++  }
++}
++
++void data_control_device_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void data_control_device_set_primary_selection(wl_client* client,
++                                               wl_resource* resource,
++                                               wl_resource* source_resource) {
++  // There's no primary selection: the source is let go, so that a client
++  // waiting to serve it (wl-copy --primary) doesn't wait for ever.
++  if (!source_resource) {
++    return;
++  }
++  if (DataControlSource* data = TakeSource(resource, source_resource)) {
++    data->source.Cancelled();
++  }
++}
++
++constexpr struct ext_data_control_device_v1_interface
++    data_control_device_implementation = {
++        data_control_device_set_selection, data_control_device_destroy,
++        data_control_device_set_primary_selection};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_data_control_manager_v1 interface:
++
++void data_control_manager_create_data_source(wl_client* client,
++                                             wl_resource* resource,
++                                             uint32_t id) {
++  wl_resource* source_resource =
++      wl_resource_create(client, &ext_data_control_source_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!source_resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  SetImplementation(source_resource, &data_control_source_implementation,
++                    std::make_unique<DataControlSource>(client,
++                                                        source_resource));
++}
++
++void data_control_manager_get_data_device(wl_client* client,
++                                          wl_resource* resource,
++                                          uint32_t id,
++                                          wl_resource* seat_resource) {
++  wl_resource* device_resource =
++      wl_resource_create(client, &ext_data_control_device_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!device_resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  // Exo has one seat.
++  Seat* seat = GetUserDataAs<Display>(resource)->seat();
++  SetImplementation(
++      device_resource, &data_control_device_implementation,
++      std::make_unique<DataControlDevice>(client, device_resource, seat));
++}
++
++void data_control_manager_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct ext_data_control_manager_v1_interface
++    data_control_manager_implementation = {
++        data_control_manager_create_data_source,
++        data_control_manager_get_data_device, data_control_manager_destroy};
++
++}  // namespace
++
++void bind_data_control_manager(wl_client* client,
++                               void* data,
++                               uint32_t version,
++                               uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_data_control_manager_v1_interface, 1, id);
++  if (!resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  wl_resource_set_implementation(resource, &data_control_manager_implementation,
++                                 data, nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/ext_data_control.h b/components/exo/wayland/ext_data_control.h
+new file mode 100644
+index 0000000000..d9e7154495
+--- /dev/null
++++ b/components/exo/wayland/ext_data_control.h
+@@ -0,0 +1,29 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_EXT_DATA_CONTROL_H_
++#define COMPONENTS_EXO_WAYLAND_EXT_DATA_CONTROL_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM: ext_data_control_v1, the clipboard for clipboard managers and
++// wl-copy and wl-paste: a client reads and sets it without having focus,
++// and hears of every change. Any client may: whatever runs as the user could
++// read and set it some other way (through the browser's DevTools, or by
++// driving an app), so a check here would hold nothing back. The clipboard
++// only; Exo has no primary selection.
++void bind_data_control_manager(wl_client* client,
++                               void* data,
++                               uint32_t version,
++                               uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_EXT_DATA_CONTROL_H_
+diff --git a/components/exo/wayland/ext_idle_notify.cc b/components/exo/wayland/ext_idle_notify.cc
+new file mode 100644
+index 0000000000..5f5c5d7375
+--- /dev/null
++++ b/components/exo/wayland/ext_idle_notify.cc
+@@ -0,0 +1,185 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/ext_idle_notify.h"
++
++#include <ext-idle-notify-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <algorithm>
++#include <memory>
++
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "components/exo/session_idle.h"
++#include "components/exo/wayland/server_util.h"
++#include "ui/base/user_activity/user_activity_detector.h"
++#include "ui/base/user_activity/user_activity_observer.h"
++
++namespace exo {
++namespace wayland {
++
++namespace {
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_idle_notification_v1 interface:
++
++// Idle once there's been no activity for |timeout| since it was made or the
++// user last did something, and (if it obeys inhibitors) since the last
++// inhibitor went. As wlroots does, an inhibitor that comes while it's idle
++// leaves it idle; only activity resumes it.
++class IdleNotification : public ui::UserActivityObserver,
++                         public SessionIdle::Observer {
++ public:
++  IdleNotification(wl_resource* resource,
++                   base::TimeDelta timeout,
++                   bool obey_inhibitors)
++      : resource_(resource),
++        timeout_(timeout),
++        obey_inhibitors_(obey_inhibitors),
++        since_(base::TimeTicks::Now()) {
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      detector->AddObserver(this);
++    }
++    SessionIdle::Get()->AddObserver(this);
++    Update();
++  }
++  IdleNotification(const IdleNotification&) = delete;
++  IdleNotification& operator=(const IdleNotification&) = delete;
++  ~IdleNotification() override {
++    SessionIdle::Get()->RemoveObserver(this);
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      detector->RemoveObserver(this);
++    }
++  }
++
++  // ui::UserActivityObserver:
++  void OnUserActivity(const ui::Event* event) override {
++    since_ = base::TimeTicks::Now();
++    if (idle_) {
++      idle_ = false;
++      ext_idle_notification_v1_send_resumed(resource_);
++      wl_client_flush(wl_resource_get_client(resource_));
++    }
++    Update();
++  }
++
++  // SessionIdle::Observer:
++  void OnIdleInhibitedChanged(bool inhibited) override {
++    if (!obey_inhibitors_) {
++      return;
++    }
++    if (!inhibited) {
++      since_ = base::TimeTicks::Now();
++    }
++    Update();
++  }
++
++ private:
++  // Goes idle if it's time, else waits until it might be. The detector
++  // notifies observers at most every 200 ms, so its last activity time is
++  // looked at too.
++  void Update() {
++    timer_.Stop();
++    if (idle_ || (obey_inhibitors_ && SessionIdle::Get()->inhibited())) {
++      return;
++    }
++    base::TimeTicks last = since_;
++    if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++      last = std::max(last, detector->last_activity_time());
++    }
++    base::TimeDelta left = last + timeout_ - base::TimeTicks::Now();
++    if (left.is_positive()) {
++      timer_.Start(FROM_HERE, left,
++                   base::BindOnce(&IdleNotification::Update,
++                                  base::Unretained(this)));
++      return;
++    }
++    idle_ = true;
++    ext_idle_notification_v1_send_idled(resource_);
++    wl_client_flush(wl_resource_get_client(resource_));
++  }
++
++  const raw_ptr<wl_resource> resource_;
++  const base::TimeDelta timeout_;
++  const bool obey_inhibitors_;
++  base::TimeTicks since_;
++  bool idle_ = false;
++  base::OneShotTimer timer_;
++};
++
++void idle_notification_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct ext_idle_notification_v1_interface
++    idle_notification_implementation = {idle_notification_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// ext_idle_notifier_v1 interface:
++
++void CreateNotification(wl_client* client,
++                        wl_resource* resource,
++                        uint32_t id,
++                        uint32_t timeout,
++                        bool obey_inhibitors) {
++  wl_resource* notification_resource =
++      wl_resource_create(client, &ext_idle_notification_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!notification_resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  // Exo has one seat, so the seat isn't looked at.
++  SetImplementation(notification_resource, &idle_notification_implementation,
++                    std::make_unique<IdleNotification>(
++                        notification_resource, base::Milliseconds(timeout),
++                        obey_inhibitors));
++}
++
++void idle_notifier_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void idle_notifier_get_idle_notification(wl_client* client,
++                                         wl_resource* resource,
++                                         uint32_t id,
++                                         uint32_t timeout,
++                                         wl_resource* seat) {
++  CreateNotification(client, resource, id, timeout, /*obey_inhibitors=*/true);
++}
++
++void idle_notifier_get_input_idle_notification(wl_client* client,
++                                               wl_resource* resource,
++                                               uint32_t id,
++                                               uint32_t timeout,
++                                               wl_resource* seat) {
++  CreateNotification(client, resource, id, timeout, /*obey_inhibitors=*/false);
++}
++
++constexpr struct ext_idle_notifier_v1_interface idle_notifier_implementation =
++    {idle_notifier_destroy, idle_notifier_get_idle_notification,
++     idle_notifier_get_input_idle_notification};
++
++}  // namespace
++
++void bind_idle_notifier(wl_client* client,
++                        void* data,
++                        uint32_t version,
++                        uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &ext_idle_notifier_v1_interface, std::min(version, 2u), id);
++  if (!resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  wl_resource_set_implementation(resource, &idle_notifier_implementation,
++                                 data, nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/ext_idle_notify.h b/components/exo/wayland/ext_idle_notify.h
+new file mode 100644
+index 0000000000..9311dd2947
+--- /dev/null
++++ b/components/exo/wayland/ext_idle_notify.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
++#define COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM: ext_idle_notify_v1, version 2: tells clients when the user has
++// been idle for a while (Discord's and chat apps' away status, swayidle).
++// Activity is Ash's (ui::UserActivityDetector: a key, the pointer, a touch);
++// inhibitors are the session's (SessionIdle, from the helper), which hold
++// get_idle_notification's objects off but not get_input_idle_notification's.
++void bind_idle_notifier(wl_client* client,
++                        void* data,
++                        uint32_t version,
++                        uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
+diff --git a/components/exo/wayland/org_kde_kwin_server_decoration.cc b/components/exo/wayland/org_kde_kwin_server_decoration.cc
+new file mode 100644
+index 0000000000..9f57301b5d
+--- /dev/null
++++ b/components/exo/wayland/org_kde_kwin_server_decoration.cc
+@@ -0,0 +1,114 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/org_kde_kwin_server_decoration.h"
++
++#include <server-decoration-server-protocol.h>
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "components/exo/surface.h"
++#include "components/exo/surface_observer.h"
++#include "components/exo/wayland/server_util.h"
++
++namespace exo::wayland {
++namespace {
++
++// A surface's decoration. EXO-DECOR: whatever the client asks for, the server
++// decorates, so the client draws no title bar or borders: a page frames an
++// embedded window, and Ash a window on the desktop.
++class ServerDecoration : public SurfaceObserver {
++ public:
++  ServerDecoration(wl_resource* resource, Surface* surface)
++      : resource_(resource), surface_(surface) {
++    surface_->AddSurfaceObserver(this);
++  }
++  ServerDecoration(const ServerDecoration&) = delete;
++  ServerDecoration& operator=(const ServerDecoration&) = delete;
++  ~ServerDecoration() override {
++    if (surface_) {
++      surface_->RemoveSurfaceObserver(this);
++    }
++  }
++
++  // Every request gets the server's mode back.
++  void SendServerMode() {
++    if (surface_) {
++      surface_->SetFrame(SurfaceFrameType::NORMAL);
++    }
++    org_kde_kwin_server_decoration_send_mode(
++        resource_, ORG_KDE_KWIN_SERVER_DECORATION_MODE_SERVER);
++  }
++
++  // SurfaceObserver:
++  void OnSurfaceDestroying(Surface* surface) override {
++    surface->RemoveSurfaceObserver(this);
++    surface_ = nullptr;
++  }
++
++ private:
++  const raw_ptr<wl_resource> resource_;
++  raw_ptr<Surface> surface_;
++};
++
++void server_decoration_release(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void server_decoration_request_mode(wl_client* client,
++                                    wl_resource* resource,
++                                    uint32_t /*mode*/) {
++  GetUserDataAs<ServerDecoration>(resource)->SendServerMode();
++}
++
++const struct org_kde_kwin_server_decoration_interface
++    server_decoration_implementation = {
++        .release = server_decoration_release,
++        .request_mode = server_decoration_request_mode,
++};
++
++void server_decoration_manager_create(wl_client* client,
++                                      wl_resource* resource,
++                                      uint32_t id,
++                                      wl_resource* surface_resource) {
++  wl_resource* decoration_resource =
++      wl_resource_create(client, &org_kde_kwin_server_decoration_interface,
++                         wl_resource_get_version(resource), id);
++  if (!decoration_resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  auto decoration = std::make_unique<ServerDecoration>(
++      decoration_resource, GetUserDataAs<Surface>(surface_resource));
++  ServerDecoration* created = decoration.get();
++  SetImplementation(decoration_resource, &server_decoration_implementation,
++                    std::move(decoration));
++  created->SendServerMode();
++}
++
++const struct org_kde_kwin_server_decoration_manager_interface
++    server_decoration_manager_implementation = {
++        .create = server_decoration_manager_create,
++};
++
++}  // namespace
++
++void bind_org_kde_kwin_server_decoration_manager(wl_client* client,
++                                                 void* data,
++                                                 uint32_t version,
++                                                 uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &org_kde_kwin_server_decoration_manager_interface, version, id);
++  if (!resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  wl_resource_set_implementation(
++      resource, &server_decoration_manager_implementation, data, nullptr);
++  org_kde_kwin_server_decoration_manager_send_default_mode(
++      resource, ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER);
++}
++
++}  // namespace exo::wayland
+diff --git a/components/exo/wayland/org_kde_kwin_server_decoration.h b/components/exo/wayland/org_kde_kwin_server_decoration.h
+new file mode 100644
+index 0000000000..1194df9984
+--- /dev/null
++++ b/components/exo/wayland/org_kde_kwin_server_decoration.h
+@@ -0,0 +1,24 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_ORG_KDE_KWIN_SERVER_DECORATION_H_
++#define COMPONENTS_EXO_WAYLAND_ORG_KDE_KWIN_SERVER_DECORATION_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo::wayland {
++
++// EXO-DECOR: KDE's server decoration protocol, which GTK reads to decide
++// whether to draw its own title bar and borders: the server decorates by
++// default, so windows without a custom title bar (a header bar) draw none.
++void bind_org_kde_kwin_server_decoration_manager(wl_client* client,
++                                                 void* data,
++                                                 uint32_t version,
++                                                 uint32_t id);
++
++}  // namespace exo::wayland
++
++#endif  // COMPONENTS_EXO_WAYLAND_ORG_KDE_KWIN_SERVER_DECORATION_H_
+diff --git a/components/exo/wayland/wp_cursor_shape.cc b/components/exo/wayland/wp_cursor_shape.cc
+new file mode 100644
+index 0000000000..a4c566dcdb
+--- /dev/null
++++ b/components/exo/wayland/wp_cursor_shape.cc
+@@ -0,0 +1,179 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/wp_cursor_shape.h"
++
++#include <cursor-shape-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "components/exo/pointer.h"
++#include "components/exo/wayland/server_util.h"
++#include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
++
++namespace exo {
++namespace wayland {
++
++namespace {
++
++ui::mojom::CursorType GetCursorType(uint32_t shape) {
++  switch (shape) {
++#define ADD_CASE(wayland, chrome)                 \
++  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_##wayland: \
++    return ui::mojom::CursorType::chrome
++
++    ADD_CASE(DEFAULT, kPointer);
++    ADD_CASE(CONTEXT_MENU, kContextMenu);
++    ADD_CASE(HELP, kHelp);
++    ADD_CASE(POINTER, kHand);
++    ADD_CASE(PROGRESS, kProgress);
++    ADD_CASE(WAIT, kWait);
++    ADD_CASE(CELL, kCell);
++    ADD_CASE(CROSSHAIR, kCross);
++    ADD_CASE(TEXT, kIBeam);
++    ADD_CASE(VERTICAL_TEXT, kVerticalText);
++    ADD_CASE(ALIAS, kAlias);
++    ADD_CASE(COPY, kCopy);
++    ADD_CASE(MOVE, kMove);
++    ADD_CASE(NO_DROP, kNoDrop);
++    ADD_CASE(NOT_ALLOWED, kNotAllowed);
++    ADD_CASE(GRAB, kGrab);
++    ADD_CASE(GRABBING, kGrabbing);
++    ADD_CASE(E_RESIZE, kEastResize);
++    ADD_CASE(N_RESIZE, kNorthResize);
++    ADD_CASE(NE_RESIZE, kNorthEastResize);
++    ADD_CASE(NW_RESIZE, kNorthWestResize);
++    ADD_CASE(S_RESIZE, kSouthResize);
++    ADD_CASE(SE_RESIZE, kSouthEastResize);
++    ADD_CASE(SW_RESIZE, kSouthWestResize);
++    ADD_CASE(W_RESIZE, kWestResize);
++    ADD_CASE(EW_RESIZE, kEastWestResize);
++    ADD_CASE(NS_RESIZE, kNorthSouthResize);
++    ADD_CASE(NESW_RESIZE, kNorthEastSouthWestResize);
++    ADD_CASE(NWSE_RESIZE, kNorthWestSouthEastResize);
++    ADD_CASE(COL_RESIZE, kColumnResize);
++    ADD_CASE(ROW_RESIZE, kRowResize);
++    ADD_CASE(ALL_SCROLL, kMiddlePanning);
++    ADD_CASE(ZOOM_IN, kZoomIn);
++    ADD_CASE(ZOOM_OUT, kZoomOut);
++#undef ADD_CASE
++    default:
++      return ui::mojom::CursorType::kNull;
++  }
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// wp_cursor_shape_device_v1 interface:
++
++// A pointer's cursor shapes. The pointer can go away first.
++class CursorShapeDevice {
++ public:
++  explicit CursorShapeDevice(wl_resource* pointer_resource)
++      : pointer_(GetUserDataAs<Pointer>(pointer_resource)) {
++    pointer_destroyed_.listener.notify = &CursorShapeDevice::OnPointerDestroyed;
++    pointer_destroyed_.device = this;
++    wl_resource_add_destroy_listener(pointer_resource,
++                                     &pointer_destroyed_.listener);
++  }
++  CursorShapeDevice(const CursorShapeDevice&) = delete;
++  CursorShapeDevice& operator=(const CursorShapeDevice&) = delete;
++  ~CursorShapeDevice() {
++    if (pointer_) {
++      wl_list_remove(&pointer_destroyed_.listener.link);
++    }
++  }
++
++  Pointer* pointer() { return pointer_; }
++
++ private:
++  // The listener comes first, so the listener's address is its struct's.
++  struct PointerListener {
++    wl_listener listener = {};
++    raw_ptr<CursorShapeDevice> device = nullptr;
++  };
++
++  static void OnPointerDestroyed(wl_listener* listener, void* data) {
++    CursorShapeDevice* device =
++        reinterpret_cast<PointerListener*>(listener)->device;
++    wl_list_remove(&device->pointer_destroyed_.listener.link);
++    device->pointer_ = nullptr;
++  }
++
++  raw_ptr<Pointer> pointer_;
++  PointerListener pointer_destroyed_;
++};
++
++void cursor_shape_device_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void cursor_shape_device_set_shape(wl_client* client,
++                                   wl_resource* resource,
++                                   uint32_t serial,
++                                   uint32_t shape) {
++  ui::mojom::CursorType cursor_type = GetCursorType(shape);
++  if (cursor_type == ui::mojom::CursorType::kNull) {
++    wl_resource_post_error(resource,
++                           WP_CURSOR_SHAPE_DEVICE_V1_ERROR_INVALID_SHAPE,
++                           "Unrecognized shape %u", shape);
++    return;
++  }
++  // As wl_pointer.set_cursor, the serial isn't checked.
++  if (Pointer* pointer =
++          GetUserDataAs<CursorShapeDevice>(resource)->pointer()) {
++    pointer->SetCursorType(cursor_type);
++  }
++}
++
++constexpr struct wp_cursor_shape_device_v1_interface
++    cursor_shape_device_implementation = {cursor_shape_device_destroy,
++                                          cursor_shape_device_set_shape};
++
++////////////////////////////////////////////////////////////////////////////////
++// wp_cursor_shape_manager_v1 interface:
++
++void cursor_shape_manager_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void cursor_shape_manager_get_pointer(wl_client* client,
++                                      wl_resource* resource,
++                                      uint32_t id,
++                                      wl_resource* pointer_resource) {
++  wl_resource* device_resource =
++      wl_resource_create(client, &wp_cursor_shape_device_v1_interface,
++                         wl_resource_get_version(resource), id);
++  SetImplementation(device_resource, &cursor_shape_device_implementation,
++                    std::make_unique<CursorShapeDevice>(pointer_resource));
++}
++
++void cursor_shape_manager_get_tablet_tool_v2(wl_client* client,
++                                             wl_resource* resource,
++                                             uint32_t id,
++                                             wl_resource* tablet_tool) {
++  // Exo has no zwp_tablet_tool_v2, so no client can get here.
++}
++
++constexpr struct wp_cursor_shape_manager_v1_interface
++    cursor_shape_manager_implementation = {
++        cursor_shape_manager_destroy, cursor_shape_manager_get_pointer,
++        cursor_shape_manager_get_tablet_tool_v2};
++
++}  // namespace
++
++void bind_cursor_shape_manager(wl_client* client,
++                               void* data,
++                               uint32_t version,
++                               uint32_t id) {
++  wl_resource* resource =
++      wl_resource_create(client, &wp_cursor_shape_manager_v1_interface, 1, id);
++  wl_resource_set_implementation(resource, &cursor_shape_manager_implementation,
++                                 data, nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/wp_cursor_shape.h b/components/exo/wayland/wp_cursor_shape.h
+new file mode 100644
+index 0000000000..66e484809c
+--- /dev/null
++++ b/components/exo/wayland/wp_cursor_shape.h
+@@ -0,0 +1,27 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_WP_CURSOR_SHAPE_H_
++#define COMPONENTS_EXO_WAYLAND_WP_CURSOR_SHAPE_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM: wp_cursor_shape_v1, the cursor by name (GTK 4.16+, Qt 6.8+,
++// foot) rather than from the client's own cursor theme, as
++// zcr_cursor_shapes_v1 does for Chrome. Pointers only: Exo has no tablet
++// tools.
++void bind_cursor_shape_manager(wl_client* client,
++                               void* data,
++                               uint32_t version,
++                               uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_WP_CURSOR_SHAPE_H_
+diff --git a/components/exo/wayland/xdg_activation.cc b/components/exo/wayland/xdg_activation.cc
+new file mode 100644
+index 0000000000..eb7edc4261
+--- /dev/null
++++ b/components/exo/wayland/xdg_activation.cc
+@@ -0,0 +1,176 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/xdg_activation.h"
++
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++#include <xdg-activation-v1-server-protocol.h>
++
++#include <map>
++#include <memory>
++#include <string>
++
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/time/time.h"
++#include "base/unguessable_token.h"
++#include "components/exo/display.h"
++#include "components/exo/embedded_windows.h"
++#include "components/exo/seat.h"
++#include "components/exo/surface.h"
++#include "components/exo/wayland/server_util.h"
++
++namespace exo {
++namespace wayland {
++namespace {
++
++// How long a token can be used for.
++constexpr base::TimeDelta kTokenLifetime = base::Seconds(60);
++
++// The tokens handed out and not used yet, by token: whether each is valid
++// (its client had keyboard focus) and when it was made.
++struct Token {
++  bool valid = false;
++  base::TimeTicks created;
++};
++
++std::map<std::string, Token>& Tokens() {
++  static base::NoDestructor<std::map<std::string, Token>> tokens;
++  return *tokens;
++}
++
++// Whether a surface of |client| has keyboard focus.
++bool ClientHasKeyboardFocus(Display* display, wl_client* client) {
++  Surface* focused = display->seat()->GetFocusedSurface();
++  wl_resource* resource = focused ? GetSurfaceResource(focused) : nullptr;
++  return resource && wl_resource_get_client(resource) == client;
++}
++
++////////////////////////////////////////////////////////////////////////////////
++// xdg_activation_token_v1 interface:
++
++class ActivationToken {
++ public:
++  explicit ActivationToken(Display* display) : display_(display) {}
++  ActivationToken(const ActivationToken&) = delete;
++  ActivationToken& operator=(const ActivationToken&) = delete;
++
++  // Returns false if it was committed before.
++  bool Commit(wl_resource* resource) {
++    if (committed_) {
++      return false;
++    }
++    committed_ = true;
++    wl_client* client = wl_resource_get_client(resource);
++    // What counts is that the client is the one the user is using, not the
++    // surface or serial it names.
++    const bool valid = ClientHasKeyboardFocus(display_, client);
++    std::string token = base::UnguessableToken::Create().ToString();
++    std::erase_if(Tokens(), [](const auto& entry) {
++      return base::TimeTicks::Now() - entry.second.created > kTokenLifetime;
++    });
++    Tokens()[token] = {valid, base::TimeTicks::Now()};
++    VLOG(1) << "EXO-ACTIVATION token for client "
++            << static_cast<const void*>(client) << (valid ? "" : " (invalid)");
++    xdg_activation_token_v1_send_done(resource, token.c_str());
++    wl_client_flush(client);
++    return true;
++  }
++
++ private:
++  const raw_ptr<Display> display_;
++  bool committed_ = false;
++};
++
++void activation_token_set_serial(wl_client* client,
++                                 wl_resource* resource,
++                                 uint32_t serial,
++                                 wl_resource* seat) {
++  // Nothing needs to be done: keyboard focus at commit decides.
++}
++
++void activation_token_set_app_id(wl_client* client,
++                                 wl_resource* resource,
++                                 const char* app_id) {
++  // Nothing needs to be done.
++}
++
++void activation_token_set_surface(wl_client* client,
++                                  wl_resource* resource,
++                                  wl_resource* surface_resource) {
++  // Nothing needs to be done.
++}
++
++void activation_token_commit(wl_client* client, wl_resource* resource) {
++  if (!GetUserDataAs<ActivationToken>(resource)->Commit(resource)) {
++    wl_resource_post_error(resource, XDG_ACTIVATION_TOKEN_V1_ERROR_ALREADY_USED,
++                           "the activation token was already committed");
++  }
++}
++
++void activation_token_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct xdg_activation_token_v1_interface
++    activation_token_implementation = {
++        activation_token_set_serial, activation_token_set_app_id,
++        activation_token_set_surface, activation_token_commit,
++        activation_token_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// xdg_activation_v1 interface:
++
++void activation_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void activation_get_activation_token(wl_client* client,
++                                     wl_resource* resource,
++                                     uint32_t id) {
++  wl_resource* token_resource =
++      wl_resource_create(client, &xdg_activation_token_v1_interface, 1, id);
++  SetImplementation(
++      token_resource, &activation_token_implementation,
++      std::make_unique<ActivationToken>(GetUserDataAs<Display>(resource)));
++}
++
++void activation_activate(wl_client* client,
++                         wl_resource* resource,
++                         const char* token,
++                         wl_resource* surface_resource) {
++  auto it = Tokens().find(token);
++  if (it == Tokens().end()) {
++    VLOG(1) << "EXO-ACTIVATION unknown token";
++    return;
++  }
++  const Token found = it->second;
++  Tokens().erase(it);
++  if (!found.valid || base::TimeTicks::Now() - found.created > kTokenLifetime) {
++    VLOG(1) << "EXO-ACTIVATION token not valid";
++    return;
++  }
++  EmbeddedWindows::Get()->RequestActivation(
++      GetUserDataAs<Surface>(surface_resource));
++}
++
++constexpr struct xdg_activation_v1_interface activation_implementation = {
++    activation_destroy, activation_get_activation_token, activation_activate};
++
++}  // namespace
++
++void bind_xdg_activation(wl_client* client,
++                         void* data,
++                         uint32_t version,
++                         uint32_t id) {
++  wl_resource* resource =
++      wl_resource_create(client, &xdg_activation_v1_interface, 1, id);
++  wl_resource_set_implementation(resource, &activation_implementation, data,
++                                 nullptr);
++}
++
++}  // namespace wayland
++}  // namespace exo
+diff --git a/components/exo/wayland/xdg_activation.h b/components/exo/wayland/xdg_activation.h
+new file mode 100644
+index 0000000000..cbe37d8305
+--- /dev/null
++++ b/components/exo/wayland/xdg_activation.h
+@@ -0,0 +1,29 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
++#define COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
++
++#include <stdint.h>
++
++struct wl_client;
++
++namespace exo {
++namespace wayland {
++
++// PLUTONIUM (EXO-ACTIVATION): xdg_activation_v1, for apps that raise each
++// other's windows (a link opened in a browser that is already running, a
++// second launch of a single-instance app). A token is valid if the client
++// that asked for it had keyboard focus; activating with one asks the shell
++// to show the window (EmbeddedWindows::RequestActivation()). |data| is the
++// Display.
++void bind_xdg_activation(wl_client* client,
++                         void* data,
++                         uint32_t version,
++                         uint32_t id);
++
++}  // namespace wayland
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
+diff --git a/components/exo/wayland/zwp_text_input_manager.cc b/components/exo/wayland/zwp_text_input_manager.cc
+index 9753416fe3..abaee4d064 100644
+--- a/components/exo/wayland/zwp_text_input_manager.cc
++++ b/components/exo/wayland/zwp_text_input_manager.cc
+@@ -7,11 +7,14 @@
+ #include <sys/mman.h>
+ #include <text-input-extension-unstable-v1-server-protocol.h>
+ #include <text-input-unstable-v1-server-protocol.h>
++#include <text-input-unstable-v3-server-protocol.h>
+ #include <wayland-server-core.h>
+ #include <wayland-server-protocol-core.h>
+ #include <xkbcommon/xkbcommon.h>
+ 
++#include <algorithm>
+ #include <string_view>
++#include <tuple>
+ 
+ #include "ash/constants/ash_features.h"
+ #include "base/compiler_specific.h"
+@@ -21,6 +24,10 @@
+ #include "base/strings/utf_offset_string_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "components/exo/display.h"
++#include "components/exo/seat.h"
++#include "components/exo/seat_observer.h"
++#include "components/exo/surface.h"
++#include "components/exo/surface_observer.h"
+ #include "components/exo/text_input.h"
+ #include "components/exo/wayland/serial_tracker.h"
+ #include "components/exo/wayland/server_util.h"
+@@ -1015,6 +1022,472 @@ constexpr struct zcr_text_input_extension_v1_interface
+     text_input_extension_implementation = {
+         text_input_extension_get_extended_text_input};
+ 
++////////////////////////////////////////////////////////////////////////////////
++// text_input_v3 interface:
++
++// Plutonium: zwp_text_input_v3 (GTK 4, Qt 6, foot) on the same TextInput as
++// v1. The client enables text input on the surface it was told it entered,
++// and its state is double-buffered until commit. Each change from the IME is
++// sent as its events followed by done, whose serial is the number of commits.
++class WaylandTextInputV3Delegate : public TextInput::Delegate,
++                                   public SeatObserver,
++                                   public SurfaceObserver {
++ public:
++  WaylandTextInputV3Delegate(wl_resource* text_input, Seat* seat)
++      : text_input_(text_input), seat_(seat->GetWeakPtr()) {
++    seat_->AddObserver(this, kTextInputV3SeatObserverPriority);
++  }
++  WaylandTextInputV3Delegate(const WaylandTextInputV3Delegate&) = delete;
++  WaylandTextInputV3Delegate& operator=(const WaylandTextInputV3Delegate&) =
++      delete;
++  ~WaylandTextInputV3Delegate() override {
++    SetEnteredSurface(nullptr);
++    if (seat_) {
++      seat_->RemoveObserver(this);
++    }
++  }
++
++  void set_text_input(TextInput* text_input) {
++    text_input_object_ = text_input;
++    // The client may create its text input while it already has keyboard
++    // focus.
++    if (seat_) {
++      OnSurfaceFocused(seat_->GetFocusedSurface(), nullptr, true);
++    }
++  }
++
++  void Enable() {
++    // Enabling resets all state from earlier requests.
++    pending_enabled_ = true;
++    pending_surrounding_text_.reset();
++    pending_content_type_ = std::make_pair(
++        static_cast<uint32_t>(ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE),
++        static_cast<uint32_t>(ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL));
++    pending_cursor_rectangle_.reset();
++  }
++
++  void Disable() { pending_enabled_ = false; }
++
++  void SetPendingSurroundingText(std::string text,
++                                 int32_t cursor,
++                                 int32_t anchor) {
++    pending_surrounding_text_.emplace(std::move(text), cursor, anchor);
++  }
++
++  void SetPendingContentType(uint32_t hint, uint32_t purpose) {
++    pending_content_type_ = std::make_pair(hint, purpose);
++  }
++
++  void SetPendingCursorRectangle(const gfx::Rect& rect) {
++    pending_cursor_rectangle_ = rect;
++  }
++
++  void CommitState() {
++    ++commit_count_;
++    const bool was_enabled = enabled_;
++    enabled_ = pending_enabled_ && entered_surface_ && seat_;
++    if (!enabled_) {
++      if (was_enabled) {
++        text_input_object_->Deactivate();
++      }
++      return;
++    }
++    if (!was_enabled) {
++      text_input_object_->Activate(seat_.get(), entered_surface_,
++                                   ui::TextInputClient::FOCUS_REASON_OTHER);
++    }
++    if (pending_content_type_) {
++      SetContentType(pending_content_type_->first,
++                     pending_content_type_->second);
++      pending_content_type_.reset();
++    }
++    if (pending_surrounding_text_) {
++      const auto& [text, cursor, anchor] = *pending_surrounding_text_;
++      SetSurroundingText(text, cursor, anchor);
++      pending_surrounding_text_.reset();
++    }
++    if (pending_cursor_rectangle_) {
++      text_input_object_->SetCaretBounds(*pending_cursor_rectangle_);
++      pending_cursor_rectangle_.reset();
++    }
++  }
++
++ private:
++  static constexpr int kTextInputV3SeatObserverPriority = 1;
++
++  wl_client* client() { return wl_resource_get_client(text_input_); }
++
++  void SetEnteredSurface(Surface* surface) {
++    if (entered_surface_) {
++      entered_surface_->RemoveSurfaceObserver(this);
++    }
++    entered_surface_ = surface;
++    if (entered_surface_) {
++      entered_surface_->AddSurfaceObserver(this);
++    }
++  }
++
++  void SetSurroundingText(std::string_view text,
++                          int32_t cursor,
++                          int32_t anchor) {
++    if (cursor < 0 || anchor < 0) {
++      return;
++    }
++    auto minmax = std::minmax(cursor, anchor);
++    std::vector<size_t> offsets{static_cast<size_t>(minmax.first),
++                                static_cast<size_t>(minmax.second)};
++    std::u16string u16_text = base::UTF8ToUTF16AndAdjustOffsets(text, &offsets);
++    if (offsets[0] == std::u16string::npos ||
++        offsets[1] == std::u16string::npos) {
++      return;
++    }
++    text_input_object_->SetSurroundingText(u16_text, 0u,
++                                           gfx::Range(offsets[0], offsets[1]),
++                                           std::nullopt, std::nullopt);
++  }
++
++  void SetContentType(uint32_t hint, uint32_t purpose) {
++    ui::TextInputType type = ui::TEXT_INPUT_TYPE_TEXT;
++    ui::TextInputMode mode = ui::TEXT_INPUT_MODE_DEFAULT;
++    int flags = ui::TEXT_INPUT_FLAG_NONE;
++    bool should_do_learning = true;
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_COMPLETION) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCOMPLETE_ON;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_SPELLCHECK) {
++      flags |= ui::TEXT_INPUT_FLAG_SPELLCHECK_ON;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_AUTO_CAPITALIZATION) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCAPITALIZE_SENTENCES;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_LOWERCASE) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCAPITALIZE_NONE;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_UPPERCASE) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCAPITALIZE_CHARACTERS;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_TITLECASE) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCAPITALIZE_WORDS;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_HIDDEN_TEXT) {
++      flags |= ui::TEXT_INPUT_FLAG_AUTOCOMPLETE_OFF |
++               ui::TEXT_INPUT_FLAG_AUTOCORRECT_OFF;
++    }
++    if (hint & ZWP_TEXT_INPUT_V3_CONTENT_HINT_SENSITIVE_DATA) {
++      should_do_learning = false;
++    }
++    // Unused hints: LATIN, MULTILINE.
++
++    switch (purpose) {
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DIGITS:
++        mode = ui::TEXT_INPUT_MODE_DECIMAL;
++        type = ui::TEXT_INPUT_TYPE_NUMBER;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NUMBER:
++        mode = ui::TEXT_INPUT_MODE_NUMERIC;
++        type = ui::TEXT_INPUT_TYPE_NUMBER;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PIN:
++        should_do_learning = false;
++        mode = ui::TEXT_INPUT_MODE_NUMERIC;
++        type = ui::TEXT_INPUT_TYPE_NUMBER;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PHONE:
++        mode = ui::TEXT_INPUT_MODE_TEL;
++        type = ui::TEXT_INPUT_TYPE_TELEPHONE;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_URL:
++        mode = ui::TEXT_INPUT_MODE_URL;
++        type = ui::TEXT_INPUT_TYPE_URL;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_EMAIL:
++        mode = ui::TEXT_INPUT_MODE_EMAIL;
++        type = ui::TEXT_INPUT_TYPE_EMAIL;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PASSWORD:
++        should_do_learning = false;
++        type = ui::TEXT_INPUT_TYPE_PASSWORD;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DATE:
++        type = ui::TEXT_INPUT_TYPE_DATE;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TIME:
++        type = ui::TEXT_INPUT_TYPE_TIME;
++        break;
++      case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DATETIME:
++        type = ui::TEXT_INPUT_TYPE_DATE_TIME;
++        break;
++      default:
++        // NORMAL, ALPHA, NAME, TERMINAL: no special type / mode are set.
++        break;
++    }
++
++    text_input_object_->SetTypeModeFlags(type, mode, flags, should_do_learning,
++                                         /*can_compose_inline=*/true,
++                                         /*surrounding_text_supported=*/true);
++  }
++
++  void SendDone() {
++    zwp_text_input_v3_send_done(text_input_, commit_count_);
++    wl_client_flush(client());
++  }
++
++  // SeatObserver:
++  void OnSurfaceFocused(Surface* gained_focus,
++                        Surface* lost_focus,
++                        bool has_focused_client) override {
++    if (gained_focus == entered_surface_) {
++      return;
++    }
++    if (entered_surface_) {
++      if (wl_resource* surface = GetSurfaceResource(entered_surface_)) {
++        zwp_text_input_v3_send_leave(text_input_, surface);
++      }
++      SetEnteredSurface(nullptr);
++      enabled_ = false;
++    }
++    wl_resource* surface =
++        gained_focus ? GetSurfaceResource(gained_focus) : nullptr;
++    if (surface && wl_resource_get_client(surface) == client()) {
++      SetEnteredSurface(gained_focus);
++      zwp_text_input_v3_send_enter(text_input_, surface);
++    }
++    wl_client_flush(client());
++  }
++
++  // SurfaceObserver:
++  void OnSurfaceDestroying(Surface* surface) override {
++    DCHECK_EQ(surface, entered_surface_);
++    SetEnteredSurface(nullptr);
++    enabled_ = false;
++  }
++
++  // TextInput::Delegate:
++  // enter and leave follow keyboard focus, not the input method.
++  void Activated() override {}
++  void Deactivated() override {}
++  void OnVirtualKeyboardVisibilityChanged(bool is_visible) override {}
++  void OnVirtualKeyboardOccludedBoundsChanged(
++      const gfx::Rect& screen_bounds) override {}
++  bool SupportsFinalizeVirtualKeyboardChanges() override { return false; }
++
++  void SetCompositionText(const ui::CompositionText& composition) override {
++    std::vector<size_t> offsets = {composition.selection.start(),
++                                   composition.selection.end()};
++    const std::string utf8 =
++        base::UTF16ToUTF8AndAdjustOffsets(composition.text, &offsets);
++    int32_t cursor_begin = -1;
++    int32_t cursor_end = -1;
++    if (!utf8.empty() && offsets[0] != std::string::npos &&
++        offsets[1] != std::string::npos) {
++      auto minmax = std::minmax(offsets[0], offsets[1]);
++      cursor_begin = static_cast<int32_t>(minmax.first);
++      cursor_end = static_cast<int32_t>(minmax.second);
++    }
++    zwp_text_input_v3_send_preedit_string(text_input_,
++                                          utf8.empty() ? nullptr : utf8.c_str(),
++                                          cursor_begin, cursor_end);
++    SendDone();
++  }
++
++  void Commit(std::u16string_view text) override {
++    zwp_text_input_v3_send_commit_string(text_input_,
++                                         base::UTF16ToUTF8(text).c_str());
++    SendDone();
++  }
++
++  // v3 has no event for moving the cursor.
++  void SetCursor(std::u16string_view surrounding_text,
++                 const gfx::Range& selection) override {}
++
++  void DeleteSurroundingText(std::u16string_view surrounding_text,
++                             const gfx::Range& range) override {
++    // v3 counts the bytes to delete before and after the selection.
++    gfx::Range selection;
++    if (!text_input_object_->GetEditableSelectionRange(&selection)) {
++      return;
++    }
++    std::vector<size_t> offsets{range.GetMin(), range.GetMax(),
++                                selection.GetMin(), selection.GetMax()};
++    base::UTF16ToUTF8AndAdjustOffsets(surrounding_text, &offsets);
++    if (std::ranges::contains(offsets, std::string::npos) ||
++        offsets[0] > offsets[2] || offsets[1] < offsets[3]) {
++      return;
++    }
++    zwp_text_input_v3_send_delete_surrounding_text(
++        text_input_, static_cast<uint32_t>(offsets[2] - offsets[0]),
++        static_cast<uint32_t>(offsets[1] - offsets[3]));
++    SendDone();
++  }
++
++  void SendKey(const ui::KeyEvent& event) override {
++    // v3 has no key events: a key the IME consumed but passed on as a
++    // character arrives as committed text.
++    char16_t character = event.GetCharacter();
++    if (character < 0x20 || character == 0x7f) {
++      return;
++    }
++    if (event.type() != ui::EventType::kKeyPressed) {
++      return;
++    }
++    Commit(std::u16string(1u, character));
++  }
++
++  void OnTextDirectionChanged(base::i18n::TextDirection direction) override {}
++
++  void SetCompositionFromExistingText(
++      std::u16string_view surrounding_text,
++      const gfx::Range& cursor,
++      const gfx::Range& range,
++      const std::vector<ui::ImeTextSpan>& ui_ime_text_spans) override {}
++
++  void ClearGrammarFragments(std::u16string_view surrounding_text,
++                             const gfx::Range& range) override {}
++
++  void AddGrammarFragment(std::u16string_view surrounding_text,
++                          const ui::GrammarFragment& fragment) override {}
++
++  void SetAutocorrectRange(std::u16string_view surrounding_text,
++                           const gfx::Range& range) override {}
++
++  bool ConfirmComposition(bool keep_selection) override { return false; }
++
++  bool SupportsConfirmPreedit() override { return false; }
++
++  bool HasImageInsertSupport() override { return false; }
++
++  void InsertImage(const GURL& src) override {}
++
++  raw_ptr<wl_resource, DanglingUntriaged> text_input_;
++  raw_ptr<TextInput> text_input_object_ = nullptr;
++  base::WeakPtr<Seat> seat_;
++  raw_ptr<Surface> entered_surface_ = nullptr;
++
++  // Number of commit requests, the serial of done events.
++  uint32_t commit_count_ = 0;
++  bool enabled_ = false;
++
++  // Double-buffered state, applied on commit.
++  bool pending_enabled_ = false;
++  std::optional<std::tuple<std::string, int32_t, int32_t>>
++      pending_surrounding_text_;
++  std::optional<std::pair<uint32_t, uint32_t>> pending_content_type_;
++  std::optional<gfx::Rect> pending_cursor_rectangle_;
++};
++
++WaylandTextInputV3Delegate* GetTextInputV3Delegate(wl_resource* resource) {
++  return static_cast<WaylandTextInputV3Delegate*>(
++      GetUserDataAs<TextInput>(resource)->delegate());
++}
++
++void text_input_v3_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void text_input_v3_enable(wl_client* client, wl_resource* resource) {
++  GetTextInputV3Delegate(resource)->Enable();
++}
++
++void text_input_v3_disable(wl_client* client, wl_resource* resource) {
++  GetTextInputV3Delegate(resource)->Disable();
++}
++
++void text_input_v3_set_surrounding_text(wl_client* client,
++                                        wl_resource* resource,
++                                        const char* text,
++                                        int32_t cursor,
++                                        int32_t anchor) {
++  GetTextInputV3Delegate(resource)->SetPendingSurroundingText(text, cursor,
++                                                              anchor);
++}
++
++void text_input_v3_set_text_change_cause(wl_client* client,
++                                         wl_resource* resource,
++                                         uint32_t cause) {
++  // Nothing needs to be done.
++}
++
++void text_input_v3_set_content_type(wl_client* client,
++                                    wl_resource* resource,
++                                    uint32_t hint,
++                                    uint32_t purpose) {
++  GetTextInputV3Delegate(resource)->SetPendingContentType(hint, purpose);
++}
++
++void text_input_v3_set_cursor_rectangle(wl_client* client,
++                                        wl_resource* resource,
++                                        int32_t x,
++                                        int32_t y,
++                                        int32_t width,
++                                        int32_t height) {
++  GetTextInputV3Delegate(resource)->SetPendingCursorRectangle(
++      gfx::Rect(x, y, width, height));
++}
++
++void text_input_v3_commit(wl_client* client, wl_resource* resource) {
++  GetTextInputV3Delegate(resource)->CommitState();
++}
++
++void text_input_v3_set_available_actions(wl_client* client,
++                                         wl_resource* resource,
++                                         wl_array* available_actions) {
++  // Version 2; not advertised.
++}
++
++void text_input_v3_show_input_panel(wl_client* client, wl_resource* resource) {
++  GetUserDataAs<TextInput>(resource)->ShowVirtualKeyboardIfEnabled();
++}
++
++void text_input_v3_hide_input_panel(wl_client* client, wl_resource* resource) {
++  GetUserDataAs<TextInput>(resource)->HideVirtualKeyboard();
++}
++
++constexpr struct zwp_text_input_v3_interface text_input_v3_implementation = {
++    text_input_v3_destroy,
++    text_input_v3_enable,
++    text_input_v3_disable,
++    text_input_v3_set_surrounding_text,
++    text_input_v3_set_text_change_cause,
++    text_input_v3_set_content_type,
++    text_input_v3_set_cursor_rectangle,
++    text_input_v3_commit,
++    text_input_v3_set_available_actions,
++    text_input_v3_show_input_panel,
++    text_input_v3_hide_input_panel,
++};
++
++////////////////////////////////////////////////////////////////////////////////
++// text_input_manager_v3 interface:
++
++void text_input_manager_v3_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++void text_input_manager_v3_get_text_input(wl_client* client,
++                                          wl_resource* resource,
++                                          uint32_t id,
++                                          wl_resource* seat_resource) {
++  Seat* seat = GetUserDataAs<WaylandSeat>(seat_resource)->seat;
++  wl_resource* text_input_resource =
++      wl_resource_create(client, &zwp_text_input_v3_interface,
++                         wl_resource_get_version(resource), id);
++
++  auto delegate =
++      std::make_unique<WaylandTextInputV3Delegate>(text_input_resource, seat);
++  auto* delegate_ptr = delegate.get();
++  auto text_input = std::make_unique<TextInput>(std::move(delegate));
++  auto* text_input_ptr = text_input.get();
++  SetImplementation(text_input_resource, &text_input_v3_implementation,
++                    std::move(text_input));
++  delegate_ptr->set_text_input(text_input_ptr);
++}
++
++constexpr struct zwp_text_input_manager_v3_interface
++    text_input_manager_v3_implementation = {
++        text_input_manager_v3_destroy,
++        text_input_manager_v3_get_text_input,
++};
++
+ }  // namespace
+ 
+ void bind_text_input_manager(wl_client* client,
+@@ -1037,5 +1510,15 @@ void bind_text_input_extension(wl_client* client,
+                                  data, nullptr);
+ }
+ 
++void bind_text_input_manager_v3(wl_client* client,
++                                void* data,
++                                uint32_t version,
++                                uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &zwp_text_input_manager_v3_interface, std::min(version, 1u), id);
++  wl_resource_set_implementation(
++      resource, &text_input_manager_v3_implementation, data, nullptr);
++}
++
+ }  // namespace wayland
+ }  // namespace exo
+diff --git a/components/exo/wayland/zwp_text_input_manager.h b/components/exo/wayland/zwp_text_input_manager.h
+index 286acb7861..e6872c91ad 100644
+--- a/components/exo/wayland/zwp_text_input_manager.h
++++ b/components/exo/wayland/zwp_text_input_manager.h
+@@ -38,6 +38,12 @@ void bind_text_input_manager(wl_client* client,
+                              uint32_t version,
+                              uint32_t id);
+ 
++// Plutonium: binds zwp_text_input_manager_v3.
++void bind_text_input_manager_v3(wl_client* client,
++                                void* data,
++                                uint32_t version,
++                                uint32_t id);
++
+ // Binds zcr_text_input_extention interface.
+ // Exceptionally, this exists in zwp_text_input_manager, because it is closely
+ // related to zwp_text_input_manager in its implementation.
+diff --git a/components/exo/wayland/zwp_text_input_manager_unittest.cc b/components/exo/wayland/zwp_text_input_manager_unittest.cc
+new file mode 100644
+index 0000000000..b45633f9da
+--- /dev/null
++++ b/components/exo/wayland/zwp_text_input_manager_unittest.cc
+@@ -0,0 +1,221 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <text-input-unstable-v3-client-protocol.h>
++#include <wayland-client-core.h>
++
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "ash/shell.h"
++#include "components/exo/surface.h"
++#include "components/exo/wayland/test/server_util.h"
++#include "components/exo/wayland/test/shell_client_data.h"
++#include "components/exo/wayland/test/test_client.h"
++#include "components/exo/wayland/test/wayland_server_test.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "ui/aura/client/focus_client.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/base/ime/composition_text.h"
++#include "ui/base/ime/input_method.h"
++#include "ui/base/ime/text_input_client.h"
++
++namespace exo::wayland {
++namespace {
++
++using TextInputV3Test = test::WaylandServerTest;
++
++// What a zwp_text_input_v3 client was sent, as one string per event.
++struct TextInputV3Client {
++  zwp_text_input_manager_v3* manager = nullptr;
++  zwp_text_input_v3* text_input = nullptr;
++  wl_surface* entered = nullptr;
++  std::vector<std::string> events;
++};
++
++void OnGlobal(void* data,
++              wl_registry* registry,
++              uint32_t name,
++              const char* interface,
++              uint32_t version) {
++  auto* client = static_cast<TextInputV3Client*>(data);
++  if (std::string_view(interface) == zwp_text_input_manager_v3_interface.name) {
++    client->manager = static_cast<zwp_text_input_manager_v3*>(wl_registry_bind(
++        registry, name, &zwp_text_input_manager_v3_interface, 1));
++  }
++}
++
++void OnGlobalRemove(void* data, wl_registry* registry, uint32_t name) {}
++
++constexpr wl_registry_listener kRegistryListener = {OnGlobal, OnGlobalRemove};
++
++void OnEnter(void* data, zwp_text_input_v3* text_input, wl_surface* surface) {
++  auto* client = static_cast<TextInputV3Client*>(data);
++  client->entered = surface;
++  client->events.push_back("enter");
++}
++
++void OnLeave(void* data, zwp_text_input_v3* text_input, wl_surface* surface) {
++  auto* client = static_cast<TextInputV3Client*>(data);
++  client->entered = nullptr;
++  client->events.push_back("leave");
++}
++
++void OnPreeditString(void* data,
++                     zwp_text_input_v3* text_input,
++                     const char* text,
++                     int32_t cursor_begin,
++                     int32_t cursor_end) {
++  static_cast<TextInputV3Client*>(data)->events.push_back(
++      "preedit " + std::string(text ? text : "") + " " +
++      std::to_string(cursor_begin) + " " + std::to_string(cursor_end));
++}
++
++void OnCommitString(void* data,
++                    zwp_text_input_v3* text_input,
++                    const char* text) {
++  static_cast<TextInputV3Client*>(data)->events.push_back(
++      "commit " + std::string(text ? text : ""));
++}
++
++void OnDeleteSurroundingText(void* data,
++                             zwp_text_input_v3* text_input,
++                             uint32_t before_length,
++                             uint32_t after_length) {
++  static_cast<TextInputV3Client*>(data)->events.push_back(
++      "delete " + std::to_string(before_length) + " " +
++      std::to_string(after_length));
++}
++
++void OnDone(void* data, zwp_text_input_v3* text_input, uint32_t serial) {
++  static_cast<TextInputV3Client*>(data)->events.push_back(
++      "done " + std::to_string(serial));
++}
++
++zwp_text_input_v3_listener MakeTextInputListener() {
++  zwp_text_input_v3_listener listener = {};
++  listener.enter = OnEnter;
++  listener.leave = OnLeave;
++  listener.preedit_string = OnPreeditString;
++  listener.commit_string = OnCommitString;
++  listener.delete_surrounding_text = OnDeleteSurroundingText;
++  listener.done = OnDone;
++  return listener;
++}
++
++const zwp_text_input_v3_listener kTextInputListener = MakeTextInputListener();
++
++TEST_F(TextInputV3Test, EnterEnableComposeCommitLeave) {
++  test::ResourceKey surface_key;
++  TextInputV3Client v3;
++
++  PostToClientAndWait([&](test::TestClient* client) {
++    ASSERT_TRUE(client->InitShmBufferFactory(256 * 256 * 4));
++    auto* data_ptr =
++        client->set_data(std::make_unique<test::ShellClientData>(client));
++    data_ptr->CreateXdgToplevel();
++    data_ptr->CreateAndAttachBuffer({256, 256});
++    data_ptr->Commit();
++    surface_key = data_ptr->GetSurfaceResourceKey();
++
++    wl_registry* registry = wl_display_get_registry(client->display());
++    wl_registry_add_listener(registry, &kRegistryListener, &v3);
++    client->Roundtrip();
++    wl_registry_destroy(registry);
++    ASSERT_TRUE(v3.manager);
++    v3.text_input =
++        zwp_text_input_manager_v3_get_text_input(v3.manager, client->seat());
++    zwp_text_input_v3_add_listener(v3.text_input, &kTextInputListener, &v3);
++    client->Roundtrip();
++  });
++
++  Surface* surface = test::server_util::GetUserDataForResource<Surface>(
++      server_.get(), surface_key);
++  ASSERT_TRUE(surface);
++  aura::client::FocusClient* focus_client =
++      aura::client::GetFocusClient(ash::Shell::GetPrimaryRootWindow());
++  focus_client->FocusWindow(nullptr);
++  focus_client->FocusWindow(surface->window());
++
++  // Keyboard focus sends enter; the client enables text input there.
++  PostToClientAndWait([&](test::TestClient* client) {
++    client->Roundtrip();
++    auto* data_ptr = client->GetDataAs<test::ShellClientData>();
++    EXPECT_EQ(v3.entered, data_ptr->GetWlSurface());
++    ASSERT_FALSE(v3.events.empty());
++    EXPECT_EQ(v3.events.back(), "enter");
++    v3.events.clear();
++
++    zwp_text_input_v3_enable(v3.text_input);
++    zwp_text_input_v3_set_content_type(v3.text_input,
++                                       ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE,
++                                       ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_EMAIL);
++    zwp_text_input_v3_set_surrounding_text(v3.text_input, "hello", 5, 5);
++    zwp_text_input_v3_set_cursor_rectangle(v3.text_input, 10, 20, 1, 16);
++    zwp_text_input_v3_commit(v3.text_input);
++    client->Roundtrip();
++  });
++
++  // The input method now sees the client's text input.
++  ui::InputMethod* input_method =
++      surface->window()->GetHost()->GetInputMethod();
++  ui::TextInputClient* text_input_client = input_method->GetTextInputClient();
++  ASSERT_TRUE(text_input_client);
++  EXPECT_EQ(text_input_client->GetTextInputType(), ui::TEXT_INPUT_TYPE_EMAIL);
++  gfx::Range selection;
++  ASSERT_TRUE(text_input_client->GetEditableSelectionRange(&selection));
++  EXPECT_EQ(selection, gfx::Range(5));
++
++  // What an IME does: delete before the cursor, compose, commit.
++  text_input_client->ExtendSelectionAndDelete(1, 0);
++  ui::CompositionText composition;
++  composition.text = u"にほ";  // にほ
++  composition.selection = gfx::Range(2);
++  text_input_client->SetCompositionText(composition);
++  text_input_client->InsertText(
++      u"日本",  // 日本
++      ui::TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
++
++  PostToClientAndWait([&](test::TestClient* client) {
++    client->Roundtrip();
++    EXPECT_EQ(v3.events, (std::vector<std::string>{"delete 1 0", "done 1",
++                                                   "preedit にほ 6 6", "done 1",
++                                                   "commit 日本", "done 1"}));
++    v3.events.clear();
++
++    // Serials count the client's commits.
++    zwp_text_input_v3_set_surrounding_text(v3.text_input, "hell日本", 10, 10);
++    zwp_text_input_v3_commit(v3.text_input);
++    client->Roundtrip();
++  });
++
++  composition.text = u"a";
++  composition.selection = gfx::Range(1);
++  text_input_client->SetCompositionText(composition);
++  text_input_client->ClearCompositionText();
++
++  PostToClientAndWait([&](test::TestClient* client) {
++    client->Roundtrip();
++    EXPECT_EQ(v3.events,
++              (std::vector<std::string>{"preedit a 1 1", "done 2",
++                                        "preedit  -1 -1", "done 2"}));
++    v3.events.clear();
++  });
++
++  // Losing keyboard focus sends leave and detaches the input method.
++  focus_client->FocusWindow(nullptr);
++  EXPECT_NE(input_method->GetTextInputClient(), text_input_client);
++
++  PostToClientAndWait([&](test::TestClient* client) {
++    client->Roundtrip();
++    EXPECT_EQ(v3.events, std::vector<std::string>{"leave"});
++    zwp_text_input_v3_destroy(v3.text_input);
++    zwp_text_input_manager_v3_destroy(v3.manager);
++    client->Roundtrip();
++  });
++}
++
++}  // namespace
++}  // namespace exo::wayland
+diff --git a/third_party/wayland-protocols/BUILD.gn b/third_party/wayland-protocols/BUILD.gn
+index 7beb117992..32db0f2965 100644
+--- a/third_party/wayland-protocols/BUILD.gn
++++ b/third_party/wayland-protocols/BUILD.gn
+@@ -55,6 +55,23 @@ wayland_protocol("gtk_shell_protocol") {
+   sources = [ "gtk/gdk/wayland/protocol/gtk-shell.xml" ]
+ }
+ 
++# PLUTONIUM (EXO-CAPTURE): screen capture for Wayland clients (grim,
++# wf-recorder).
++# PLUTONIUM: Exo serves it (clipboard managers, wl-copy and wl-paste).
++wayland_protocol("ext_data_control_protocol") {
++  sources = [ "src/staging/ext-data-control/ext-data-control-v1.xml" ]
++}
++
++wayland_protocol("ext_image_copy_capture_protocol") {
++  sources = [
++    "src/staging/ext-image-capture-source/ext-image-capture-source-v1.xml",
++    "src/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml",
++
++    # The capture source protocol's toplevel sources refer to its handles.
++    "src/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml",
++  ]
++}
++
+ wayland_protocol("idle_inhibit_protocol") {
+   sources = [ "src/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" ]
+ }
+@@ -107,6 +124,10 @@ wayland_protocol("org_kde_kwin_idle") {
+   sources = [ "kde/src/protocols/idle.xml" ]
+ }
+ 
++wayland_protocol("org_kde_kwin_server_decoration") {
++  sources = [ "kde/src/protocols/server-decoration.xml" ]
++}
++
+ wayland_protocol("pointer_constraints_protocol") {
+   sources =
+       [ "src/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml" ]

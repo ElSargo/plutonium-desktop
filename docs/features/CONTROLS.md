@@ -1,6 +1,6 @@
 # Fullscreen, keys and the app launcher
 
-Better control of the windows and tabs a shell shows (and pointer capture for apps, below), tested on DRM (tty2, T3 Code as the shell) on 2026-10-17. `chromium/patches/0011-*.patch`.
+Better control of the windows and tabs a shell shows (and pointer capture for apps, below), tested on DRM (tty2, T3 Code as the shell) on 2026-10-17. Chromium's shell patch.
 
 ## Fullscreen (native, any frontend)
 
@@ -54,7 +54,7 @@ Ending a capture:
 
 Shortcuts keep working during a capture (Super+F, Alt+1…9, the launcher), because only mouse events are taken.
 
-What changed in Chromium (`chromium/patches/0012-*.patch`):
+What changed in Chromium (Chromium's Exo patch):
 - **Permission.** Chrome's security delegate allowed pointer locks for ARC windows only. In the Plutonium shell (`--plutonium-hide-windows`), any app may lock.
 - **Activation.** A capture used to need the window to be active, which a parked window never is. It now accepts a parked window that has embedded keyboard focus.
 - **Focus.** Pointer observes the seat for embedded keyboard focus. Aura focus doesn't move when a page gives an embedded window the keyboard. It updates in a posted task, because the seat is notifying its observers at that moment.
@@ -71,7 +71,7 @@ Not done:
 
 ## Modal dialogs and pointer leave
 
-**Modal dialogs** (`chromium/patches/0030-*.patch`, EXO-MODAL). While a GTK modal dialog was open, the app sent its keys to the dialog, but the parent's element still reported `windowFocused`. Exo now implements `xdg_wm_dialog_v1`, which GTK 4 and Qt 6 use to say a window is modal to its parent. While a page shows the dialog:
+**Modal dialogs** (Chromium's Exo patch, EXO-MODAL). While a GTK modal dialog was open, the app sent its keys to the dialog, but the parent's element still reported `windowFocused`. Exo now implements `xdg_wm_dialog_v1`, which GTK 4 and Qt 6 use to say a window is modal to its parent. While a page shows the dialog:
 - focusing the parent (`focusWindow()`, a click) focuses the dialog instead;
 - a dialog that opens, becomes modal, or is first shown over the focused window takes its focus;
 - when the focused dialog closes or its element goes away, focus goes back to the parent.

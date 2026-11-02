@@ -28,7 +28,7 @@ we know. Sizes: **S** ≈ hours, **M** ≈ a day, **L** ≈ several days.
   sessions import dmabufs now and gtk4-demo runs. The missing guard stays.) Exo should reject or drop a buffer that fails to
   import (and tell the client), not keep retrying. The `EXO-DIAG` error
   logging from the viability work may make it worse; demote it.
-  Done 2026-10-20 (`chromium/patches/0028`, GPU_X11.md): kwrite's XRGB8888
+  Done 2026-10-20 (Chromium's DRM patch, GPU_X11.md): kwrite's XRGB8888
   shm buffers on Xvfb were the trigger. The GPU process reports which shm
   formats it can import, Exo imports XRGB as ARGB with padding alpha or
   refuses the format (`wl_shm.invalid_format`), and never sends one that
@@ -38,7 +38,7 @@ we know. Sizes: **S** ≈ hours, **M** ≈ a day, **L** ≈ several days.
   While a GTK modal dialog is open, keys go to the dialog but the parent's
   element still reports `windowFocused`. Embedded focus should follow the
   client's own redirection (or the page should be told).
-  Done 2026-10-20 for GTK 4 and Qt 6 (`xdg_dialog_v1`, `chromium/patches/0030`,
+  Done 2026-10-20 for GTK 4 and Qt 6 (`xdg_dialog_v1`, Chromium's Exo patch,
   CONTROLS.md): focus on the parent goes to its modal dialog while a page
   shows it. Still open: GTK 3 (only `gtk_shell1` says modal), and shells
   that don't show a dialog, where its keys are lost.
@@ -53,12 +53,12 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   DevTools on 127.0.0.1:9224, which any local process (another user, a
   sandboxed app with network access) could use to drive the whole browser.
   Now it's a Unix socket that takes only the user's own processes
-  (`--plutonium-remote-debugging-socket`, `chromium/patches/0097`, SO_PEERCRED),
+  (`--plutonium-remote-debugging-socket`, Chromium's DevTools patch, SO_PEERCRED),
   in the 0700 `$XDG_RUNTIME_DIR/plutonium`. `DEVTOOLS=port` gets the port back
   for tools that need one. It's no boundary against the user's own processes,
   agents included: they can reach the socket, and read the profile anyway.
 - [x] **Unit and browser tests for the broker and grant checks.** M · Phase 2
-  Done 2026-10-20 (`chromium/patches/0032`, `features/BROKER.md`): unit
+  Done 2026-10-20 (Chromium's shell patch, `features/BROKER.md`): unit
   tests, not browser tests. `plutonium_unittests` is a target of its own
   (about 800 build steps from a built chrome; `unit_tests` would be about
   8,800 and `browser_tests` 8,100): `ExoWindowBroker` grants and revocation,
@@ -70,18 +70,18 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   Done 2026-10-20: `tools/shell-checks/run.sh [--forced]`, 39 checks, all
   passing (`features/BROKER.md`). No holes. Found and fixed on the way:
   `revokeGrant()` crashed the dev build (re-entrant observer list,
-  `chromium/patches/0031`). A `javascript:` URL's document keeps the
+  Chromium's page API patch). A `javascript:` URL's document keeps the
   previous document's grants: the browser sees no new document, and only
   the shell's own script can make one, so it is not a hole. A compromised
   renderer is covered by the unit test, not live.
 - [x] **Forward `OnGrantRevoked` to the shell.** S · Phase 2
-  Done 2026-10-20 (`chromium/patches/0031`): the `grantrevoked` event, for
+  Done 2026-10-20 (Chromium's page API patch): the `grantrevoked` event, for
   the document's own grants. The shell library drops a revoked cached grant.
 - [x] **Unsubscribe from broker events when the last listener goes.** S
-  Done 2026-10-20 (`chromium/patches/0031`): for every kind of broker
+  Done 2026-10-20 (Chromium's page API patch): for every kind of broker
   event; listening again replays the current state.
 - [x] **`NativeWindowEvent` script constructor.** S
-  Done 2026-10-20 (`chromium/patches/0031`). `BrowserTabEvent` has none
+  Done 2026-10-20 (Chromium's page API patch). `BrowserTabEvent` has none
   yet.
 - [ ] **An activated prerender of the shell has no `navigator.windowBroker`.**
   S · Phase 2. The origin trial is only force-enabled for primary-main-frame
@@ -125,7 +125,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   (`features/SEAT.md`): Ctrl+Alt+Backspace, and VT switching with
   Ctrl+Alt+Fn. Ash is a logind session controller.
 - [x] **Start a DRM session on a VT that isn't in front.** Done
-  (`features/SEAT.md`, patch 0033): the displays aren't configured until the
+  (`features/SEAT.md`, Chromium's DRM patch): the displays aren't configured until the
   session is in front, and Ash comes up when it is.
 - [x] **App launching from the shell.** Done in Phase 3: the helper's
   `launch` (shell library `shell.launch()`, MCP `launch_app`).
@@ -140,7 +140,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   scale such as 1.6 or 2, or relax the rule for sub-pixel scale errors. S
 - [x] **Pixel-snap `<native-window>`.** Elements at fractional device positions
   can't be promoted to planes (DRM takes whole-pixel rects). S · Done
-  2026-10-26 (patch 0058, `WINDOW_SIZING.md`): the surface layer goes at whole
+  2026-10-26 (Chromium's page API patch, `WINDOW_SIZING.md`): the surface layer goes at whole
   device pixels on screen; verified on Xvfb (crisp under a fractional
   `translate()`), planes not yet checked on DRM.
 - [x] **Real input on the TTY** (evdev keyboard/mouse). Verified with virtual
@@ -269,7 +269,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `preview_snapshot` after `preview_resize` (390×844 or 1024×768) timed out at
   15 s and was left `stuck`; clicks after worked. 5 of 5 on the X11 session
   (slot 26, 2026-10-28); it passed on 2026-10-24 (`excalidraw-spiral-sized`).
-  Done 2026-10-29 (Chromium patch 0092): raw `Page.captureScreenshot` hung
+  Done 2026-10-29 (Chromium's embedded surfaces patch): raw `Page.captureScreenshot` hung
   too. When a tab moved to another `<embed>`, its renderer's surface id from
   the old one reached the new plugin late, and `UpdateFromChild` took its
   child sequence number across embed tokens. The plugin then stayed one ahead
@@ -282,7 +282,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   moves without a button in 0.3 s, with the pen down 8 s; a minute later 19 s
   and 10 s, held awake (`Plutonium.setTabAwake`), while the page's
   `requestAnimationFrame` ran at 60 fps. A 490-point `preview_drag` times out
-  after 60 s with no pause at all. Done 2026-10-29 (Chromium patch 0093):
+  after 60 s with no pause at all. Done 2026-10-29 (Chromium's page API patch):
   nothing draws an awake hidden tab's frames, and viz sends a frame sink one
   BeginFrame a second once more than three go undrawn
   (`ThrottleUndrawnFrames`), so a page that redraws on each move (the pen)
@@ -325,14 +325,14 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   Seen in run `20261024-145112-excalidraw-spiral-sized` (`EXO-STALL`).
 - [x] **Incognito agent tabs on the desktop.** `profileId: "incognito"`
   was ignored for desktop-rendered tabs (shared storage). Now a throwaway
-  off-the-record profile per tab (Chromium patch 0045).
+  off-the-record profile per tab (Chromium's tabs patch).
 - [x] **The panel's cursor and desktop zoom.** S · Plutonium's preview bridge
   reported `zoomFactor: 1`, so a zoomed desktop tab would place the agent's
   cursor off by the zoom. Now it reports the tab's `zoom` state (T3 patch,
   `previewBridge.ts`). Not checked live on a zoomed tab yet.
 - [x] **Agents and popups.** M · Window snapshots draw the window's open
   menus (and say where they are); agent clicks and hovers reach them, and a
-  press outside closes them (patch 0060; `features/AGENT_CONTROL.md`,
+  press outside closes them (Chromium's Exo patch; `features/AGENT_CONTROL.md`,
   "Popups").
 - [x] **Popups of windows no panel shows covered the shell.** An agent's
   menus and tooltips showed over the shell (and other threads) while no
@@ -425,11 +425,11 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   tab.
 - [x] **Tabs' media sessions over MPRIS.** M · Linux Chromium exposes a
   page's media session on D-Bus for media keys and desktop widgets; ours go
-  to Ash's media controls. Done 2026-10-28 (`LINUX_COMPAT.md`, patch 0088):
+  to Ash's media controls. Done 2026-10-28 (`LINUX_COMPAT.md`, Chromium's tab features patch):
   `use_mpris` on for ChromeOS; the helper skips that player.
 - [x] **Speech synthesis voices.** S–M · `speechSynthesis.getVoices()` is
   empty (ChromeOS's voices are TTS extensions); Linux Chromium uses
-  speech-dispatcher. Done 2026-10-28 (`LINUX_COMPAT.md`, patch 0089):
+  speech-dispatcher. Done 2026-10-28 (`LINUX_COMPAT.md`, Chromium's tab features patch):
   `tts_linux.cc` on ChromeOS, `--enable-speech-dispatcher` when the host has
   its socket.
 - [x] **Dark mode from the host.** S · `prefers-color-scheme` follows Ash's
@@ -451,7 +451,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [x] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
   or edge resize could become niri's interactive move or column resize. The
   page would need the pointer for the rest of the drag. Done 2026-10-26
-  (`WINDOW_SIZING.md`, patch 0057): the browser hands the rest of the drag to
+  (`WINDOW_SIZING.md`, Chromium's embedded surfaces patch): the browser hands the rest of the drag to
   the page; niri's move verified on X11 with two displays. Plain ignores both.
 - [x] **CSD edge resize in shells.** S–M · GTK 4's resize edges are in its
   shadow, outside the geometry, where `<native-window>` clips the surface, so
@@ -502,7 +502,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   nudges or clipboard history, …"); screenshots and the folder upload
   were already covered. The toasts themselves weren't triggered live.
 - [x] **Tabs don't survive a browser restart.** M · Session restore.
-  Done 2026-10-26 (patch 0056, `TABS.md`, "Surviving a restart"): addresses
+  Done 2026-10-26 (Chromium's tabs patch, `TABS.md`, "Surviving a restart"): addresses
   and tags, through a clean stop and a kill -9; not history. Also
   what "close and reopen on wake" for a snoozed thread needs (the T3
   sidebar item).
@@ -513,7 +513,7 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   2026-10-20); an automated check in both directions is part of the DRM
   verification pass. The primary selection (middle-click paste) isn't a
   requirement.
-- [x] **text-input-v3 (IME for GTK 4, Qt, foot).** Done (patch 0061,
+- [x] **text-input-v3 (IME for GTK 4, Qt, foot).** Done (Chromium's Wayland protocols patch,
   `features/IME.md`). foot and gtk4-demo bind it, get enter/leave and
   enable, and take pre-edit and commits. Qt 6 is untested.
 - [x] **Test real IME composition.** Done on Xvfb with a test extension IME
@@ -528,10 +528,10 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   explicit sync (`linux-drm-syncobj`). M · Phase 5
   `xdg_activation_v1` and `wp_cursor_shape_v1` are done (0063, 0064,
   `features/WAYLAND_PROTOCOLS.md`).
-  - [x] **`ext_data_control_v1`.** Done 2026-10-27 (patch 0084): wl-copy,
+  - [x] **`ext_data_control_v1`.** Done 2026-10-27 (Chromium's Wayland protocols patch): wl-copy,
     wl-paste and `wl-paste --watch` without focus, both ways with the page's
     clipboard; any client may use it. No primary selection.
-  - [x] **`xdg_toplevel_icon_v1`.** Done 2026-10-27 (patch 0085): kwrite's
+  - [x] **`xdg_toplevel_icon_v1`.** Done 2026-10-27 (Chromium's Exo patch): kwrite's
     named icon and pixels reach the shells (`windowIcon()` in the shell
     library) and the switcher.
 - [x] **X11 apps** via rootless Xwayland as an Exo client. Done
@@ -579,7 +579,7 @@ showing the tab with a cancelable event, and falls back to Chrome's UI.
   `ContentsZoomChange`, `BrowserTabEntry.zoom`, `setTabZoom`; T3's zoom.
   Done (2026-10-23): see `TAB_FEATURES.md`, "As built" and Zoom. T3 has zoom
   through the keys, the wheel and the toast; its panel's own zoom controls
-  are still ignored (its bridge, patch 0012).
+  are still ignored (its bridge, T3 patch 0012).
 - [x] **File pickers for tabs.** L · `RunFileChooser` through
   `FileSelectHelper`, and a `SelectFileDialog` factory that sends registry
   tabs' pickers (inputs, File System Access, Save As) to the shell as
@@ -688,7 +688,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 
 - [x] **Shell capture API and screenshots.** M · `shell.capture()` →
   MediaStream and `shell.screenshot()` → PNG for outputs, windows, tabs and
-  regions, on the snapshot and capturer code from patches 0005 and 0007.
+  regions, on the snapshot and capturer code from Chromium's Exo and tabs patches.
   niri's Print key with a region/window selector, saving to
   `~/Pictures/Screenshots`. The global recording and screenshot switches, enforced in
   Ash. Copying to the clipboard waits on the clipboard item. Done
@@ -721,7 +721,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
 - [x] **GlobalShortcuts portal.** M · The helper answers it; the focused shell
   binds keys through `setShellShortcuts`. Discord push-to-talk, OBS hotkeys.
 - [x] **`ext-idle-notify-v1` in Exo.** S–M · Exo has `zwp_idle_inhibit` only.
-  Discord's away status. Done 2026-10-27 (patch 0083,
+  Discord's away status. Done 2026-10-27 (Chromium's Wayland protocols patch,
   `features/WAYLAND_PROTOCOLS.md`): swayidle idles and resumes on Ash's input,
   held off by the session's inhibitors (`Plutonium.setIdleInhibited`).
 - [x] **getDisplayMedia from tabs through the shell picker.** M · Replace
@@ -743,7 +743,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   that takes dmabufs (OBS). Still a CPU copy per frame: no copy at all needs
   buffers Ash allocates and the capturer renders into, rather than viz's pool.
 - [x] **A shell's MediaStream of a window bigger than the screen.** S–M ·
-  From the window's own frame sink (patch 0054), not a subtree of the
+  From the window's own frame sink (Chromium's capture patch), not a subtree of the
   screen's frame. A parked window that nothing shows still gives no frames;
   PipeWire captures cover that.
 - [x] **The portal's `PickColor`.** S · The focused shell's picker over a frozen screen.
@@ -797,7 +797,7 @@ In order. The design and the decisions behind it are in `features/CAPTURE.md`.
   over DevTools (`Inspector.targetCrashed`) and roll back. Both done
   2026-10-27 (`SHELL_PACKAGES.md`): `shellnotice` events and a notification;
   `Target.targetCrashed` rolls back an edit from the last five minutes. A crashed
-  shell page that showed a tab took the browser down (fixed, patch 0073).
+  shell page that showed a tab took the browser down (fixed, Chromium's tabs patch).
 - [x] **Installed shells: agents.** Decided (2026-10-26): no "ask an agent"
   buttons. The switcher and the shells page copy a prompt that points the
   user's own agent at the Plutonium skill (`skill/SKILL.md`, written to
@@ -934,7 +934,7 @@ shell find it.
   - `tools/freeze-probe.sh` (research repo) compares the page's own latest frame with what the X window shows, plus rAF rate and process states. Run it while frozen;
   - `plutonium run` keeps the previous Ash log as `logs/ash-<socket>.prev.log`.
   Not reproduced by clicking through DevTools (new thread → No project), which bypasses Ash's input path; the cause is still unknown.
-- [x] **No `wl_pointer.leave`** when the pointer leaves an embedded window (seen with wev). The common cases already worked. A drag that ended outside the window got its leave only at the next move. Now it comes with the release (`chromium/patches/0029`, CONTROLS.md).
+- [x] **No `wl_pointer.leave`** when the pointer leaves an embedded window (seen with wev). The common cases already worked. A drag that ended outside the window got its leave only at the next move. Now it comes with the release (Chromium's embedded surfaces patch, CONTROLS.md).
 
 ## Shipping
 
@@ -944,7 +944,7 @@ shell find it.
   so users needn't build Chromium.
 - [ ] **Rebuild and push the prebuilt image.** S (hours of build) · Its tag
   is a hash of the patch series (`chromium-<hash>`, `dev/env.sh`), and the
-  newest one pushed is from before patch 0031, so `plutonium image pull` in a
+  newest one pushed is from 2026-10-20, so `plutonium image pull` in a
   checkout of `main` finds nothing: the checkout path in INSTALL.md needs a
   pushed image of the current series (`plutonium chromium build --release`,
   `image build`, `image push`). Releases don't use it: their chrome is the

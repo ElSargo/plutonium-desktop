@@ -219,7 +219,7 @@ What's playing, and play/pause, next and previous.
   `mediaSessionAction`, the `mediaSessionChanged` event; patch "the hardware
   keys go to the helper…"), as the player `"browser"`, named after the site,
   with `tab` the shells' tab playing. No artwork for it yet. The browser is
-  also on MPRIS (patch 0088, `LINUX_COMPAT.md`) for other desktops; that
+  also on MPRIS (Chromium's tab features patch, `LINUX_COMPAT.md`) for other desktops; that
   player (`chromium.instance<pid>`, the pid from `SystemInfo.getProcessInfo`)
   is left out here, as it's the same session.
 - **Tested:** `helper/test/media.test.ts` against fake players on the fake
@@ -547,7 +547,7 @@ second display does to the shells.
   `chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.{h,cc}`
   (the configuration, as `CrosDisplayConfigImpl` does it, with modes set as
   policy so Ash doesn't ask) and the switcher's pages in
-  `plutonium_overlay.cc` (Chromium patch 0096).
+  `plutonium_overlay.cc` (Chromium's switcher patch).
 - **In the shells:** GNOME's quick settings has a display button, and its
   Settings app a Displays page over this service. niri's bar and plain's tray
   have `display.js` (a monitor icon with the count; its popover lists the

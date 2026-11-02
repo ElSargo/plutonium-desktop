@@ -1,0 +1,2260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 05/13] Plutonium: DRM: shell mode on the display hardware
+
+Running on the hardware: the display-plane path, logind seats (also on a VT that isn't in front), evdev and libinput fixes, touchpad swipes for the shell, and the GPU details (Vulkan device ids, shm buffers the GPU can't import).
+
+It holds these changes:
+- set the DRM device id for a Vulkan device shared with ANGLE
+- seat management through logind
+- shm buffers the GPU can't import don't stall the display; EXO-DIAG logs at VLOG(1)
+- start a logind session on a VT that isn't in front
+- a detached input device's settings update runs on the UI thread
+- touchpad swipes with three fingers or more go to the shell page
+
+and the parts in these files of:
+- Exo embedding (Phase 1) and window broker (Phase 2)
+- shell mode on DRM, evdev input fix, display-plane path
+- browser tabs as SurfaceEmbed elements, DRM mouse wheel
+- niri shell keys, touchpad and scrolling, drag and drop, shell links as tabs
+---
+ .../common/shared_image_capabilities.h        |   5 +
+ .../ozone_image_backing_factory.cc            |   4 +
+ .../shared_image/shared_image_factory.cc      |  30 ++
+ .../service/shared_memory_region_wrapper.cc   |  29 +-
+ .../common/shared_image_capabilities.mojom    |   1 +
+ .../shared_image_capabilities_mojom_traits.cc |   3 +
+ .../shared_image_capabilities_mojom_traits.h  |   5 +
+ gpu/vulkan/vulkan_device_queue.cc             |   4 +
+ ui/display/manager/display_configurator.cc    |  69 ++-
+ ui/display/manager/display_configurator.h     |  10 +
+ ui/display/manager/display_manager.cc         |   6 +-
+ ui/display/types/native_display_observer.h    |   7 +
+ ui/events/ozone/BUILD.gn                      |   9 +
+ ui/events/ozone/DEPS                          |   1 +
+ ui/events/ozone/device/logind_session.cc      | 450 ++++++++++++++++++
+ ui/events/ozone/device/logind_session.h       | 127 +++++
+ ui/events/ozone/evdev/BUILD.gn                |   2 +-
+ .../ozone/evdev/event_converter_evdev_impl.cc |  43 +-
+ .../ozone/evdev/event_converter_evdev_impl.h  |   7 +
+ ui/events/ozone/evdev/event_factory_evdev.cc  |  66 ++-
+ ui/events/ozone/evdev/event_factory_evdev.h   |  18 +-
+ .../ozone/evdev/input_controller_evdev.cc     |  10 +
+ .../ozone/evdev/input_controller_evdev.h      |   6 +
+ .../ozone/evdev/input_device_factory_evdev.cc |  11 +
+ .../ozone/evdev/input_device_factory_evdev.h  |   4 +
+ .../evdev/input_device_factory_evdev_proxy.cc |   6 +
+ .../evdev/input_device_factory_evdev_proxy.h  |   1 +
+ .../ozone/evdev/input_device_opener_evdev.cc  |  12 +-
+ .../ozone/evdev/libinput_event_converter.cc   |  76 ++-
+ .../ozone/evdev/libinput_event_converter.h    |  13 +-
+ ui/gfx/linux/gbm_support_x11.cc               |   5 +-
+ ui/gfx/linux/gbm_wrapper.cc                   |  28 +-
+ ui/ozone/platform/drm/common/drm_wrapper.cc   |  13 +-
+ ui/ozone/platform/drm/common/drm_wrapper.h    |   3 +
+ .../drm/gpu/drm_gpu_display_manager.cc        |  12 +-
+ .../platform/drm/gpu/drm_overlay_manager.cc   |  47 +-
+ ui/ozone/platform/drm/gpu/fake_drm_device.cc  |   4 +
+ ui/ozone/platform/drm/gpu/fake_drm_device.h   |   1 +
+ .../drm/gpu/hardware_display_plane_manager.cc |  18 +
+ .../hardware_display_plane_manager_atomic.cc  |   9 +-
+ .../drm/host/drm_display_host_manager.cc      |  74 ++-
+ .../drm/host/drm_display_host_manager.h       |   9 +-
+ .../drm/host/drm_native_display_delegate.cc   |   8 +
+ .../drm/host/drm_native_display_delegate.h    |   2 +
+ ui/ozone/platform/drm/ozone_platform_drm.cc   |   6 +
+ ui/ozone/platform/x11/ozone_platform_x11.cc   |   2 +
+ 46 files changed, 1219 insertions(+), 57 deletions(-)
+ create mode 100644 ui/events/ozone/device/logind_session.cc
+ create mode 100644 ui/events/ozone/device/logind_session.h
+
+diff --git a/gpu/command_buffer/common/shared_image_capabilities.h b/gpu/command_buffer/common/shared_image_capabilities.h
+index e60ebcb026..bed680674d 100644
+--- a/gpu/command_buffer/common/shared_image_capabilities.h
++++ b/gpu/command_buffer/common/shared_image_capabilities.h
+@@ -37,6 +37,11 @@ struct GPU_COMMAND_BUFFER_COMMON_EXPORT SharedImageCapabilities {
+   // SkSurface, i.e. that RASTER_WRITE can render into. Being listed here says
+   // nothing about whether a backing can be allocated.
+   std::vector<viz::SharedImageFormat> skia_writable_yuv_formats;
++  // EXO-IMPORT: the 32-bit RGB formats a shared image can be created as from
++  // a shared-memory GpuMemoryBuffer, for raster and display reads (what Exo
++  // makes of wl_shm buffers). Creating one that isn't listed stops the
++  // client's whole GPU channel.
++  std::vector<viz::SharedImageFormat> shared_memory_import_formats;
+ 
+   bool is_r16f_supported = false;
+   bool disable_webgpu_shared_images = false;
+diff --git a/gpu/command_buffer/service/shared_image/ozone_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/ozone_image_backing_factory.cc
+index 99dd3cba74..6008feb10e 100644
+--- a/gpu/command_buffer/service/shared_image/ozone_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/ozone_image_backing_factory.cc
+@@ -272,11 +272,15 @@ bool OzoneImageBackingFactory::IsSupported(
+   }
+   auto* factory = ui::OzonePlatform::GetInstance()->GetSurfaceFactoryOzone();
+   if (!factory->CanCreateNativePixmapForFormat(format)) {
++    VLOG(1) << "EXO-DIAG IsSupported: CanCreateNativePixmapForFormat false for "
++            << format.ToString();
+     return false;
+   }
+ 
+   ui::GLOzone* gl_ozone = factory->GetCurrentGLOzone();
+   if (used_by_gl && (!gl_ozone || !gl_ozone->CanImportNativePixmap(format))) {
++    VLOG(1) << "EXO-DIAG IsSupported: CanImportNativePixmap false for "
++            << format.ToString() << " gl_ozone=" << !!gl_ozone;
+     return false;
+   }
+ 
+diff --git a/gpu/command_buffer/service/shared_image/shared_image_factory.cc b/gpu/command_buffer/service/shared_image/shared_image_factory.cc
+index 0b99c4c905..7bcb773475 100644
+--- a/gpu/command_buffer/service/shared_image/shared_image_factory.cc
++++ b/gpu/command_buffer/service/shared_image/shared_image_factory.cc
+@@ -385,6 +385,10 @@ SharedImageFactory::SharedImageFactory(
+   }
+ #elif BUILDFLAG(IS_OZONE)
+   // For all Ozone platforms - Desktop Linux, ChromeOS, Fuchsia, CastOS.
++  VLOG(1) << "EXO-DIAG supports_native_pixmaps="
++          << ui::OzonePlatform::GetInstance()
++                 ->GetPlatformRuntimeProperties()
++                 .supports_native_pixmaps;
+   if (ui::OzonePlatform::GetInstance()
+           ->GetPlatformRuntimeProperties()
+           .supports_native_pixmaps) {
+@@ -959,6 +963,32 @@ gpu::SharedImageCapabilities SharedImageFactory::MakeCapabilities() {
+         !context_state_->is_drdc_enabled();
+   }
+ 
++  // EXO-IMPORT: which formats a shared-memory buffer can be imported as.
++  {
++    constexpr gpu::SharedImageUsageSet kImportUsage =
++        SHARED_IMAGE_USAGE_RASTER_READ | SHARED_IMAGE_USAGE_RASTER_WRITE |
++        SHARED_IMAGE_USAGE_DISPLAY_READ;
++    for (viz::SharedImageFormat format : {viz::SinglePlaneFormat::kRGBA_8888,
++                                          viz::SinglePlaneFormat::kRGBX_8888,
++                                          viz::SinglePlaneFormat::kBGRA_8888,
++                                          viz::SinglePlaneFormat::kBGRX_8888}) {
++      // As CreateSharedImage() from a buffer handle: a factory that takes the
++      // buffer, or else a GPU backing for a CompoundImageBacking.
++      const gfx::Size size(64, 64);
++      if (GetFactoryByUsage(kImportUsage, format, size, /*pixel_data=*/{},
++                            gfx::SHARED_MEMORY_BUFFER, /*stream=*/std::nullopt,
++                            /*params=*/nullptr) ||
++          (!IsSharedBetweenThreads(kImportUsage) &&
++           CompoundImageBacking::IsValidSharedMemoryFormat(size, format) &&
++           GetFactoryByUsage(
++               CompoundImageBacking::GetGpuSharedImageUsage(kImportUsage),
++               format, size, /*pixel_data=*/{}, gfx::EMPTY_BUFFER,
++               /*stream=*/std::nullopt, /*params=*/nullptr))) {
++        shared_image_caps.shared_memory_import_formats.push_back(format);
++      }
++    }
++  }
++
+ #if BUILDFLAG(IS_WIN)
+   shared_image_caps.shared_image_d3d = IsD3DSharedImageSupported();
+   shared_image_caps.shared_image_swap_chain =
+diff --git a/gpu/command_buffer/service/shared_memory_region_wrapper.cc b/gpu/command_buffer/service/shared_memory_region_wrapper.cc
+index abe91d0a04..b3f16fafc6 100644
+--- a/gpu/command_buffer/service/shared_memory_region_wrapper.cc
++++ b/gpu/command_buffer/service/shared_memory_region_wrapper.cc
+@@ -79,6 +79,16 @@ bool SharedMemoryRegionWrapper::Initialize(
+ 
+   std::optional<size_t> buffer_size =
+       viz::SharedMemorySizeForSharedImageFormat(format, size);
++  // EXO-VIABILITY experiment: account for padded rows (see below).
++  if (buffer_size && format.NumberOfPlanes() == 1) {
++    base::CheckedNumeric<size_t> padded = handle.stride;
++    padded *= size.height();
++    if (!padded.IsValid()) {
++      buffer_size = std::nullopt;
++    } else {
++      buffer_size = std::max<size_t>(*buffer_size, padded.ValueOrDie());
++    }
++  }
+   if (!buffer_size) {
+     DLOG(ERROR) << "Invalid GMB size.";
+     return false;
+@@ -113,11 +123,17 @@ bool SharedMemoryRegionWrapper::Initialize(
+   // The offset/stride only make sense when GpuMemoryBufferHandle is for a
+   // single plane. Stride should be set as the expected stride for first plane
+   // and offset should always be zero.
+-  DCHECK_EQ(static_cast<size_t>(handle.stride),
+-            viz::SharedMemoryRowSizeForSharedImageFormat(format, /*plane=*/0,
+-                                                         size.width())
+-                .value());
+-  DCHECK_EQ(handle.offset, 0u);
++  // EXO-VIABILITY experiment: wl_shm clients (e.g. foot) may pad rows, and
++  // Exo forwards the client stride. Honour it for single-plane formats instead
++  // of assuming tightly packed rows.
++  const size_t tight_stride =
++      viz::SharedMemoryRowSizeForSharedImageFormat(format, /*plane=*/0,
++                                                   size.width())
++          .value();
++  DCHECK(num_planes == 1 ||
++         static_cast<size_t>(handle.stride) == tight_stride);
++  DCHECK_GE(static_cast<size_t>(handle.stride), tight_stride);
++  // Non-zero offsets are handled via |memory_offset| above (wl_shm pools).
+ 
+   for (int plane_index = 0; plane_index < num_planes; ++plane_index) {
+     const size_t plane_offset =
+@@ -128,6 +144,9 @@ bool SharedMemoryRegionWrapper::Initialize(
+                                       format, plane_index, size.width())
+                                       .value();
+   }
++  if (num_planes == 1) {
++    planes_[0].stride = handle.stride;
++  }
+ 
+   return true;
+ }
+diff --git a/gpu/ipc/common/shared_image_capabilities.mojom b/gpu/ipc/common/shared_image_capabilities.mojom
+index 95943e1ad5..df8d972957 100644
+--- a/gpu/ipc/common/shared_image_capabilities.mojom
++++ b/gpu/ipc/common/shared_image_capabilities.mojom
+@@ -17,6 +17,7 @@ struct SharedImageCapabilities {
+   bool supports_ycbcr_nv12_sampling;
+   bool supports_ycbcr_p010_sampling;
+   array<viz.mojom.SharedImageFormat> skia_writable_yuv_formats;
++  array<viz.mojom.SharedImageFormat> shared_memory_import_formats;
+   bool is_r16f_supported;
+   bool disable_webgpu_shared_images;
+   bool disable_one_component_textures;
+diff --git a/gpu/ipc/common/shared_image_capabilities_mojom_traits.cc b/gpu/ipc/common/shared_image_capabilities_mojom_traits.cc
+index ada98cf634..624eb24cef 100644
+--- a/gpu/ipc/common/shared_image_capabilities_mojom_traits.cc
++++ b/gpu/ipc/common/shared_image_capabilities_mojom_traits.cc
+@@ -24,6 +24,9 @@ bool StructTraits<gpu::mojom::SharedImageCapabilitiesDataView,
+   if (!data.ReadSkiaWritableYuvFormats(&out->skia_writable_yuv_formats)) {
+     return false;
+   }
++  if (!data.ReadSharedMemoryImportFormats(&out->shared_memory_import_formats)) {
++    return false;
++  }
+   out->is_r16f_supported = data.is_r16f_supported();
+   out->disable_webgpu_shared_images = data.disable_webgpu_shared_images();
+   out->disable_one_component_textures = data.disable_one_component_textures();
+diff --git a/gpu/ipc/common/shared_image_capabilities_mojom_traits.h b/gpu/ipc/common/shared_image_capabilities_mojom_traits.h
+index a7c2e536c8..1647c284c8 100644
+--- a/gpu/ipc/common/shared_image_capabilities_mojom_traits.h
++++ b/gpu/ipc/common/shared_image_capabilities_mojom_traits.h
+@@ -55,6 +55,11 @@ struct GPU_IPC_COMMON_EXPORT StructTraits<
+     return input.skia_writable_yuv_formats;
+   }
+ 
++  static const std::vector<viz::SharedImageFormat>&
++  shared_memory_import_formats(const gpu::SharedImageCapabilities& input) {
++    return input.shared_memory_import_formats;
++  }
++
+   static bool is_r16f_supported(const gpu::SharedImageCapabilities& input) {
+     return input.is_r16f_supported;
+   }
+diff --git a/gpu/vulkan/vulkan_device_queue.cc b/gpu/vulkan/vulkan_device_queue.cc
+index a97235c08f..2d9809f413 100644
+--- a/gpu/vulkan/vulkan_device_queue.cc
++++ b/gpu/vulkan/vulkan_device_queue.cc
+@@ -473,6 +473,10 @@ bool VulkanDeviceQueue::InitializeFromANGLE(bool is_thread_safe) {
+   vk_physical_device_properties_ = physical_device_info.properties;
+   vk_physical_device_driver_properties_ =
+       physical_device_info.driver_properties;
++  // Plutonium: as in Initialize(). Exo's dmabuf feedback names this device;
++  // without it (VulkanFromANGLE) clients aren't told the GPU and fall back
++  // to software rendering.
++  drm_device_id_ = physical_device_info.drm_device_id;
+ 
+   VkDevice vk_device = gl::QueryVkDeviceFromANGLE();
+   VkQueue vk_queue = gl::QueryVkQueueFromANGLE();
+diff --git a/ui/display/manager/display_configurator.cc b/ui/display/manager/display_configurator.cc
+index 58c7779732..bd7567ed86 100644
+--- a/ui/display/manager/display_configurator.cc
++++ b/ui/display/manager/display_configurator.cc
+@@ -14,6 +14,7 @@
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/syslog_logging.h"
++#include "base/task/sequenced_task_runner.h"
+ #include "base/system/sys_info.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+@@ -517,7 +518,10 @@ DisplayConfigurator::DisplayConfigurator()
+     : state_controller_(nullptr),
+       mirroring_controller_(nullptr),
+       is_panel_fitting_enabled_(false),
+-      configure_displays_(base::SysInfo::IsRunningOnChromeOS()),
++      // EXO-VIABILITY experiment: see DisplayManager::DisplayManager().
++      configure_displays_(base::SysInfo::IsRunningOnChromeOS() ||
++                          base::CommandLine::ForCurrentProcess()->HasSwitch(
++                              "exo-viability-real-displays")),
+       current_display_state_(MULTIPLE_DISPLAY_STATE_INVALID),
+       current_power_state_(chromeos::DISPLAY_POWER_ALL_ON),
+       requested_display_state_(MULTIPLE_DISPLAY_STATE_INVALID),
+@@ -634,6 +638,12 @@ void DisplayConfigurator::OnDisplayControlTaken(DisplayControlCallback callback,
+                success);
+   display_control_changing_ = false;
+   display_externally_controlled_ = !success;
++  if (pending_platform_display_control_) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&DisplayConfigurator::ApplyPlatformDisplayControl,
++                       weak_ptr_factory_.GetWeakPtr()));
++  }
+   if (success) {
+     // Force a configuration since the display configuration may have changed.
+     force_configure_ = true;
+@@ -725,6 +735,12 @@ void DisplayConfigurator::OnDisplayControlRelinquished(
+ 
+   display_control_changing_ = false;
+   display_externally_controlled_ = success;
++  if (pending_platform_display_control_) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&DisplayConfigurator::ApplyPlatformDisplayControl,
++                       weak_ptr_factory_.GetWeakPtr()));
++  }
+   if (success) {
+     if (display::features::IsFastDrmMasterDropEnabled()) {
+       // Emit a fake power-off signal call to Ash so it treats all displays as
+@@ -901,6 +917,49 @@ void DisplayConfigurator::OnConfigurationChanged() {
+                          &DisplayConfigurator::ConfigureDisplays);
+ }
+ 
++void DisplayConfigurator::OnDisplayControlRevoked() {
++  VLOG(1) << "The platform revoked display control.";
++  configure_timer_.Stop();
++  pending_platform_display_control_ = false;
++  ApplyPlatformDisplayControl();
++}
++
++void DisplayConfigurator::OnDisplayControlRestored() {
++  VLOG(1) << "The platform restored display control.";
++  pending_platform_display_control_ = true;
++  ApplyPlatformDisplayControl();
++}
++
++void DisplayConfigurator::ApplyPlatformDisplayControl() {
++  if (display_control_changing_ || !pending_platform_display_control_) {
++    return;
++  }
++  const bool control = *pending_platform_display_control_;
++  pending_platform_display_control_.reset();
++  if (control) {
++    // TakeControl() forces the next configuration, which may find other
++    // displays than before.
++    TakeControl(base::BindOnce(
++        [](base::WeakPtr<DisplayConfigurator> configurator, bool success) {
++          if (configurator && success) {
++            configurator->ConfigureDisplays();
++          }
++        },
++        weak_ptr_factory_.GetWeakPtr()));
++    return;
++  }
++  if (display_externally_controlled_) {
++    return;
++  }
++  // Like RelinquishControl(), but the displays can't be turned off first:
++  // DRM master is gone already.
++  display_externally_controlled_ = true;
++  display_control_changing_ = true;
++  native_display_delegate_->RelinquishDisplayControl(
++      base::BindOnce(&DisplayConfigurator::OnDisplayControlRelinquished,
++                     weak_ptr_factory_.GetWeakPtr(), base::DoNothing()));
++}
++
+ void DisplayConfigurator::OnDisplaySnapshotsInvalidated() {
+   VLOG(1) << "Display snapshots invalidated.";
+   cached_displays_.clear();
+@@ -982,6 +1041,14 @@ void DisplayConfigurator::RunPendingConfiguration() {
+   if (configuration_task_)
+     return;
+ 
++  // Someone else has the displays: configure them once they're back
++  // (TakeControl() forces it).
++  if (display_externally_controlled_ && !display_control_changing_) {
++    VLOG(1) << "Displays are controlled externally. Not configuring them.";
++    CallAndClearQueuedCallbacks(false);
++    return;
++  }
++
+   if (!ShouldRunConfigurationTask()) {
+     LOG(ERROR) << "Called RunPendingConfiguration without any changes"
+                   " requested";
+diff --git a/ui/display/manager/display_configurator.h b/ui/display/manager/display_configurator.h
+index e331f3fcae..002ea30d82 100644
+--- a/ui/display/manager/display_configurator.h
++++ b/ui/display/manager/display_configurator.h
+@@ -274,6 +274,8 @@ class DISPLAY_MANAGER_EXPORT DisplayConfigurator
+   // NativeDisplayObserver:
+   void OnConfigurationChanged() override;
+   void OnDisplaySnapshotsInvalidated() override;
++  void OnDisplayControlRevoked() override;
++  void OnDisplayControlRestored() override;
+ 
+   void AddObserver(Observer* observer);
+   void RemoveObserver(Observer* observer);
+@@ -409,6 +411,10 @@ class DISPLAY_MANAGER_EXPORT DisplayConfigurator
+   void OnDisplayControlRelinquished(DisplayControlCallback callback,
+                                     bool success);
+ 
++  // Applies the platform's last word on display control
++  // (OnDisplayControlRevoked/Restored) once no other change is in progress.
++  void ApplyPlatformDisplayControl();
++
+   // Helper function that sends the actual command.
+   // |callback| is called upon completion of the relinquish command.
+   // |success| is the result from calling SetDisplayPowerInternal() in
+@@ -506,6 +512,10 @@ class DISPLAY_MANAGER_EXPORT DisplayConfigurator
+   // hasn't arrived yet.
+   bool display_control_changing_;
+ 
++  // Whether the platform lets Chrome control the displays, if it said so
++  // while a change was in progress.
++  std::optional<bool> pending_platform_display_control_;
++
+   // Whether the displays are currently suspended.
+   bool displays_suspended_;
+ 
+diff --git a/ui/display/manager/display_manager.cc b/ui/display/manager/display_manager.cc
+index 26b59f719f..4f9d51043f 100644
+--- a/ui/display/manager/display_manager.cc
++++ b/ui/display/manager/display_manager.cc
+@@ -471,7 +471,11 @@ bool DisplayManager::PendingDisplayChanges::IsEmpty() const {
+ 
+ DisplayManager::DisplayManager(std::unique_ptr<Screen> screen)
+     : screen_(std::move(screen)), layout_store_(new DisplayLayoutStore) {
+-  SetConfigureDisplays(base::SysInfo::IsRunningOnChromeOS());
++  // EXO-VIABILITY experiment: drive real displays (Ozone DRM) on
++  // linux-chromeos, where IsRunningOnChromeOS() is false.
++  SetConfigureDisplays(base::SysInfo::IsRunningOnChromeOS() ||
++                       base::CommandLine::ForCurrentProcess()->HasSwitch(
++                           "exo-viability-real-displays"));
+   change_display_upon_host_resize_ = !configure_displays_;
+   unified_desktop_enabled_ = base::CommandLine::ForCurrentProcess()->HasSwitch(
+       ::switches::kEnableUnifiedDesktop);
+diff --git a/ui/display/types/native_display_observer.h b/ui/display/types/native_display_observer.h
+index 7507edec92..82d7bb872f 100644
+--- a/ui/display/types/native_display_observer.h
++++ b/ui/display/types/native_display_observer.h
+@@ -20,6 +20,13 @@ class DISPLAY_TYPES_EXPORT NativeDisplayObserver {
+   // DisplaySnapshots owned by NativeDisplayDelegate are about to be
+   // invalidated and any stored pointers to them should be deleted.
+   virtual void OnDisplaySnapshotsInvalidated() = 0;
++
++  // The platform took control of the displays away (the session was switched
++  // away from, and DRM master went with it, or it started on a VT that isn't
++  // in front), or gave it back. Nothing can be configured in between, not
++  // even turned off.
++  virtual void OnDisplayControlRevoked() {}
++  virtual void OnDisplayControlRestored() {}
+ };
+ 
+ }  // namespace display
+diff --git a/ui/events/ozone/BUILD.gn b/ui/events/ozone/BUILD.gn
+index aaa0b617c5..8f100827fb 100644
+--- a/ui/events/ozone/BUILD.gn
++++ b/ui/events/ozone/BUILD.gn
+@@ -48,6 +48,15 @@ component("ozone") {
+     ]
+   }
+ 
++  if (is_linux || is_chromeos) {
++    # Seat access through logind (--plutonium-logind-session).
++    sources += [
++      "device/logind_session.cc",
++      "device/logind_session.h",
++    ]
++    deps += [ "//dbus" ]
++  }
++
+   if (use_udev) {
+     sources += [
+       "device/udev/device_manager_udev.cc",
+diff --git a/ui/events/ozone/DEPS b/ui/events/ozone/DEPS
+index c4c2788a8f..db0376c16b 100644
+--- a/ui/events/ozone/DEPS
++++ b/ui/events/ozone/DEPS
+@@ -1,4 +1,5 @@
+ include_rules = [
++  "+dbus",
+   "+device/udev_linux",
+   "+mojo/public/cpp/bindings",
+   "+ui/ozone/public",
+diff --git a/ui/events/ozone/device/logind_session.cc b/ui/events/ozone/device/logind_session.cc
+new file mode 100644
+index 0000000000..7e56804ab2
+--- /dev/null
++++ b/ui/events/ozone/device/logind_session.cc
+@@ -0,0 +1,450 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/events/ozone/device/logind_session.h"
++
++#include <fcntl.h>
++#include <linux/input.h>
++#include <sys/ioctl.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/environment.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/logging.h"
++#include "base/memory/ptr_util.h"
++#include "base/message_loop/message_pump_type.h"
++#include "base/posix/eintr_wrapper.h"
++#include "base/task/single_thread_task_runner.h"
++#include "dbus/bus.h"
++#include "dbus/message.h"
++#include "dbus/object_proxy.h"
++
++namespace ui {
++
++const char kLogindSessionSwitch[] = "plutonium-logind-session";
++
++namespace {
++
++constexpr char kLogindService[] = "org.freedesktop.login1";
++constexpr char kManagerPath[] = "/org/freedesktop/login1";
++constexpr char kManagerInterface[] = "org.freedesktop.login1.Manager";
++constexpr char kSessionInterface[] = "org.freedesktop.login1.Session";
++constexpr char kSeatInterface[] = "org.freedesktop.login1.Seat";
++constexpr char kPropertiesInterface[] = "org.freedesktop.DBus.Properties";
++
++constexpr unsigned int kDrmMajor = 226;
++
++LogindSession* g_instance = nullptr;
++
++bool IsDrm(dev_t device) {
++  return major(device) == kDrmMajor;
++}
++
++std::string DeviceName(dev_t device) {
++  return std::to_string(major(device)) + ":" + std::to_string(minor(device));
++}
++
++std::string ErrorText(const dbus::Error& error) {
++  return error.name() + ": " + error.message();
++}
++
++void LogIfError(const std::string& what,
++                dbus::Response* response,
++                dbus::ErrorResponse* error) {
++  if (error) {
++    std::string message;
++    dbus::MessageReader(error).PopString(&message);
++    LOG(ERROR) << "logind " << what << ": " << error->GetErrorName() << ": "
++               << message;
++  }
++}
++
++// org.freedesktop.DBus.Properties.Get on |proxy|, returning a reader of the
++// value inside the variant (which must outlive the reader, so it is kept in
++// |response|).
++bool GetProperty(dbus::ObjectProxy* proxy,
++                 const std::string& interface,
++                 const std::string& name,
++                 std::unique_ptr<dbus::Response>* response,
++                 dbus::MessageReader* value) {
++  dbus::MethodCall call(kPropertiesInterface, "Get");
++  dbus::MessageWriter writer(&call);
++  writer.AppendString(interface);
++  writer.AppendString(name);
++  auto result =
++      proxy->CallMethodAndBlock(&call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
++  if (!result.has_value()) {
++    LOG(ERROR) << "logind: can't read " << name << ": "
++               << ErrorText(result.error());
++    return false;
++  }
++  *response = std::move(result.value());
++  dbus::MessageReader reader(response->get());
++  return reader.PopVariant(value);
++}
++
++}  // namespace
++
++// static
++std::unique_ptr<LogindSession> LogindSession::CreateFromCommandLine() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(kLogindSessionSwitch)) {
++    return nullptr;
++  }
++  std::string session_id =
++      command_line->GetSwitchValueASCII(kLogindSessionSwitch);
++  if (session_id.empty()) {
++    session_id = base::Environment::Create()
++                     ->GetVar("XDG_SESSION_ID")
++                     .value_or("auto");
++  }
++  auto session = base::WrapUnique(new LogindSession());
++  if (!session->Start(session_id)) {
++    LOG(FATAL) << "Could not take control of logind session " << session_id
++               << " (--" << kLogindSessionSwitch << ")";
++  }
++  return session;
++}
++
++// static
++LogindSession* LogindSession::Get() {
++  return g_instance;
++}
++
++LogindSession::LogindSession()
++    : thread_("logind"),
++      observers_(base::MakeRefCounted<base::ObserverListThreadSafe<Observer>>()) {
++}
++
++LogindSession::~LogindSession() {
++  if (g_instance == this) {
++    g_instance = nullptr;
++  }
++  if (thread_.IsRunning()) {
++    thread_.task_runner()->PostTask(
++        FROM_HERE, base::BindOnce(&LogindSession::ShutdownOnThread,
++                                  base::Unretained(this)));
++    thread_.Stop();
++  }
++}
++
++bool LogindSession::Start(const std::string& session_id) {
++  if (!thread_.StartWithOptions(
++          base::Thread::Options(base::MessagePumpType::IO, 0))) {
++    return false;
++  }
++  bool result = false;
++  base::WaitableEvent done;
++  thread_.task_runner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&LogindSession::StartOnThread, base::Unretained(this),
++                     session_id, &result, &done));
++  done.Wait();
++  if (result) {
++    g_instance = this;
++  }
++  return result;
++}
++
++void LogindSession::StartOnThread(const std::string& session_id,
++                                  bool* result,
++                                  base::WaitableEvent* done) {
++  *result = TakeControl(session_id);
++  done->Signal();
++}
++
++bool LogindSession::TakeControl(const std::string& session_id) {
++  dbus::Bus::Options options;
++  options.bus_type = dbus::Bus::SYSTEM;
++  options.connection_type = dbus::Bus::PRIVATE;
++  options.dbus_task_runner = thread_.task_runner();
++  bus_ = base::MakeRefCounted<dbus::Bus>(std::move(options));
++
++  dbus::ObjectProxy* manager = bus_->GetObjectProxy(
++      kLogindService, dbus::ObjectPath(kManagerPath));
++  {
++    dbus::MethodCall call(kManagerInterface, "GetSession");
++    dbus::MessageWriter(&call).AppendString(session_id);
++    auto response = manager->CallMethodAndBlock(
++        &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
++    if (!response.has_value()) {
++      LOG(ERROR) << "logind: no session " << session_id << ": "
++                 << ErrorText(response.error());
++      return false;
++    }
++    if (!dbus::MessageReader(response->get()).PopObjectPath(&session_path_)) {
++      return false;
++    }
++  }
++  session_proxy_ = bus_->GetObjectProxy(kLogindService, session_path_);
++
++  // Signals first, so that none sent once Chrome is the controller is lost.
++  if (!session_proxy_->ConnectToSignalAndBlock(
++          kSessionInterface, "PauseDevice",
++          base::BindRepeating(&LogindSession::OnPauseDevice,
++                              base::Unretained(this))) ||
++      !session_proxy_->ConnectToSignalAndBlock(
++          kSessionInterface, "ResumeDevice",
++          base::BindRepeating(&LogindSession::OnResumeDevice,
++                              base::Unretained(this)))) {
++    LOG(ERROR) << "logind: can't listen to session " << session_id;
++    return false;
++  }
++
++  {
++    dbus::MethodCall call(kSessionInterface, "TakeControl");
++    dbus::MessageWriter(&call).AppendBool(false);
++    auto response = session_proxy_->CallMethodAndBlock(
++        &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
++    if (!response.has_value()) {
++      LOG(ERROR) << "logind: can't take control of session " << session_id
++                 << ": " << ErrorText(response.error());
++      return false;
++    }
++  }
++
++  std::unique_ptr<dbus::Response> response;
++  dbus::MessageReader value(nullptr);
++  bool active = false;
++  if (!GetProperty(session_proxy_, kSessionInterface, "Active", &response,
++                   &value) ||
++      !value.PopBool(&active)) {
++    return false;
++  }
++  active_ = active;
++
++  dbus::MessageReader seat(nullptr);
++  std::string seat_id;
++  dbus::ObjectPath seat_path;
++  if (GetProperty(session_proxy_, kSessionInterface, "Seat", &response,
++                  &value) &&
++      value.PopStruct(&seat) && seat.PopString(&seat_id) &&
++      seat.PopObjectPath(&seat_path) && seat_path.IsValid()) {
++    seat_proxy_ = bus_->GetObjectProxy(kLogindService, seat_path);
++  } else {
++    LOG(WARNING) << "logind: session " << session_id
++                 << " has no seat; can't switch VTs";
++  }
++
++  LOG(INFO) << "logind: controlling session " << session_id << " ("
++               << session_path_.value() << ") on seat " << seat_id << ", "
++               << (active ? "active" : "inactive");
++  return true;
++}
++
++base::ScopedFD LogindSession::OpenDevice(const base::FilePath& path) {
++  struct stat st;
++  if (stat(path.value().c_str(), &st) != 0) {
++    PLOG(ERROR) << "logind: can't open " << path.value();
++    return base::ScopedFD();
++  }
++  if (!S_ISCHR(st.st_mode)) {
++    LOG(ERROR) << "logind: not a device: " << path.value();
++    return base::ScopedFD();
++  }
++  if (!IsDrm(st.st_rdev) && !active_) {
++    // Opened when the session is in front (OnSessionResumed()).
++    VLOG(1) << "logind: session inactive, not opening " << path.value();
++    return base::ScopedFD();
++  }
++  base::ScopedFD fd;
++  base::WaitableEvent done;
++  thread_.task_runner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&LogindSession::OpenDeviceOnThread,
++                     base::Unretained(this), st.st_rdev, &fd, &done));
++  done.Wait();
++  if (!fd.is_valid() && (IsDrm(st.st_rdev) || active_)) {
++    LOG(ERROR) << "logind: can't open " << path.value();
++  }
++  return fd;
++}
++
++void LogindSession::OpenDeviceOnThread(dev_t device,
++                                       base::ScopedFD* result,
++                                       base::WaitableEvent* done) {
++  auto it = devices_.find(device);
++  if (it != devices_.end() && !IsDrm(device)) {
++    // An input device that was unplugged since: logind dropped it.
++    int version;
++    if (ioctl(it->second.get(), EVIOCGVERSION, &version) < 0) {
++      ReleaseDevice(device);
++      it = devices_.end();
++    }
++  }
++  if (it == devices_.end()) {
++    bool inactive = false;
++    base::ScopedFD fd = TakeDevice(device, &inactive);
++    if (fd.is_valid() && inactive && !IsDrm(device)) {
++      // Taken revoked: useless until the session is back, when it's opened
++      // again.
++      VLOG(1) << "logind: session inactive, not opening " << DeviceName(device);
++      ReleaseDevice(device);
++      fd.reset();
++    }
++    if (fd.is_valid()) {
++      it = devices_.emplace(device, std::move(fd)).first;
++      if (IsDrm(device)) {
++        // What logind says now wins over what it said at TakeControl(): the
++        // session may have been switched to or away from since, and a device
++        // taken after that gets no PauseDevice or ResumeDevice for it.
++        if (inactive) {
++          paused_drm_devices_.insert(device);
++          if (active_.exchange(false)) {
++            observers_->Notify(FROM_HERE, &Observer::OnSessionPaused);
++          }
++        } else if (paused_drm_devices_.empty() && !active_.exchange(true)) {
++          observers_->Notify(FROM_HERE, &Observer::OnSessionResumed);
++        }
++      }
++    }
++  }
++  if (it != devices_.end()) {
++    result->reset(HANDLE_EINTR(fcntl(it->second.get(), F_DUPFD_CLOEXEC, 0)));
++  }
++  done->Signal();
++}
++
++base::ScopedFD LogindSession::TakeDevice(dev_t device, bool* inactive) {
++  dbus::MethodCall call(kSessionInterface, "TakeDevice");
++  dbus::MessageWriter writer(&call);
++  writer.AppendUint32(major(device));
++  writer.AppendUint32(minor(device));
++  auto response = session_proxy_->CallMethodAndBlock(
++      &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT);
++  if (!response.has_value()) {
++    LOG(ERROR) << "logind: TakeDevice " << DeviceName(device) << ": "
++               << ErrorText(response.error());
++    return base::ScopedFD();
++  }
++  base::ScopedFD fd;
++  dbus::MessageReader reader(response->get());
++  if (!reader.PopFileDescriptor(&fd) || !reader.PopBool(inactive)) {
++    LOG(ERROR) << "logind: bad TakeDevice reply for " << DeviceName(device);
++    return base::ScopedFD();
++  }
++  return fd;
++}
++
++void LogindSession::ReleaseDevice(dev_t device) {
++  devices_.erase(device);
++  paused_drm_devices_.erase(device);
++  dbus::MethodCall call(kSessionInterface, "ReleaseDevice");
++  dbus::MessageWriter writer(&call);
++  writer.AppendUint32(major(device));
++  writer.AppendUint32(minor(device));
++  session_proxy_->CallMethodWithErrorResponse(
++      &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
++      base::BindOnce(&LogIfError, "ReleaseDevice " + DeviceName(device)));
++}
++
++void LogindSession::SwitchTo(uint32_t vt) {
++  thread_.task_runner()->PostTask(
++      FROM_HERE, base::BindOnce(&LogindSession::SwitchToOnThread,
++                                base::Unretained(this), vt));
++}
++
++void LogindSession::SwitchToOnThread(uint32_t vt) {
++  if (!seat_proxy_) {
++    return;
++  }
++  VLOG(1) << "logind: switching to VT " << vt;
++  dbus::MethodCall call(kSeatInterface, "SwitchTo");
++  dbus::MessageWriter(&call).AppendUint32(vt);
++  seat_proxy_->CallMethodWithErrorResponse(
++      &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
++      base::BindOnce(&LogIfError, "SwitchTo " + std::to_string(vt)));
++}
++
++void LogindSession::AddObserver(Observer* observer) {
++  observers_->AddObserver(observer);
++}
++
++void LogindSession::RemoveObserver(Observer* observer) {
++  observers_->RemoveObserver(observer);
++}
++
++void LogindSession::OnPauseDevice(dbus::Signal* signal) {
++  dbus::MessageReader reader(signal);
++  uint32_t major_number, minor_number;
++  std::string type;
++  if (!reader.PopUint32(&major_number) || !reader.PopUint32(&minor_number) ||
++      !reader.PopString(&type)) {
++    LOG(ERROR) << "logind: bad PauseDevice signal";
++    return;
++  }
++  const dev_t device = makedev(major_number, minor_number);
++  VLOG(1) << "logind: PauseDevice " << DeviceName(device) << " " << type;
++
++  if (type == "gone") {
++    // Unplugged; logind has forgotten it already.
++    devices_.erase(device);
++    paused_drm_devices_.erase(device);
++    return;
++  }
++
++  if (IsDrm(device)) {
++    // logind dropped DRM master already. "pause" waits for an answer (or a
++    // timeout); there's nothing to finish first.
++    paused_drm_devices_.insert(device);
++    if (type == "pause") {
++      dbus::MethodCall call(kSessionInterface, "PauseDeviceComplete");
++      dbus::MessageWriter writer(&call);
++      writer.AppendUint32(major_number);
++      writer.AppendUint32(minor_number);
++      session_proxy_->CallMethodWithErrorResponse(
++          &call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
++          base::BindOnce(&LogIfError,
++                         "PauseDeviceComplete " + DeviceName(device)));
++    }
++  } else {
++    // Revoked for good: give it back, and take it again on the way back.
++    ReleaseDevice(device);
++  }
++
++  if (active_.exchange(false)) {
++    LOG(INFO) << "logind: session paused";
++    observers_->Notify(FROM_HERE, &Observer::OnSessionPaused);
++  }
++}
++
++void LogindSession::OnResumeDevice(dbus::Signal* signal) {
++  dbus::MessageReader reader(signal);
++  uint32_t major_number, minor_number;
++  base::ScopedFD fd;
++  if (!reader.PopUint32(&major_number) || !reader.PopUint32(&minor_number) ||
++      !reader.PopFileDescriptor(&fd)) {
++    LOG(ERROR) << "logind: bad ResumeDevice signal";
++    return;
++  }
++  const dev_t device = makedev(major_number, minor_number);
++  VLOG(1) << "logind: ResumeDevice " << DeviceName(device);
++
++  // For DRM it's the same open file as before, with master again. An input
++  // device is a new one.
++  devices_[device] = std::move(fd);
++  if (!IsDrm(device)) {
++    return;
++  }
++  paused_drm_devices_.erase(device);
++  if (paused_drm_devices_.empty() && !active_.exchange(true)) {
++    LOG(INFO) << "logind: session resumed";
++    observers_->Notify(FROM_HERE, &Observer::OnSessionResumed);
++  }
++}
++
++void LogindSession::ShutdownOnThread() {
++  devices_.clear();
++  if (bus_) {
++    bus_->ShutdownAndBlock();
++  }
++}
++
++}  // namespace ui
+diff --git a/ui/events/ozone/device/logind_session.h b/ui/events/ozone/device/logind_session.h
+new file mode 100644
+index 0000000000..e232b45d3b
+--- /dev/null
++++ b/ui/events/ozone/device/logind_session.h
+@@ -0,0 +1,127 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_EVENTS_OZONE_DEVICE_LOGIND_SESSION_H_
++#define UI_EVENTS_OZONE_DEVICE_LOGIND_SESSION_H_
++
++#include <sys/types.h>
++
++#include <atomic>
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++
++#include "base/component_export.h"
++#include "base/files/file_path.h"
++#include "base/files/scoped_file.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/observer_list_threadsafe.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/threading/thread.h"
++#include "dbus/object_path.h"
++
++namespace dbus {
++class Bus;
++class ObjectProxy;
++class Signal;
++}  // namespace dbus
++
++namespace ui {
++
++// --plutonium-logind-session[=<id>]: run as the controller of that logind
++// session (the caller's own without an id).
++COMPONENT_EXPORT(EVENTS_OZONE) extern const char kLogindSessionSwitch[];
++
++// Seat access through systemd-logind, for Ash on DRM on a VT, the way other
++// compositors do it: Chrome takes control of its session and opens the DRM
++// and input devices through logind (TakeDevice). logind does the rest of the
++// VT handling. It puts the VT in graphics mode with the kernel keyboard off,
++// switches VTs on request (SwitchTo), drops DRM master and revokes the input
++// devices when the session is switched away from, gives them back when it is
++// in front again, and restores the VT when Chrome exits, crashes included.
++//
++// All D-Bus traffic is on a thread of its own. OpenDevice() blocks the
++// calling thread until logind answers.
++class COMPONENT_EXPORT(EVENTS_OZONE) LogindSession {
++ public:
++  class Observer {
++   public:
++    // The session was switched away from: DRM master is gone and the input
++    // devices are revoked.
++    virtual void OnSessionPaused() {}
++    // The session is in front again and has DRM master back. Input devices
++    // must be opened again.
++    virtual void OnSessionResumed() {}
++
++   protected:
++    virtual ~Observer() = default;
++  };
++
++  // With --plutonium-logind-session, takes control of the session and returns
++  // it; null without the switch. A session that was asked for but can't be
++  // had is fatal: the VT would stay in text mode, taking every key typed.
++  static std::unique_ptr<LogindSession> CreateFromCommandLine();
++
++  // The session controller, if Chrome is one.
++  static LogindSession* Get();
++
++  LogindSession(const LogindSession&) = delete;
++  LogindSession& operator=(const LogindSession&) = delete;
++  ~LogindSession();
++
++  // Whether the session is in front (its devices work).
++  bool is_active() const { return active_; }
++
++  // Opens a DRM or input device through logind. Blocks; not on the UI thread
++  // after startup. An input device can't be opened while the session is
++  // inactive.
++  base::ScopedFD OpenDevice(const base::FilePath& path);
++
++  // Switches to VT |vt|. Logind pauses this session first if it is leaving.
++  void SwitchTo(uint32_t vt);
++
++  // Observers are called on the sequence they were added on.
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++ private:
++  LogindSession();
++
++  bool Start(const std::string& session_id);
++
++  // On |thread_|.
++  void StartOnThread(const std::string& session_id,
++                     bool* result,
++                     base::WaitableEvent* done);
++  bool TakeControl(const std::string& session_id);
++  void OpenDeviceOnThread(dev_t device,
++                          base::ScopedFD* result,
++                          base::WaitableEvent* done);
++  base::ScopedFD TakeDevice(dev_t device, bool* inactive);
++  void ReleaseDevice(dev_t device);
++  void SwitchToOnThread(uint32_t vt);
++  void OnPauseDevice(dbus::Signal* signal);
++  void OnResumeDevice(dbus::Signal* signal);
++  void ShutdownOnThread();
++
++  base::Thread thread_;
++  scoped_refptr<base::ObserverListThreadSafe<Observer>> observers_;
++  std::atomic<bool> active_ = false;
++
++  // Thread-internal state.
++  scoped_refptr<dbus::Bus> bus_;
++  raw_ptr<dbus::ObjectProxy> session_proxy_ = nullptr;
++  raw_ptr<dbus::ObjectProxy> seat_proxy_ = nullptr;
++  dbus::ObjectPath session_path_;
++  // The devices logind gave this session: callers get duplicates.
++  std::map<dev_t, base::ScopedFD> devices_;
++  // DRM devices that are paused. The session is back when none is left.
++  std::set<dev_t> paused_drm_devices_;
++};
++
++}  // namespace ui
++
++#endif  // UI_EVENTS_OZONE_DEVICE_LOGIND_SESSION_H_
+diff --git a/ui/events/ozone/evdev/BUILD.gn b/ui/events/ozone/evdev/BUILD.gn
+index f338774561..4b1ebe8dda 100644
+--- a/ui/events/ozone/evdev/BUILD.gn
++++ b/ui/events/ozone/evdev/BUILD.gn
+@@ -200,7 +200,7 @@ component("evdev") {
+ 
+   if (use_libinput) {
+     configs += [ ":libinput" ]
+-    public_configs += [ ":libinput_config" ]
++    configs += [ ":libinput_config" ]  # PLUTONIUM: only evdev reads it
+ 
+     sources += [
+       "libinput_event_converter.cc",
+diff --git a/ui/events/ozone/evdev/event_converter_evdev_impl.cc b/ui/events/ozone/evdev/event_converter_evdev_impl.cc
+index 687a0f2d97..dd8d7e444b 100644
+--- a/ui/events/ozone/evdev/event_converter_evdev_impl.cc
++++ b/ui/events/ozone/evdev/event_converter_evdev_impl.cc
+@@ -272,6 +272,23 @@ void EventConverterEvdevImpl::ConvertMouseMoveEvent(const input_event& input) {
+     case REL_Y:
+       y_offset_ = input.value;
+       break;
++    // EXO-DRM: wheels. Without libgestures (is_chromeos_device builds only)
++    // nothing else turns them into events. Prefer the high-resolution axes
++    // (1/120 notch) when the device reports them; it reports both.
++    case REL_WHEEL:
++      wheel_ticks_.set_y(wheel_ticks_.y() + input.value * 120);
++      break;
++    case REL_HWHEEL:
++      wheel_ticks_.set_x(wheel_ticks_.x() - input.value * 120);
++      break;
++    case REL_WHEEL_HI_RES:
++      wheel_hi_res_.set_y(wheel_hi_res_.y() + input.value);
++      has_hi_res_wheel_ = true;
++      break;
++    case REL_HWHEEL_HI_RES:
++      wheel_hi_res_.set_x(wheel_hi_res_.x() - input.value);
++      has_hi_res_wheel_ = true;
++      break;
+   }
+ }
+ 
+@@ -394,18 +411,24 @@ void EventConverterEvdevImpl::SetReceivedValidInputCallback(
+ }
+ 
+ void EventConverterEvdevImpl::FlushEvents(const input_event& input) {
+-  if (!cursor_ || (x_offset_ == 0 && y_offset_ == 0))
+-    return;
+-
+-  cursor_->MoveCursor(gfx::Vector2dF(x_offset_, y_offset_));
+-
+-  dispatcher_->DispatchMouseMoveEvent(MouseMoveEventParams(
+-      input_device_.id, EF_NONE, cursor_->GetLocation(),
+-      nullptr /* ordinal_delta*/, PointerDetails(EventPointerType::kMouse),
+-      TimeTicksFromInputEvent(input)));
+-
++  // EXO-DRM: wheel, after any motion in the same report.
++  gfx::Vector2d ticks = has_hi_res_wheel_ ? wheel_hi_res_ : wheel_ticks_;
++  wheel_ticks_ = wheel_hi_res_ = gfx::Vector2d();
++  if (cursor_ && (x_offset_ || y_offset_)) {
++    cursor_->MoveCursor(gfx::Vector2dF(x_offset_, y_offset_));
++    dispatcher_->DispatchMouseMoveEvent(MouseMoveEventParams(
++        input_device_.id, EF_NONE, cursor_->GetLocation(),
++        nullptr /* ordinal_delta*/, PointerDetails(EventPointerType::kMouse),
++        TimeTicksFromInputEvent(input)));
++  }
+   x_offset_ = 0;
+   y_offset_ = 0;
++  if (!cursor_ || ticks.IsZero())
++    return;
++  // One notch is 120 ticks and MouseWheelEvent::kWheelDelta (120) pixels.
++  dispatcher_->DispatchMouseWheelEvent(
++      MouseWheelEventParams(input_device_.id, cursor_->GetLocation(), ticks,
++                            ticks, TimeTicksFromInputEvent(input)));
+ }
+ 
+ std::ostream& EventConverterEvdevImpl::DescribeForLog(std::ostream& os) const {
+diff --git a/ui/events/ozone/evdev/event_converter_evdev_impl.h b/ui/events/ozone/evdev/event_converter_evdev_impl.h
+index 227c1d475d..c0f28474e6 100644
+--- a/ui/events/ozone/evdev/event_converter_evdev_impl.h
++++ b/ui/events/ozone/evdev/event_converter_evdev_impl.h
+@@ -19,6 +19,7 @@
+ #include "ui/events/event_modifiers.h"
+ #include "ui/events/ozone/evdev/cursor_delegate_evdev.h"
+ #include "ui/events/ozone/evdev/event_converter_evdev.h"
++#include "ui/gfx/geometry/vector2d.h"
+ #include "ui/events/ozone/evdev/event_device_info.h"
+ #include "ui/events/ozone/evdev/keyboard_evdev.h"
+ #include "ui/events/ozone/evdev/mouse_button_map_evdev.h"
+@@ -117,6 +118,12 @@ class COMPONENT_EXPORT(EVDEV) EventConverterEvdevImpl
+   // Save y-axis events of relative devices to be flushed at EV_SYN time.
+   int y_offset_ = 0;
+ 
++  // EXO-DRM: wheel motion since the last EV_SYN, in 1/120 notches, from the
++  // legacy and the high-resolution axes.
++  gfx::Vector2d wheel_ticks_;
++  gfx::Vector2d wheel_hi_res_;
++  bool has_hi_res_wheel_ = false;
++
+   // Saves the last scan code seen in order to attach it to the next key event.
+   // The scan code is sent as a separate event message EV_MSC with subtype
+   // MSC_SCAN prior to the EV_KEY message that contains the key code.
+diff --git a/ui/events/ozone/evdev/event_factory_evdev.cc b/ui/events/ozone/evdev/event_factory_evdev.cc
+index 6b80cf2449..4cd2c4bdd6 100644
+--- a/ui/events/ozone/evdev/event_factory_evdev.cc
++++ b/ui/events/ozone/evdev/event_factory_evdev.cc
+@@ -4,10 +4,15 @@
+ 
+ #include "ui/events/ozone/evdev/event_factory_evdev.h"
+ 
++#include <linux/input.h>
++#include <signal.h>
++#include <unistd.h>
++
+ #include <utility>
+ 
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/task_runner.h"
+ #include "base/time/time.h"
+@@ -240,7 +245,11 @@ EventFactoryEvdev::EventFactoryEvdev(CursorDelegateEvdev* cursor,
+   DCHECK(device_manager_);
+ }
+ 
+-EventFactoryEvdev::~EventFactoryEvdev() = default;
++EventFactoryEvdev::~EventFactoryEvdev() {
++  if (LogindSession* session = LogindSession::Get()) {
++    session->RemoveObserver(this);
++  }
++}
+ 
+ void EventFactoryEvdev::Init() {
+   DCHECK(!initialized_);
+@@ -271,6 +280,9 @@ EventFactoryEvdev::CreateSystemInputInjector() {
+ void EventFactoryEvdev::DispatchKeyEvent(const KeyEventParams& params) {
+   TRACE_EVENT1("evdev", "EventFactoryEvdev::DispatchKeyEvent", "device",
+                params.device_id);
++  if (HandleSessionKey(params)) {
++    return;
++  }
+   keyboard_.OnKeyChange(params.code, params.scan_code, params.down,
+                         params.suppress_auto_repeat, params.timestamp,
+                         params.device_id, params.flags);
+@@ -586,6 +598,55 @@ void EventFactoryEvdev::SynthesizeMouseMove(const gfx::PointF& location) {
+                                     EventTimeForNow())));
+ }
+ 
++bool EventFactoryEvdev::HandleSessionKey(const KeyEventParams& params) {
++  LogindSession* session = LogindSession::Get();
++  if (!session) {
++    return false;
++  }
++  if (!params.down) {
++    return session_keys_down_.erase(params.code) > 0;
++  }
++  constexpr int kCtrlAlt = EF_CONTROL_DOWN | EF_ALT_DOWN;
++  if ((modifiers_.GetModifierFlags() & (kCtrlAlt | EF_SHIFT_DOWN |
++                                        EF_COMMAND_DOWN)) != kCtrlAlt) {
++    return false;
++  }
++  uint32_t vt = 0;
++  if (params.code >= KEY_F1 && params.code <= KEY_F10) {
++    vt = params.code - KEY_F1 + 1;
++  } else if (params.code == KEY_F11 || params.code == KEY_F12) {
++    vt = params.code - KEY_F11 + 11;
++  } else if (params.code != KEY_BACKSPACE) {
++    return false;
++  }
++  if (!session_keys_down_.insert(params.code).second) {
++    return true;  // Repeat.
++  }
++  if (vt) {
++    session->SwitchTo(vt);
++  } else {
++    // A clean exit, as from `plutonium stop`. logind restores the VT.
++    LOG(WARNING) << "Ctrl+Alt+Backspace: ending the session";
++    kill(getpid(), SIGTERM);
++  }
++  return true;
++}
++
++void EventFactoryEvdev::OnSessionPaused() {
++  // The devices are revoked: close them, which releases what was held down.
++  session_keys_down_.clear();
++  if (input_device_factory_proxy_) {
++    input_device_factory_proxy_->RemoveAllInputDevices();
++  }
++}
++
++void EventFactoryEvdev::OnSessionResumed() {
++  // Open them all again; while away, any could have come or gone.
++  if (input_device_factory_proxy_) {
++    device_manager_->ScanDevices(this);
++  }
++}
++
+ int EventFactoryEvdev::NextDeviceId() {
+   return ++last_device_id_;
+ }
+@@ -611,6 +672,9 @@ void EventFactoryEvdev::OnThreadStarted(
+ 
+   // Scan & monitor devices.
+   device_manager_->AddObserver(this);
++  if (LogindSession* session = LogindSession::Get()) {
++    session->AddObserver(this);
++  }
+   device_manager_->ScanDevices(this);
+ 
+   // Notify device thread that initial scan is done.
+diff --git a/ui/events/ozone/evdev/event_factory_evdev.h b/ui/events/ozone/evdev/event_factory_evdev.h
+index c252511791..6044adc3ce 100644
+--- a/ui/events/ozone/evdev/event_factory_evdev.h
++++ b/ui/events/ozone/evdev/event_factory_evdev.h
+@@ -5,6 +5,8 @@
+ #ifndef UI_EVENTS_OZONE_EVDEV_EVENT_FACTORY_EVDEV_H_
+ #define UI_EVENTS_OZONE_EVDEV_EVENT_FACTORY_EVDEV_H_
+ 
++#include <set>
++
+ #include "base/component_export.h"
+ #include "base/containers/flat_map.h"
+ #include "base/functional/callback.h"
+@@ -14,6 +16,7 @@
+ #include "base/task/task_runner.h"
+ #include "ui/events/event_modifiers.h"
+ #include "ui/events/ozone/device/device_event_observer.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/events/ozone/evdev/device_event_dispatcher_evdev.h"
+ #include "ui/events/ozone/evdev/event_thread_evdev.h"
+ #include "ui/events/ozone/evdev/input_controller_evdev.h"
+@@ -51,7 +54,8 @@ enum class StylusState;
+ // This is a UI thread object, but creates its own thread for I/O. See
+ // InputDeviceFactoryEvdev for the I/O thread part.
+ class COMPONENT_EXPORT(EVDEV) EventFactoryEvdev : public DeviceEventObserver,
+-                                                  public PlatformEventSource {
++                                                  public PlatformEventSource,
++                                                  public LogindSession::Observer {
+  public:
+   EventFactoryEvdev(CursorDelegateEvdev* cursor,
+                     DeviceManager* device_manager,
+@@ -128,12 +132,21 @@ class COMPONENT_EXPORT(EVDEV) EventFactoryEvdev : public DeviceEventObserver,
+   // PlatformEventSource:
+   void OnDispatcherListChanged() override;
+ 
++  // LogindSession::Observer:
++  void OnSessionPaused() override;
++  void OnSessionResumed() override;
++
+  private:
+   // Dispatch event via PlatformEventSource.
+   void DispatchUiEvent(ui::Event* event);
+ 
+   int NextDeviceId();
+ 
++  // As the logind session's controller, Chrome switches VTs (Ctrl+Alt+Fn) and
++  // ends the session (Ctrl+Alt+Backspace): the kernel keyboard is off. True
++  // if |params| was such a key, which then goes no further.
++  bool HandleSessionKey(const KeyEventParams& params);
++
+   // Device thread initialization.
+   void StartThread();
+   void OnThreadStarted(
+@@ -166,6 +179,9 @@ class COMPONENT_EXPORT(EVDEV) EventFactoryEvdev : public DeviceEventObserver,
+   // Keyboard state.
+   KeyboardEvdev keyboard_;
+ 
++  // Session keys that are down, whose releases are kept back too.
++  std::set<unsigned int> session_keys_down_;
++
+   // Cursor movement.
+   const raw_ptr<CursorDelegateEvdev> cursor_;
+ 
+diff --git a/ui/events/ozone/evdev/input_controller_evdev.cc b/ui/events/ozone/evdev/input_controller_evdev.cc
+index 73dce91f83..6e25f87b03 100644
+--- a/ui/events/ozone/evdev/input_controller_evdev.cc
++++ b/ui/events/ozone/evdev/input_controller_evdev.cc
+@@ -501,6 +501,16 @@ void InputControllerEvdev::SetHapticTouchpadEffectForNextButtonRelease(
+ }
+ 
+ void InputControllerEvdev::OnInputDeviceRemoved(int device_id) {
++  // PLUTONIUM (EXO-SEAT): the device factory calls this on the input thread
++  // as it detaches a device (a VT switch detaches every one), but the
++  // settings are this thread's: the update it schedules, with a weak pointer
++  // bound here, must not be queued on the input thread.
++  if (!task_runner_->RunsTasksInCurrentSequence()) {
++    task_runner_->PostTask(
++        FROM_HERE, base::BindOnce(&InputControllerEvdev::OnInputDeviceRemoved,
++                                  weak_ptr_factory_.GetWeakPtr(), device_id));
++    return;
++  }
+   input_device_settings_.RemoveDeviceFromSettings(device_id);
+   // Mouse button map and pointing stick map can be null in tests.
+   if (mouse_button_map_) {
+diff --git a/ui/events/ozone/evdev/input_controller_evdev.h b/ui/events/ozone/evdev/input_controller_evdev.h
+index b4c5cb1ace..7b1d7913e1 100644
+--- a/ui/events/ozone/evdev/input_controller_evdev.h
++++ b/ui/events/ozone/evdev/input_controller_evdev.h
+@@ -11,6 +11,7 @@
+ #include "base/containers/flat_map.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "ui/events/devices/haptic_touchpad_effects.h"
+ #include "ui/events/devices/stylus_state.h"
+@@ -196,6 +197,11 @@ class COMPONENT_EXPORT(EVDEV) InputControllerEvdev : public InputController {
+   // LED state.
+   bool caps_lock_led_state_ = false;
+ 
++  // PLUTONIUM (EXO-SEAT): this (UI) thread's, for calls that come from the
++  // input thread (see OnInputDeviceRemoved()).
++  scoped_refptr<base::SingleThreadTaskRunner> task_runner_ =
++      base::SingleThreadTaskRunner::GetCurrentDefault();
++
+   base::WeakPtrFactory<InputControllerEvdev> weak_ptr_factory_{this};
+ };
+ 
+diff --git a/ui/events/ozone/evdev/input_device_factory_evdev.cc b/ui/events/ozone/evdev/input_device_factory_evdev.cc
+index 5e26d25b6a..f1a4733558 100644
+--- a/ui/events/ozone/evdev/input_device_factory_evdev.cc
++++ b/ui/events/ozone/evdev/input_device_factory_evdev.cc
+@@ -10,6 +10,7 @@
+ 
+ #include <algorithm>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/command_line.h"
+ #include "base/files/scoped_file.h"
+@@ -144,6 +145,16 @@ void InputDeviceFactoryEvdev::RemoveInputDevice(const base::FilePath& path) {
+   DetachInputDevice(path);
+ }
+ 
++void InputDeviceFactoryEvdev::RemoveAllInputDevices() {
++  std::vector<base::FilePath> paths;
++  for (const auto& it : converters_) {
++    paths.push_back(it.first);
++  }
++  for (const auto& path : paths) {
++    DetachInputDevice(path);
++  }
++}
++
+ void InputDeviceFactoryEvdev::OnStartupScanComplete() {
+   startup_devices_enumerated_ = true;
+   NotifyDevicesUpdated();
+diff --git a/ui/events/ozone/evdev/input_device_factory_evdev.h b/ui/events/ozone/evdev/input_device_factory_evdev.h
+index b1a4195b61..d7cb49e017 100644
+--- a/ui/events/ozone/evdev/input_device_factory_evdev.h
++++ b/ui/events/ozone/evdev/input_device_factory_evdev.h
+@@ -69,6 +69,10 @@ class COMPONENT_EXPORT(EVDEV) InputDeviceFactoryEvdev {
+   // Stop reading & close an unplugged input device.
+   void RemoveInputDevice(const base::FilePath& path);
+ 
++  // Stop reading & close every input device (the session was switched away
++  // from, and they are revoked).
++  void RemoveAllInputDevices();
++
+   // Device thread handler for initial scan completion.
+   void OnStartupScanComplete();
+ 
+diff --git a/ui/events/ozone/evdev/input_device_factory_evdev_proxy.cc b/ui/events/ozone/evdev/input_device_factory_evdev_proxy.cc
+index 16d878accd..9280145fe1 100644
+--- a/ui/events/ozone/evdev/input_device_factory_evdev_proxy.cc
++++ b/ui/events/ozone/evdev/input_device_factory_evdev_proxy.cc
+@@ -74,6 +74,12 @@ void InputDeviceFactoryEvdevProxy::RemoveInputDevice(
+                                 input_device_factory_, path));
+ }
+ 
++void InputDeviceFactoryEvdevProxy::RemoveAllInputDevices() {
++  task_runner_->PostTask(
++      FROM_HERE, base::BindOnce(&InputDeviceFactoryEvdev::RemoveAllInputDevices,
++                                input_device_factory_));
++}
++
+ void InputDeviceFactoryEvdevProxy::OnStartupScanComplete() {
+   task_runner_->PostTask(
+       FROM_HERE, base::BindOnce(&InputDeviceFactoryEvdev::OnStartupScanComplete,
+diff --git a/ui/events/ozone/evdev/input_device_factory_evdev_proxy.h b/ui/events/ozone/evdev/input_device_factory_evdev_proxy.h
+index 1ddc7bf721..26f72095b3 100644
+--- a/ui/events/ozone/evdev/input_device_factory_evdev_proxy.h
++++ b/ui/events/ozone/evdev/input_device_factory_evdev_proxy.h
+@@ -40,6 +40,7 @@ class COMPONENT_EXPORT(EVDEV) InputDeviceFactoryEvdevProxy {
+   // that object on another thread.
+   void AddInputDevice(int id, const base::FilePath& path);
+   void RemoveInputDevice(const base::FilePath& path);
++  void RemoveAllInputDevices();
+   void OnStartupScanComplete();
+   void SetCapsLockLed(bool enabled);
+   void GetStylusSwitchState(InputController::GetStylusSwitchStateReply reply);
+diff --git a/ui/events/ozone/evdev/input_device_opener_evdev.cc b/ui/events/ozone/evdev/input_device_opener_evdev.cc
+index 1a7e671b49..871a629be7 100644
+--- a/ui/events/ozone/evdev/input_device_opener_evdev.cc
++++ b/ui/events/ozone/evdev/input_device_opener_evdev.cc
+@@ -15,6 +15,7 @@
+ #include "base/memory/ptr_util.h"
+ #include "base/trace_event/trace_event.h"
+ #include "ui/events/event_switches.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/events/ozone/evdev/event_converter_evdev_impl.h"
+ #include "ui/events/ozone/evdev/gamepad_event_converter_evdev.h"
+ #include "ui/events/ozone/evdev/microphone_mute_switch_event_converter_evdev.h"
+@@ -110,7 +111,16 @@ std::unique_ptr<EventConverterEvdev> InputDeviceOpenerEvdev::OpenInputDevice(
+   const base::FilePath& path = params.path;
+   TRACE_EVENT1("evdev", "OpenInputDevice", "path", path.value());
+ 
+-  base::ScopedFD fd(open(path.value().c_str(), O_RDWR | O_NONBLOCK));
++  base::ScopedFD fd;
++  if (LogindSession* session = LogindSession::Get()) {
++    // Non-blocking, as logind opens it.
++    fd = session->OpenDevice(path);
++    if (!fd.is_valid()) {
++      return nullptr;
++    }
++  } else {
++    fd.reset(open(path.value().c_str(), O_RDWR | O_NONBLOCK));
++  }
+   if (fd.get() < 0) {
+     PLOG(ERROR) << "Cannot open " << path.value();
+     return nullptr;
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.cc b/ui/events/ozone/evdev/libinput_event_converter.cc
+index cfe335e2ae..bf34001ae4 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.cc
++++ b/ui/events/ozone/evdev/libinput_event_converter.cc
+@@ -2,16 +2,25 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#ifdef UNSAFE_BUFFERS_BUILD
++// PLUTONIUM: libinput hands us a printf format and va_list.
++#pragma allow_unsafe_buffers
++#endif
++
+ #include "ui/events/ozone/evdev/libinput_event_converter.h"
+ 
++#include <errno.h>
+ #include <fcntl.h>
+ 
+ #include <ostream>
+ #include <string>
+ 
++#include "base/files/file_path.h"
++#include "base/files/scoped_file.h"
+ #include "base/logging.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/events/ozone/evdev/cursor_delegate_evdev.h"
+ #include "ui/events/ozone/evdev/device_event_dispatcher_evdev.h"
+ #include "ui/events/ozone/evdev/event_device_info.h"
+@@ -81,6 +90,13 @@ libinput_event_pointer* LibInputEventConverter::LibInputEvent::PointerEvent()
+   return event;
+ }
+ 
++libinput_event_gesture* LibInputEventConverter::LibInputEvent::GestureEvent()
++    const {
++  auto* const event = libinput_event_get_gesture_event(event_);
++  DCHECK(event);
++  return event;
++}
++
+ libinput_event_type LibInputEventConverter::LibInputEvent::Type() const {
+   return libinput_event_get_type(event_);
+ }
+@@ -235,6 +251,10 @@ int LibInputEventConverter::LibInputContext::OpenRestricted(const char* path,
+                                                             int flags,
+                                                             void* user_data) {
+   VLOG(1) << "Open input: " << path;
++  if (LogindSession* session = LogindSession::Get()) {
++    base::ScopedFD fd = session->OpenDevice(base::FilePath(path));
++    return fd.is_valid() ? fd.release() : -EACCES;
++  }
+   int fd = open(path, flags);
+   return fd;
+ }
+@@ -361,6 +381,16 @@ void LibInputEventConverter::HandleEvent(const LibInputEvent& event) {
+       HandlePointerAxis(event);
+       break;
+ 
++    // PLUTONIUM: touchpad swipes with three fingers or more, which nothing
++    // read before. They go on as ChromeOS's gesture library sends them:
++    // scroll events with their finger count (Ash's shell mode hands them to
++    // the visible shell page).
++    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
++    case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE:
++    case LIBINPUT_EVENT_GESTURE_SWIPE_END:
++      HandleSwipe(event);
++      break;
++
+     default:
+       DVLOG(3) << "Ignoring libinput event: " << event.Type();
+       break;
+@@ -409,13 +439,51 @@ void LibInputEventConverter::HandlePointerAxis(const LibInputEvent& evt) {
+   libinput_event_pointer* event = evt.PointerEvent();
+   const auto h = GetAxisValue(event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+   const auto v = GetAxisValue(event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+-  const gfx::Vector2d delta(h, v);
++  // PLUTONIUM: keep the fraction. Finger scrolling comes in steps well under
++  // a pixel, which gfx::Vector2d truncated to nothing.
++  const gfx::Vector2dF delta(h, v);
+ 
+   DVLOG(3) << "Pointer axis h:" << h << ", v:" << v;
+ 
+-  dispatcher_->DispatchScrollEvent({input_device_.id, EventType::kScroll,
+-                                    cursor_->GetLocation(), delta, delta, 2,
+-                                    Timestamp(evt)});
++  // PLUTONIUM: libinput ends a finger scroll with an axis event of 0. That is
++  // a fling start in aura (fingers lifted), which Exo sends as axis_stop so
++  // clients can start kinetic scrolling.
++  const bool stop =
++      delta.IsZero() &&
++      libinput_event_pointer_get_axis_source(event) ==
++          LIBINPUT_POINTER_AXIS_SOURCE_FINGER;
++  dispatcher_->DispatchScrollEvent(
++      {input_device_.id, stop ? EventType::kScrollFlingStart : EventType::kScroll,
++       cursor_->GetLocation(), delta, delta, 2, Timestamp(evt)});
++}
++
++void LibInputEventConverter::HandleSwipe(const LibInputEvent& evt) {
++  libinput_event_gesture* event = evt.GestureEvent();
++  const int fingers = libinput_event_gesture_get_finger_count(event);
++  // Where the fingers moved (not the content: natural scrolling doesn't apply).
++  gfx::Vector2dF delta;
++  EventType type = EventType::kScroll;
++  switch (evt.Type()) {
++    case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
++      // A scroll's start in ChromeOS's gesture library.
++      type = EventType::kScrollFlingCancel;
++      break;
++    case LIBINPUT_EVENT_GESTURE_SWIPE_END:
++      type = EventType::kScrollFlingStart;
++      break;
++    default:
++      delta = gfx::Vector2dF(libinput_event_gesture_get_dx(event),
++                             libinput_event_gesture_get_dy(event));
++      break;
++  }
++
++  DVLOG(3) << "Swipe fingers=" << fingers << " type=" << static_cast<int>(type)
++           << " delta=" << delta.ToString();
++
++  dispatcher_->DispatchScrollEvent(
++      {input_device_.id, type, cursor_->GetLocation(), delta, delta, fingers,
++       base::TimeTicks() +
++           base::Microseconds(libinput_event_gesture_get_time_usec(event))});
+ }
+ 
+ base::TimeTicks LibInputEventConverter::Timestamp(const LibInputEvent& evt) {
+diff --git a/ui/events/ozone/evdev/libinput_event_converter.h b/ui/events/ozone/evdev/libinput_event_converter.h
+index c030a344c4..2d393493d6 100644
+--- a/ui/events/ozone/evdev/libinput_event_converter.h
++++ b/ui/events/ozone/evdev/libinput_event_converter.h
+@@ -10,6 +10,7 @@
+ #include <optional>
+ #include <ostream>
+ 
++#include "base/memory/raw_ptr_exclusion.h"
+ #include "ui/events/ozone/evdev/event_converter_evdev.h"
+ 
+ namespace ui {
+@@ -35,10 +36,11 @@ class LibInputEventConverter : public EventConverterEvdev {
+     ~LibInputEvent();
+ 
+     libinput_event_pointer* PointerEvent() const;
++    libinput_event_gesture* GestureEvent() const;
+     libinput_event_type Type() const;
+ 
+    private:
+-    libinput_event* event_;
++    RAW_PTR_EXCLUSION libinput_event* event_;
+   };
+ 
+   // This class wraps the libinput_device struct from libinput library.
+@@ -60,7 +62,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     void SetTapToClickEnabled(const bool enabled) const;
+ 
+     const int device_id_;
+-    libinput_device* device_;
++    RAW_PTR_EXCLUSION libinput_device* device_;
+   };
+ 
+   // This class wraps the libinput struct from libinput library. Any operations
+@@ -93,7 +95,7 @@ class LibInputEventConverter : public EventConverterEvdev {
+     static constexpr libinput_interface interface_ = {OpenRestricted,
+                                                       CloseRestricted};
+ 
+-    libinput* li_;
++    RAW_PTR_EXCLUSION libinput* li_;
+   };
+ 
+   static std::unique_ptr<LibInputEventConverter> Create(
+@@ -132,10 +134,11 @@ class LibInputEventConverter : public EventConverterEvdev {
+   void HandlePointerMotion(const LibInputEvent& evt);
+   void HandlePointerButton(const LibInputEvent& evt);
+   void HandlePointerAxis(const LibInputEvent& evt);
++  void HandleSwipe(const LibInputEvent& evt);
+   base::TimeTicks Timestamp(const LibInputEvent& evt);
+ 
+-  DeviceEventDispatcherEvdev* const dispatcher_;
+-  CursorDelegateEvdev* const cursor_;
++  RAW_PTR_EXCLUSION DeviceEventDispatcherEvdev* const dispatcher_;
++  RAW_PTR_EXCLUSION CursorDelegateEvdev* const cursor_;
+ 
+   const bool has_keyboard_;
+   const bool has_mouse_;
+diff --git a/ui/gfx/linux/gbm_support_x11.cc b/ui/gfx/linux/gbm_support_x11.cc
+index 83362ba894..9820c35b5e 100644
+--- a/ui/gfx/linux/gbm_support_x11.cc
++++ b/ui/gfx/linux/gbm_support_x11.cc
+@@ -52,6 +52,7 @@ std::unique_ptr<ui::GbmDevice> CreateX11GbmDevice() {
+   // Obtain an authenticated DRM fd.
+   auto reply = dri3.Open({connection->default_root(), 0}).Sync();
+   if (!reply) {
++    VLOG(1) << "EXO-DIAG DRI3Open failed";
+     return nullptr;
+   }
+ 
+@@ -63,7 +64,9 @@ std::unique_ptr<ui::GbmDevice> CreateX11GbmDevice() {
+     return nullptr;
+   }
+ 
+-  return ui::CreateGbmDevice(fd.release());
++  auto device = ui::CreateGbmDevice(fd.release());
++  VLOG(1) << "EXO-DIAG CreateGbmDevice " << (device ? "ok" : "FAILED");
++  return device;
+ }
+ 
+ }  // namespace
+diff --git a/ui/gfx/linux/gbm_wrapper.cc b/ui/gfx/linux/gbm_wrapper.cc
+index 9f74463107..8f6ed07dc3 100644
+--- a/ui/gfx/linux/gbm_wrapper.cc
++++ b/ui/gfx/linux/gbm_wrapper.cc
+@@ -452,10 +452,18 @@ class Device final : public ui::GbmDevice {
+       return nullptr;
+     }
+ 
+-    int gbm_flags = 0;
+-    if ((gbm_flags = GetSupportedGbmFlags(format)) == 0) {
+-      LOG(ERROR) << "gbm format not supported: " << DrmFormatToString(format);
+-      return nullptr;
++    int gbm_flags = GetSupportedGbmFlags(format);
++    // EXO-VIABILITY experiment: Mesa's gbm_device_is_format_supported() says
++    // no to NV12/YV12 for every usage, yet gbm_bo_import() of such dmabufs
++    // works through the DRI image path. Try the import anyway.
++    // EXO-GPU: with SCANOUT first (falling back to no usage flags below), so
++    // the buffer still gets a KMS framebuffer if the display takes the
++    // format (best effort, see DrmThread::CreateBufferFromHandle()); without
++    // one, video can never be promoted to a plane.
++    if (gbm_flags == 0) {
++      VLOG(1) << "gbm format not reported as supported, trying import anyway: "
++              << DrmFormatToString(format);
++      gbm_flags = GBM_BO_USE_SCANOUT;
+     }
+ 
+     struct gbm_import_fd_modifier_data fd_data;
+@@ -482,6 +490,18 @@ class Device final : public ui::GbmDevice {
+     // kept open for the lifetime of the buffer.
+     struct gbm_bo* bo = gbm_bo_import(device_.get(), GBM_BO_IMPORT_FD_MODIFIER,
+                                       &fd_data, gbm_flags);
++    // EXO-VIABILITY experiment: Mesa rejects SCANOUT imports of
++    // non-displayable modifiers (e.g. AMD 2-plane DCC) that Vulkan can still
++    // sample. Retry without usage flags so such buffers stay importable.
++    if (!bo && gbm_flags != 0) {
++      bo = gbm_bo_import(device_.get(), GBM_BO_IMPORT_FD_MODIFIER, &fd_data,
++                         0);
++      if (bo) {
++        VLOG(1) << "EXO-DIAG gbm_bo_import ok without SCANOUT, modifier=0x"
++                << std::hex << handle.modifier;
++        gbm_flags = 0;
++      }
++    }
+     if (!bo) {
+       LOG(ERROR) << "nullptr returned from gbm_bo_import";
+       return nullptr;
+diff --git a/ui/ozone/platform/drm/common/drm_wrapper.cc b/ui/ozone/platform/drm/common/drm_wrapper.cc
+index 5da3eaf211..272d972991 100644
+--- a/ui/ozone/platform/drm/common/drm_wrapper.cc
++++ b/ui/ozone/platform/drm/common/drm_wrapper.cc
+@@ -204,14 +204,19 @@ bool DrmWrapper::SetCursor(uint32_t crtc_id,
+ bool DrmWrapper::SetMaster() {
+   TRACE_EVENT1("drm", "DrmWrapper::SetMaster", "path", device_path_.value());
+   DCHECK(drm_fd_.is_valid());
+-  has_master_ = (drmSetMaster(drm_fd_.get()) == 0);
++  // Under a session manager (logind) it's the manager that sets master, on
++  // its own copy of the file: only the process that opened a file, or root,
++  // may. What counts is that it is master now.
++  has_master_ = drmSetMaster(drm_fd_.get()) == 0 || IsMaster();
+   return has_master_;
+ }
+ 
+ bool DrmWrapper::DropMaster() {
+   TRACE_EVENT1("drm", "DrmWrapper::DropMaster", "path", device_path_.value());
+   DCHECK(drm_fd_.is_valid());
+-  const bool drop_master_result = (drmDropMaster(drm_fd_.get()) == 0);
++  // Not master to begin with (the session manager dropped it) is as good.
++  const bool drop_master_result =
++      drmDropMaster(drm_fd_.get()) == 0 || !IsMaster();
+   // Chrome no longer has DRM master if drop master call succeeded.
+   has_master_ = !drop_master_result;
+   return drop_master_result;
+@@ -221,6 +226,10 @@ bool DrmWrapper::has_master() const {
+   return has_master_;
+ }
+ 
++bool DrmWrapper::IsMaster() const {
++  return drmIsMaster(drm_fd_.get());
++}
++
+ /**************
+  * Dumb Buffers
+  **************/
+diff --git a/ui/ozone/platform/drm/common/drm_wrapper.h b/ui/ozone/platform/drm/common/drm_wrapper.h
+index 0f1e022fd8..c84729c69e 100644
+--- a/ui/ozone/platform/drm/common/drm_wrapper.h
++++ b/ui/ozone/platform/drm/common/drm_wrapper.h
+@@ -135,6 +135,9 @@ class DrmWrapper {
+   virtual bool SetMaster();
+   virtual bool DropMaster();
+   virtual bool has_master() const;
++  // Whether the file is DRM master right now, which a session manager may
++  // have changed since SetMaster() or DropMaster().
++  virtual bool IsMaster() const;
+ 
+   /**************
+    * Dumb Buffers
+diff --git a/ui/ozone/platform/drm/gpu/drm_gpu_display_manager.cc b/ui/ozone/platform/drm/gpu/drm_gpu_display_manager.cc
+index a8994855e6..0c39bf512f 100644
+--- a/ui/ozone/platform/drm/gpu/drm_gpu_display_manager.cc
++++ b/ui/ozone/platform/drm/gpu/drm_gpu_display_manager.cc
+@@ -423,8 +423,15 @@ bool DrmGpuDisplayManager::TakeDisplayControl() {
+ }
+ 
+ bool DrmGpuDisplayManager::RelinquishDisplayControl() {
++  const DrmDeviceVector& devices = drm_device_manager_->GetDrmDevices();
++  // Without master (a session manager took it away already), nothing can be
++  // committed: only stop using the displays.
++  const bool lost_master =
++      std::ranges::any_of(devices, [](const scoped_refptr<DrmDevice>& drm) {
++        return !drm->IsMaster();
++      });
+   const bool detach_planes_before_dropping =
+-      display::features::IsFastDrmMasterDropEnabled();
++      display::features::IsFastDrmMasterDropEnabled() && !lost_master;
+   if (detach_planes_before_dropping &&
+       !screen_manager_->DetachPlanesFromAllControllers()) {
+     LOG(ERROR) << __func__
+@@ -432,7 +439,6 @@ bool DrmGpuDisplayManager::RelinquishDisplayControl() {
+     return false;
+   }
+ 
+-  const DrmDeviceVector& devices = drm_device_manager_->GetDrmDevices();
+   for (const auto& drm : devices) {
+     if (!drm->DropMaster()) {
+       LOG(ERROR) << __func__ << "Drm drop master failed for: "  // nocheck
+@@ -444,7 +450,7 @@ bool DrmGpuDisplayManager::RelinquishDisplayControl() {
+   // Dissociate controllers from windows so that subsequent pageflips fail
+   // early. The only way to re-establish the mapping is to re-take DRM master
+   // and do a new configuration.
+-  if (detach_planes_before_dropping) {
++  if (detach_planes_before_dropping || lost_master) {
+     screen_manager_->UpdateControllerToWindowMapping();
+   }
+ 
+diff --git a/ui/ozone/platform/drm/gpu/drm_overlay_manager.cc b/ui/ozone/platform/drm/gpu/drm_overlay_manager.cc
+index 6089515c37..66e53561e5 100644
+--- a/ui/ozone/platform/drm/gpu/drm_overlay_manager.cc
++++ b/ui/ozone/platform/drm/gpu/drm_overlay_manager.cc
+@@ -9,6 +9,11 @@
+ #include <utility>
+ #include <variant>
+ 
++#include <set>
++#include <string>
++
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/trace_event/trace_event.h"
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "ui/base/ui_base_features.h"
+@@ -145,7 +150,20 @@ void DrmOverlayManager::CheckOverlaySupport(
+ 
+     // CanHandleCandidate() should never return false if the candidate is
+     // the primary plane.
+-    DCHECK(can_handle || candidate.plane_z_order != 0);
++    // EXO-DIAG: log instead of DCHECK so the rejection is visible and Viz
++    // falls back to compositing.
++    static int rejected_count = 0;
++    if (!can_handle && (candidate.plane_z_order == 0 || rejected_count++ % 50 == 0)) {
++      VLOG(1) << "EXO-DIAG candidate rejected z=" << candidate.plane_z_order
++              << " bg_color=" << candidate.background_color.has_value()
++              << " of " << candidates->size()
++              << ": buffer_size=" << candidate.buffer_size.ToString()
++              << " display_rect=" << candidate.display_rect.ToString()
++              << " crop=" << candidate.crop_rect.ToString()
++              << " format=" << candidate.format.ToString()
++              << " native_pixmap=" << !!candidate.native_pixmap
++              << " requires_overlay=" << candidate.requires_overlay;
++    }
+ 
+     // Also verify if hardware supports required buffer format. It can happen,
+     // that a system doesn't support overlays for certain buffer formats. Thus,
+@@ -172,6 +190,22 @@ void DrmOverlayManager::CheckOverlaySupport(
+              status[i] == OVERLAY_STATUS_NOT);
+       candidates->at(i).overlay_handled = status[i] == OVERLAY_STATUS_ABLE;
+     }
++    // EXO-DIAG: synchronous test-commit results, rate limited.
++    {
++      std::string result;
++      for (size_t i = 0; i < size; ++i) {
++        result += " z=" +
++                  base::NumberToString(result_candidates[i].plane_z_order) +
++                  ":" + result_candidates[i].buffer_size.ToString() + "@" +
++                  result_candidates[i].display_rect.ToString() +
++                  (status[i] == OVERLAY_STATUS_ABLE ? " ABLE" : " NOT");
++      }
++      // Log each distinct result once (strategies alternate per frame).
++      static base::NoDestructor<std::set<std::string>> seen;
++      if (seen->size() < 200 && seen->insert(result).second) {
++        VLOG(1) << "EXO-DIAG validated sync" << result;
++      }
++    }
+     return;
+   }
+ 
+@@ -326,6 +360,17 @@ void DrmOverlayManager::UpdateCacheForOverlayCandidates(
+   auto iter = cache.Peek(ToCacheKey(candidates));
+   if (iter != cache.end())
+     iter->second.status = status;
++  // EXO-DIAG: GPU-side (test commit) validation results.
++  std::string result;
++  for (size_t i = 0; i < candidates.size() && i < status.size(); ++i) {
++    result += " z=" + base::NumberToString(candidates[i].plane_z_order) +
++              ":" + candidates[i].buffer_size.ToString() +
++              (status[i] == OVERLAY_STATUS_ABLE ? " ABLE" : " NOT");
++  }
++  static base::NoDestructor<std::set<std::string>> seen;
++  if (seen->size() < 200 && seen->insert(result).second) {
++    VLOG(1) << "EXO-DIAG validated" << result;
++  }
+ }
+ 
+ DrmOverlayManager::OverlayValidationCacheValue::OverlayValidationCacheValue() =
+diff --git a/ui/ozone/platform/drm/gpu/fake_drm_device.cc b/ui/ozone/platform/drm/gpu/fake_drm_device.cc
+index aa37f2a5e4..b0b4cf6ac9 100644
+--- a/ui/ozone/platform/drm/gpu/fake_drm_device.cc
++++ b/ui/ozone/platform/drm/gpu/fake_drm_device.cc
+@@ -987,6 +987,10 @@ bool FakeDrmDevice::has_master() const {
+   return has_master_;
+ }
+ 
++bool FakeDrmDevice::IsMaster() const {
++  return has_master_;
++}
++
+ void FakeDrmDevice::RunCallbacks() {
+   while (!callbacks_.empty()) {
+     PageFlipCallback callback = std::move(callbacks_.front());
+diff --git a/ui/ozone/platform/drm/gpu/fake_drm_device.h b/ui/ozone/platform/drm/gpu/fake_drm_device.h
+index 5e8719e53f..b799fecaa5 100644
+--- a/ui/ozone/platform/drm/gpu/fake_drm_device.h
++++ b/ui/ozone/platform/drm/gpu/fake_drm_device.h
+@@ -406,6 +406,7 @@ class FakeDrmDevice : public DrmDevice {
+   bool SetMaster() override;
+   bool DropMaster() override;
+   bool has_master() const override;
++  bool IsMaster() const override;
+ 
+   // There is a circular reference between DrmDevice and
+   // HardwareDisplayPlaneManager, as described in https://crbug.com/40263526.
+diff --git a/ui/ozone/platform/drm/gpu/hardware_display_plane_manager.cc b/ui/ozone/platform/drm/gpu/hardware_display_plane_manager.cc
+index b5c7768912..2af0f7398c 100644
+--- a/ui/ozone/platform/drm/gpu/hardware_display_plane_manager.cc
++++ b/ui/ozone/platform/drm/gpu/hardware_display_plane_manager.cc
+@@ -248,12 +248,30 @@ bool HardwareDisplayPlaneManager::AssignOverlayPlanes(
+     }
+ 
+     if (!hw_plane) {
++      // EXO-DIAG: rate limited.
++      static int no_plane = 0;
++      if (no_plane++ % 100 == 0) {
++        VLOG(1) << "EXO-DIAG no compatible plane for z=" << plane.z_order
++                << " format=0x" << std::hex
++                << (plane.enable_blend
++                        ? plane.buffer->framebuffer_pixel_format()
++                        : plane.buffer->opaque_framebuffer_pixel_format())
++                << " modifier=0x" << plane.buffer->format_modifier() << std::dec
++                << " size=" << plane.buffer->size().ToString() << " of "
++                << overlay_list.size();
++      }
+       RestoreCurrentPlaneList(plane_list);
+       return false;
+     }
+ 
+     if (!SetPlaneData(plane_list, hw_plane, plane, crtc_id, crtc_offset,
+                       OverlayPlaneToDrmSrcRect(plane))) {
++      static int set_failed = 0;
++      if (set_failed++ % 100 == 0) {
++        VLOG(1) << "EXO-DIAG SetPlaneData failed for z=" << plane.z_order
++                << " plane id=" << hw_plane->id() << " modifier=0x" << std::hex
++                << plane.buffer->format_modifier() << std::dec;
++      }
+       RestoreCurrentPlaneList(plane_list);
+       return false;
+     }
+diff --git a/ui/ozone/platform/drm/gpu/hardware_display_plane_manager_atomic.cc b/ui/ozone/platform/drm/gpu/hardware_display_plane_manager_atomic.cc
+index 114a955908..261f248641 100644
+--- a/ui/ozone/platform/drm/gpu/hardware_display_plane_manager_atomic.cc
++++ b/ui/ozone/platform/drm/gpu/hardware_display_plane_manager_atomic.cc
+@@ -263,7 +263,11 @@ bool HardwareDisplayPlaneManagerAtomic::Commit(CommitRequest commit_request,
+       DCHECK(crtc_request.plane_list());
+       if (!AssignOverlayPlanes(crtc_request.plane_list(),
+                                crtc_request.overlays(), crtc_id)) {
+-        LOG_IF(ERROR, !is_testing) << "Failed to Assign Overlay Planes";
++        // EXO-DIAG: also when testing (rate limited).
++        static int assign_failed = 0;
++        LOG_IF(ERROR, !is_testing || assign_failed++ % 300 == 0)
++            << "Failed to Assign Overlay Planes"
++            << (is_testing ? " (test)" : "");
+         status = false;
+       }
+       enable_planes_lists.insert(crtc_request.plane_list());
+@@ -409,7 +413,8 @@ bool HardwareDisplayPlaneManagerAtomic::Commit(
+         }
+         PLOG(ERROR) << ss.str();
+       } else {
+-        VPLOG(2) << "Failed to commit properties for MODE_ATOMIC_TEST_ONLY.";
++        static int test_failed = 0;
++        VPLOG_IF(1, test_failed++ % 300 == 0) << "EXO-DIAG test commit failed";
+       }
+ 
+       ResetCurrentPlaneList(plane_list);
+diff --git a/ui/ozone/platform/drm/host/drm_display_host_manager.cc b/ui/ozone/platform/drm/host/drm_display_host_manager.cc
+index 27eea5ab9d..6bd7a4ecd2 100644
+--- a/ui/ozone/platform/drm/host/drm_display_host_manager.cc
++++ b/ui/ozone/platform/drm/host/drm_display_host_manager.cc
+@@ -28,6 +28,7 @@
+ #include "ui/display/types/display_snapshot.h"
+ #include "ui/events/ozone/device/device_event.h"
+ #include "ui/events/ozone/device/device_manager.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/ozone/platform/drm/common/drm_util.h"
+ #include "ui/ozone/platform/drm/common/drm_wrapper.h"
+ #include "ui/ozone/platform/drm/common/hardware_display_controller_info.h"
+@@ -104,16 +105,9 @@ base::FilePath MapDevPathToSysPath(const base::FilePath& device_path) {
+   return sys_path;
+ }
+ 
+-std::unique_ptr<DrmWrapper> OpenDrmDevice(const base::FilePath& dev_path,
+-                                          const base::FilePath& sys_path,
+-                                          bool is_primary_device) {
+-  // Security folks have requested that we assert the graphics device has the
+-  // expected path, so use a CHECK instead of a DCHECK. The sys_path is only
+-  // used a label and is otherwise unvalidated.
+-  CHECK(dev_path.DirName() == base::FilePath("/dev/dri"));
+-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+-                                                base::BlockingType::MAY_BLOCK);
+-
++// Opens |dev_path| and makes sure it has enough privilege (DRM master, or
++// authenticated by the master).
++base::ScopedFD OpenAndAuthenticate(const base::FilePath& dev_path) {
+   base::ScopedFD scoped_fd;
+   int num_auth_attempts = 0;
+   bool is_authenticated = false;
+@@ -123,7 +117,7 @@ std::unique_ptr<DrmWrapper> OpenDrmDevice(const base::FilePath& dev_path,
+     int fd = HANDLE_EINTR(open(dev_path.value().c_str(), O_RDWR | O_CLOEXEC));
+     if (fd < 0) {
+       PLOG(ERROR) << "Failed to open " << dev_path.value();
+-      return nullptr;
++      return base::ScopedFD();
+     }
+     scoped_fd.reset(fd);
+ 
+@@ -175,6 +169,30 @@ std::unique_ptr<DrmWrapper> OpenDrmDevice(const base::FilePath& dev_path,
+             << (base::TimeTicks::Now() - start_time).InMilliseconds() << " ms "
+             << "with " << num_auth_attempts << " attempt(s)";
+   }
++  return scoped_fd;
++}
++
++std::unique_ptr<DrmWrapper> OpenDrmDevice(const base::FilePath& dev_path,
++                                          const base::FilePath& sys_path,
++                                          bool is_primary_device) {
++  // Security folks have requested that we assert the graphics device has the
++  // expected path, so use a CHECK instead of a DCHECK. The sys_path is only
++  // used a label and is otherwise unvalidated.
++  CHECK(dev_path.DirName() == base::FilePath("/dev/dri"));
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  base::ScopedFD scoped_fd;
++  if (LogindSession* session = LogindSession::Get()) {
++    // As the session's controller: logind opens it, and it is DRM master
++    // while the session is in front.
++    scoped_fd = session->OpenDevice(dev_path);
++  } else {
++    scoped_fd = OpenAndAuthenticate(dev_path);
++  }
++  if (!scoped_fd.is_valid()) {
++    return nullptr;
++  }
+ 
+   auto drm = std::make_unique<DrmWrapper>(sys_path, std::move(scoped_fd),
+                                           is_primary_device);
+@@ -301,6 +319,9 @@ DrmDisplayHostManager::DrmDisplayHostManager(
+   device_manager_->AddObserver(this);
+   proxy_->RegisterHandlerForDrmDisplayHostManager(this);
+   proxy_->AddGpuThreadObserver(this);
++  if (LogindSession* session = LogindSession::Get()) {
++    session->AddObserver(this);
++  }
+ 
+   auto display_infos = GetAvailableDisplayControllerInfos(*primary_drm_device_);
+   ConsolidateTiledDisplayInfo(display_infos);
+@@ -335,6 +356,9 @@ DrmDisplayHostManager::DrmDisplayHostManager(
+ }
+ 
+ DrmDisplayHostManager::~DrmDisplayHostManager() {
++  if (LogindSession* session = LogindSession::Get()) {
++    session->RemoveObserver(this);
++  }
+   device_manager_->RemoveObserver(this);
+   proxy_->UnRegisterHandlerForDrmDisplayHostManager();
+   proxy_->RemoveGpuThreadObserver(this);
+@@ -368,6 +392,14 @@ DrmDisplayHost* DrmDisplayHostManager::GetDisplay(int64_t display_id) {
+ void DrmDisplayHostManager::AddDelegate(DrmNativeDisplayDelegate* delegate) {
+   DCHECK(!delegate_);
+   delegate_ = delegate;
++  LogindSession* session = LogindSession::Get();
++  if (session && !session->is_active()) {
++    // Started on a VT that isn't in front: no DRM master, so nothing can be
++    // configured until the session is in front (OnSessionResumed()). The
++    // GPU process has nothing to give up yet.
++    display_externally_controlled_ = true;
++    delegate_->OnDisplayControlRevoked();
++  }
+ }
+ 
+ void DrmDisplayHostManager::RemoveDelegate(DrmNativeDisplayDelegate* delegate) {
+@@ -408,7 +440,10 @@ void DrmDisplayHostManager::RelinquishDisplayControl(
+   }
+ 
+   if (display_externally_controlled_) {
+-    LOG(ERROR) << "RelinquishDisplayControl called while display not owned";
++    // Under logind, a session that starts in the background was never given
++    // the displays (AddDelegate()).
++    LOG_IF(ERROR, !LogindSession::Get())
++        << "RelinquishDisplayControl called while display not owned";
+     std::move(callback).Run(true);
+     return;
+   }
+@@ -444,6 +479,19 @@ void DrmDisplayHostManager::ConfigureDisplays(
+                                      modeset_flags);
+ }
+ 
++void DrmDisplayHostManager::OnSessionPaused() {
++  // logind took DRM master away.
++  if (delegate_) {
++    delegate_->OnDisplayControlRevoked();
++  }
++}
++
++void DrmDisplayHostManager::OnSessionResumed() {
++  if (delegate_) {
++    delegate_->OnDisplayControlRestored();
++  }
++}
++
+ void DrmDisplayHostManager::OnDeviceEvent(const DeviceEvent& event) {
+   if (event.device_type() != DeviceEvent::DISPLAY)
+     return;
+@@ -467,7 +515,7 @@ void DrmDisplayHostManager::ProcessEvent() {
+         if (drm_devices_.find(event.path) == drm_devices_.end()) {
+           base::ThreadPool::PostTask(
+               FROM_HERE,
+-              {base::MayBlock(),
++              {base::MayBlock(), base::WithBaseSyncPrimitives(),
+                base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
+               base::BindOnce(
+                   &OpenDeviceAsync, event.path,
+diff --git a/ui/ozone/platform/drm/host/drm_display_host_manager.h b/ui/ozone/platform/drm/host/drm_display_host_manager.h
+index 6d3f4a3ee2..73c0b4aa98 100644
+--- a/ui/ozone/platform/drm/host/drm_display_host_manager.h
++++ b/ui/ozone/platform/drm/host/drm_display_host_manager.h
+@@ -16,6 +16,7 @@
+ #include "ui/display/types/native_display_delegate.h"
+ #include "ui/events/ozone/device/device_event.h"
+ #include "ui/events/ozone/device/device_event_observer.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/events/ozone/evdev/event_factory_evdev.h"
+ #include "ui/ozone/platform/drm/common/display_types.h"
+ #include "ui/ozone/platform/drm/host/gpu_thread_observer.h"
+@@ -33,7 +34,9 @@ class GpuThreadAdapter;
+ // The portion of the DrmDisplayHostManager implementation that is agnostic
+ // in how its communication with GPU-specific functionality is implemented.
+ // This is used from both the IPC and the in-process versions in  MUS.
+-class DrmDisplayHostManager : public DeviceEventObserver, GpuThreadObserver {
++class DrmDisplayHostManager : public DeviceEventObserver,
++                              GpuThreadObserver,
++                              LogindSession::Observer {
+  public:
+   DrmDisplayHostManager(
+       GpuThreadAdapter* proxy,
+@@ -60,6 +63,10 @@ class DrmDisplayHostManager : public DeviceEventObserver, GpuThreadObserver {
+       display::ModesetFlags modeset_flags);
+ 
+   // DeviceEventObserver overrides:
++  // LogindSession::Observer:
++  void OnSessionPaused() override;
++  void OnSessionResumed() override;
++
+   void OnDeviceEvent(const DeviceEvent& event) override;
+ 
+   // GpuThreadObserver overrides:
+diff --git a/ui/ozone/platform/drm/host/drm_native_display_delegate.cc b/ui/ozone/platform/drm/host/drm_native_display_delegate.cc
+index e53eefd6f4..a46b3add37 100644
+--- a/ui/ozone/platform/drm/host/drm_native_display_delegate.cc
++++ b/ui/ozone/platform/drm/host/drm_native_display_delegate.cc
+@@ -30,6 +30,14 @@ void DrmNativeDisplayDelegate::OnDisplaySnapshotsInvalidated() {
+       &display::NativeDisplayObserver::OnDisplaySnapshotsInvalidated);
+ }
+ 
++void DrmNativeDisplayDelegate::OnDisplayControlRevoked() {
++  observers_.Notify(&display::NativeDisplayObserver::OnDisplayControlRevoked);
++}
++
++void DrmNativeDisplayDelegate::OnDisplayControlRestored() {
++  observers_.Notify(&display::NativeDisplayObserver::OnDisplayControlRestored);
++}
++
+ void DrmNativeDisplayDelegate::Initialize() {
+   display_manager_->AddDelegate(this);
+ }
+diff --git a/ui/ozone/platform/drm/host/drm_native_display_delegate.h b/ui/ozone/platform/drm/host/drm_native_display_delegate.h
+index b8bf5a3e38..4f24261e9e 100644
+--- a/ui/ozone/platform/drm/host/drm_native_display_delegate.h
++++ b/ui/ozone/platform/drm/host/drm_native_display_delegate.h
+@@ -26,6 +26,8 @@ class DrmNativeDisplayDelegate : public display::NativeDisplayDelegate {
+ 
+   void OnConfigurationChanged();
+   void OnDisplaySnapshotsInvalidated();
++  void OnDisplayControlRevoked();
++  void OnDisplayControlRestored();
+ 
+   // display::NativeDisplayDelegate overrides:
+   void Initialize() override;
+diff --git a/ui/ozone/platform/drm/ozone_platform_drm.cc b/ui/ozone/platform/drm/ozone_platform_drm.cc
+index d174dbe968..2a81b28188 100644
+--- a/ui/ozone/platform/drm/ozone_platform_drm.cc
++++ b/ui/ozone/platform/drm/ozone_platform_drm.cc
+@@ -25,6 +25,7 @@
+ #include "ui/base/buildflags.h"
+ #include "ui/base/cursor/cursor_factory.h"
+ #include "ui/events/ozone/device/device_manager.h"
++#include "ui/events/ozone/device/logind_session.h"
+ #include "ui/events/ozone/evdev/event_factory_evdev.h"
+ #include "ui/events/ozone/layout/keyboard_layout_engine_manager.h"
+ #include "ui/gfx/linux/client_native_pixmap_dmabuf.h"
+@@ -191,6 +192,9 @@ class OzonePlatformDrm : public OzonePlatform {
+ 
+     host_thread_ = base::PlatformThread::CurrentRef();
+ 
++    // Before any device is opened: as the logind session's controller,
++    // devices are opened through logind.
++    logind_session_ = LogindSession::CreateFromCommandLine();
+     device_manager_ = CreateDeviceManager();
+     window_manager_ = std::make_unique<DrmWindowHostManager>();
+     cursor_ = std::make_unique<DrmCursor>(window_manager_.get());
+@@ -345,6 +349,8 @@ class OzonePlatformDrm : public OzonePlatform {
+   // be declared before the two managers, so that they're deleted after them.
+ 
+   // Objects in the host process.
++  // First, so that it outlives everything that opened a device through it.
++  std::unique_ptr<LogindSession> logind_session_;
+ #if BUILDFLAG(USE_XKBCOMMON)
+   XkbEvdevCodes xkb_evdev_code_converter_;
+ #endif
+diff --git a/ui/ozone/platform/x11/ozone_platform_x11.cc b/ui/ozone/platform/x11/ozone_platform_x11.cc
+index 33d4a4a084..907191a1db 100644
+--- a/ui/ozone/platform/x11/ozone_platform_x11.cc
++++ b/ui/ozone/platform/x11/ozone_platform_x11.cc
+@@ -290,6 +290,8 @@ class OzonePlatformX11 : public OzonePlatform,
+   }
+ 
+   void InitializeGPU(const InitParams& params) override {
++    VLOG(1) << "EXO-DIAG X11 InitializeGPU enable_native_gpu_memory_buffers="
++            << params.enable_native_gpu_memory_buffers;
+     InitializeCommon(params);
+     if (params.enable_native_gpu_memory_buffers) {
+       base::ThreadPool::PostTask(FROM_HERE, base::BindOnce([]() {

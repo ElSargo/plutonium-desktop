@@ -20,7 +20,7 @@
 
 - With "Super opens the overview" on, the shell takes every Super combination, so apps see none (niri does the same). It's a switch in Settings.
 - A keyboard whose F-keys Plutonium treats as a Chromebook top row sends F1–F4 as Back, Forward, Refresh and Zoom; those are bound too. F5 and up become brightness and media keys there, so Alt+F7, F8 and F10 may not work on such keyboards.
-- A browser tab dragged partly off the screen overflows like a native window (Chromium patch 0077); before it, the tab laid out again to fit its visible part.
+- A browser tab dragged partly off the screen overflows like a native window (Chromium's embedded surfaces patch); before it, the tab laid out again to fit its visible part.
 - A focused browser tab keeps the keyboard from the shell. To take it back the shell hides the tab for two frames.
 - Storage keys must match `[\w.-]`; the per-session key is sanitized.
 
@@ -30,6 +30,6 @@ In an X11 test session (2026-10-27), with real keys and clicks: Super tap, Alt+T
 
 The overview rework (2026-10-27), on the live page through DevTools: the layout of all three states, the caption and outline staying on the window through a workspace switch (frame by frame), an app dragged from the grid lighting up a workspace, search. Not yet by hand with a real pointer.
 
-The second round (2026-10-27), on the live page through DevTools while the shell was in the background: the grid's pages, dots and arrows, a thumbnail's snapshot drawn, the caption and its icon on the window. Not seen on the display: the app grid opening (the white area was never reproduced; the fix follows from how cc rasters a hidden layer), the icon's scale and fade, and patch 0077.
+The second round (2026-10-27), on the live page through DevTools while the shell was in the background: the grid's pages, dots and arrows, a thumbnail's snapshot drawn, the caption and its icon on the window. Not seen on the display: the app grid opening (the white area was never reproduced; the fix follows from how cc rasters a hidden layer), the icon's scale and fade, and Chromium's fix for tabs partly off the screen.
 
 Not checked: a real touchpad (DRM), Wi-Fi connect and disconnect, Bluetooth pairing, the power buttons, keyboard move and resize (Alt+F7/F8), the two dash modes.

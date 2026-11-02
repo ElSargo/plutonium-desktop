@@ -1,0 +1,3146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 08/13] Plutonium: browser tabs as elements of the shell page
+
+Tabs are real Chromium tabs shown in the shell page: opening, driving and restoring them, incognito tabs, fullscreen, and their requests to the shell.
+
+It holds these changes:
+- browser tabs as SurfaceEmbed elements, DRM mouse wheel
+- tab automation over DevTools, SurfaceEmbed fixes
+- Google sign-in on the web; tabs fullscreen outside the shells
+- common plumbing for tab features
+- tab features plumbing follow-ups
+- incognito tabs, each in a throwaway off-the-record profile
+- the shells' tabs survive a restart
+- a shell page whose renderer crashes while it shows a tab no longer takes the browser down
+
+and the parts in these files of:
+- shell mode on DRM, evdev input fix, display-plane path
+- native fullscreen for embedded apps and tabs, Super+F, shell shortcuts
+- several live shells, Super+Tab switches between them
+- tags and groups on windows and tabs, the Super+Tab overlay
+- niri shell keys, touchpad and scrolling, drag and drop, shell links as tabs
+- Chrome's own UI in the shell (DevTools, context menus, keys)
+- the switcher: shell pages, fullscreen windows, backup terminal and browser
+- agents drive windows and tabs over DevTools
+- page zoom for tabs
+- find in page for tabs
+- tabs' permission prompts ask the shell
+- per-thread permission grants
+- downloads for the shells' tabs
+- file pickers for tabs ask the shell
+- printing in tabs goes to the shell
+- only the shell window is held fullscreen
+---
+ chrome/browser/plutonium_tab_requests.cc      |  298 +++
+ chrome/browser/plutonium_tab_requests.h       |  172 ++
+ chrome/browser/plutonium_tabs.cc              | 1644 +++++++++++++++++
+ chrome/browser/plutonium_tabs.h               |  317 ++++
+ .../plutonium_tab_presenter.cc                |  101 +
+ .../plutonium_tab_presenter.h                 |   56 +
+ .../main_extra_parts/plutonium_tab_session.cc |  173 ++
+ .../main_extra_parts/plutonium_tab_session.h  |   67 +
+ .../browser/ui/browser_command_controller.cc  |    7 +
+ .../browser_ui_controller.cc                  |    4 +-
+ .../browser/ui/navigator/browser_navigator.cc |    6 +
+ .../frame/browser_frame_view_chromeos.cc      |    7 +-
+ chrome/browser/ui/views/frame/browser_view.cc |   14 +-
+ ...chrome_web_contents_view_delegate_views.cc |    7 +
+ .../performance_manager_tab_helper.cc         |   14 +-
+ .../browser/web_contents/web_contents_impl.cc |    6 +
+ 16 files changed, 2883 insertions(+), 10 deletions(-)
+ create mode 100644 chrome/browser/plutonium_tab_requests.cc
+ create mode 100644 chrome/browser/plutonium_tab_requests.h
+ create mode 100644 chrome/browser/plutonium_tabs.cc
+ create mode 100644 chrome/browser/plutonium_tabs.h
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.cc
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.cc
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h
+
+diff --git a/chrome/browser/plutonium_tab_requests.cc b/chrome/browser/plutonium_tab_requests.cc
+new file mode 100644
+index 0000000000..d391a9b783
+--- /dev/null
++++ b/chrome/browser/plutonium_tab_requests.cc
+@@ -0,0 +1,298 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_tab_requests.h"
++
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/mojom/native_window/window_broker.mojom.h"
++#include "ui/aura/window.h"
++
++PlutoniumTabRequests::Params::Params() = default;
++PlutoniumTabRequests::Params::Params(Params&&) = default;
++PlutoniumTabRequests::Params& PlutoniumTabRequests::Params::operator=(
++    Params&&) = default;
++PlutoniumTabRequests::Params::~Params() = default;
++
++PlutoniumTabRequests::Request::Request() = default;
++PlutoniumTabRequests::Request::~Request() = default;
++
++PlutoniumTabRequests::Handle::Handle(int32_t id) : id_(id) {}
++
++PlutoniumTabRequests::Handle::~Handle() {
++  PlutoniumTabRequests::Get()->Cancel(id_);
++}
++
++bool PlutoniumTabRequests::Handle::is_open() const {
++  return PlutoniumTabRequests::Get()->requests_.contains(id_);
++}
++
++PlutoniumTabRequests::PlutoniumTabRequests() {
++  tabs_observation_.Observe(PlutoniumTabs::Get());
++}
++
++PlutoniumTabRequests::~PlutoniumTabRequests() = default;
++
++// static
++PlutoniumTabRequests* PlutoniumTabRequests::Get() {
++  static base::NoDestructor<PlutoniumTabRequests> instance;
++  return instance.get();
++}
++
++// static
++content::WebContents* PlutoniumTabRequests::ShellFor(
++    content::WebContents* contents) {
++  PlutoniumTabs* tabs = PlutoniumTabs::Get();
++  // An attached tab's view is in its embedder's window. (Only the visible
++  // shell's <embed>s attach today; with a visible shell per display, this
++  // is the one on the tab's display.)
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (shells && contents && contents->GetSurfaceEmbedConnector()) {
++    aura::Window* window = contents->GetTopLevelNativeWindow();
++    for (const PlutoniumShells::Shell& shell : shells->GetShells()) {
++      content::WebContents* page = shells->GetContents(shell.id);
++      if (window && page && page->GetTopLevelNativeWindow() == window) {
++        return page;
++      }
++    }
++  }
++  // Hidden or presented: the visible (focused) shell.
++  return tabs->shell();
++}
++
++std::unique_ptr<PlutoniumTabRequests::Handle> PlutoniumTabRequests::Start(
++    content::WebContents* contents,
++    Params params) {
++  std::optional<PlutoniumTabs::TabInfo> tab =
++      PlutoniumTabs::Get()->GetTabFor(contents);
++  if (!tab) {
++    return nullptr;
++  }
++  auto request = std::make_unique<Request>();
++  const int32_t id = next_id_++;
++  request->id = id;
++  request->tab_id = tab->id;
++  request->kind = std::move(params.kind);
++  request->detail = std::move(params.detail);
++  request->on_answer = std::move(params.on_answer);
++  request->on_fallback = std::move(params.on_fallback);
++
++  auto mojo_request = blink::mojom::TabRequest::New();
++  mojo_request->id = id;
++  mojo_request->tab_id = tab->id;
++  mojo_request->kind = request->kind;
++  base::JSONWriter::Write(request->detail, &mojo_request->detail_json);
++  VLOG(1) << "EXO-TAB-FEATURES request #" << id << " (" << request->kind
++          << ") for tab #" << tab->id;
++  requests_[id] = std::move(request);
++  UpdatePending(tab->id);
++
++  content::WebContents* shell = ShellFor(contents);
++  const bool asked =
++      shell && plutonium_shell::SendTabRequest(
++                   shell, std::move(mojo_request),
++                   base::BindOnce(&PlutoniumTabRequests::OnTaken,
++                                  base::Unretained(this), id));
++  if (!asked) {
++    VLOG(1) << "EXO-TAB-FEATURES request #" << id
++            << ": no shell listens, falling back";
++    FallBack(id, FallbackReason::kNotTaken);
++  }
++  return std::make_unique<Handle>(id);
++}
++
++void PlutoniumTabRequests::OnTaken(int32_t id, int32_t taker) {
++  auto it = requests_.find(id);
++  if (it == requests_.end()) {
++    // Over already (cancelled meanwhile): the shell may show it now.
++    if (taker) {
++      plutonium_shell::EndTabRequest(taker, id);
++    }
++    return;
++  }
++  if (!taker) {
++    VLOG(1) << "EXO-TAB-FEATURES request #" << id
++            << ": the shell didn't take it, falling back";
++    FallBack(id, FallbackReason::kNotTaken);
++    return;
++  }
++  it->second->taker = taker;
++  UpdatePending(it->second->tab_id);
++}
++
++bool PlutoniumTabRequests::Answer(int32_t id,
++                                  From from,
++                                  int32_t taker,
++                                  const std::string& answer_json) {
++  auto it = requests_.find(id);
++  if (it == requests_.end()) {
++    return false;
++  }
++  Request& request = *it->second;
++  if (from == From::kShell && (!taker || request.taker != taker)) {
++    return false;
++  }
++  std::optional<base::Value> answer =
++      answer_json.empty()
++          ? base::Value()
++          : base::JSONReader::Read(answer_json, base::JSON_PARSE_RFC);
++  if (!answer || !request.on_answer) {
++    return false;
++  }
++  // The callback may end the request's owner (and so Cancel() it): keep
++  // the callback alive across the call, and look the request up again.
++  auto on_answer = request.on_answer;
++  request.answering = from == From::kShell;
++  const bool accepted = on_answer.Run(from, *answer);
++  it = requests_.find(id);
++  if (it != requests_.end()) {
++    it->second->answering = false;
++  }
++  if (!accepted) {
++    return false;
++  }
++  VLOG(1) << "EXO-TAB-FEATURES request #" << id << " answered by the "
++          << (from == From::kShell ? "shell" : "agent");
++  // An agent's answer: the shell that took it puts its UI away.
++  End(id, /*tell_taker=*/from != From::kShell);
++  return true;
++}
++
++void PlutoniumTabRequests::OnShellGone(int32_t taker) {
++  std::vector<int32_t> ids;
++  for (const auto& [id, request] : requests_) {
++    if (request->taker == taker) {
++      ids.push_back(id);
++    }
++  }
++  for (int32_t id : ids) {
++    VLOG(1) << "EXO-TAB-FEATURES request #" << id
++            << ": the shell that took it went away, falling back";
++    requests_[id]->taker = 0;
++    FallBack(id, FallbackReason::kShellGone);
++  }
++}
++
++void PlutoniumTabRequests::OnTabRemoved(int32_t tab_id) {
++  std::vector<int32_t> ids;
++  for (const auto& [id, request] : requests_) {
++    if (request->tab_id == tab_id) {
++      ids.push_back(id);
++    }
++  }
++  // Its page and its features go with it; nothing runs.
++  for (int32_t id : ids) {
++    End(id, /*tell_taker=*/true);
++  }
++}
++
++std::unique_ptr<PlutoniumTabRequests::Request> PlutoniumTabRequests::End(
++    int32_t id,
++    bool tell_taker) {
++  auto it = requests_.find(id);
++  if (it == requests_.end()) {
++    return nullptr;
++  }
++  std::unique_ptr<Request> request = std::move(it->second);
++  requests_.erase(it);
++  if (tell_taker && request->taker) {
++    plutonium_shell::EndTabRequest(request->taker, id);
++  }
++  UpdatePending(request->tab_id);
++  return request;
++}
++
++void PlutoniumTabRequests::FallBack(int32_t id, FallbackReason reason) {
++  std::unique_ptr<Request> request = End(id, /*tell_taker=*/true);
++  if (!request || !request->on_fallback) {
++    return;
++  }
++  // Never from inside Start() or a broker call.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(std::move(request->on_fallback), reason));
++}
++
++void PlutoniumTabRequests::Cancel(int32_t id) {
++  auto it = requests_.find(id);
++  if (it != requests_.end()) {
++    VLOG(1) << "EXO-TAB-FEATURES request #" << id << " cancelled";
++    End(id, /*tell_taker=*/!it->second->answering);
++  }
++}
++
++// static
++void PlutoniumTabRequests::RunTestRequest(content::WebContents* contents,
++                                          const base::DictValue& args,
++                                          PlutoniumTabs::CommandCallback done) {
++  struct State {
++    std::unique_ptr<Handle> handle;
++    PlutoniumTabs::CommandCallback done;
++  };
++  // Lives as long as the request (its fallback holds it).
++  auto state = std::make_shared<State>();
++  state->done = std::move(done);
++  Params params;
++  params.kind = "test";
++  params.detail = args.Clone();
++  params.on_answer = base::BindRepeating(
++      [](std::weak_ptr<State> weak, From from, const base::Value& answer) {
++        std::shared_ptr<State> state = weak.lock();
++        if (!state || !state->done) {
++          return false;
++        }
++        std::move(state->done)
++            .Run(base::Value(
++                base::DictValue()
++                    .Set("answeredBy", from == From::kShell ? "shell" : "agent")
++                    .Set("answer", answer.Clone())));
++        return true;
++      },
++      std::weak_ptr<State>(state));
++  params.on_fallback = base::BindOnce(
++      [](std::shared_ptr<State> state, FallbackReason reason) {
++        if (state->done) {
++          std::move(state->done)
++              .Run(base::Value(base::DictValue().Set(
++                  "fallback", reason == FallbackReason::kNotTaken
++                                  ? "notTaken"
++                                  : "shellGone")));
++        }
++      },
++      state);
++  state->handle = Get()->Start(contents, std::move(params));
++  if (!state->handle && state->done) {
++    std::move(state->done).Run(std::nullopt);
++  }
++}
++
++void PlutoniumTabRequests::UpdatePending(int32_t tab_id) {
++  content::WebContents* contents = PlutoniumTabs::Get()->GetContents(tab_id);
++  if (!contents) {
++    return;
++  }
++  base::DictValue pending;
++  for (const auto& [id, request] : requests_) {
++    if (request->tab_id != tab_id) {
++      continue;
++    }
++    // The latest of a kind (ids only grow).
++    pending.Set(request->kind, base::DictValue()
++                                   .Set("requestId", id)
++                                   .Set("taken", request->taker != 0)
++                                   .Set("detail", request->detail.Clone()));
++  }
++  PlutoniumTabs::Get()->SetTabState(
++      contents, "pending",
++      pending.empty() ? base::Value() : base::Value(std::move(pending)));
++}
+diff --git a/chrome/browser/plutonium_tab_requests.h b/chrome/browser/plutonium_tab_requests.h
+new file mode 100644
+index 0000000000..9f0793270e
+--- /dev/null
++++ b/chrome/browser/plutonium_tab_requests.h
+@@ -0,0 +1,172 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_TAB_REQUESTS_H_
++#define CHROME_BROWSER_PLUTONIUM_TAB_REQUESTS_H_
++
++#include <map>
++#include <memory>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_tabs.h"
++
++namespace content {
++class WebContents;
++}
++
++// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "The common shape"): what
++// a tab's page needs the user for, asked of a shell. A file chooser, a
++// permission prompt, print, find: each feature is a "kind" of request, with
++// its own details and answers (JSON), and its own fallback.
++//
++// The shell showing the tab (else the visible shell; ShellFor()) gets a
++// cancelable "tabrequest" event on navigator.windowBroker: {requestId, tabId,
++// kind, detail}. Calling preventDefault() takes it; the shell then shows its
++// UI and answers with answerTabRequest(requestId, answer). If no shell
++// listens, or none takes it, the fallback runs at once. If the shell that took
++// it goes away (it reloads, closes or crashes), the fallback runs then. A
++// request never hangs.
++//
++// While a request is open, the tab's state (PlutoniumTabs::SetTabState) has
++// "pending": {<kind>: {requestId, taken, detail}}, so every shell, the
++// switcher and agents see a tab that waits on the user. An agent can answer
++// one too (the DevTools Plutonium domain's answerTabRequest); each kind says
++// whether it accepts that (From::kAgent).
++//
++// When a request ends some other way (answered by an agent, cancelled by the
++// feature, or the tab closed), the shell that took it gets "tabrequestend"
++// {requestId, tabId, kind}, and puts its UI away.
++class PlutoniumTabRequests : public PlutoniumTabs::Observer {
++ public:
++  // Who answered.
++  enum class From { kShell, kAgent };
++  // Why the fallback runs.
++  enum class FallbackReason {
++    // No shell listens, or none took it.
++    kNotTaken,
++    // The shell that took it went away before answering.
++    kShellGone,
++  };
++
++  struct Params {
++    Params();
++    Params(Params&&);
++    Params& operator=(Params&&);
++    ~Params();
++
++    // "fileChooser", "permission", "print", "find", ... (lowerCamelCase).
++    std::string kind;
++    // What the shell gets as the event's detail, and agents and other
++    // shells see in the tab's pending state.
++    base::DictValue detail;
++    // |answer| (the JSON value the shell or agent gave). Return true to end
++    // the request; false if it isn't an answer this kind takes (from that
++    // answerer), and the request stays open.
++    base::RepeatingCallback<bool(From from, const base::Value& answer)>
++        on_answer;
++    // The request ended without an answer: run the fallback (Chrome's own
++    // UI, or cancel or dismiss), depending on the kind and the reason.
++    base::OnceCallback<void(FallbackReason reason)> on_fallback;
++  };
++
++  // An open request. Destroying it cancels the request if it is still open
++  // (the shell gets "tabrequestend"), and no callback runs after that.
++  class Handle {
++   public:
++    explicit Handle(int32_t id);
++    Handle(const Handle&) = delete;
++    Handle& operator=(const Handle&) = delete;
++    ~Handle();
++
++    int32_t id() const { return id_; }
++    // Whether the request is still open.
++    bool is_open() const;
++
++   private:
++    const int32_t id_;
++  };
++
++  static PlutoniumTabRequests* Get();
++
++  PlutoniumTabRequests(const PlutoniumTabRequests&) = delete;
++  PlutoniumTabRequests& operator=(const PlutoniumTabRequests&) = delete;
++
++  // Asks about tab |contents|. Null if |contents| isn't one of the registry's
++  // tabs: then nothing was sent and no callback will run. Callbacks never
++  // run from inside Start().
++  std::unique_ptr<Handle> Start(content::WebContents* contents,
++                                Params params);
++
++  // The shell page to ask about tab |contents|: the one whose <embed> shows
++  // it, else (a hidden or presented tab) the visible shell. Null if none.
++  static content::WebContents* ShellFor(content::WebContents* contents);
++
++  // The shell (|taker|, the broker connection that took it) or an agent
++  // (|taker| 0) answers request |id| with |answer_json|. False if there is no
++  // such open request, |taker| didn't take it, the JSON is invalid, or the
++  // kind refuses the answer.
++  bool Answer(int32_t id,
++              From from,
++              int32_t taker,
++              const std::string& answer_json);
++
++  // Broker connection |taker| went away: the requests it took fall back.
++  void OnShellGone(int32_t taker);
++
++  // PlutoniumTabs::Observer:
++  void OnTabRemoved(int32_t tab_id) override;
++
++  // The "test-request" command (with --plutonium-test-tab-requests): asks a
++  // request of kind "test" with |args| as its detail, and resolves once it
++  // ends: {"answeredBy": "shell" | "agent", "answer": ...} or {"fallback":
++  // "notTaken" | "shellGone"}.
++  static void RunTestRequest(content::WebContents* contents,
++                             const base::DictValue& args,
++                             PlutoniumTabs::CommandCallback done);
++
++ private:
++  friend class base::NoDestructor<PlutoniumTabRequests>;
++  friend class Handle;
++
++  struct Request {
++    Request();
++    ~Request();
++    int32_t id = 0;
++    int32_t tab_id = 0;
++    std::string kind;
++    base::DictValue detail;
++    base::RepeatingCallback<bool(From, const base::Value&)> on_answer;
++    base::OnceCallback<void(FallbackReason)> on_fallback;
++    // The broker connection that took it, or 0 (being asked).
++    int32_t taker = 0;
++    // In its on_answer: the answerer needs no "tabrequestend".
++    bool answering = false;
++  };
++
++  PlutoniumTabRequests();
++  ~PlutoniumTabRequests() override;
++
++  // The shell answered whether it takes request |id|.
++  void OnTaken(int32_t id, int32_t taker);
++  // Ends request |id|: tells its taker (|tell_taker|) and updates the
++  // tab's pending state. Returns it, or null if it wasn't open.
++  std::unique_ptr<Request> End(int32_t id, bool tell_taker);
++  // Ends request |id| and runs its fallback (later).
++  void FallBack(int32_t id, FallbackReason reason);
++  // Destroying a Handle.
++  void Cancel(int32_t id);
++  void UpdatePending(int32_t tab_id);
++
++  int32_t next_id_ = 1;
++  std::map<int32_t, std::unique_ptr<Request>> requests_;
++  base::ScopedObservation<PlutoniumTabs, PlutoniumTabs::Observer>
++      tabs_observation_{this};
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_TAB_REQUESTS_H_
+diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
+new file mode 100644
+index 0000000000..a51f3ba6e3
+--- /dev/null
++++ b/chrome/browser/plutonium_tabs.cc
+@@ -0,0 +1,1644 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_tabs.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/containers/flat_map.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/strings/string_util.h"
++#include "base/time/time.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/values.h"
++#include "chrome/browser/devtools/devtools_toggle_action.h"
++#include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/file_select_helper.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_destroyer.h"
++#include "chrome/browser/plutonium_find.h"
++#include "chrome/browser/plutonium_groups.h"
++#include "chrome/browser/plutonium_downloads.h"
++#include "chrome/browser/plutonium_keys.h"
++#include "chrome/browser/plutonium_permissions.h"
++#include "chrome/browser/plutonium_print.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/plutonium_zoom.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params_utils.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "components/surface_embed/browser/surface_embed_handle.h"
++#include "components/surface_embed/browser/surface_embed_host.h"
++#include "content/public/browser/keyboard_event_processing_result.h"
++#include "content/public/browser/render_frame_host.h"
++#include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "components/viz/host/client_frame_sink_video_capturer.h"
++#include "components/url_formatter/url_fixer.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/file_select_listener.h"
++#include "content/public/browser/focused_node_details.h"
++#include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/surface_embed_connector.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_delegate.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "mojo/public/cpp/bindings/callback_helpers.h"
++#include "media/base/video_frame.h"
++#include "media/capture/mojom/video_capture_buffer.mojom.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "third_party/skia/include/core/SkColorSpace.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/aura/window.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size_conversions.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++#include "url/url_constants.h"
++
++namespace {
++
++// The size a tab lays out at before an <embed> first shows it.
++constexpr gfx::Size kDefaultTabSize(1280, 800);
++
++// How long a hidden tab gets to produce a frame for a snapshot.
++constexpr base::TimeDelta kHiddenSnapshotTimeout = base::Seconds(3);
++
++// Takes one frame of a hidden tab. A hidden tab's view isn't in any
++// compositor tree, so CopyFromSurface() has nothing to copy; a frame sink
++// video capturer reads the renderer's own frames instead (as tab hover-card
++// thumbnails do), while a capturer count keeps the hidden page painting.
++// Deletes itself after the first frame or the timeout.
++class HiddenTabFrameGrabber : public viz::mojom::FrameSinkVideoConsumer {
++ public:
++  ~HiddenTabFrameGrabber() override = default;
++
++  static void Start(content::WebContents* contents,
++                    base::OnceCallback<void(const SkBitmap&)> callback) {
++    content::RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
++    if (!view) {
++      std::move(callback).Run(SkBitmap());
++      return;
++    }
++    gfx::Size size = gfx::ScaleToCeiledSize(view->GetViewBounds().size(),
++                                            view->GetDeviceScaleFactor());
++    if (size.IsEmpty()) {
++      std::move(callback).Run(SkBitmap());
++      return;
++    }
++    auto* grabber = new HiddenTabFrameGrabber(std::move(callback));
++    grabber->capture_ = contents->IncrementCapturerCount(
++        gfx::Size(), /*stay_hidden=*/true, /*stay_awake=*/true,
++        /*is_activity=*/false);
++    grabber->capturer_ = view->CreateVideoCapturer();
++    grabber->capturer_->SetIsSecure(true);
++    grabber->capturer_->SetResolutionConstraints(size, size, false);
++    grabber->capturer_->SetAutoThrottlingEnabled(false);
++    grabber->capturer_->SetMinSizeChangePeriod(base::TimeDelta());
++    grabber->capturer_->SetFormat(media::PIXEL_FORMAT_ARGB);
++    grabber->capturer_->Start(grabber,
++                              viz::mojom::BufferFormatPreference::kDefault);
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&HiddenTabFrameGrabber::Finish,
++                       grabber->weak_factory_.GetWeakPtr(), SkBitmap()),
++        kHiddenSnapshotTimeout);
++  }
++
++  // viz::mojom::FrameSinkVideoConsumer:
++  void OnFrameCaptured(
++      media::mojom::VideoBufferHandlePtr data,
++      media::mojom::VideoFrameInfoPtr info,
++      const gfx::Rect& content_rect,
++      mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
++          callbacks) override {
++    mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> done(
++        std::move(callbacks));
++    if (!data->is_read_only_shmem_region()) {
++      return;
++    }
++    base::ReadOnlySharedMemoryMapping mapping =
++        data->get_read_only_shmem_region().Map();
++    if (!mapping.IsValid() ||
++        mapping.size() < media::VideoFrame::AllocationSize(
++                             info->pixel_format, info->coded_size)) {
++      return;
++    }
++    const SkImageInfo image_info = SkImageInfo::MakeN32(
++        content_rect.right(), content_rect.bottom(), kPremul_SkAlphaType,
++        info->color_space.ToSkColorSpace());
++    const size_t row_bytes = media::VideoFrame::RowBytes(
++        media::VideoFrame::Plane::kARGB, info->pixel_format,
++        info->coded_size.width());
++    if (mapping.size() < image_info.computeByteSize(row_bytes)) {
++      return;
++    }
++    SkBitmap frame;
++    frame.installPixels(image_info,
++                        const_cast<uint8_t*>(mapping.data()), row_bytes);
++    SkBitmap subset;
++    SkBitmap copy;
++    if (!frame.extractSubset(&subset, gfx::RectToSkIRect(content_rect)) ||
++        !copy.tryAllocPixels(subset.info().makeAlphaType(kPremul_SkAlphaType)) ||
++        !subset.readPixels(copy.pixmap())) {
++      return;
++    }
++    Finish(std::move(copy));
++  }
++  void OnNewCaptureVersion(const media::CaptureVersion&) override {}
++  void OnFrameWithEmptyRegionCapture() override {}
++  void OnStopped() override {}
++  void OnLog(const std::string&) override {}
++
++ private:
++  explicit HiddenTabFrameGrabber(
++      base::OnceCallback<void(const SkBitmap&)> callback)
++      : callback_(std::move(callback)) {}
++
++  void Finish(SkBitmap bitmap) {
++    if (!callback_) {
++      return;
++    }
++    capturer_->Stop();
++    std::move(callback_).Run(bitmap);
++    // Not from inside the capturer's own call.
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
++                                                              this);
++  }
++
++  base::OnceCallback<void(const SkBitmap&)> callback_;
++  base::ScopedClosureRunner capture_;
++  std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
++  base::WeakPtrFactory<HiddenTabFrameGrabber> weak_factory_{this};
++};
++
++}  // namespace
++
++// Sends DevTools protocol commands to one tab, for the shell's automation
++// (snapshots, synthetic input, evaluating script). An untrusted client: it
++// can't reach the browser target, other targets or local files, and only page
++// domains are passed through.
++class TabDevTools : public content::DevToolsAgentHostClient {
++ public:
++  explicit TabDevTools(content::WebContents* contents) : contents_(contents) {}
++
++  ~TabDevTools() override {
++    if (host_) {
++      host_->DetachClient(this);
++    }
++    FailAll("The tab closed");
++  }
++
++  void Send(const std::string& method,
++            const std::string& params_json,
++            PlutoniumTabs::DevToolsCallback callback) {
++    static constexpr const char* kDomains[] = {
++        "Runtime.", "Input.",   "Page.", "DOM.",
++        "Accessibility.", "Emulation.", "Log.", "Network."};
++    bool allowed = false;
++    for (const char* domain : kDomains) {
++      allowed |= base::StartsWith(method, domain);
++    }
++    if (!allowed) {
++      std::move(callback).Run(false, "Not allowed: " + method);
++      return;
++    }
++    base::DictValue params;
++    if (!params_json.empty()) {
++      std::optional<base::DictValue> parsed =
++          base::JSONReader::ReadDict(params_json, base::JSON_PARSE_RFC);
++      if (!parsed) {
++        std::move(callback).Run(false, "params must be a JSON object");
++        return;
++      }
++      params = std::move(*parsed);
++    }
++    if (!host_) {
++      host_ = content::DevToolsAgentHost::GetOrCreateFor(contents_);
++      if (!host_->AttachClient(this)) {
++        host_ = nullptr;
++        std::move(callback).Run(false, "Could not attach to the tab");
++        return;
++      }
++    }
++    const int id = next_id_++;
++    pending_[id] = std::move(callback);
++    std::string message;
++    base::JSONWriter::Write(base::DictValue()
++                                .Set("id", id)
++                                .Set("method", method)
++                                .Set("params", std::move(params)),
++                            &message);
++    host_->DispatchProtocolMessage(this, base::as_byte_span(message));
++  }
++
++  // content::DevToolsAgentHostClient:
++  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
++                               base::span<const uint8_t> message) override {
++    std::optional<base::DictValue> parsed = base::JSONReader::ReadDict(
++        base::as_string_view(message), base::JSON_PARSE_RFC);
++    if (!parsed) {
++      return;
++    }
++    const base::DictValue& dict = *parsed;
++    std::optional<int> id = dict.FindInt("id");
++    if (!id) {
++      return;  // An event; not forwarded.
++    }
++    auto it = pending_.find(*id);
++    if (it == pending_.end()) {
++      return;
++    }
++    PlutoniumTabs::DevToolsCallback callback = std::move(it->second);
++    pending_.erase(it);
++    if (const base::DictValue* error = dict.FindDict("error")) {
++      const std::string* text = error->FindString("message");
++      std::move(callback).Run(false, text ? *text : "DevTools error");
++      return;
++    }
++    std::string result = "{}";
++    if (const base::Value* value = dict.Find("result")) {
++      base::JSONWriter::Write(*value, &result);
++    }
++    std::move(callback).Run(true, result);
++  }
++
++  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override {
++    host_ = nullptr;
++    FailAll("DevTools detached");
++  }
++
++  bool MayAttachToURL(const GURL& url, bool is_webui) override {
++    return !is_webui;
++  }
++  bool IsTrusted() override { return false; }
++  bool MayReadLocalFiles() override { return false; }
++  bool MayWriteLocalFiles() override { return false; }
++
++ private:
++  void FailAll(const std::string& error) {
++    auto pending = std::move(pending_);
++    pending_.clear();
++    for (auto& [id, callback] : pending) {
++      std::move(callback).Run(false, error);
++    }
++  }
++
++  const raw_ptr<content::WebContents> contents_;
++  scoped_refptr<content::DevToolsAgentHost> host_;
++  int next_id_ = 1;
++  base::flat_map<int, PlutoniumTabs::DevToolsCallback> pending_;
++};
++
++// One tab: owns its WebContents and is its delegate.
++class PlutoniumTabs::Tab : public content::WebContentsDelegate,
++                           public content::WebContentsObserver,
++                           public content::JavaScriptDialogManager {
++ public:
++  // A tab owns its page (|owned|), unless it's someone else's (|borrowed|,
++  // EXO-CHROME: DevTools'), which keeps its own delegate.
++  Tab(PlutoniumTabs* tabs,
++      int32_t id,
++      std::unique_ptr<content::WebContents> owned,
++      content::WebContents* borrowed,
++      std::string tag,
++      std::vector<std::string> tags,
++      int32_t opener_id,
++      const std::string& opened_by)
++      : content::WebContentsObserver(owned ? owned.get() : borrowed),
++        tabs_(tabs),
++        owned_contents_(std::move(owned)),
++        contents_(owned_contents_ ? owned_contents_.get() : borrowed) {
++    info_.id = id;
++    info_.tag = std::move(tag);
++    info_.tags = std::move(tags);
++    info_.opener_id = opener_id;
++    info_.opened_by = opened_by;
++    info_.incognito = contents_->GetBrowserContext()->IsOffTheRecord();
++    if (owned_contents_) {
++      contents_->SetDelegate(this);
++    }
++    info_.content_id =
++        surface_embed::SurfaceEmbedHandle::CreateForWebContents(contents_.get())
++            ->id();
++    Refresh();
++  }
++
++  ~Tab() override {
++    CancelDialog();
++    Observe(nullptr);
++    if (owned_contents_) {
++      contents_->SetDelegate(nullptr);
++    }
++  }
++
++  content::WebContents* contents() const { return contents_; }
++  // EXO-CHROME: a page this tab doesn't own (DevTools').
++  bool borrowed() const { return !owned_contents_; }
++  void Changed() { tabs_->TabChanged(this); }
++
++  TabDevTools* devtools() {
++    if (!devtools_) {
++      devtools_ = std::make_unique<TabDevTools>(contents_.get());
++    }
++    return devtools_.get();
++  }
++  const TabInfo& info() const { return info_; }
++  // EXO-TAGS: Refresh() leaves tags alone.
++  void set_tags(std::vector<std::string> tags) { info_.tags = std::move(tags); }
++
++  // EXO-TAB-FEATURES: a feature's state; true if it changed.
++  bool SetState(const std::string& key, base::Value value) {
++    const base::Value* old = state_.Find(key);
++    if (value.is_none() ? !old : (old && *old == value)) {
++      return false;
++    }
++    if (value.is_none()) {
++      state_.Remove(key);
++    } else {
++      state_.Set(key, std::move(value));
++    }
++    return true;
++  }
++
++  // Re-reads the tab's state; true if it changed.
++  bool Refresh() {
++    const bool embedded = !!contents_->GetSurfaceEmbedConnector();
++    content::RenderWidgetHostView* view = contents_->GetRenderWidgetHostView();
++    if (embedded && view && !view->GetViewBounds().IsEmpty()) {
++      size_ = view->GetViewBounds().size();
++    } else if (!embedded && info_.embedded) {
++      // Detaching gives the tab a fresh, unsized view: keep the page laid
++      // out at the size it was shown at (and snapshots of it meaningful).
++      contents_->Resize(gfx::Rect(size_));
++    }
++    if (!embedded) {
++      Park();
++    }
++    TabInfo info = info_;
++    info.url = contents_->GetVisibleURL();
++    info.title = contents_->GetTitle();
++    info.loading = contents_->IsLoading();
++    info.can_go_back = contents_->GetController().CanGoBack();
++    info.can_go_forward = contents_->GetController().CanGoForward();
++    info.embedded = embedded;
++    info.focused = embedded && view && view->HasFocus() &&
++                   contents_->ContainsOrIsFocusedWebContents();
++    info.presented = tabs_->presented_tab_id() == info_.id;
++    info.dialog_type = dialog_type_;
++    info.dialog_message = dialog_message_;
++    info.dialog_default_prompt = dialog_default_prompt_;
++    base::JSONWriter::Write(state_, &info.state_json);
++    if (info == info_) {
++      return false;
++    }
++    info_ = std::move(info);
++    return true;
++  }
++
++  // content::WebContentsDelegate:
++  content::WebContents* OpenURLFromTab(
++      content::WebContents* source,
++      const content::OpenURLParams& params,
++      base::OnceCallback<void(content::NavigationHandle&)>
++          navigation_handle_callback) override {
++    content::WebContents* target = nullptr;
++    switch (params.disposition) {
++      case WindowOpenDisposition::CURRENT_TAB:
++        target = source;
++        break;
++      case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++      case WindowOpenDisposition::NEW_BACKGROUND_TAB:
++      case WindowOpenDisposition::NEW_POPUP:
++      case WindowOpenDisposition::NEW_WINDOW:
++      case WindowOpenDisposition::SINGLETON_TAB:
++      case WindowOpenDisposition::SWITCH_TO_TAB: {
++        content::WebContents::CreateParams create_params(
++            source->GetBrowserContext());
++        create_params.initially_hidden = true;
++        std::unique_ptr<content::WebContents> contents =
++            content::WebContents::Create(create_params);
++        contents->Resize(gfx::Rect(size_));
++        target = tabs_->AddTab(std::move(contents), info_.tag, info_.tags,
++                               info_.id, "page")
++                     ->contents();
++        break;
++      }
++      default:
++        // Downloads, "save link as" and the like aren't tabs.
++        return nullptr;
++    }
++    base::WeakPtr<content::NavigationHandle> handle =
++        target->GetController().LoadURLWithParams(
++            content::NavigationController::LoadURLParams(params));
++    if (handle && navigation_handle_callback) {
++      std::move(navigation_handle_callback).Run(*handle);
++    }
++    return target;
++  }
++
++  content::WebContents* AddNewContents(
++      content::WebContents* source,
++      std::unique_ptr<content::WebContents> new_contents,
++      const GURL& target_url,
++      WindowOpenDisposition disposition,
++      const blink::mojom::WindowFeatures& window_features,
++      bool user_gesture,
++      bool* was_blocked) override {
++    // window.open() and the like. Every new window is a tab; the shell
++    // decides whether and where to show it. Without a user gesture it's a
++    // popup Chrome would block (its popup blocker lives in tab helpers these
++    // tabs don't have): drop it.
++    if (!user_gesture) {
++      VLOG(1) << "EXO-TABS tab #" << info_.id << ": blocked a popup to "
++              << target_url.spec() << " (no user gesture)";
++      if (was_blocked) {
++        *was_blocked = true;
++      }
++      return nullptr;
++    }
++    if (new_contents->GetContainerBounds().IsEmpty()) {
++      new_contents->Resize(gfx::Rect(size_));
++    }
++    return tabs_
++        ->AddTab(std::move(new_contents), info_.tag, info_.tags, info_.id,
++                 "page")
++        ->contents();
++  }
++
++  void CloseContents(content::WebContents* source) override {
++    tabs_->RemoveTab(info_.id);
++  }
++
++  void NavigationStateChanged(content::WebContents* source,
++                              content::InvalidateTypes changed_flags) override {
++    tabs_->TabChanged(this);
++  }
++
++  void LoadingStateChanged(content::WebContents* source,
++                           bool should_show_loading_ui) override {
++    tabs_->TabChanged(this);
++  }
++
++  bool ShouldFocusPageAfterCrash(content::WebContents* source) override {
++    return false;
++  }
++
++  // EXO-KEYS: the shell's shortcuts go to the shell page, and Escape leaves
++  // the page's own fullscreen, as in a browser window.
++  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override {
++    // EXO-PRESENT: presented, it's in front of every shell.
++    if (tabs_->presented_tab_id() != info_.id &&
++        tabs_->ForwardShellShortcut(event)) {
++      return content::KeyboardEventProcessingResult::HANDLED;
++    }
++    if (page_fullscreen_ &&
++        event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
++        event.windows_key_code == ui::VKEY_ESCAPE) {
++      contents_->ExitFullscreen(/*will_cause_resize=*/true);
++      return content::KeyboardEventProcessingResult::HANDLED;
++    }
++    return content::KeyboardEventProcessingResult::NOT_HANDLED;
++  }
++
++  // EXO-CHROME: the browser keys a page has without a browser window, once
++  // the page has let them through: DevTools, and back, forward and reload.
++  // EXO-TAB-FEATURES: Ctrl+wheel the page let through.
++  void ContentsZoomChange(bool zoom_in) override {
++    plutonium_zoom::ZoomChange(contents_, zoom_in);
++  }
++
++  bool HandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override {
++    if (event.GetType() != blink::WebInputEvent::Type::kRawKeyDown) {
++      return false;
++    }
++    switch (plutonium_keys::GetDevToolsKey(event)) {
++      case plutonium_keys::DevToolsKey::kToggle:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::Show(),
++            DevToolsOpenedByAction::kToggleShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kConsole:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::ShowConsolePanel(),
++            DevToolsOpenedByAction::kConsoleShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kInspect:
++        DevToolsWindow::OpenDevToolsWindow(
++            contents_, DevToolsToggleAction::Inspect(),
++            DevToolsOpenedByAction::kInspectorModeShortcut);
++        return true;
++      case plutonium_keys::DevToolsKey::kNone:
++        break;
++    }
++    constexpr int kModifiers =
++        blink::WebInputEvent::kControlKey | blink::WebInputEvent::kAltKey |
++        blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kMetaKey;
++    const int modifiers = event.GetModifiers() & kModifiers;
++    const int key = event.windows_key_code;
++    content::NavigationController& controller = contents_->GetController();
++    if (key == ui::VKEY_BROWSER_BACK ||
++        (key == ui::VKEY_LEFT && modifiers == blink::WebInputEvent::kAltKey)) {
++      if (controller.CanGoBack()) {
++        controller.GoBack();
++      }
++      return true;
++    }
++    if (key == ui::VKEY_BROWSER_FORWARD ||
++        (key == ui::VKEY_RIGHT && modifiers == blink::WebInputEvent::kAltKey)) {
++      if (controller.CanGoForward()) {
++        controller.GoForward();
++      }
++      return true;
++    }
++    const bool reload =
++        key == ui::VKEY_BROWSER_REFRESH ||
++        (key == ui::VKEY_F5 && (modifiers & ~blink::WebInputEvent::kShiftKey) ==
++                                   0) ||
++        (key == ui::VKEY_R && (modifiers & ~blink::WebInputEvent::kShiftKey) ==
++                                  blink::WebInputEvent::kControlKey);
++    if (reload) {
++      controller.Reload(modifiers & blink::WebInputEvent::kShiftKey
++                            ? content::ReloadType::BYPASSING_CACHE
++                            : content::ReloadType::NORMAL,
++                        /*check_for_repost=*/true);
++      return true;
++    }
++    // EXO-TAB-FEATURES: find, print and zoom, once a feature has them.
++    const std::string command = plutonium_keys::GetTabCommandKey(event);
++    if (!command.empty() && !borrowed() && tabs_->HasCommand(command)) {
++      tabs_->RunNamedCommand(info_.id, command, std::string(),
++                             base::DoNothing());
++      return true;
++    }
++    return false;
++  }
++
++  // EXO-FULLSCREEN: the page's own fullscreen (e.g. a video's) makes the
++  // <embed> fullscreen, so the page gets the whole screen.
++  bool CanEnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame) override {
++    return !!contents_->GetSurfaceEmbedConnector();
++  }
++
++  void EnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame,
++      const blink::mojom::FullscreenOptions& options) override {
++    page_fullscreen_ = true;
++    if (!embed_fullscreen_) {
++      embed_fullscreen_for_page_ = true;
++      SetEmbedFullscreen(true);
++    }
++  }
++
++  void ExitFullscreenModeForTab(content::WebContents* source) override {
++    page_fullscreen_ = false;
++    if (embed_fullscreen_for_page_) {
++      embed_fullscreen_for_page_ = false;
++      SetEmbedFullscreen(false);
++    }
++  }
++
++  bool IsFullscreenForTabOrPending(
++      const content::WebContents* source) override {
++    return page_fullscreen_;
++  }
++
++  // Asks the <embed> showing the tab to enter or leave fullscreen; false if
++  // no <embed> shows it.
++  bool SetEmbedFullscreen(bool fullscreen) {
++    content::SurfaceEmbedConnector* connector =
++        contents_->GetSurfaceEmbedConnector();
++    if (!connector || !connector->GetDelegate()) {
++      return false;
++    }
++    connector->GetDelegate()->SetEmbedElementFullscreen(fullscreen);
++    return true;
++  }
++
++  bool embed_fullscreen() const { return embed_fullscreen_; }
++
++  void OnEmbedFullscreenChanged(bool fullscreen) {
++    VLOG(1) << "EXO-FULLSCREEN tab #" << info_.id << "'s <embed> "
++            << (fullscreen ? "entered" : "left") << " fullscreen";
++    embed_fullscreen_ = fullscreen;
++    if (!fullscreen) {
++      embed_fullscreen_for_page_ = false;
++      // Leaving the <embed>'s fullscreen (Super+F, the shell) ends the
++      // page's too.
++      if (page_fullscreen_) {
++        contents_->ExitFullscreen(/*will_cause_resize=*/true);
++      }
++    }
++  }
++
++  // EXO-TAB-PERMISSIONS: getUserMedia(), as BrowserWebContentsDelegate.
++  void RequestMediaAccessPermission(
++      content::WebContents* web_contents,
++      const content::MediaStreamRequest& request,
++      content::MediaResponseCallback callback) override {
++    plutonium_permissions::RequestMediaAccessPermission(
++        web_contents, request, std::move(callback));
++  }
++
++  bool CheckMediaAccessPermission(content::RenderFrameHost* render_frame_host,
++                                  const url::Origin& security_origin,
++                                  blink::mojom::MediaStreamType type) override {
++    return plutonium_permissions::CheckMediaAccessPermission(
++        render_frame_host, security_origin, type);
++  }
++
++  content::JavaScriptDialogManager* GetJavaScriptDialogManager(
++      content::WebContents* source) override {
++    return this;
++  }
++
++  // EXO-TAB-FEATURES: file pickers, as in a Browser. The picker itself asks
++  // the shell (PlutoniumSelectFileDialogFactory).
++  void RunFileChooser(content::RenderFrameHost* render_frame_host,
++                      scoped_refptr<content::FileSelectListener> listener,
++                      const blink::mojom::FileChooserParams& params) override {
++    FileSelectHelper::RunFileChooser(render_frame_host, std::move(listener),
++                                     params);
++  }
++
++  void EnumerateDirectory(content::WebContents* web_contents,
++                          scoped_refptr<content::FileSelectListener> listener,
++                          const base::FilePath& path) override {
++    FileSelectHelper::EnumerateDirectory(web_contents, std::move(listener),
++                                         path);
++  }
++
++  // content::JavaScriptDialogManager: the shell shows the dialog (it sees
++  // it in the tab's state) and answers through AnswerDialog().
++  void RunJavaScriptDialog(content::WebContents* web_contents,
++                           content::RenderFrameHost* render_frame_host,
++                           content::JavaScriptDialogType dialog_type,
++                           const std::u16string& message_text,
++                           const std::u16string& default_prompt_text,
++                           DialogClosedCallback callback,
++                           bool* did_suppress_message) override {
++    if (dialog_callback_) {
++      *did_suppress_message = true;
++      return;
++    }
++    switch (dialog_type) {
++      case content::JAVASCRIPT_DIALOG_TYPE_ALERT:
++        dialog_type_ = "alert";
++        break;
++      case content::JAVASCRIPT_DIALOG_TYPE_CONFIRM:
++        dialog_type_ = "confirm";
++        break;
++      case content::JAVASCRIPT_DIALOG_TYPE_PROMPT:
++        dialog_type_ = "prompt";
++        break;
++    }
++    ShowDialog(message_text, default_prompt_text, std::move(callback));
++  }
++
++  void RunBeforeUnloadDialog(content::WebContents* web_contents,
++                             content::RenderFrameHost* render_frame_host,
++                             bool is_reload,
++                             DialogClosedCallback callback) override {
++    if (dialog_callback_) {
++      // Stay on the page.
++      std::move(callback).Run(false, std::u16string());
++      return;
++    }
++    dialog_type_ = "beforeunload";
++    ShowDialog(is_reload ? u"Reload this page? Changes you made may not be "
++                           u"saved."
++                         : u"Leave this page? Changes you made may not be "
++                           u"saved.",
++               std::u16string(), std::move(callback));
++  }
++
++  bool HandleJavaScriptDialog(content::WebContents* web_contents,
++                              bool accept,
++                              const std::u16string* prompt_override) override {
++    if (!dialog_callback_) {
++      return false;
++    }
++    Answer(accept, prompt_override ? *prompt_override : dialog_default_prompt_);
++    return true;
++  }
++
++  void CancelDialogs(content::WebContents* web_contents,
++                     bool reset_state) override {
++    CancelDialog();
++  }
++
++  void Answer(bool accept, const std::u16string& prompt_text) {
++    if (!dialog_callback_) {
++      return;
++    }
++    DialogClosedCallback callback = std::move(dialog_callback_);
++    dialog_type_.clear();
++    dialog_message_.clear();
++    dialog_default_prompt_.clear();
++    std::move(callback).Run(accept, prompt_text);
++    tabs_->TabChanged(this);
++  }
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    tabs_->TabChanged(this);
++  }
++
++  // Only a borrowed page goes before its tab (its owner closed it).
++  void WebContentsDestroyed() override {
++    Observe(nullptr);
++    contents_ = nullptr;
++    tabs_->RemoveTab(info_.id);
++  }
++
++  void OnVisibilityChanged(content::Visibility visibility) override {
++    // An <embed> attaching or detaching the tab changes its visibility. On
++    // detach that happens before the connector goes: look once it's done.
++    tabs_->TabChanged(this);
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&Tab::Changed, weak_factory_.GetWeakPtr()));
++  }
++
++  void OnFocusChangedInPage(const content::FocusedNodeDetails& details) override {
++    tabs_->TabChanged(this);
++  }
++
++  void PrimaryMainFrameRenderProcessGone(
++      base::TerminationStatus status) override {
++    LOG(WARNING) << "EXO-TABS tab #" << info_.id << " renderer gone ("
++                 << status << ")";
++    tabs_->TabChanged(this);
++  }
++
++  // EXO-TAB-FEATURES: the WebContents-only helpers Chrome's TabFeatures
++  // would attach (chrome/browser/ui/tabs/tab_features.cc), for the features
++  // in TAB_FEATURES.md. One line per feature; what a feature needs from the
++  // delegate, Tab implements below, as BrowserWebContentsDelegate does.
++  // Called once the tab is registered (so a helper may SetTabState()), for
++  // the tab's own page only.
++  void AttachHelpers() {
++    plutonium_zoom::AttachHelpers(contents_);
++    PlutoniumFind::Attach(contents_);
++    // Permission prompts (plutonium_permissions.h).
++    plutonium_permissions::AttachHelpers(contents_);
++    // Downloads: the profile's manager saves them; this lists them.
++    PlutoniumDownloads::Get()->ObserveContext(contents_->GetBrowserContext());
++    // Printing (plutonium_print.h).
++    plutonium_print::AttachHelpers(contents_);
++  }
++
++ private:
++
++  // Keeps the tab's own (hidden) view in the shell's window tree while no
++  // <embed> shows it (and, while presented, the presenter doesn't).
++  void Park() {
++    aura::Window* window = contents_->GetNativeView();
++    aura::Window* parking = tabs_->parking();
++    if (!window || !parking || window->parent()) {
++      return;
++    }
++    window->Hide();
++    parking->AddChild(window);
++    parking->StackChildAtBottom(window);
++  }
++
++  void ShowDialog(const std::u16string& message,
++                  const std::u16string& default_prompt,
++                  DialogClosedCallback callback) {
++    dialog_message_ = message;
++    dialog_default_prompt_ = default_prompt;
++    dialog_callback_ = std::move(callback);
++    tabs_->TabChanged(this);
++  }
++
++  void CancelDialog() {
++    if (dialog_callback_) {
++      Answer(false, std::u16string());
++    }
++  }
++
++  const raw_ptr<PlutoniumTabs> tabs_;
++  std::unique_ptr<content::WebContents> owned_contents_;
++  raw_ptr<content::WebContents> contents_;
++  TabInfo info_;
++  // The size the page is laid out at while no <embed> shows it.
++  gfx::Size size_ = kDefaultTabSize;
++  std::string dialog_type_;
++  std::u16string dialog_message_;
++  std::u16string dialog_default_prompt_;
++  DialogClosedCallback dialog_callback_;
++  // EXO-TAB-FEATURES: SetState(); TabInfo::state_json.
++  base::DictValue state_;
++  // EXO-FULLSCREEN: whether the <embed> showing the tab is fullscreen,
++  // whether the page asked to be, and whether the <embed> went fullscreen
++  // for the page (so leaves it with the page).
++  bool embed_fullscreen_ = false;
++  bool page_fullscreen_ = false;
++  bool embed_fullscreen_for_page_ = false;
++  // Destroyed before |contents_|.
++  std::unique_ptr<TabDevTools> devtools_;
++  base::WeakPtrFactory<Tab> weak_factory_{this};
++};
++
++// Watches the shell page: focus moving within it (e.g. to its own controls)
++// is how an embedded tab loses keyboard focus.
++class PlutoniumTabs::ShellObserver : public content::WebContentsObserver {
++ public:
++  ShellObserver(PlutoniumTabs* tabs, content::WebContents* shell)
++      : content::WebContentsObserver(shell), tabs_(tabs) {}
++
++  void OnFocusChangedInPage(const content::FocusedNodeDetails&) override {
++    tabs_->RefreshAll();
++  }
++  void OnWebContentsFocused(content::RenderWidgetHost*) override {
++    tabs_->RefreshAll();
++  }
++  void OnWebContentsLostFocus(content::RenderWidgetHost*) override {
++    tabs_->RefreshAll();
++  }
++
++ private:
++  const raw_ptr<PlutoniumTabs> tabs_;
++};
++
++PlutoniumTabs::TabInfo::TabInfo() = default;
++PlutoniumTabs::TabInfo::TabInfo(const TabInfo&) = default;
++PlutoniumTabs::TabInfo& PlutoniumTabs::TabInfo::operator=(const TabInfo&) =
++    default;
++PlutoniumTabs::TabInfo::~TabInfo() = default;
++bool PlutoniumTabs::TabInfo::operator==(const TabInfo&) const = default;
++
++PlutoniumTabs::PlutoniumTabs() {
++  surface_embed::SurfaceEmbedHost::SetFullscreenChangedCallback(
++      base::BindRepeating(&PlutoniumTabs::OnEmbedFullscreenChanged,
++                          base::Unretained(this)));
++  // EXO-SHELLS: a hidden shell's <embed>s get their tabs when it's shown.
++  surface_embed::SurfaceEmbedHost::SetAttachFilter(
++      base::BindRepeating([](content::RenderFrameHost* parent) {
++        return !plutonium_shell::IsShellDocument(parent) ||
++               plutonium_shell::IsVisibleShellDocument(parent);
++      }));
++  // EXO-PRESENT: the presented tab is the presenter's alone.
++  surface_embed::SurfaceEmbedHost::SetChildFilter(
++      base::BindRepeating([](content::WebContents* child) {
++        PlutoniumTabs* tabs = PlutoniumTabs::Get();
++        return !tabs->presented_tab_id_ ||
++               tabs->GetContents(tabs->presented_tab_id_) != child;
++      }));
++  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++    SetShell(shells->GetVisibleContents());
++  }
++  // EXO-TAB-FEATURES: their commands (AddCommand()), one line per feature.
++  plutonium_zoom::AddCommands(this);
++  PlutoniumFind::AddCommands(this);
++  // Permission prompts (plutonium_permissions.h).
++  AddCommand("permission-request",
++             base::BindRepeating(&plutonium_permissions::RunRequestCommand));
++  AddCommand("permissions",
++             base::BindRepeating(&plutonium_permissions::RunListCommand));
++  AddCommand("permission-revoke",
++             base::BindRepeating(&plutonium_permissions::RunRevokeCommand));
++  AddCommand("print", base::BindRepeating(&plutonium_print::RunPrintCommand));
++  AddCommand("print-to-pdf",
++             base::BindRepeating(&plutonium_print::RunPrintToPdfCommand));
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "plutonium-test-tab-requests")) {
++    AddCommand("test-request",
++               base::BindRepeating(&PlutoniumTabRequests::RunTestRequest));
++  }
++}
++PlutoniumTabs::~PlutoniumTabs() = default;
++
++// static
++PlutoniumTabs* PlutoniumTabs::Get() {
++  static base::NoDestructor<PlutoniumTabs> instance;
++  return instance.get();
++}
++
++void PlutoniumTabs::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void PlutoniumTabs::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++std::vector<PlutoniumTabs::TabInfo> PlutoniumTabs::GetTabs() const {
++  std::vector<TabInfo> tabs;
++  for (const auto& [id, tab] : tabs_) {
++    tabs.push_back(tab->info());
++  }
++  return tabs;
++}
++
++bool PlutoniumTabs::IsTab(const content::WebContents* contents) const {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->contents() == contents) {
++      return true;
++    }
++  }
++  return false;
++}
++
++std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::GetTab(
++    int32_t tab_id) const {
++  if (Tab* tab = FindTab(tab_id)) {
++    return tab->info();
++  }
++  return std::nullopt;
++}
++
++content::WebContents* PlutoniumTabs::GetContents(int32_t tab_id) const {
++  Tab* tab = FindTab(tab_id);
++  return tab ? tab->contents() : nullptr;
++}
++
++std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::GetTabFor(
++    const content::WebContents* contents) const {
++  if (Tab* tab = FindTab(contents)) {
++    return tab->info();
++  }
++  return std::nullopt;
++}
++
++void PlutoniumTabs::AddDevToolsTab(content::WebContents* devtools,
++                                   content::WebContents* inspected) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  Tab* inspected_tab = FindTab(inspected);
++  if (!inspected_tab || FindTab(devtools)) {
++    return;
++  }
++  if (devtools->GetContainerBounds().IsEmpty()) {
++    devtools->Resize(gfx::Rect(kDefaultTabSize));
++  }
++  const TabInfo inspected_info = inspected_tab->info();
++  AddTab(nullptr, devtools, inspected_info.tag, inspected_info.tags,
++         inspected_info.id, "devtools")
++      ->Refresh();
++}
++
++void PlutoniumTabs::RequestShow(content::WebContents* contents) {
++  if (Tab* tab = FindTab(contents); tab && shell()) {
++    plutonium_shell::RequestShowTab(shell(), tab->info().id);
++  }
++}
++
++bool PlutoniumTabs::ForwardShellShortcut(
++    const input::NativeWebKeyboardEvent& event) {
++  if (!plutonium_keys::IsShellShortcut(event) || !shell()) {
++    return false;
++  }
++  content::RenderWidgetHost* widget =
++      shell()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  if (!widget) {
++    return false;
++  }
++  widget->ForwardKeyboardEvent(event);
++  return true;
++}
++
++// static
++GURL PlutoniumTabs::ToLoadableUrl(const std::string& text) {
++  GURL url = url_formatter::FixupURL(text);
++  if (!url.is_valid() || url.SchemeIs(url::kJavaScriptScheme)) {
++    return GURL();
++  }
++  return url;
++}
++
++void PlutoniumTabs::RefreshAll() {
++  std::vector<Tab*> tabs;
++  for (const auto& [id, tab] : tabs_) {
++    tabs.push_back(tab.get());
++  }
++  for (Tab* tab : tabs) {
++    TabChanged(tab);
++  }
++}
++
++std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateTab(
++    content::WebContents* shell,
++    const std::string& url_text,
++    const std::string& tag,
++    const std::string& opened_by,
++    bool incognito) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  content::BrowserContext* browser_context = shell->GetBrowserContext();
++  // In shell mode PlutoniumShells says which shell is visible.
++  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++    if (!this->shell()) {
++      SetShell(shells->GetVisibleContents());
++    }
++  } else {
++    SetShell(shell);
++  }
++  GURL url = ToLoadableUrl(url_text);
++  if (!url.is_valid()) {
++    VLOG(1) << "EXO-TABS refusing to open \"" << url_text << "\"";
++    return std::nullopt;
++  }
++  if (incognito) {
++    // EXO-INCOGNITO: a profile of its own, as DevTools makes for
++    // Target.createBrowserContext (which may open windows, unlike other
++    // non-primary off-the-record profiles).
++    Profile* otr =
++        Profile::FromBrowserContext(browser_context)
++            ->GetOffTheRecordProfile(
++                Profile::OTRProfileID::CreateUniqueForDevTools(),
++                /*create_if_needed=*/true);
++    incognito_profiles_.push_back(otr->GetWeakPtr());
++    browser_context = otr;
++  }
++  content::WebContents::CreateParams params(browser_context);
++  params.initially_hidden = true;
++  std::unique_ptr<content::WebContents> contents =
++      content::WebContents::Create(params);
++  contents->Resize(gfx::Rect(kDefaultTabSize));
++  Tab* tab = AddTab(std::move(contents), tag, {}, 0, opened_by);
++  content::NavigationController::LoadURLParams load(url);
++  load.transition_type = ui::PageTransitionFromInt(
++      ui::PAGE_TRANSITION_TYPED | ui::PAGE_TRANSITION_FROM_ADDRESS_BAR);
++  tab->contents()->GetController().LoadURLWithParams(load);
++  tab->Refresh();
++  return tab->info();
++}
++
++std::optional<PlutoniumTabs::TabInfo> PlutoniumTabs::CreateAgentTab(
++    const std::string& url,
++    const std::vector<std::string>& tags,
++    bool incognito) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  content::WebContents* shell = this->shell();
++  if (!shell) {
++    if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++      shell = shells->GetVisibleContents();
++    }
++  }
++  if (!shell) {
++    return std::nullopt;
++  }
++  std::optional<TabInfo> tab =
++      CreateTab(shell, url, tags.empty() ? std::string() : tags.front(),
++                "agent", incognito);
++  if (tab && tags.size() > 1) {
++    UpdateTags(tab->id, std::vector<std::string>(tags.begin() + 1, tags.end()),
++               {});
++    tab = GetTab(tab->id);
++  }
++  return tab;
++}
++
++// static
++bool PlutoniumTabs::MaybeOpenFromShell(
++    NavigateParams* params,
++    base::WeakPtr<content::NavigationHandle>* handle) {
++  content::WebContents* source = params->source_contents;
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!source || !shells) {
++    return false;
++  }
++  switch (params->disposition) {
++    case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++    case WindowOpenDisposition::NEW_BACKGROUND_TAB:
++    case WindowOpenDisposition::NEW_POPUP:
++    case WindowOpenDisposition::NEW_WINDOW:
++    case WindowOpenDisposition::SINGLETON_TAB:
++      break;
++    default:
++      return false;
++  }
++  // Only the shells' own pages; their tabs handle this themselves (Tab).
++  std::optional<PlutoniumShells::Shell> shell = shells->GetShellFor(source);
++  if (!shell || Get()->IsTab(source)) {
++    return false;
++  }
++  const bool inserted = !!params->contents_to_insert;
++  std::unique_ptr<content::WebContents> contents =
++      std::move(params->contents_to_insert);
++  if (!contents) {
++    if (!params->url.is_valid()) {
++      return false;
++    }
++    content::WebContents::CreateParams create(source->GetBrowserContext());
++    create.initially_hidden = true;
++    contents = content::WebContents::Create(create);
++  }
++  if (contents->GetContainerBounds().IsEmpty()) {
++    contents->Resize(gfx::Rect(kDefaultTabSize));
++  }
++  Tab* tab = Get()->AddTab(std::move(contents), std::string(), {}, 0,
++                           "shell:" + shell->id);
++  VLOG(1) << "EXO-TABS tab #" << tab->info().id << " for "
++          << params->url.possibly_invalid_spec() << " from shell "
++          << shell->id << " (disposition "
++          << static_cast<int>(params->disposition) << ")";
++  if (!inserted) {
++    content::NavigationController::LoadURLParams load =
++        LoadURLParamsFromNavigateParams(params);
++    *handle = tab->contents()->GetController().LoadURLWithParams(load);
++  }
++  tab->Refresh();
++  params->navigated_or_inserted_contents = tab->contents();
++  return true;
++}
++
++bool PlutoniumTabs::UpdateTags(int32_t tab_id,
++                               const std::vector<std::string>& add,
++                               const std::vector<std::string>& remove) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    return false;
++  }
++  std::vector<std::string> tags = plutonium_tags::Update(
++      tab->info().tags, !tab->info().tag.empty(), add, remove);
++  if (tags == tab->info().tags) {
++    return true;
++  }
++  tab->set_tags(std::move(tags));
++  VLOG(1) << "EXO-TAGS tab #" << tab_id << " tags ["
++          << base::JoinString(tab->info().tags, " ") << "]";
++  for (Observer& observer : observers_) {
++    observer.OnTabChanged(tab->info());
++  }
++  return true;
++}
++
++bool PlutoniumTabs::Navigate(int32_t tab_id, const std::string& url_text) {
++  Tab* tab = FindTab(tab_id);
++  GURL url = ToLoadableUrl(url_text);
++  if (!tab || tab->borrowed() || !url.is_valid()) {
++    return false;
++  }
++  content::NavigationController::LoadURLParams load(url);
++  load.transition_type = ui::PageTransitionFromInt(
++      ui::PAGE_TRANSITION_TYPED | ui::PAGE_TRANSITION_FROM_ADDRESS_BAR);
++  tab->contents()->GetController().LoadURLWithParams(load);
++  return true;
++}
++
++void PlutoniumTabs::RunCommand(int32_t tab_id, Command command) {
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    return;
++  }
++  // EXO-CHROME: DevTools closes as DevTools; its page stays its own.
++  if (tab->borrowed()) {
++    if (command == Command::kClose) {
++      if (DevToolsWindow* devtools =
++              DevToolsWindow::AsDevToolsWindow(tab->contents())) {
++        devtools->CloseShellTab();
++      }
++    } else if (command == Command::kReload) {
++      tab->contents()->GetController().Reload(content::ReloadType::NORMAL,
++                                              /*check_for_repost=*/false);
++    }
++    return;
++  }
++  content::NavigationController& controller = tab->contents()->GetController();
++  switch (command) {
++    case Command::kBack:
++      if (controller.CanGoBack()) {
++        controller.GoBack();
++      }
++      break;
++    case Command::kForward:
++      if (controller.CanGoForward()) {
++        controller.GoForward();
++      }
++      break;
++    case Command::kReload:
++      controller.Reload(content::ReloadType::NORMAL, /*check_for_repost=*/false);
++      break;
++    case Command::kStop:
++      tab->contents()->Stop();
++      break;
++    case Command::kClose:
++      RemoveTab(tab_id);
++      break;
++  }
++}
++
++void PlutoniumTabs::AddCommand(const std::string& name,
++                               CommandHandler handler) {
++  commands_[name] = std::move(handler);
++}
++
++bool PlutoniumTabs::HasCommand(const std::string& name) const {
++  return commands_.contains(name);
++}
++
++void PlutoniumTabs::RunNamedCommand(
++    int32_t tab_id,
++    const std::string& name,
++    const std::string& args_json,
++    base::OnceCallback<void(bool, const std::string&)> done) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  // A feature that drops its CommandCallback (its tab closed while it
++  // waited on the user) still answers.
++  done = mojo::WrapCallbackWithDefaultInvokeIfNotRun(
++      std::move(done), false, std::string("The command ended unanswered"));
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    std::move(done).Run(false, "No such tab");
++    return;
++  }
++  static constexpr std::pair<const char*, Command> kBuiltIn[] = {
++      {"back", Command::kBack},     {"forward", Command::kForward},
++      {"reload", Command::kReload}, {"stop", Command::kStop},
++      {"close", Command::kClose}};
++  for (const auto& [built_in, command] : kBuiltIn) {
++    if (name == built_in) {
++      RunCommand(tab_id, command);
++      std::move(done).Run(true, "null");
++      return;
++    }
++  }
++  auto it = commands_.find(name);
++  if (it == commands_.end()) {
++    std::move(done).Run(false, "Unknown command: " + name);
++    return;
++  }
++  // EXO-CHROME: DevTools' page has none of the features.
++  if (tab->borrowed()) {
++    std::move(done).Run(false, "DevTools has no " + name);
++    return;
++  }
++  base::DictValue args;
++  if (!args_json.empty()) {
++    std::optional<base::DictValue> parsed =
++        base::JSONReader::ReadDict(args_json, base::JSON_PARSE_RFC);
++    if (!parsed) {
++      std::move(done).Run(false, "args must be a JSON object");
++      return;
++    }
++    args = std::move(*parsed);
++  }
++  VLOG(1) << "EXO-TAB-FEATURES tab #" << tab_id << ": " << name;
++  it->second.Run(
++      tab->contents(), args,
++      base::BindOnce(
++          [](base::OnceCallback<void(bool, const std::string&)> done,
++             const std::string& name, std::optional<base::Value> result) {
++            if (!result) {
++              std::move(done).Run(false, name + " failed");
++              return;
++            }
++            std::string json;
++            base::JSONWriter::Write(*result, &json);
++            std::move(done).Run(true, json);
++          },
++          std::move(done), name));
++}
++
++void PlutoniumTabs::SetTabState(content::WebContents* contents,
++                                const std::string& key,
++                                base::Value value) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  Tab* tab = FindTab(contents);
++  if (tab && tab->SetState(key, std::move(value))) {
++    TabChanged(tab);
++  }
++}
++
++void PlutoniumTabs::AnswerDialog(int32_t tab_id,
++                                 bool accept,
++                                 const std::u16string& prompt_text) {
++  if (Tab* tab = FindTab(tab_id)) {
++    tab->Answer(accept, prompt_text);
++  }
++}
++
++void PlutoniumTabs::SendDevToolsCommand(int32_t tab_id,
++                                        const std::string& method,
++                                        const std::string& params_json,
++                                        DevToolsCallback callback) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    std::move(callback).Run(false, "No such tab");
++    return;
++  }
++  // EXO-CHROME: DevTools' own page is privileged: not for automation.
++  if (tab->borrowed()) {
++    std::move(callback).Run(false, "DevTools can't be automated");
++    return;
++  }
++  tab->devtools()->Send(method, params_json, std::move(callback));
++}
++
++void PlutoniumTabs::Snapshot(
++    int32_t tab_id,
++    base::OnceCallback<void(const SkBitmap&)> callback) {
++  Tab* tab = FindTab(tab_id);
++  content::RenderWidgetHostView* view =
++      tab ? tab->contents()->GetRenderWidgetHostView() : nullptr;
++  if (!view) {
++    std::move(callback).Run(SkBitmap());
++    return;
++  }
++  if (tab->contents()->GetVisibility() != content::Visibility::VISIBLE) {
++    HiddenTabFrameGrabber::Start(tab->contents(), std::move(callback));
++    return;
++  }
++  view->CopyFromSurface(
++      gfx::Rect(), gfx::Size(), base::Seconds(2),
++      base::BindOnce(
++          [](base::OnceCallback<void(const SkBitmap&)> callback,
++             const content::CopyFromSurfaceResult& result) {
++            std::move(callback).Run(result.has_value() ? result->bitmap
++                                                       : SkBitmap());
++          },
++          std::move(callback)));
++}
++
++void PlutoniumTabs::OnProfileWillBeDestroyed(Profile* profile) {
++  // A WebContents must not outlive its profile.
++  std::vector<int32_t> doomed;
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->contents()->GetBrowserContext() == profile) {
++      doomed.push_back(id);
++    }
++  }
++  for (int32_t id : doomed) {
++    if (id == presented_tab_id_) {
++      presented_tab_id_ = 0;
++      presenter_->EndPresentation();
++    }
++    auto it = tabs_.find(id);
++    std::unique_ptr<Tab> tab = std::move(it->second);
++    tabs_.erase(it);
++    for (Observer& observer : observers_) {
++      observer.OnTabRemoved(id);
++    }
++  }
++  profile_observations_.RemoveObservation(profile);
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
++    std::unique_ptr<content::WebContents> contents,
++    const std::string& tag_text,
++    const std::vector<std::string>& inherited_tags,
++    int32_t opener_id,
++    const std::string& opened_by) {
++  return AddTab(std::move(contents), nullptr, tag_text, inherited_tags,
++                opener_id, opened_by);
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::AddTab(
++    std::unique_ptr<content::WebContents> owned,
++    content::WebContents* borrowed,
++    const std::string& tag_text,
++    const std::vector<std::string>& inherited_tags,
++    int32_t opener_id,
++    const std::string& opened_by) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  content::WebContents* contents = owned ? owned.get() : borrowed;
++  // EXO-TAGS: the origin tag first, then (for a page's new tab) the
++  // opener's other tags.
++  const std::string tag =
++      plutonium_tags::IsValidTag(tag_text) ? tag_text : std::string();
++  std::vector<std::string> tags = plutonium_tags::Update(
++      tag.empty() ? std::vector<std::string>()
++                  : std::vector<std::string>{tag},
++      !tag.empty(), inherited_tags, {});
++  Profile* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++  if (!profile_observations_.IsObservingSource(profile)) {
++    profile_observations_.AddObservation(profile);
++  }
++  int32_t id = next_id_++;
++  auto new_tab =
++      std::make_unique<Tab>(this, id, std::move(owned), borrowed, tag,
++                            std::move(tags), opener_id, opened_by);
++  Tab* tab = new_tab.get();
++  tabs_[id] = std::move(new_tab);
++  VLOG(1) << "EXO-TABS tab #" << id << " added (opened by " << opened_by
++          << (opener_id ? " #" + base::NumberToString(opener_id) : "")
++          << ", tag \"" << tag << "\")";
++  for (Observer& observer : observers_) {
++    observer.OnTabAdded(tab->info());
++  }
++  // EXO-TAB-FEATURES: not DevTools' page.
++  if (!tab->borrowed()) {
++    tab->AttachHelpers();
++  }
++  return tab;
++}
++
++void PlutoniumTabs::SetPresenter(Presenter* presenter) {
++  if (presenter_ && presenter != presenter_) {
++    EndPresentation();
++  }
++  presenter_ = presenter;
++}
++
++bool PlutoniumTabs::Present(int32_t tab_id) {
++  Tab* tab = FindTab(tab_id);
++  if (!tab || !presenter_) {
++    return false;
++  }
++  if (presented_tab_id_ == tab_id) {
++    presenter_->Present(tab->contents());
++    return true;
++  }
++  EndPresentation();
++  ExitFullscreen();
++  presented_tab_id_ = tab_id;
++  // Its <embed> keeps wanting it, for afterwards. Detached, the page gets a
++  // view of its own, which Refresh() parks and the presenter takes.
++  surface_embed::SurfaceEmbedHost::DetachFromHost(tab->contents());
++  TabChanged(tab);
++  presenter_->Present(tab->contents());
++  VLOG(1) << "EXO-PRESENT tab #" << tab_id;
++  return true;
++}
++
++void PlutoniumTabs::EndPresentation() {
++  const int32_t tab_id = presented_tab_id_;
++  if (!tab_id) {
++    return;
++  }
++  presented_tab_id_ = 0;
++  if (presenter_) {
++    presenter_->EndPresentation();
++  }
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    return;
++  }
++  // Parked again, until the visible shell's <embed> takes it back.
++  TabChanged(tab);
++  surface_embed::SurfaceEmbedHost::ReattachHosts(
++      base::BindRepeating([](content::RenderFrameHost* parent) {
++        return !plutonium_shell::IsShellDocument(parent) ||
++               plutonium_shell::IsVisibleShellDocument(parent);
++      }));
++  VLOG(1) << "EXO-PRESENT ended for tab #" << tab_id;
++}
++
++void PlutoniumTabs::RemoveTab(int32_t tab_id) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  auto it = tabs_.find(tab_id);
++  if (it == tabs_.end()) {
++    return;
++  }
++  if (tab_id == presented_tab_id_) {
++    presented_tab_id_ = 0;
++    presenter_->EndPresentation();
++  }
++  std::unique_ptr<Tab> tab = std::move(it->second);
++  tabs_.erase(it);
++  VLOG(1) << "EXO-TABS tab #" << tab_id << " removed";
++  for (Observer& observer : observers_) {
++    observer.OnTabRemoved(tab_id);
++  }
++  // This may run inside one of the tab's own WebContents calls
++  // (CloseContents): destroy it once that has returned.
++  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
++                                                            std::move(tab));
++  // EXO-INCOGNITO: and then its profile, if it was the last incognito tab
++  // in it.
++  if (!incognito_profiles_.empty()) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PlutoniumTabs::DestroyUnusedIncognitoProfiles,
++                       base::Unretained(this)));
++  }
++}
++
++void PlutoniumTabs::DestroyUnusedIncognitoProfiles() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  std::vector<base::WeakPtr<Profile>> kept;
++  for (base::WeakPtr<Profile>& profile : incognito_profiles_) {
++    if (!profile) {
++      continue;
++    }
++    bool used = false;
++    for (const auto& [id, tab] : tabs_) {
++      used = used || tab->contents()->GetBrowserContext() == profile.get();
++    }
++    if (used) {
++      kept.push_back(std::move(profile));
++    } else {
++      ProfileDestroyer::DestroyOTRProfileWhenAppropriate(profile.get());
++    }
++  }
++  incognito_profiles_ = std::move(kept);
++}
++
++void PlutoniumTabs::TabChanged(Tab* tab) {
++  // Not registered yet (called from Tab's constructor) or already removed.
++  if (FindTab(tab->info().id) != tab || !tab->Refresh()) {
++    return;
++  }
++  for (Observer& observer : observers_) {
++    observer.OnTabChanged(tab->info());
++  }
++}
++
++aura::Window* PlutoniumTabs::parking() const {
++  return parking_.windows().empty() ? nullptr : parking_.windows().front();
++}
++
++bool PlutoniumTabs::ToggleFocusedTabFullscreen() {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->info().focused) {
++      VLOG(1) << "EXO-FULLSCREEN toggling tab #" << id;
++      return tab->SetEmbedFullscreen(!tab->embed_fullscreen());
++    }
++  }
++  return false;
++}
++
++bool PlutoniumTabs::ExitFullscreen() {
++  bool any = false;
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->embed_fullscreen()) {
++      any |= tab->SetEmbedFullscreen(false);
++    }
++  }
++  return any;
++}
++
++content::WebContents* PlutoniumTabs::shell() const {
++  return shell_observer_ ? shell_observer_->web_contents() : nullptr;
++}
++
++void PlutoniumTabs::SetShell(content::WebContents* shell) {
++  if (!shell) {
++    return;
++  }
++  aura::Window* window = shell->GetTopLevelNativeWindow();
++  aura::Window* old_parking = parking();
++  if (window && window != old_parking) {
++    parking_.RemoveAll();
++    parking_.Add(window);
++    // Hidden tabs keep painting (for snapshots) only in a shown window.
++    // An attached tab's native view is its embedder's (and it gets a fresh
++    // view, parked by Refresh(), when it's detached): leave those alone.
++    for (const auto& [id, tab] : tabs_) {
++      if (tab->contents()->GetSurfaceEmbedConnector()) {
++        continue;
++      }
++      aura::Window* view = tab->contents()->GetNativeView();
++      if (view && old_parking && view->parent() == old_parking) {
++        old_parking->RemoveChild(view);
++        window->AddChild(view);
++        window->StackChildAtBottom(view);
++      }
++    }
++  }
++  if (!shell_observer_ || shell_observer_->web_contents() != shell) {
++    shell_observer_ = std::make_unique<ShellObserver>(this, shell);
++  }
++}
++
++void PlutoniumTabs::OnEmbedFullscreenChanged(content::WebContents* contents,
++                                             bool fullscreen) {
++  if (Tab* tab = FindTab(contents)) {
++    tab->OnEmbedFullscreenChanged(fullscreen);
++  }
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::FindTab(
++    const content::WebContents* contents) const {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->contents() == contents) {
++      return tab.get();
++    }
++  }
++  return nullptr;
++}
++
++PlutoniumTabs::Tab* PlutoniumTabs::FindTab(int32_t tab_id) const {
++  auto it = tabs_.find(tab_id);
++  return it == tabs_.end() ? nullptr : it->second.get();
++}
+diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
+new file mode 100644
+index 0000000000..20b23443a7
+--- /dev/null
++++ b/chrome/browser/plutonium_tabs.h
+@@ -0,0 +1,317 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_TABS_H_
++#define CHROME_BROWSER_PLUTONIUM_TABS_H_
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "base/scoped_multi_source_observation.h"
++#include "base/sequence_checker.h"
++#include "base/unguessable_token.h"
++#include "base/values.h"
++#include "chrome/browser/profiles/profile_observer.h"
++#include "ui/aura/window_tracker.h"
++#include "url/gurl.h"
++
++class Profile;
++class SkBitmap;
++struct NavigateParams;
++
++namespace input {
++struct NativeWebKeyboardEvent;
++}
++
++namespace content {
++class BrowserContext;
++class NavigationHandle;
++class WebContents;
++}  // namespace content
++
++// EXO-TABS: the shell's browser tabs.
++//
++// A tab is a real web page: its own WebContents in the shell's profile,
++// shown in the shell page through SurfaceEmbed
++// (<embed type="application/x-chromium-surface-embed" data-content-id=…>).
++// The registry owns the tabs. They don't belong to any shell document: they
++// survive a shell reload and close when the page closes itself, the shell
++// closes them, or their profile goes away.
++//
++// The shell creates tabs (CreateTab) and drives them (Navigate, Command).
++// A tab's page can open more tabs (window.open, target=_blank, a middle
++// click); those are registered here too, with the opener's tag, and reported
++// to observers like any other. What to show, and where, is up to the shell.
++class PlutoniumTabs : public ProfileObserver {
++ public:
++  // What the registry knows about a tab. Changes to anything here are
++  // reported through Observer::OnTabChanged().
++  struct TabInfo {
++    TabInfo();
++    TabInfo(const TabInfo&);
++    TabInfo& operator=(const TabInfo&);
++    ~TabInfo();
++    bool operator==(const TabInfo&) const;
++
++    // Stable for the tab's lifetime and never reused. Not a capability.
++    int32_t id = 0;
++    // The SurfaceEmbedHandle id an <embed> attaches with.
++    base::UnguessableToken content_id;
++    GURL url;
++    std::u16string title;
++    bool loading = false;
++    bool can_go_back = false;
++    bool can_go_forward = false;
++    bool embedded = false;
++    bool focused = false;
++    // EXO-PRESENT: shown on its own, outside every shell (Present()).
++    bool presented = false;
++    // EXO-TAGS: the tag it was created with (its opener's, for tabs a page
++    // opened), or empty. Never changes.
++    std::string tag;
++    // |tag| (if any) first, then the tags shells and the browser added (a
++    // page's new tabs start with its opener's).
++    std::vector<std::string> tags;
++    int32_t opener_id = 0;
++    // "shell", "shell:<shell id>" (a link a shell page opened), "page",
++    // "devtools" (EXO-CHROME: the DevTools of tab |opener_id|) or "agent"
++    // (EXO-AGENT: CreateAgentTab()).
++    std::string opened_by;
++    // EXO-INCOGNITO: in a throwaway off-the-record profile of its own
++    // (CreateTab(..., incognito)), shared only with the tabs its page opens.
++    bool incognito = false;
++    // The dialog the page waits on ("alert", "confirm", "prompt",
++    // "beforeunload"), or empty.
++    std::string dialog_type;
++    std::u16string dialog_message;
++    std::u16string dialog_default_prompt;
++    // EXO-TAB-FEATURES: what the tab's features report (SetTabState()), a
++    // JSON object, e.g. {"zoom": 110, "zoomDefault": false, "pending": {…}}.
++    std::string state_json = "{}";
++  };
++
++  enum class Command { kBack, kForward, kReload, kStop, kClose };
++
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnTabAdded(const TabInfo& tab) {}
++    virtual void OnTabChanged(const TabInfo& tab) {}
++    virtual void OnTabRemoved(int32_t tab_id) {}
++  };
++
++  // Created on first use; lives until the browser exits.
++  static PlutoniumTabs* Get();
++
++  PlutoniumTabs(const PlutoniumTabs&) = delete;
++  PlutoniumTabs& operator=(const PlutoniumTabs&) = delete;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  std::vector<TabInfo> GetTabs() const;
++  // Whether |contents| is one of the tabs. A tab is never the shell, even
++  // if it shows the shell's URL.
++  bool IsTab(const content::WebContents* contents) const;
++  std::optional<TabInfo> GetTab(int32_t tab_id) const;
++  // Tab |tab_id|'s page (the shells overlay opens its DevTools), or null.
++  content::WebContents* GetContents(int32_t tab_id) const;
++  // The tab |contents| is, if it is one.
++  std::optional<TabInfo> GetTabFor(const content::WebContents* contents) const;
++
++  // EXO-CHROME: |devtools| (owned by its DevToolsWindow) is the DevTools of
++  // tab |inspected|: it becomes a tab too, with |inspected|'s tags, opened by
++  // "devtools", so the shell shows it beside it. It goes when DevTools closes;
++  // closing the tab closes DevTools. It can't be navigated or automated.
++  void AddDevToolsTab(content::WebContents* devtools,
++                      content::WebContents* inspected);
++  // Asks the visible shell to show the tab |contents| is
++  // ("tabfocusrequest").
++  void RequestShow(content::WebContents* contents);
++  // EXO-KEYS: sends |event| to the visible shell's page if it is one of its
++  // shortcuts (plutonium_keys.h); true if it did.
++  bool ForwardShellShortcut(const input::NativeWebKeyboardEvent& event);
++
++  // The URL CreateTab() and Navigate() would load for |text|, or an invalid
++  // GURL if they would refuse it.
++  static GURL ToLoadableUrl(const std::string& text);
++
++  // Opens a tab at |url| in |shell|'s profile, or with |incognito| in a new
++  // off-the-record profile that goes when its last tab does. Nullopt if the
++  // URL isn't loadable.
++  std::optional<TabInfo> CreateTab(content::WebContents* shell,
++                                   const std::string& url,
++                                   const std::string& tag,
++                                   const std::string& opened_by = "shell",
++                                   bool incognito = false);
++  // EXO-AGENT: opens a tab for the helper (the DevTools Plutonium domain), in
++  // the shells' profile, opened by "agent". |tags| starts with its origin
++  // tag. Nullopt if the URL isn't loadable or there is no shell yet.
++  std::optional<TabInfo> CreateAgentTab(const std::string& url,
++                                        const std::vector<std::string>& tags,
++                                        bool incognito = false);
++  bool Navigate(int32_t tab_id, const std::string& url);
++  // PLUTONIUM: in shell mode, a shell page's new tab or window (Ctrl+click,
++  // middle click, target=_blank, window.open) becomes one of these tabs
++  // instead of a Chrome window. It starts untagged, opened by
++  // "shell:<shell id>": that shell puts it in its current thread. False if
++  // |params| isn't such a navigation (chrome::Navigate() goes on).
++  static bool MaybeOpenFromShell(
++      NavigateParams* params,
++      base::WeakPtr<content::NavigationHandle>* handle);
++  // EXO-TAGS: adds |add| to and takes |remove| out of the tab's tags (not
++  // its origin tag). False if there is no such tab.
++  bool UpdateTags(int32_t tab_id,
++                  const std::vector<std::string>& add,
++                  const std::vector<std::string>& remove);
++  void RunCommand(int32_t tab_id, Command command);
++
++  // EXO-TAB-FEATURES (TAB_FEATURES.md): the features the registry's tabs get
++  // in place of a Browser's: find, zoom, printing, permissions, file pickers,
++  // downloads. Each attaches its WebContents helpers in Tab::AttachHelpers()
++  // and adds its commands in the constructor, one line each.
++  //
++  // A command beyond back, forward, reload, stop and close, which shells
++  // (tabCommand()), agents (Plutonium.tabCommand) and keys
++  // (plutonium_keys::GetTabCommandKey()) run, such as "zoom-in" or "find".
++  // |done| gets the result (base::Value() for none), or nullopt if it failed.
++  using CommandCallback =
++      base::OnceCallback<void(std::optional<base::Value> result)>;
++  using CommandHandler =
++      base::RepeatingCallback<void(content::WebContents* contents,
++                                   const base::DictValue& args,
++                                   CommandCallback done)>;
++  // Adds (or replaces) command |name|. Not for borrowed pages (DevTools').
++  void AddCommand(const std::string& name, CommandHandler handler);
++  bool HasCommand(const std::string& name) const;
++  // Runs command |name| (a built-in one or a feature's) with |args_json| (a
++  // JSON object, or empty) on |tab_id|. |done| gets (true, the result as
++  // JSON) or (false, why not).
++  void RunNamedCommand(int32_t tab_id,
++                       const std::string& name,
++                       const std::string& args_json,
++                       base::OnceCallback<void(bool, const std::string&)> done);
++  // Sets the tab's state |key| (a feature's, such as "zoom") to |value|, or
++  // removes it if |value| is none. Every shell and agent gets the change
++  // (OnTabChanged(), TabInfo::state_json). Ignored if |contents| isn't a tab.
++  void SetTabState(content::WebContents* contents,
++                   const std::string& key,
++                   base::Value value);
++  // Answers the tab's pending dialog, if any.
++  void AnswerDialog(int32_t tab_id,
++                    bool accept,
++                    const std::u16string& prompt_text);
++  // (success, result as JSON or an error message).
++  using DevToolsCallback =
++      base::OnceCallback<void(bool, const std::string&)>;
++  // Sends DevTools protocol command |method| with |params_json| (a JSON
++  // object, or empty) to |tab_id|. Only page domains (Runtime, Input, Page,
++  // DOM, Accessibility, Emulation, Log, Network) are allowed.
++  void SendDevToolsCommand(int32_t tab_id,
++                           const std::string& method,
++                           const std::string& params_json,
++                           DevToolsCallback callback);
++  // What |tab_id| shows, even while hidden. Empty bitmap on failure.
++  void Snapshot(int32_t tab_id,
++                base::OnceCallback<void(const SkBitmap&)> callback);
++
++  // EXO-PRESENT: a tab shown on its own, fullscreen, outside every shell
++  // (the switcher's "Open fullscreen"): the same page, not a copy of it. No
++  // <embed> shows it meanwhile; afterwards the ones that want it take it back.
++  // Ash shows it (SetPresenter()).
++  class Presenter {
++   public:
++    virtual ~Presenter() = default;
++    // Shows |contents|, which no <embed> has.
++    virtual void Present(content::WebContents* contents) = 0;
++    // Lets go of what it shows.
++    virtual void EndPresentation() = 0;
++  };
++  void SetPresenter(Presenter* presenter);
++  // False if there is no such tab or no presenter.
++  bool Present(int32_t tab_id);
++  void EndPresentation();
++  int32_t presented_tab_id() const { return presented_tab_id_; }
++
++  // EXO-FULLSCREEN: toggles fullscreen for the <embed> showing the focused
++  // tab (see plutonium_keys.h). False if no shown tab has focus.
++  bool ToggleFocusedTabFullscreen();
++  // Takes every tab's <embed> out of fullscreen; false if none was.
++  bool ExitFullscreen();
++
++  // The shell page tabs were last created from, or in shell mode the
++  // visible shell's (where EXO-KEYS sends the shell's shortcuts), or null.
++  content::WebContents* shell() const;
++  // EXO-SHELLS: |shell| is the visible shell now. Tabs no <embed> shows
++  // move to its window.
++  void SetShell(content::WebContents* shell);
++
++  // ProfileObserver:
++  void OnProfileWillBeDestroyed(Profile* profile) override;
++
++ private:
++  class Tab;
++  class ShellObserver;
++  friend class Tab;
++  friend class base::NoDestructor<PlutoniumTabs>;
++
++  PlutoniumTabs();
++  ~PlutoniumTabs() override;
++
++  // Registers |contents| as a new tab and tells observers.
++  Tab* AddTab(std::unique_ptr<content::WebContents> contents,
++              const std::string& tag,
++              const std::vector<std::string>& tags,
++              int32_t opener_id,
++              const std::string& opened_by);
++  // The same for a page someone else owns (|owned| null) or the tab owns.
++  Tab* AddTab(std::unique_ptr<content::WebContents> owned,
++              content::WebContents* borrowed,
++              const std::string& tag,
++              const std::vector<std::string>& tags,
++              int32_t opener_id,
++              const std::string& opened_by);
++  // Destroys tab |tab_id| (later, if a call into it is on the stack).
++  void RemoveTab(int32_t tab_id);
++  void TabChanged(Tab* tab);
++  void RefreshAll();
++  Tab* FindTab(int32_t tab_id) const;
++  Tab* FindTab(const content::WebContents* contents) const;
++  // EXO-FULLSCREEN: an <embed> showing |contents| entered or left
++  // fullscreen.
++  void OnEmbedFullscreenChanged(content::WebContents* contents,
++                                bool fullscreen);
++
++  // Where tabs that no <embed> shows keep their (hidden) view: the shell's
++  // top-level window. A view outside any window tree has no compositor, so
++  // its page never paints, not even for a snapshot.
++  aura::Window* parking() const;
++
++  aura::WindowTracker parking_;
++  raw_ptr<Presenter> presenter_ = nullptr;
++  int32_t presented_tab_id_ = 0;
++  std::unique_ptr<ShellObserver> shell_observer_;
++  int32_t next_id_ = 1;
++  std::map<int32_t, std::unique_ptr<Tab>> tabs_;
++  // EXO-TAB-FEATURES: the features' commands, by name.
++  std::map<std::string, CommandHandler> commands_;
++  base::ObserverList<Observer> observers_;
++  base::ScopedMultiSourceObservation<Profile, ProfileObserver>
++      profile_observations_{this};
++  // EXO-INCOGNITO: the profiles incognito tabs were opened in; each is
++  // destroyed once no tab uses it (DestroyUnusedIncognitoProfiles()).
++  std::vector<base::WeakPtr<Profile>> incognito_profiles_;
++  void DestroyUnusedIncognitoProfiles();
++  SEQUENCE_CHECKER(sequence_checker_);
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_TABS_H_
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.cc
+new file mode 100644
+index 0000000000..dcb568021e
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.cc
+@@ -0,0 +1,101 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h"
++
++#include <utility>
++
++#include "ash/shell.h"
++#include "base/logging.h"
++#include "base/task/sequenced_task_runner.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/aura/window.h"
++#include "ui/base/mojom/window_show_state.mojom.h"
++#include "ui/views/background.h"
++#include "ui/views/controls/webview/webview.h"
++#include "ui/views/widget/widget.h"
++#include "ui/views/widget/widget_delegate.h"
++
++PlutoniumTabPresenter::PlutoniumTabPresenter() {
++  PlutoniumTabs::Get()->SetPresenter(this);
++  PlutoniumTabs::Get()->AddObserver(this);
++}
++
++PlutoniumTabPresenter::~PlutoniumTabPresenter() {
++  PlutoniumTabs::Get()->RemoveObserver(this);
++  PlutoniumTabs::Get()->SetPresenter(nullptr);
++  CloseWidget();
++}
++
++void PlutoniumTabPresenter::Present(content::WebContents* contents) {
++  if (!widget_) {
++    aura::Window* root = ash::Shell::GetRootWindowForNewWindows();
++    if (!root) {
++      return;
++    }
++    views::Widget::InitParams params(
++        views::Widget::InitParams::CLIENT_OWNS_WIDGET,
++        views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
++    params.name = "PlutoniumTabPresentation";
++    // A normal window, in front of the shells' (the switcher stays above).
++    params.context = root;
++    params.show_state = ui::mojom::WindowShowState::kFullscreen;
++    params.activatable = views::Widget::InitParams::Activatable::kYes;
++    delegate_ = std::make_unique<views::WidgetDelegate>();
++    params.delegate = delegate_.get();
++    widget_ = std::make_unique<views::Widget>(std::move(params));
++    auto web_view =
++        std::make_unique<views::WebView>(contents->GetBrowserContext());
++    web_view->SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
++    web_view_ = widget_->SetContentsView(std::move(web_view));
++    widget_observation_.Observe(widget_.get());
++  }
++  if (web_view_->web_contents() != contents) {
++    web_view_->SetWebContents(contents);
++  }
++  widget_->widget_delegate()->SetTitle(contents->GetTitle());
++  widget_->SetFullscreen(true);
++  widget_->Show();
++  widget_->Activate();
++  web_view_->RequestFocus();
++  contents->Focus();
++}
++
++void PlutoniumTabPresenter::EndPresentation() {
++  CloseWidget();
++}
++
++void PlutoniumTabPresenter::OnTabChanged(const PlutoniumTabs::TabInfo& tab) {
++  if (widget_ && tab.presented) {
++    widget_->widget_delegate()->SetTitle(tab.title);
++  }
++}
++
++void PlutoniumTabPresenter::OnWidgetDestroying(views::Widget* widget) {
++  // Closed by something else than EndPresentation().
++  widget_observation_.Reset();
++  if (web_view_) {
++    web_view_->SetWebContents(nullptr);
++    web_view_ = nullptr;
++  }
++  // It's going: not closed again by EndPresentation().
++  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
++      FROM_HERE, std::move(widget_));
++  PlutoniumTabs::Get()->EndPresentation();
++}
++
++void PlutoniumTabPresenter::CloseWidget() {
++  if (!widget_) {
++    return;
++  }
++  widget_observation_.Reset();
++  // The page goes back to the tab registry, which parks it.
++  if (web_view_) {
++    web_view_->SetWebContents(nullptr);
++    web_view_ = nullptr;
++  }
++  widget_->CloseNow();
++  widget_.reset();
++}
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h
+new file mode 100644
+index 0000000000..4341065534
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_presenter.h
+@@ -0,0 +1,56 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_PRESENTER_H_
++#define CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_PRESENTER_H_
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/plutonium_tabs.h"
++#include "ui/views/widget/widget_observer.h"
++
++namespace views {
++class WebView;
++class Widget;
++class WidgetDelegate;
++}  // namespace views
++
++// EXO-PRESENT: shows a presented tab (PlutoniumTabs::Present) in a fullscreen
++// window of its own, in front of the shells: the tab's own page, with its
++// state, input and focus, not the same URL loaded again. The switcher's
++// "Leave fullscreen", Super+F or showing a shell ends it, and the tab goes
++// back to the <embed>s that want it.
++class PlutoniumTabPresenter : public PlutoniumTabs::Presenter,
++                              public PlutoniumTabs::Observer,
++                              public views::WidgetObserver {
++ public:
++  PlutoniumTabPresenter();
++  PlutoniumTabPresenter(const PlutoniumTabPresenter&) = delete;
++  PlutoniumTabPresenter& operator=(const PlutoniumTabPresenter&) = delete;
++  ~PlutoniumTabPresenter() override;
++
++  // PlutoniumTabs::Presenter:
++  void Present(content::WebContents* contents) override;
++  void EndPresentation() override;
++
++  // PlutoniumTabs::Observer:
++  void OnTabChanged(const PlutoniumTabs::TabInfo& tab) override;
++
++  // views::WidgetObserver:
++  void OnWidgetDestroying(views::Widget* widget) override;
++
++ private:
++  void CloseWidget();
++
++  // Outlives |widget_|.
++  std::unique_ptr<views::WidgetDelegate> delegate_;
++  std::unique_ptr<views::Widget> widget_;
++  raw_ptr<views::WebView> web_view_ = nullptr;
++  base::ScopedObservation<views::Widget, views::WidgetObserver>
++      widget_observation_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_PRESENTER_H_
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.cc
+new file mode 100644
+index 0000000000..fe55d3ae09
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.cc
+@@ -0,0 +1,173 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h"
++
++#include <utility>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "base/values.h"
++#include "chrome/browser/lifetime/browser_shutdown.h"
++#include "chrome/browser/profiles/profile.h"
++#include "content/public/browser/web_contents.h"
++#include "url/url_constants.h"
++
++namespace {
++
++constexpr base::FilePath::CharType kFileName[] =
++    FILE_PATH_LITERAL("Plutonium Tabs");
++constexpr char kTabsKey[] = "tabs";
++constexpr char kUrlKey[] = "url";
++constexpr char kTagsKey[] = "tags";
++constexpr char kOpenedByKey[] = "openedBy";
++
++// Origin tags of shells that reopen their own tabs: T3 Code's server
++// reopens its browser panel's.
++constexpr const char* kSelfRestoringTagPrefixes[] = {"t3:"};
++
++bool ShouldSave(const PlutoniumTabs::TabInfo& tab) {
++  if (tab.incognito || tab.opened_by == "devtools" || !tab.url.is_valid() ||
++      tab.url.IsAboutBlank()) {
++    return false;
++  }
++  for (const char* prefix : kSelfRestoringTagPrefixes) {
++    if (!tab.tags.empty() && tab.tags.front().starts_with(prefix)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++std::optional<std::string> ReadFile(const base::FilePath& path) {
++  std::string json;
++  if (!base::ReadFileToString(path, &json)) {
++    return std::nullopt;
++  }
++  return json;
++}
++
++}  // namespace
++
++PlutoniumTabSession::PlutoniumTabSession(Profile* profile)
++    : path_(profile->GetPath().Append(kFileName)),
++      writer_(path_,
++              base::ThreadPool::CreateSequencedTaskRunner(
++                  {base::MayBlock(),
++                   base::TaskShutdownBehavior::BLOCK_SHUTDOWN}),
++              base::Seconds(1)) {}
++
++PlutoniumTabSession::~PlutoniumTabSession() {
++  if (writer_.HasPendingWrite()) {
++    writer_.DoScheduledWrite();
++  }
++}
++
++void PlutoniumTabSession::Restore(content::WebContents* shell) {
++  if (restoring_ || observation_.IsObserving() || !shell) {
++    return;
++  }
++  restoring_ = true;
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++      base::BindOnce(&ReadFile, path_),
++      base::BindOnce(&PlutoniumTabSession::OnRead,
++                     weak_ptr_factory_.GetWeakPtr(), shell->GetWeakPtr()));
++}
++
++void PlutoniumTabSession::OnRead(base::WeakPtr<content::WebContents> shell,
++                                 std::optional<std::string> json) {
++  restoring_ = false;
++  PlutoniumTabs* tabs = PlutoniumTabs::Get();
++  std::optional<base::DictValue> saved =
++      json ? base::JSONReader::ReadDict(*json, base::JSON_PARSE_RFC)
++           : std::nullopt;
++  const base::ListValue* list = saved ? saved->FindList(kTabsKey) : nullptr;
++  int restored = 0;
++  if (list && shell && !browser_shutdown::HasShutdownStarted()) {
++    for (const base::Value& value : *list) {
++      const base::DictValue* entry = value.GetIfDict();
++      const std::string* url = entry ? entry->FindString(kUrlKey) : nullptr;
++      if (!url) {
++        continue;
++      }
++      std::vector<std::string> tags;
++      if (const base::ListValue* saved_tags = entry->FindList(kTagsKey)) {
++        for (const base::Value& tag : *saved_tags) {
++          if (tag.is_string()) {
++            tags.push_back(tag.GetString());
++          }
++        }
++      }
++      const std::string* opened_by = entry->FindString(kOpenedByKey);
++      std::optional<PlutoniumTabs::TabInfo> tab = tabs->CreateTab(
++          shell.get(), *url, tags.empty() ? std::string() : tags.front(),
++          opened_by ? *opened_by : std::string("shell"));
++      if (!tab) {
++        continue;
++      }
++      if (tags.size() > 1) {
++        tabs->UpdateTags(
++            tab->id, std::vector<std::string>(tags.begin() + 1, tags.end()),
++            {});
++      }
++      ++restored;
++    }
++  }
++  LOG(WARNING) << "EXO-SESSION restored " << restored << " tab(s)";
++  // From now on the file follows the tabs.
++  observation_.Observe(tabs);
++  Schedule();
++}
++
++void PlutoniumTabSession::OnTabAdded(const PlutoniumTabs::TabInfo& tab) {
++  Schedule();
++}
++
++void PlutoniumTabSession::OnTabChanged(const PlutoniumTabs::TabInfo& tab) {
++  Schedule();
++}
++
++void PlutoniumTabSession::OnTabRemoved(int32_t tab_id) {
++  Schedule();
++}
++
++void PlutoniumTabSession::Schedule() {
++  // Closing the browser closes its tabs: they're still the session.
++  if (browser_shutdown::HasShutdownStarted()) {
++    return;
++  }
++  base::ListValue list;
++  for (const PlutoniumTabs::TabInfo& tab : PlutoniumTabs::Get()->GetTabs()) {
++    if (!ShouldSave(tab)) {
++      continue;
++    }
++    base::ListValue tags;
++    for (const std::string& tag : tab.tags) {
++      tags.Append(tag);
++    }
++    list.Append(base::DictValue()
++                    .Set(kUrlKey, tab.url.spec())
++                    .Set(kTagsKey, std::move(tags))
++                    .Set(kOpenedByKey, tab.opened_by));
++  }
++  std::string json;
++  base::JSONWriter::Write(base::DictValue().Set(kTabsKey, std::move(list)),
++                          &json);
++  if (json == pending_ && !writer_.HasPendingWrite()) {
++    return;
++  }
++  pending_ = std::move(json);
++  writer_.ScheduleWrite(this);
++}
++
++std::optional<std::string> PlutoniumTabSession::SerializeData() {
++  return pending_;
++}
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h
+new file mode 100644
+index 0000000000..72b11b8fa1
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_tab_session.h
+@@ -0,0 +1,67 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_SESSION_H_
++#define CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_SESSION_H_
++
++#include <optional>
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/files/important_file_writer.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/plutonium_tabs.h"
++
++class Profile;
++
++namespace content {
++class WebContents;
++}
++
++// EXO-SESSION: the shells' tabs survive a restart of the browser, or a
++// crash. Every tab (its address and tags) is written to "Plutonium Tabs" in
++// the profile, a second after any change, and opened again at the next
++// start, in the threads it was in. Not saved: incognito tabs, DevTools, and
++// tabs of shells that reopen their own (T3 Code's server reopens its browser
++// panel's tabs). Each restored tab starts afresh at its address (no
++// back/forward history).
++class PlutoniumTabSession : public PlutoniumTabs::Observer,
++                            public base::ImportantFileWriter::DataSerializer {
++ public:
++  explicit PlutoniumTabSession(Profile* profile);
++  PlutoniumTabSession(const PlutoniumTabSession&) = delete;
++  PlutoniumTabSession& operator=(const PlutoniumTabSession&) = delete;
++  ~PlutoniumTabSession() override;
++
++  // Opens the saved tabs in |shell|'s profile, then keeps the file up to
++  // date. Once.
++  void Restore(content::WebContents* shell);
++
++  // PlutoniumTabs::Observer:
++  void OnTabAdded(const PlutoniumTabs::TabInfo& tab) override;
++  void OnTabChanged(const PlutoniumTabs::TabInfo& tab) override;
++  void OnTabRemoved(int32_t tab_id) override;
++
++  // base::ImportantFileWriter::DataSerializer:
++  std::optional<std::string> SerializeData() override;
++
++ private:
++  void OnRead(base::WeakPtr<content::WebContents> shell,
++              std::optional<std::string> json);
++  // Schedules writing the tabs as they are now.
++  void Schedule();
++
++  base::FilePath path_;
++  base::ImportantFileWriter writer_;
++  bool restoring_ = false;
++  // What the next write writes (taken when it's scheduled: by the time it
++  // runs, the browser may be closing its tabs).
++  std::string pending_;
++  base::ScopedObservation<PlutoniumTabs, PlutoniumTabs::Observer>
++      observation_{this};
++  base::WeakPtrFactory<PlutoniumTabSession> weak_ptr_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_TAB_SESSION_H_
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 0a440ff813..3000d60b52 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -41,6 +41,7 @@
+ #include "chrome/browser/glic/public/glic_keyed_service_factory.h"
+ #include "chrome/browser/glic/public/service/glic_instance_coordinator.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -644,6 +645,12 @@ bool BrowserCommandController::SupportsCommand(int id) const {
+ }
+ 
+ bool BrowserCommandController::IsCommandEnabled(int id) const {
++  // PLUTONIUM (EXO-CHROME): a shell's window is the desktop, not a browser:
++  // no new windows, help, printing, closing or reloading it from a key.
++  if (plutonium_shell::IsShellBrowser(browser_) &&
++      !plutonium_shell::IsCommandAllowedInShell(id)) {
++    return false;
++  }
+   return command_updater_->IsCommandEnabled(id);
+ }
+ 
+diff --git a/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc b/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
+index f68bbcc884..70d3c0c0f6 100644
+--- a/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
++++ b/chrome/browser/ui/browser_ui_controller/browser_ui_controller.cc
+@@ -13,6 +13,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_event.h"
+ #include "chrome/browser/app_mode/app_mode_utils.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
+ #include "chrome/browser/ui/browser_window.h"
+@@ -274,7 +275,8 @@ void BrowserUiController::NotifyTabUIChanged(tabs::TabInterface* tab,
+ 
+ std::vector<StatusBubble*> BrowserUiController::GetStatusBubbles() {
+   // For kiosk and exclusive app mode we want to always hide the status bubble.
+-  if (IsRunningInAppMode()) {
++  // So does Plutonium's shell mode (EXO-CHROME): the desktop shows no URLs.
++  if (IsRunningInAppMode() || plutonium_shell::IsShellMode()) {
+     return {};
+   }
+ 
+diff --git a/chrome/browser/ui/navigator/browser_navigator.cc b/chrome/browser/ui/navigator/browser_navigator.cc
+index 970685520a..2af68495b6 100644
+--- a/chrome/browser/ui/navigator/browser_navigator.cc
++++ b/chrome/browser/ui/navigator/browser_navigator.cc
+@@ -34,6 +34,7 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/ui/incognito_allowed_url.h"
+ #include "chrome/browser/ui/location_bar/location_bar.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+@@ -1164,6 +1165,11 @@ base::WeakPtr<content::NavigationHandle> ShowTabModalPopup(
+ }  // namespace internal
+ 
+ base::WeakPtr<content::NavigationHandle> Navigate(NavigateParams* params) {
++  // PLUTONIUM: a shell page's new tabs and windows are the shell's tabs.
++  if (base::WeakPtr<content::NavigationHandle> handle;
++      PlutoniumTabs::MaybeOpenFromShell(params, &handle)) {
++    return handle;
++  }
+   AdditionalParams additional_params;
+   return internal::NavigateImpl(params, additional_params);
+ }
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc b/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
+index 37f1031b13..b3794319ff 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_chromeos.cc
+@@ -18,6 +18,7 @@
+ #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/platform_util.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_attributes_storage.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -809,8 +810,10 @@ void BrowserFrameViewChromeOS::OnAppRegistryCacheWillBeDestroyed(
+ }
+ 
+ bool BrowserFrameViewChromeOS::ShouldEnableImmersiveModeController() const {
+-  // Do not support immersive mode in kiosk.
+-  if (chromeos::IsKioskSession()) {
++  // Do not support immersive mode in kiosk, nor in Plutonium's shell window
++  // (EXO-BOOT): the shell has the whole screen, without a top-edge reveal.
++  if (chromeos::IsKioskSession() ||
++      plutonium_shell::IsShellBrowser(GetBrowserView()->browser())) {
+     return false;
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 16fc7f6675..1f887ff32d 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -56,6 +56,7 @@
+ #include "chrome/browser/glic/public/features.h"
+ #include "chrome/browser/headless/headless_mode_util.h"
+ #include "chrome/browser/platform_util.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_attributes_entry.h"
+ #include "chrome/browser/profiles/profile_avatar_icon_util.h"
+@@ -520,9 +521,10 @@ bool WidgetHasChildModalDialog(views::Widget* parent_widget) {
+ // Returns whether immmersive fullscreen should replace fullscreen. This
+ // should only occur for "browser-fullscreen" for tabbed-typed windows (not
+ // for tab-fullscreen and not for app/popup type windows).
+-bool ShouldUseImmersiveFullscreenForUrl(ExclusiveAccessBubbleType type) {
+-  // Kiosk mode needs the whole screen.
+-  if (IsRunningInAppMode()) {
++bool ShouldUseImmersiveFullscreenForUrl(ExclusiveAccessBubbleType type,
++                                        BrowserWindowInterface* browser) {
++  // Kiosk mode needs the whole screen, and so does the Plutonium shell.
++  if (IsRunningInAppMode() || plutonium_shell::IsShellBrowser(browser)) {
+     return false;
+   }
+   // An empty URL signifies browser fullscreen. Immersive is used for browser
+@@ -788,8 +790,10 @@ class BrowserView::ExclusiveAccessContextImpl
+       // crbug.com/741069).
+       // Immersive mode logic for downloads is handled by the download
+       // controller.
+-      should_close_bubble |= ShouldUseImmersiveFullscreenForUrl(params.type) &&
+-                             !chromeos::IsManagedGuestSession();
++      should_close_bubble |=
++          ShouldUseImmersiveFullscreenForUrl(params.type,
++                                             browser_view_->browser()) &&
++          !chromeos::IsManagedGuestSession();
+ #endif
+     }
+ 
+diff --git a/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc b/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
+index fdefbf534e..469061cab7 100644
+--- a/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
++++ b/chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc
+@@ -15,6 +15,7 @@
+ #include "chrome/browser/ui/sad_tab_helper.h"
+ #include "chrome/browser/ui/tab_contents/chrome_web_contents_menu_helper.h"
+ #include "chrome/browser/ui/tab_contents/chrome_web_contents_view_handle_drop.h"
++#include "chrome/browser/plutonium_context_menu.h"
+ #include "chrome/browser/ui/views/renderer_context_menu/render_view_context_menu_views.h"
+ #include "chrome/browser/ui/views/sad_tab_view.h"
+ #include "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_focus_helper.h"
+@@ -98,6 +99,12 @@ void ChromeWebContentsViewDelegateViews::ShowMenu(
+     return;
+   }
+ 
++  // PLUTONIUM (EXO-CHROME): a shell page's or a tab's menu is the shell's to
++  // show, without Chrome's browser-window items.
++  if (plutonium_context_menu::MaybeShow(web_contents_, context_menu_)) {
++    return;
++  }
++
+   context_menu_->Show();
+ }
+ 
+diff --git a/components/performance_manager/performance_manager_tab_helper.cc b/components/performance_manager/performance_manager_tab_helper.cc
+index 418e71fa8e..e36e210093 100644
+--- a/components/performance_manager/performance_manager_tab_helper.cc
++++ b/components/performance_manager/performance_manager_tab_helper.cc
+@@ -482,6 +482,13 @@ void PerformanceManagerTabHelper::OnFrameVisibilityChanged(
+     NOTREACHED();
+   }();
+ 
++  // EXO-TABS: the main frame of a WebContents shown through SurfaceEmbed gets
++  // visibility from its <embed>, but to the graph it is an outermost main
++  // frame, which is always treated as intersecting (and may not be told
++  // otherwise: that is a bad message).
++  if (!frame_node->parent_or_outer_document_or_embedder()) {
++    return;
++  }
+   frame_node->SetViewportIntersection(viewport_intersection);
+ }
+ 
+@@ -732,8 +739,11 @@ void PerformanceManagerTabHelper::SurfaceEmbedChildWebContentsDetached(
+   auto* page = helper->page_node_.get();
+   CHECK(page);
+ 
+-  CHECK(page->embedder_frame_node());
+-  page->ClearEmbedderFrameNode();
++  // EXO-TABS: an embedder whose renderer crashed has lost its frame node,
++  // and the page its embedder with it, before the <embed>'s host goes.
++  if (page->embedder_frame_node()) {
++    page->ClearEmbedderFrameNode();
++  }
+ }
+ 
+ void PerformanceManagerTabHelper::WebContentsDestroyed() {
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index 38f29c21b7..f755d558a0 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -12692,6 +12692,12 @@ bool WebContentsImpl::IsTransientActivationRequiredForHtmlFullscreen(
+   RenderFrameHostImpl* primary_main_frame = GetPrimaryMainFrame();
+   RenderFrameHostImpl* host =
+       requesting_frame ? requesting_frame : primary_main_frame;
++
++  // EXO-FULLSCREEN: the embedder vouches for this frame.
++  if (GetContentClient()->browser()->IsFullscreenAllowedWithoutUserActivation(
++          host)) {
++    return false;
++  }
+   auto* last_exits = GetFullscreenUserData(GetBrowserContext())->last_exits();
+   auto last_exit =
+       last_exits->find(primary_main_frame->GetLastCommittedOrigin());

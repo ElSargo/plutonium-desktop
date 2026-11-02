@@ -26,7 +26,7 @@ No shell is part of either. A shell is its folder in `shells/`, and the core kno
 The patch series in `chromium/patches/` is the source of truth. The checkout's `plutonium` branch is that series applied to `chromium/BASE`.
 
 1. Work on the `plutonium` branch. Build with `plutonium chromium build`; incremental builds take seconds to a few minutes. Restart with `plutonium stop --drm` and `plutonium run …`.
-2. Commit, either as new commits or fixups squashed into the patch they belong to (`git rebase -i chromium/BASE`).
+2. Commit as fixups of the patch whose files you change (`git commit --fixup=<commit>`, then `git rebase -i --autosquash <BASE>`). There's one patch per part of Plutonium, and no two share a file (`chromium/README.md`, "The patches"). A new commit of its own becomes a new patch; fold it in before a release.
 3. Run `plutonium chromium export`. It rewrites `chromium/patches/` from `BASE..HEAD`, with stable patch headers, so diffs between versions stay readable. Commit those patches here.
 
 **Moving to a newer Chromium:**
@@ -232,7 +232,7 @@ The tools agents drive apps and tabs with are tested by an agent doing a real ta
 
 ## Docs
 
-- **`docs/features/`**: what each feature does and how it was verified. Their test records sometimes name the old research repository's scripts and patch files. The patch numbers in `chromium/README.md` map them to the series here.
+- **`docs/features/`**: what each feature does and how it was verified. Their test records sometimes name the old research repository's scripts and patch files, or patch numbers from before the series was folded into one patch per part (2026-11-02); `chromium/README.md` lists the parts.
 - **`docs/history/`**: the project's reports in the order they happened, from the viability study to Phase 4. They describe the code as it was then.
 - **`docs/agent-tests/`**: the agent tool tests' scenarios, review brief and reports.
 - **`docs/BACKLOG.md`**: everything not done.

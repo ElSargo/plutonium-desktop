@@ -17,8 +17,8 @@ sources:  output · window (parked or not) · tab · a region of any of these
 
 ## What exists
 
-- **Window snapshots** (patch 0005): a viz `CopyOutputRequest` on the window's surface, cropped to the window. It works while the window is parked, because parked windows keep drawing (patch 0010).
-- **Tab frames** (patch 0007): a `FrameSinkVideoCapturer` on a hidden tab's view.
+- **Window snapshots** (Chromium's Exo patch): a viz `CopyOutputRequest` on the window's surface, cropped to the window. It works while the window is parked, because parked windows keep drawing (Chromium's Exo patch).
+- **Tab frames** (Chromium's tabs patch): a `FrameSinkVideoCapturer` on a hidden tab's view.
 - **Agents** take PNGs of their thread's windows and tabs (`snapshot_window`, `snapshot_tab`), and record them (`start_recording`, Agents below).
 
 Built since (below): the portal backend (ScreenCast, Screenshot, GlobalShortcuts), PipeWire output, a shell API, and getDisplayMedia from tabs through the shell's picker.
@@ -40,7 +40,7 @@ Built since (below): the portal backend (ScreenCast, Screenshot, GlobalShortcuts
 |---|---|
 | Output | The root window's frame sink: what the screen shows, including the shell page. |
 | Window | The Exo surface's frame sink. It keeps working when the window is parked or on another workspace, so OBS can record a window that isn't on screen. |
-| Tab | The `WebContents`' frame sink, as in patch 0007. |
+| Tab | The `WebContents`' frame sink, as for tab frames. |
 | Region | A crop of any of the above, for region screenshots and recording part of the screen. |
 
 Cursor modes follow the portal: hidden, embedded, or metadata (position and image sent alongside the frames). OBS prefers metadata.
@@ -139,7 +139,7 @@ getDisplayMedia from a tab goes to Ash's `DesktopMediaPicker`. That picker is re
 **Ash: `chrome/browser/plutonium_capture.{h,cc}`** (`PlutoniumCapture`), one registry of captures and requests.
 - **Sources** are JSON objects `{type: "output" | "window" | "tab", id, region?}`. An output's id is the display id as a string (display ids don't fit in a JSON number); outputs come from the display list (`display::Screen`). `region` is in the source's pixels.
 - **Screenshots:** an output is a copy of its root window's layer (`ui::GrabWindowSnapshot`), a window is `EmbeddedWindows::Snapshot()` (also parked), a tab is `PlutoniumTabs::Snapshot()`; then cropped.
-- **A shell's MediaStream of a window** comes from the window's own frame sink, the one its Exo surface tree submits to (patch 0054: the DesktopMediaID is the surface's host window, and `AuraWindowVideoCaptureDevice` captures a non-root window that embeds a client's sink from that sink). So it's the whole window, also where it's partly off the screen or held at a capture size bigger than it (Chromium's own window capture, a subtree of the screen's frame, is clipped to the screen). Frames come while the surface is drawn somewhere, on the screen or in a shell that shows it: a parked window that nothing shows gives none. PipeWire captures, which use the window's own copies, cover that case (below). Client-side shadows are in the frame.
+- **A shell's MediaStream of a window** comes from the window's own frame sink, the one its Exo surface tree submits to (Chromium's capture patch: the DesktopMediaID is the surface's host window, and `AuraWindowVideoCaptureDevice` captures a non-root window that embeds a client's sink from that sink). So it's the whole window, also where it's partly off the screen or held at a capture size bigger than it (Chromium's own window capture, a subtree of the screen's frame, is clipped to the screen). Frames come while the surface is drawn somewhere, on the screen or in a shell that shows it: a parked window that nothing shows gives none. PipeWire captures, which use the window's own copies, cover that case (below). Client-side shadows are in the frame.
 - **A shell's MediaStream:** the "stream" command registers a desktop stream id for the shell document (`DesktopStreamsRegistry`), and the library calls `getUserMedia({video: {mandatory: {chromeMediaSource: "desktop", chromeMediaSourceId}}})`. Chrome's own capture devices do the rest: an output is its root window, a window is its widget's aura window (a subtree capture of the root's frame: `MakeWindowCapturable()` keeps it drawn while parked at zero opacity), a tab is its `WebContents`. `DesktopCaptureAccessHandler` hands the capture its `MediaStreamUI`, wrapped (`WrapStreamUI()`), so the capture starts and stops with the stream and `stopCapture()` really stops it; Chrome's "is sharing your screen" notification is left out, since the shells show it. A region is cropped in the library (`MediaStreamTrackProcessor`, `VideoFrame.visibleRect`).
 - **PipeWire** (`chrome/browser/plutonium_pipewire.{h,cc}`, `PlutoniumScreencast`): the "start" command, for the portal.
   - Frames: for an output or a tab, a `FrameSinkVideoCapturer` on the same targets, ARGB in shared memory. A tab's is a hidden capture with no size (the page keeps its own), and a navigation to another site, which gives the page a new view, gets a new capturer on that view. For a window, its own copies as it draws (`plutonium_agent::WindowScreencast`, as agents' screencasts, at most 30 a second): a window's subtree of the screen's frame only covers what fits on the screen, so this is what lets OBS record a parked window, or one held at 1080p on a smaller screen.
