@@ -12,13 +12,13 @@
 #               each shell's files (their git tree) and build
 #
 # Made from a commit as it is: a checkout with uncommitted changes needs
-# --allow-dirty, and says so in BUNDLE. Chrome is this checkout's prebuilt
-# image (pulled if it isn't here), the release build of exactly its patches.
+# --allow-dirty, and says so in BUNDLE. Chrome is the official build in the
+# Chromium checkout (chromium build --official), and BUNDLE's CHROMIUM_BUILD
+# is its label (.plutonium-build: "official <hash of chromium/>").
 #
 # Options:
-#   --chrome-image <image>  take chrome from another prebuilt image
-#   --chrome-out <dir>      or from a release out dir: a local build, which
-#                           BUNDLE can't tie to a patch set
+#   --chrome-out <dir>      the out dir chrome comes from
+#                           (default: $CHROMIUM_DIR/src/out/Official)
 #   --allow-dirty           build from uncommitted changes
 #   --version <v>           default: git describe (a tag v0.1.0 is 0.1.0)
 #   --out <dir>             where the tarball goes (default: dist/)
@@ -26,10 +26,9 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../../lib/common.sh"
 
-chrome_image= chrome_out= version= out=$ROOT/dist shell_builds=1 allow_dirty=
+chrome_out= version= out=$ROOT/dist shell_builds=1 allow_dirty=
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --chrome-image) chrome_image=$2; shift ;;
     --chrome-out) chrome_out=$2; shift ;;
     --allow-dirty) allow_dirty=1 ;;
     --version) version=$2; shift ;;
@@ -43,12 +42,7 @@ commit=$(git -C "$ROOT" rev-parse HEAD)
 dirty=$([[ -n $(git -C "$ROOT" status --porcelain) ]] && echo 1 || true)
 [[ -z $dirty || -n $allow_dirty ]] ||
   die "bundle build: $ROOT has uncommitted changes; commit them, or --allow-dirty (BUNDLE then says DIRTY=1)"
-# This checkout's Chromium: the prebuilt image of exactly its patches.
-if [[ -z $chrome_image && -z $chrome_out ]]; then
-  chrome_image=$PREBUILT_REPO:$PREBUILT_TAG
-  pm image exists "$chrome_image" || pm pull "$chrome_image" ||
-    die "bundle build: no prebuilt image $chrome_image for this checkout's chromium/ (plutonium image build and push it), or --chrome-out <a release out dir>"
-fi
+chrome_out=${chrome_out:-$CHROMIUM_DIR/src/$CHROMIUM_OFFICIAL_OUT}
 # A tag v0.1.0 is version 0.1.0.
 version=${version:-$(git -C "$ROOT" describe --tags --always --dirty)}
 version=${version#v}
@@ -70,23 +64,15 @@ in_builder() {
 }
 
 # --- Chromium ----------------------------------------------------------------
-if [[ -n $chrome_image ]]; then
-  step "chrome from $chrome_image"
-  pm image exists "$chrome_image" || pm pull "$chrome_image" || die "no image $chrome_image"
-  [[ $chrome_image == "$PREBUILT_REPO:$PREBUILT_TAG" ]] && chromium_tag=$PREBUILT_TAG ||
-    echo "warning: $chrome_image isn't this checkout's Chromium ($PREBUILT_TAG)" >&2
-  c=$(pm create "$chrome_image" true)
-  pm cp "$c:/opt/plutonium/chrome" "$stage/" || { pm rm "$c" > /dev/null; die "could not copy chrome out of $chrome_image"; }
-  pm rm "$c" > /dev/null
-  chrome_from=$chrome_image
-else
-  step "chrome from $chrome_out"
-  [[ -x $chrome_out/chrome ]] || die "no release build at $chrome_out (plutonium chromium build --release), and no prebuilt image"
-  stage_release "$chrome_out" "$stage"
-  [[ -f $chrome_out/LICENSES.chromium.html ]] && cp "$chrome_out/LICENSES.chromium.html" "$stage/chrome/" ||
-    echo "warning: no LICENSES.chromium.html (plutonium image build makes it); the bundle can't be published without it" >&2
-  chrome_from="$chrome_out ($(cat "$chrome_out/.plutonium-build" 2>/dev/null || echo "unknown build"))"
-fi
+step "chrome from $chrome_out"
+[[ -x $chrome_out/chrome ]] || die "no build at $chrome_out (plutonium chromium build --official)"
+stage_release "$chrome_out" "$stage"
+[[ -f $chrome_out/LICENSES.chromium.html ]] && cp "$chrome_out/LICENSES.chromium.html" "$stage/chrome/" ||
+  echo "warning: no LICENSES.chromium.html (DEVELOPING.md, \"Publishing a release\"); the bundle can't be published without it" >&2
+chromium_build=$(cat "$chrome_out/.plutonium-build" 2>/dev/null || true)
+expected="official $(cat "$ROOT/chromium/BASE" "$ROOT/chromium/args.gn" "$ROOT"/chromium/patches/*.patch | sha256sum | cut -c1-12)"
+[[ $chromium_build == "$expected" ]] ||
+  echo "warning: $chrome_out is labelled '${chromium_build:-nothing}', not '$expected' (this checkout's patches); the bundle can't be published" >&2
 (
   cd "$stage/chrome"
   shopt -s nullglob
@@ -175,8 +161,7 @@ cat > "$stage/BUNDLE" <<EOF
 VERSION=$version
 COMMIT=$commit
 DIRTY=${dirty:-0}
-CHROMIUM_TAG=${chromium_tag:-}
-CHROMIUM_FROM="$chrome_from"
+CHROMIUM_BUILD="$chromium_build"
 SHELLS="$shell_trees"
 ${shell_builds_info}NODE_VERSION=$NODE_VERSION
 GLIBC_MIN=${glibc#GLIBC_}

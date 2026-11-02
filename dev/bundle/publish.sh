@@ -49,7 +49,13 @@ version=$(field VERSION) commit=$(field COMMIT)
 tag=v$version
 [[ $(git -C "$ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" || true) == "$commit" ]] ||
   die "bundle publish: tag $tag isn't the bundle's commit ${commit:0:12}"
-[[ -n $(field CHROMIUM_FROM)$(field CHROMIUM_TAG) ]] || die "bundle publish: BUNDLE names no Chromium build"
+# Chrome: the official build of exactly that commit's patches (its label,
+# as DEVELOPING.md writes it).
+expected="official $( { git -C "$ROOT" show "$commit:chromium/BASE" "$commit:chromium/args.gn"
+  git -C "$ROOT" ls-tree --name-only "$commit" chromium/patches/ | grep '\.patch$' | LC_ALL=C sort |
+    while read -r f; do git -C "$ROOT" show "$commit:$f"; done; } | sha256sum | cut -c1-12)"
+[[ $(field CHROMIUM_BUILD | tr -d '"') == "$expected" ]] ||
+  die "bundle publish: its chrome is '$(field CHROMIUM_BUILD | tr -d '"')', not the official build of $tag's patches ('$expected')"
 tar -tJf "$tarball" "$name/chrome/LICENSES.chromium.html" > /dev/null 2>&1 ||
   die "bundle publish: $name has no chrome/LICENSES.chromium.html (Chromium's license notices; DEVELOPING.md, \"Publishing a release\")"
 notes=$(git -C "$ROOT" show "$commit:docs/releases/$tag.md" 2> /dev/null) ||
@@ -66,7 +72,7 @@ ln "$stage/$name.tar.xz" "$stage/plutonium-x86_64.tar.xz" 2> /dev/null || cp "$t
 (cd "$stage" && for f in "$name.tar.xz" plutonium-x86_64.tar.xz; do sha256sum "$f" > "$f.sha256"; done)
 git -C "$ROOT" show "$commit:dev/bundle/install.sh" > "$stage/install.sh"
 printf '%s\n' "$notes" > "$stage/NOTES.md"
-echo "$tag: $(field SHELLS); chrome from $(field CHROMIUM_TAG)$(field CHROMIUM_FROM); $(du -h "$stage/$name.tar.xz" | cut -f1)"
+echo "$tag: $(field SHELLS); chrome $(field CHROMIUM_BUILD); $(du -h "$stage/$name.tar.xz" | cut -f1)"
 echo "staged in $stage"
 
 args=(release create "$tag" --verify-tag --title "Plutonium $version" --notes-file "$stage/NOTES.md"

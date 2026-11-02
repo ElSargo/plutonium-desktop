@@ -48,12 +48,12 @@ use_libinput = true         # touchpads on DRM (features/STYX_SHELL)
 
 A first build takes about two hours on 32 threads, and incremental builds take seconds to minutes.
 
-**Release build** (`args.release.gn`, `plutonium chromium build --release`, into `out/Release`): the same features, as one self-contained `chrome` with no assertions or symbols. It took 1 h 22 min on 32 threads (68,749 steps). `plutonium image build` stages it into the prebuilt image:
+**Release build** (`args.release.gn`, `plutonium chromium build --release`, into `out/Release`): the same features, as one self-contained `chrome` with no assertions or symbols. It took 1 h 22 min on 32 threads (68,749 steps). `plutonium host build` and the release bundle stage it the same way:
 - what Chrome's Linux installer ships (`chrome/installer/linux/common/installer.py`), plus every top-level `.pak`, `.bin` and `.dat`, `locales/` and `resources/`;
 - the binaries, stripped: 607 MB in all;
 - Chromium's license notices (`LICENSES.chromium.html`).
 
-**Official build** (`args.official.gn`, `plutonium chromium build --official`, into `out/Official`): the release build optimized the way Google ships Chrome, for a published tarball (`plutonium bundle build --chrome-out ~/chromium/src/out/Official`). It turns on `is_official_build` and ThinLTO (which gn leaves off for a non-device ChromeOS build) and uses ChromeOS's AFDO sample profile for big x86 cores. Chrome's Linux PGO profile is for a different binary, and CFI is off, since a bad cast in a patch would take the session down.
+**Official build** (`args.official.gn`, `plutonium chromium build --official`, into `out/Official`): the release build optimized the way Google ships Chrome, for a published tarball (`plutonium bundle build` takes chrome from it). It turns on `is_official_build` and ThinLTO (which gn leaves off for a non-device ChromeOS build) and uses ChromeOS's AFDO sample profile for big x86 cores. Chrome's Linux PGO profile is for a different binary, and CFI is off, since a bad cast in a patch would take the session down.
 
 ## Changing Chromium
 

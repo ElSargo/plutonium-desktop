@@ -13,23 +13,13 @@ LOGS=${LOGS:-$ROOT/logs}
 CHROMIUM_DIR=${CHROMIUM_DIR:-$HOME/chromium}          # holds .gclient and src/
 DEPOT_TOOLS=${DEPOT_TOOLS:-$HOME/depot_tools}
 CHROMIUM_OUT=${CHROMIUM_OUT:-out/Plutonium}           # build dir, relative to src/
-CHROMIUM_RELEASE_OUT=${CHROMIUM_RELEASE_OUT:-out/Release}  # release build, for the prebuilt image
+CHROMIUM_RELEASE_OUT=${CHROMIUM_RELEASE_OUT:-out/Release}  # release build, for HOST=1
 CHROMIUM_OFFICIAL_OUT=${CHROMIUM_OFFICIAL_OUT:-out/Official}  # official (LTO) build, for a published tarball
 
 # The build and run container (rootless podman, Ubuntu 24.04).
 CONTAINER=${CONTAINER:-plutonium}
 BUILD_IMAGE=${BUILD_IMAGE:-localhost/plutonium-build:24.04}
-# The prebuilt image (plutonium image build/push/pull). Its tag is a hash of
-# what the Chromium build is made from, so it always matches this checkout.
-PREBUILT_REPO=${PREBUILT_REPO:-ghcr.io/elsargo/plutonium}
-PREBUILT_TAG=chromium-$(cat "$ROOT/chromium/BASE" "$ROOT/chromium/args.release.gn" "$ROOT"/chromium/patches/*.patch | sha256sum | cut -c1-12)
-# PREBUILT=1: run Chromium from the prebuilt image; no checkout or build.
-if [[ -n ${PREBUILT:-} ]]; then
-  IMAGE=${IMAGE:-$PREBUILT_REPO:$PREBUILT_TAG}
-  CHROME_BIN=/opt/plutonium/chrome/chrome
-else
-  IMAGE=${IMAGE:-$BUILD_IMAGE}
-fi
+IMAGE=${IMAGE:-$BUILD_IMAGE}
 # Podman command. From a shell inside another user namespace (an agent's
 # sandbox, some IDE terminals) podman can't run directly; use dev/pm.sh. A
 # relative path is in the checkout (lib/pm.sh, from before dev/, is dev/pm.sh).
@@ -37,10 +27,8 @@ PODMAN=${PODMAN:-podman}
 [[ $PODMAN == lib/pm.sh ]] && PODMAN=dev/pm.sh
 [[ $PODMAN == */* && $PODMAN != /* ]] && PODMAN=$ROOT/$PODMAN
 
-# The container that builds Chromium. With PREBUILT=1, CONTAINER runs the
-# prebuilt image, which can't build; the build container keeps its default name.
-if [[ -n ${PREBUILT:-} ]]; then BUILD_CONTAINER=${BUILD_CONTAINER:-plutonium}
-else BUILD_CONTAINER=${BUILD_CONTAINER:-$CONTAINER}; fi
+# The container that builds Chromium: the one sessions run in, unless set.
+BUILD_CONTAINER=${BUILD_CONTAINER:-$CONTAINER}
 
 # Dev builds of a patch set, kept by `plutonium chromium build` so that a
 # checkout runs its own build while another one rebuilds the shared out dir.
@@ -64,8 +52,8 @@ if [[ -z ${CHROME_BIN:-} && $OUT_BUILD != "custom $BUILD_KEY" && -x $BUILDS_DIR/
   CHROME_BIN=$BUILDS_DIR/$BUILD_KEY/chrome
 fi
 CHROME_BIN=${CHROME_BIN:-$CHROMIUM_DIR/src/$CHROMIUM_OUT/chrome}
-# HOST=1: run Ash on the host, with no container: the release build (from the
-# prebuilt image with PREBUILT=1, or out/Release), with its libraries from
+# HOST=1: run Ash on the host, with no container: the release build
+# (out/Release), with its libraries from
 # nixpkgs (plutonium host build, dev/nix/chrome.nix).
 HOST_CHROME=${HOST_CHROME:-$DATA_DIR/host-chrome}
 HOST_TOOLS=${HOST_TOOLS:-$DATA_DIR/host-tools}     # Xvfb, python3 with websockets
@@ -77,7 +65,7 @@ if [[ -n ${HOST:-} ]]; then
   ASH_BIN='/nix/store/[^/ ]*-plutonium-chrome-[^/ ]*/libexec/plutonium/chrome/chrome'
 fi
 if [[ -z ${HOST:-} ]]; then
-  CHROME_FIX="plutonium chromium build, or PREBUILT=1 and plutonium image pull"
+  CHROME_FIX="plutonium chromium build"
   ASH_RUNTIME_FIX="make the container again (plutonium container stop; podman rm $CONTAINER; plutonium container create), with /run/dbus"
 else
   CHROME_FIX="plutonium host build"
@@ -109,9 +97,7 @@ pm() { $PODMAN "$@"; }
 in_container() {
   local env=()
   while [[ $1 == -e ]]; do env+=(-e "$2"); shift 2; done
-  local dir=$CHROMIUM_DIR
-  [[ -n ${PREBUILT:-} ]] && dir=$MAIN_ROOT
-  pm exec "${env[@]}" -w "$dir" "$CONTAINER" "$@"
+  pm exec "${env[@]}" -w "$CHROMIUM_DIR" "$CONTAINER" "$@"
 }
 # The same in the build container, from the Chromium checkout.
 in_build_container() {
@@ -145,11 +131,6 @@ else
   # exec's own process, a daemon (Xvfb) dies within a second.
   on_ash_daemon() { pm exec -d "$CONTAINER" sh -c '"$@" > /dev/null 2>&1' sh "$@" > /dev/null; }
   need_ash_runtime() { need_container; }
-  # chrome in the prebuilt image is in the container; a build, in the mounted checkout.
-  chrome_built() {
-    if [[ -n ${PREBUILT:-} ]]; then container_running && in_container test -x "$CHROME_BIN"
-    else [[ -x $CHROME_BIN ]]; fi
-  }
   # Pages and shells use the host's fonts (LINUX_COMPAT.md, "Fonts"). In the
   # container, /etc/fonts is the host's when the container was made with it
   # (plutonium container create); this adds the user's own fonts and

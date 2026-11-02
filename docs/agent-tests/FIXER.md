@@ -4,7 +4,7 @@ The brief for a fixer thread in the agent tool testing loop (`README.md`, `.clau
 
 ## Your checkouts
 
-- **This repository:** your thread's worktree and branch. Run `bin/plutonium worktree setup` first. If you run a session of your own (below), add `PREBUILT=` and `CONTAINER=plutonium` to its `plutonium.local.env`.
+- **This repository:** your thread's worktree and branch. Run `bin/plutonium worktree setup` first. If you run a session of your own (below), add `CONTAINER=plutonium` to its `plutonium.local.env`.
 - **T3 Code** (server, MCP tools and their descriptions, web app): never edit `~/projects/t3code` itself. Make a worktree from its `plutonium` branch: `git -C ~/projects/t3code worktree add ~/.t3/worktrees/t3code/fix-<name> -b fix/<name> plutonium`. Build it with `T3CODE_DIR=<it> bin/plutonium hydra build`, test with `node_modules/.bin/vp test run <file>` in `apps/server` and typecheck with `npx tsc-rs --noEmit`. Commit there, then export into your branch: `T3CODE_DIR=<it> bin/plutonium hydra export`.
 - **Chromium** (Exo, Ash, the browser): follow `~/chromium-wt/BRIEF.md` exactly. Edit only in a sparse worktree; the orchestrator runs every build (`BUILD REQUEST`).
 - **The helper** (`helper/src`): test with `cd helper && npm test`.

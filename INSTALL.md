@@ -9,13 +9,13 @@ plutonium doctor
 
 Then steps 4 to 6 below, with `~/.config/plutonium/plutonium.env` in place of the checkout's `plutonium.env`. `sh install.sh --uninstall` removes it (your data stays). The rest of this page installs from a checkout instead.
 
-From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the time is the 1.3 GB download. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each. Building Chromium yourself is its own page, [docs/BUILDING.md](docs/BUILDING.md).
+From a fresh clone to a running desktop. A checkout runs Plutonium's Chromium built from source, so expect an afternoon, mostly the download and the first build. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each.
 
 ## 1. What you need
 
 **Machine**
 - x86-64 Linux with an AMD or Intel GPU on Mesa. It has been developed on AMD graphics; Intel should work. NVIDIA is untested, and its proprietary driver probably doesn't work.
-- 16 GB of RAM is comfortable (less is untested), and about 3 GB of disk for the image.
+- 16 GB of RAM is comfortable (32 GB is better for building Chromium), and about 60 GB of disk for Chromium's checkout and build.
 - systemd (logind and a user session), and rootless podman.
 
 **Distributions.** It's developed on NixOS, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested in a container, from the packages below up to `plutonium doctor` and the helper's tests; not yet booted on hardware. Others with systemd, podman and Node 24 should work. If yours doesn't, please say so (Reporting a bug, below).
@@ -54,26 +54,26 @@ environment.systemPackages = with pkgs; [ nodejs_24 python3 git curl foot xwayla
 
 ```
 git clone https://github.com/ElSargo/pluto.git && cd pluto
-echo PREBUILT=1 > plutonium.env
 bin/plutonium doctor
 ```
 
-`plutonium.env` holds your settings; `plutonium.env.example` lists them all, each with its default. Add `bin/` to your `PATH`, or call `bin/plutonium`.
+`plutonium.env` (create it if you need it) holds your settings; `plutonium.env.example` lists them all, each with its default. Add `bin/` to your `PATH`, or call `bin/plutonium`.
 
 `doctor` prints a line for each missing piece, and the command that fixes it on your distribution. It exits with 1 until everything it needs is there. Run it again after each step.
 
-## 3. Chromium: the prebuilt image
+## 3. Chromium: build it
 
 ```
-plutonium image pull          # ghcr.io/elsargo/plutonium, ~1.3 GB
-plutonium container create    # the container, from that image, started
+plutonium container build     # the build container's image (~1.6 GB, ~10 min)
+plutonium container create    # the container 'plutonium', started
+plutonium chromium fetch      # depot_tools and Chromium at chromium/BASE (28 GB)
+plutonium chromium patch      # Plutonium's patches, on a branch 'plutonium'
+plutonium chromium build      # out/Plutonium/chrome (about two hours on 32 threads, the first time)
 ```
 
-The image holds a release build of Plutonium's Chromium and the libraries it needs. Its tag is a hash of `chromium/` (the base revision, the patches and the build settings), so it always matches your checkout. Everything else, including the helper, the shells and T3 Code, runs from this repository.
+[docs/BUILDING.md](docs/BUILDING.md) has the details. Everything else, including the helper, the shells and T3 Code, runs from this repository.
 
-- **"no prebuilt image for this checkout's chromium/".** The patches changed after the last published image. Check out a commit that has one, or build Chromium yourself ([docs/BUILDING.md](docs/BUILDING.md)).
-- **"won't give … without a login".** The image isn't public yet. Log in with a GitHub token that can read packages: `gh auth refresh -s read:packages && gh auth token | podman login ghcr.io -u <you> --password-stdin`.
-- **After `git pull`**, `doctor` says whether the container still runs this checkout's image. If not: `plutonium image pull`, `plutonium container stop`, `podman rm plutonium`, `plutonium container create`.
+- **After `git pull`**, if `chromium/` changed: `plutonium chromium patch`, then `plutonium chromium build` (it rebuilds only what changed).
 - **After a reboot**, `plutonium container start` (a login session from the login screen entry starts it itself).
 
 ## 4. First session: in a window

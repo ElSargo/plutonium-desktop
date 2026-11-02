@@ -15,7 +15,7 @@
 
 ## The core and dev/
 
-`bin/plutonium` and `lib/` are what every install runs: sessions, shells, the login screen, `doctor`. A release install is them with `chrome/` and `node/` beside them, and runs Ash on the host. `dev/` is what only a checkout has, and the release bundle leaves out: the container (`dev/container/`), Chromium builds and the prebuilt image, `HOST=1`'s Nix build (`dev/nix/`), the live frontends, worktrees and the bundle itself (`dev/bundle/`).
+`bin/plutonium` and `lib/` are what every install runs: sessions, shells, the login screen, `doctor`. A release install is them with `chrome/` and `node/` beside them, and runs Ash on the host. `dev/` is what only a checkout has, and the release bundle leaves out: the container (`dev/container/`), Chromium builds, `HOST=1`'s Nix build (`dev/nix/`), the live frontends, worktrees and the bundle itself (`dev/bundle/`).
 
 No shell is part of either. A shell is its folder in `shells/`, and the core knows it only through its manifest ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)): Hydra's launcher, its T3 Code patches and its release build are all in `shells/hydra/`, and `plutonium hydra …` is the manifest's `cli`.
 
@@ -54,31 +54,18 @@ Worktrees inside the main checkout are visible in the container, at the same pat
 - **In the background.** Add `--bg` to `patch`, `build` or `ensure`, and the command runs as a systemd user unit, outlasting your shell and an agent's command timeout. Its output goes to `logs/chromium.log`. `plutonium chromium wait [seconds]` waits for it and exits with its status, or with 124 if it's still running after that many seconds.
 - **A build per series.** A dev build of a checkout's own series, as it is, is kept in `$BUILDS_DIR/<key>`. The key is a hash of `BASE`, `args.gn` and the patches. It's a copy of what chrome runs with, made with reflinks on btrfs, so it costs almost nothing. That checkout's sessions run it, so they keep working while someone else's build changes the out dir. The newest `BUILDS_KEEP` (6) are kept, plus any that a session is running.
 - **`plutonium chromium ensure`** gets a checkout its build. It reuses the kept one if there is one. Otherwise it moves the Chromium checkout to the series (detached, so no branch moves), builds it, keeps it, and moves the checkout back. It refuses if the Chromium checkout has uncommitted changes, since someone is working in it.
-- **Which build a session runs** (without `PREBUILT=1`): the out dir if it holds more work on top of this checkout's series (you're working in the Chromium checkout); else this series' kept build; else the out dir, whatever it holds. `plutonium status` names it.
+- **Which build a session runs:** the out dir if it holds more work on top of this checkout's series (you're working in the Chromium checkout); else this series' kept build; else the out dir, whatever it holds. `plutonium status` names it.
 
-A worktree that doesn't change `chromium/patches` doesn't need any of this with `PREBUILT=1`: the prebuilt image's tag is a hash of the same files, so it runs the same image as the main checkout. To run a dev build in a worktree that does change them, put `PREBUILT=` and `CONTAINER=plutonium` (the build container) in its `plutonium.local.env`.
+A worktree that doesn't change `chromium/patches` has the same key as the main checkout, so it runs the same kept build.
 
 **ccache.** With `CCACHE=1`, the compiler runs through ccache, and coming back to a series built before costs a fraction of the build. The cost is Chromium's clang modules, which ccache can't cache and so are turned off. Building `//base`: 61 s with modules; 99 s without, cold; 28 s with every compile from the cache. Turning it on or off rebuilds everything once. The build container needs ccache (in the Containerfile since this change; `plutonium container build`, then create it again).
-
-## Publishing the prebuilt image
-
-After the Chromium patches change:
-
-```
-plutonium chromium build --release   # out/Release
-plutonium image build                # stage, strip, build ghcr.io/elsargo/plutonium:chromium-<hash>
-plutonium image login                # once; needs gh auth refresh -s write:packages
-plutonium image push                 # that tag and :latest
-```
-
-Test it before pushing: `PREBUILT=1 CONTAINER=plutonium-prebuilt plutonium container create`, then run sessions with the same two variables set.
 
 ## The release bundle
 
 A release is one tarball that runs without podman on any x86-64 systemd distribution with a desktop: `dist/plutonium-<version>-x86_64.tar.xz`. The host provides glibc, Mesa and what Mesa links (X11, GLib, systemd's libraries, D-Bus, ALSA); the bundle carries everything else.
 
 ```
-plutonium bundle build                # from a commit; chrome from this checkout's prebuilt image
+plutonium bundle build                # from a commit; chrome from the official build (out/Official)
 plutonium bundle check                # install it in clean Ubuntu, Debian, Fedora, Arch, openSUSE containers
 sh dev/bundle/install.sh --from dist/plutonium-<version>-x86_64.tar.xz   # install it here
 ```
@@ -90,12 +77,12 @@ sh dev/bundle/install.sh --from dist/plutonium-<version>-x86_64.tar.xz   # insta
 A release install is the core without `dev/` (above): it runs Ash on the host, from its own directory, with its own chrome, node and Hydra's server build. Its settings are `~/.config/plutonium/plutonium.env` and its logs go to `~/.local/share/plutonium/logs`. It has none of a checkout's commands; `hydra fetch`, `build`, `export` and `live` say they're for a checkout.
 
 It's made from:
-- **chrome:** the release build of exactly this checkout's patches: its prebuilt image (`plutonium image tag`), pulled if it isn't here. `--chrome-image <image>` takes another, and `--chrome-out <dir>` a local release build, which `BUNDLE` can't tie to a patch set. Less what `dev/bundle/exclude.txt` lists (the locales' build metadata and ChromeOS's accessibility extensions). The libraries it needs that the host may lack (NSS, libinput and its stack, xkbcommon) are copied from Ubuntu 22.04 into `chrome/lib`, and every binary finds them through `RUNPATH`, never `LD_LIBRARY_PATH`, which would leak into apps (`dev/bundle/collect-libs.sh`). Which libraries are the host's is `dev/bundle/host-libs.txt`: a library Mesa links has to be the host's, since one process loads both.
+- **chrome:** the official build in the Chromium checkout (`$CHROMIUM_DIR/src/out/Official`; `--chrome-out <dir>` takes another), with its label, `.plutonium-build` ("official <hash of chromium/>"). It warns when the label isn't this checkout's patches, and `publish` refuses such a bundle. Less what `dev/bundle/exclude.txt` lists (the locales' build metadata and ChromeOS's accessibility extensions). The libraries it needs that the host may lack (NSS, libinput and its stack, xkbcommon) are copied from Ubuntu 22.04 into `chrome/lib`, and every binary finds them through `RUNPATH`, never `LD_LIBRARY_PATH`, which would leak into apps (`dev/bundle/collect-libs.sh`). Which libraries are the host's is `dev/bundle/host-libs.txt`: a library Mesa links has to be the host's, since one process loads both.
 - **node:** the official build in `dev/bundle/node.txt`, checked against its SHA-256.
 - **this checkout:** a commit (one with uncommitted changes needs `--allow-dirty`): the tracked files of `bin/`, `lib/`, `helper/` (with its `node_modules`), `shells/` and `skill/`, less what a shell's manifest `exclude`s (Hydra's `src/`).
 - **the shells' builds:** what a manifest's `bundle` command builds into `shells/<name>/build`. Hydra's (`hydra bundle`) is T3 Code at `shells/hydra/src/BASE` with the patches, in its own checkout in `~/.local/share/plutonium/bundle/t3code`: T3's server bundle (`bin.mjs`), its web app without source maps, and the native packages T3's own CLI archive carries (`shells/hydra/src/runtime.ts`, from T3's lists). `hydra.env` records what `hydra` otherwise reads from T3's source (its database, last migration and pairing scopes). `--no-shell-builds` leaves them out.
 
-`BUNDLE` in the tarball records exactly what it's made of: the commit (and `DIRTY=1` for uncommitted changes), the Chromium build's tag (empty for a local build), each shell's files as their git tree (`SHELLS`, the tree an installed copy's `shipped:` commit names), what each shell's build was made from (Hydra's T3 Code base and patches), node, and the oldest glibc it runs on (2.35 so far: Ubuntu 22.04's libinput). The tarball can't keep `chrome-sandbox` setuid, so the installer sets it. It also carries the keyboard layouts (`chrome/xkb`) and libinput's device quirks (`chrome/libinput`): Chromium reads the layouts from `/usr/share/X11/xkb` only, and the bundled libinput its quirks from `/usr/share/libinput`. NixOS has neither, so there the release's module (`lib/nixos.nix`) links those paths to the copies.
+`BUNDLE` in the tarball records exactly what it's made of: the commit (and `DIRTY=1` for uncommitted changes), the Chromium build's label (`CHROMIUM_BUILD`), each shell's files as their git tree (`SHELLS`, the tree an installed copy's `shipped:` commit names), what each shell's build was made from (Hydra's T3 Code base and patches), node, and the oldest glibc it runs on (2.35 so far: Ubuntu 22.04's libinput). The tarball can't keep `chrome-sandbox` setuid, so the installer sets it. It also carries the keyboard layouts (`chrome/xkb`) and libinput's device quirks (`chrome/libinput`): Chromium reads the layouts from `/usr/share/X11/xkb` only, and the bundled libinput its quirks from `/usr/share/libinput`. NixOS has neither, so there the release's module (`lib/nixos.nix`) links those paths to the copies.
 
 **NixOS** runs the release through nix-ld, which the release's module (`lib/nixos.nix`, what the installer tells NixOS users to import) sets up: `programs.nix-ld.enable = true`, with the libraries `dev/bundle/host-libs.txt` says are the host's in `programs.nix-ld.libraries` (`mesa libgbm libglvnd libdrm wayland expat zlib zstd libffi`, xorg's X11 libraries, `systemd dbus alsa-lib glib`, …), and nothing more: nix-ld's library path is searched before the bundle's own `RUNPATH`. Its Vulkan drivers are in `/run/opengl-driver`, where only NixOS's own Vulkan loader looks, so an X11 session adds `/run/opengl-driver/share` to Ash's `XDG_DATA_DIRS` for chrome's.
 
@@ -105,7 +92,7 @@ A release is a bundle of a tagged commit, built from a clean tree, with its note
 
 ```
 git tag -a v0.1.0 -m "Plutonium 0.1.0"              # on main, with docs/releases/v0.1.0.md committed
-bin/plutonium bundle build --chrome-out ~/chromium/src/out/Official   # → dist/plutonium-0.1.0-x86_64.tar.xz
+bin/plutonium bundle build                          # → dist/plutonium-0.1.0-x86_64.tar.xz
 bin/plutonium bundle check dist/plutonium-0.1.0-x86_64.tar.xz
 git push <remote> main v0.1.0
 bin/plutonium bundle publish --draft dist/plutonium-0.1.0-x86_64.tar.xz   # --dry-run first, to see it

@@ -77,7 +77,6 @@ up() {
   fi
   cat > "$WT/plutonium.local.env" <<EOF
 # The agent tool tests' session (tools/agent-tests/session.sh writes this).
-PREBUILT=
 CONTAINER=plutonium
 T3_HOME=$STATE/t3-home
 T3CODE_DIR=$t3dir

@@ -940,17 +940,9 @@ shell find it.
 
 - [x] **Reproducible setup:** this repository. The Chromium and T3 patch series
   apply to pinned upstream commits; the container, CLI and install guide are here.
-- [x] **A release build and a prebuilt image** (`ghcr.io/elsargo/plutonium`),
-  so users needn't build Chromium.
-- [ ] **Rebuild and push the prebuilt image.** S (hours of build) · Its tag
-  is a hash of the patch series (`chromium-<hash>`, `dev/env.sh`), and the
-  newest one pushed is from 2026-10-20, so `plutonium image pull` in a
-  checkout of `main` finds nothing: the checkout path in INSTALL.md needs a
-  pushed image of the current series (`plutonium chromium build --release`,
-  `image build`, `image push`). Releases don't use it: their chrome is the
-  official build (`DEVELOPING.md`, "Putting a change on your own desktop").
-- [ ] **Build and push the image from CI** (GitHub Actions can't build Chromium
-  in its time limits on free runners; a self-hosted runner could). M
+- [x] **Users needn't build Chromium:** the release carries the official
+  build. The prebuilt container image a checkout could run instead
+  (`PREBUILT=1`, `plutonium image`) is gone; a checkout builds its own.
 - [x] **Start from a display manager.** M · `plutonium session install`
   writes `/usr/share/wayland-sessions/plutonium.desktop`, which runs
   `plutonium session start`: the container and the kill switch first, then

@@ -48,7 +48,7 @@ The first run installs the shells in `~/.pluto/shells`. From then on, `plutonium
 
 ## Developing
 
-To work on Plutonium itself, run it from a checkout, with Chromium from the prebuilt image in a podman container, or [built from source](docs/BUILDING.md). [INSTALL.md](INSTALL.md) walks through it (podman, Node.js 24, `plutonium image pull`, `plutonium container create`), and [docs/DEVELOPING.md](docs/DEVELOPING.md) covers testing, worktrees, and making a release.
+To work on Plutonium itself, run it from a checkout, with Plutonium's Chromium [built from source](docs/BUILDING.md) in a podman container. [INSTALL.md](INSTALL.md) walks through it (podman, Node.js 24, `plutonium container create`, `plutonium chromium build`), and [docs/DEVELOPING.md](docs/DEVELOPING.md) covers testing, worktrees, and making a release.
 
 ## Repository
 

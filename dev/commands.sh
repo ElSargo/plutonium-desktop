@@ -1,6 +1,5 @@
 # The commands of a checkout of the source, which bin/plutonium sources after
-# lib/common.sh (and dev/env.sh): the container, Chromium and its prebuilt
-# image, HOST=1's build, the live frontends, worktrees and the release bundle.
+# lib/common.sh (and dev/env.sh): the container, Chromium, HOST=1's build, the live frontends, worktrees and the release bundle.
 # A release install has no dev/, and none of them.
 
 dev_usage() {
@@ -18,8 +17,7 @@ Setup from source (INSTALL.md):
                              then build chrome
                              from the checkout as it is (a dev build of this checkout's patches is kept)
   hydra fetch|build          Hydra's T3 Code: clone it and apply its patches, then build it
-  image pull                 PREBUILT=1: download the prebuilt Chromium instead of building it
-  host build                 HOST=1: the release build (prebuilt image, or out/Release) for the
+  host build                 HOST=1: the release build (out/Release) for the
                              host, with nixpkgs libraries (dev/nix/chrome.nix), and the tools a
                              session uses (dev/nix/host-tools.nix): no container to run it
 
@@ -35,7 +33,6 @@ Development:
                              --bg to run as a user unit. They queue on one lock across checkouts
   hydra export|live          Hydra's patches; its web app in a running session: plutonium hydra help
   shells export <name>       your edits to an installed shell, back into shells/<name>
-  image build|push|login|tag the prebuilt image, from the release build (chromium build --release)
   bundle build [options]     the release bundle: chrome with its libraries, node, the helper,
                              the shells and their builds (Hydra's server), in
                              dist/plutonium-<version>-x86_64.tar.xz
@@ -52,14 +49,13 @@ Settings: plutonium.env (see plutonium.env.example).
 EOF2
 }
 
-dev_has() { [[ $1 == @(container|chromium|image|host|bundle|live|worktree|cdp) ]]; }
+dev_has() { [[ $1 == @(container|chromium|host|bundle|live|worktree|cdp) ]]; }
 dev_cmd() {
   local cmd=$1
   shift
   case $cmd in
     container) container_cmd "$@" ;;
     chromium) chromium_cmd "$@" ;;
-    image) image_cmd "$@" ;;
     host) host_cmd "$@" ;;
     live) live_cmd "$@" ;;
     worktree) worktree_cmd "$@" ;;
@@ -85,9 +81,7 @@ dev_status() {
   if [[ -n ${HOST:-} ]]; then echo "Ash runs on the host (HOST=1)"
   elif container_running; then echo "container $CONTAINER: running"
   else echo "container $CONTAINER: not running"; fi
-  local from=
-  [[ -z ${HOST:-} && -n ${PREBUILT:-} ]] && from=" (prebuilt, $IMAGE)"
-  chrome_built && echo "chrome: $CHROME_BIN$from" || echo "chrome: missing ($CHROME_BIN)"
+  chrome_built && echo "chrome: $CHROME_BIN" || echo "chrome: missing ($CHROME_BIN)"
   local lock=$RUN_DIR/plutonium/chromium.lock
   if [[ -f $lock ]] && ! flock -n "$lock" true; then echo "Chromium checkout: busy, $(cat "$lock.who" 2>/dev/null)"; fi
   [[ $(systemctl --user is-active "$CHROMIUM_UNIT" 2>/dev/null) == active ]] &&
@@ -135,21 +129,13 @@ dev_doctor() {
   else
     echo "Container and Chromium:"
     local remake="make the container again: plutonium container stop; podman rm $CONTAINER; plutonium container create"
-    if [[ -n ${PREBUILT:-} ]]; then
-      check "prebuilt image $IMAGE" "pm image exists $IMAGE" "plutonium image pull (about 1.3 GB)"
-    else
-      check "build image $IMAGE" "pm image exists $IMAGE" "plutonium container build, or PREBUILT=1 in plutonium.env for the prebuilt Chromium"
-    fi
+    check "build image $IMAGE" "pm image exists $IMAGE" "plutonium container build"
     if ! pm container exists "$CONTAINER"; then
       missing "container $CONTAINER" "plutonium container create"
     elif ! container_running; then
       missing "container $CONTAINER running" "plutonium container start"
     else
       ok "container $CONTAINER running"
-      if [[ -n ${PREBUILT:-} ]]; then
-        check "it runs this checkout's image" "[ \"\$(pm container inspect -f '{{.ImageName}}' $CONTAINER)\" = $IMAGE ]" \
-          "the image changed with chromium/ (git pull): plutonium image pull, then $remake"
-      fi
       check "the system D-Bus in the container (DRM)" "in_container test -S /run/dbus/system_bus_socket" "$remake"
       check "uid 65534 unmapped in the container (DRM input hotplug)" "in_container cat /proc/self/uid_map | awk '\$1 <= 65534 && 65534 < \$1 + \$3 { m = 1 } END { exit m }'" "$remake"
       local camera
@@ -157,15 +143,10 @@ dev_doctor() {
         [[ -c $camera ]] || continue
         check_opt "camera $camera in the container (tabs' getUserMedia)" "in_container test -c $camera" "$remake"
       done
-      if [[ -n ${PREBUILT:-} ]]; then
-        check "chrome in the container" "chrome_built" "$remake"
-      fi
     fi
-    if [[ -z ${PREBUILT:-} ]]; then
-      check "Chromium checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch, or PREBUILT=1 in plutonium.env"
-      check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
-      check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
-    fi
+    check "Chromium checkout at $CHROMIUM_DIR/src" "[ -d $CHROMIUM_DIR/src/.git ]" "plutonium chromium fetch"
+    check "patched (branch plutonium)" "git -C $CHROMIUM_DIR/src rev-parse -q --verify refs/heads/plutonium" "plutonium chromium patch"
+    check "built ($CHROME_BIN)" "[ -x $CHROME_BIN ]" "plutonium chromium build"
   fi
 }
 
@@ -178,7 +159,7 @@ container_cmd() {
     create)
       pm container exists "$CONTAINER" && die "a container '$CONTAINER' already exists"
       mkdir -p "$DATA_DIR" "$RUN_DIR"
-      [[ -n ${PREBUILT:-} ]] || mkdir -p "$CHROMIUM_DIR" "$DEPOT_TOOLS"
+      mkdir -p "$CHROMIUM_DIR" "$DEPOT_TOOLS"
       local mounts=() dir
       # Same path inside as outside, so paths need no translation. The
       # user's home too (TAB_FEATURES.md, "Paths in the container"): a file
@@ -187,8 +168,7 @@ container_cmd() {
       # writes there) is a directory under the data dir.
       mkdir -p "$DATA_DIR/container-home"
       mounts+=(-v "$HOME:$HOME")
-      local dirs=("$ROOT" "$DATA_DIR" "$RUN_DIR")
-      [[ -n ${PREBUILT:-} ]] || dirs+=("$CHROMIUM_DIR" "$DEPOT_TOOLS")
+      local dirs=("$ROOT" "$DATA_DIR" "$RUN_DIR" "$CHROMIUM_DIR" "$DEPOT_TOOLS")
       for dir in "${dirs[@]}"; do
         mounts+=(-v "$dir:$dir")
       done
@@ -222,7 +202,7 @@ container_cmd() {
         --device /dev/dri -v /dev/input:/dev/input -v /run/udev:/run/udev:ro -v /run/dbus:/run/dbus "${mounts[@]}" \
         -e HOME="$DATA_DIR/container-home" -e XDG_RUNTIME_DIR="$RUN_DIR" \
         -e PATH="$DEPOT_TOOLS:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-        -w "$([[ -n ${PREBUILT:-} ]] && echo "$ROOT" || echo "$CHROMIUM_DIR")" "$IMAGE" sleep infinity > /dev/null
+        -w "$CHROMIUM_DIR" "$IMAGE" sleep infinity > /dev/null
       container_cmd start ;;
     start)
       # From a systemd user unit that stays, so the container's monitor
@@ -240,47 +220,6 @@ container_cmd() {
   esac
 }
 
-# --- Prebuilt image ----------------------------------------------------------
-image_cmd() {
-  local ref=$PREBUILT_REPO:$PREBUILT_TAG
-  case "${1:-}" in
-    build)
-      # In the build container: it has strip and the Chromium checkout, and
-      # the prebuilt image (CONTAINER with PREBUILT=1) has neither.
-      container_running "$BUILD_CONTAINER" ||
-        die "the build container '$BUILD_CONTAINER' is not running (plutonium container create, without PREBUILT=1; or set BUILD_CONTAINER)"
-      local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT stage=$DATA_DIR/image-stage
-      [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
-      stage_release "$out" "$stage"
-      in_build_container sh -c "strip --strip-unneeded '$stage/chrome/chrome' '$stage/chrome/chrome_crashpad_handler' '$stage'/chrome/*.so*"
-      # Chromium's license notices, which redistributing it requires.
-      in_build_container sh -c "cd src && python3 tools/licenses/licenses.py credits --gn-target //chrome:chrome --gn-out-dir $CHROMIUM_RELEASE_OUT '$stage/chrome/LICENSES.chromium.html'" ||
-        echo "warning: could not generate LICENSES.chromium.html" >&2
-      cp "$ROOT/dev/container/Containerfile.runtime" "$stage/Containerfile"
-      du -sh "$stage/chrome"
-      pm build -t "$ref" -f "$stage/Containerfile" "$stage"
-      pm tag "$ref" "$PREBUILT_REPO:latest"
-      echo "built $ref" ;;
-    push)
-      pm push "$ref" && pm push "$PREBUILT_REPO:latest" ;;
-    pull)
-      local err
-      err=$(pm pull "$ref" 2>&1 | tee /dev/stderr) && return
-      case $err in
-        *unauthorized*|*denied*|*authentication*)
-          die "ghcr.io won't give $ref without a login: log in with a GitHub token that can read packages (INSTALL.md, Prebuilt)" ;;
-        *"manifest unknown"*|*"not found"*)
-          die "there is no prebuilt image for this checkout's chromium/ ($PREBUILT_TAG): its patches changed after the last published image. Check out a commit that has one, or build Chromium yourself (INSTALL.md, steps 3 and 4)" ;;
-        *) die "could not pull $ref" ;;
-      esac ;;
-    login)
-      # A token with write:packages (gh auth refresh -s write:packages).
-      gh auth token | pm login ghcr.io -u "$(gh api user --jq .login)" --password-stdin ;;
-    tag) echo "$ref" ;;
-    *) usage; exit 2 ;;
-  esac
-}
-
 # --- On the host --------------------------------------------------------------
 host_cmd() {
   case "${1:-}" in
@@ -289,17 +228,9 @@ host_cmd() {
       local stage=$DATA_DIR/host-stage
       rm -rf "$stage"
       mkdir -p "$stage"
-      if [[ -n ${PREBUILT:-} ]]; then
-        pm image exists "$IMAGE" || die "no image $IMAGE (plutonium image pull)"
-        local c
-        c=$(pm create "$IMAGE" true)
-        pm cp "$c:/opt/plutonium/chrome" "$stage/" || { pm rm "$c" > /dev/null; die "could not copy chrome out of $IMAGE"; }
-        pm rm "$c" > /dev/null
-      else
-        local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT
-        [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
-        stage_release "$out" "$stage"
-      fi
+      local out=$CHROMIUM_DIR/src/$CHROMIUM_RELEASE_OUT
+      [[ -x $out/chrome ]] || die "no release build at $out (plutonium chromium build --release)"
+      stage_release "$out" "$stage"
       # Against the system's nixpkgs, so libgbm and libEGL match its Mesa.
       nix build --impure --out-link "$HOST_CHROME" --expr \
         "(import <nixpkgs> {}).callPackage $ROOT/dev/nix/chrome.nix { src = /. + \"$stage/chrome\"; }"
@@ -375,7 +306,7 @@ chromium_args() {
 chromium_build() {
   local release=${1:-} src=$CHROMIUM_DIR/src outdir=$CHROMIUM_OUT args=$ROOT/chromium/args.gn env=()
   container_running "$BUILD_CONTAINER" ||
-    die "the build container '$BUILD_CONTAINER' is not running (plutonium container create, without PREBUILT=1; or set BUILD_CONTAINER)"
+    die "the build container '$BUILD_CONTAINER' is not running (plutonium container create, or set BUILD_CONTAINER)"
   case $release in
     release) outdir=$CHROMIUM_RELEASE_OUT args=$ROOT/chromium/args.release.gn ;;
     official) outdir=$CHROMIUM_OFFICIAL_OUT args=$ROOT/chromium/args.official.gn ;;
@@ -534,8 +465,6 @@ GCLIENT
         git -C "$src" checkout -q --detach "$commit"
         chromium_build
       fi
-      [[ -n ${PREBUILT:-} ]] &&
-        echo "note: this checkout's sessions run the prebuilt image (PREBUILT=1). To run this build, put PREBUILT= and CONTAINER=$BUILD_CONTAINER in plutonium.local.env"
       true ;;
     wait) chromium_wait "${2:-}" ;;
     export)

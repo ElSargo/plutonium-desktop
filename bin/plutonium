@@ -173,10 +173,10 @@ stop_cmd() {
 
 # What a release was made from (its BUNDLE): "<version> (<commit>, Chromium <tag>)".
 bundle_describe() {
-  local version commit dirty tag
+  local version commit dirty chromium
   version=$(sed -n 's/^VERSION=//p' "$1") commit=$(sed -n 's/^COMMIT=//p' "$1")
-  dirty=$(sed -n 's/^DIRTY=//p' "$1") tag=$(sed -n 's/^CHROMIUM_TAG=//p' "$1")
-  echo "$version (commit ${commit:0:12}$([[ $dirty == 1 ]] && echo ", with uncommitted changes"), Chromium ${tag:-from a local build})"
+  dirty=$(sed -n 's/^DIRTY=//p' "$1") chromium=$(sed -n 's/^CHROMIUM_BUILD="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$1")
+  echo "$version (commit ${commit:0:12}$([[ $dirty == 1 ]] && echo ", with uncommitted changes"), Chromium ${chromium:-from an unlabelled build})"
 }
 status_cmd() {
   [[ -f $ROOT/BUNDLE ]] && echo "release install: $ROOT, $(bundle_describe "$ROOT/BUNDLE")"
