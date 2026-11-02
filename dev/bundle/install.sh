@@ -17,7 +17,7 @@
 # POSIX sh: `curl | sh` runs it with whatever sh is (dash on Debian and Ubuntu).
 set -eu
 
-RELEASE_URL=https://github.com/ElSargo/plutonium-desktop/releases/latest/download/plutonium-x86_64.tar.xz
+RELEASE_URL=https://github.com/ElSargo/pluto/releases/latest/download/plutonium-x86_64.tar.xz
 DEST=/opt/plutonium
 LINK=/usr/local/bin/plutonium
 ENTRY=/usr/share/wayland-sessions/plutonium.desktop

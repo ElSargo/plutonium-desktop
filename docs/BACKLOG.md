@@ -966,6 +966,7 @@ shell find it.
 - [x] **Releases on GitHub.** `plutonium bundle publish` (`dev/bundle/publish.sh`)
   puts a tagged, clean bundle up under the names `install.sh` downloads,
   with `docs/releases/v<version>.md` as its notes.
-- [ ] **Serve `install.sh` at a short address** (the site), and put it in
-  `INSTALL.md`, the README and the site in place of `https://…/install.sh`.
+- [x] **Serve `install.sh` at a short address:** the site, on GitHub Pages
+  (`.github/workflows/pages.yml`), serves it beside the page, at
+  `https://elsargo.github.io/pluto/install.sh`.
 - [x] **A license:** MIT.

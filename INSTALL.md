@@ -3,7 +3,7 @@
 **The release.** One package, no podman or checkout: the installer puts it in `/opt/plutonium`, sets up Chromium's `chrome-sandbox`, and adds Plutonium to the login screen. It needs x86-64 Linux with systemd, glibc 2.35 or newer, a desktop's libraries (Mesa, X11, GLib, ALSA), and python3, git and curl; it says what's missing. On NixOS the installer puts the release in place, and the rest is a module it carries, `/opt/plutonium/lib/nixos.nix`: copy it beside `configuration.nix` as `plutonium.nix`, add it to `imports`, and `sudo nixos-rebuild switch`. It sets up nix-ld (the release's binaries are generic Linux ones), the login screen's entry, the `plutonium` command, the keyboard layout links, and Python, git, curl, foot and xwayland-satellite.
 
 ```
-curl -fsSL https://…/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
+curl -fsSL https://elsargo.github.io/pluto/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
 plutonium doctor
 ```
 
@@ -53,7 +53,7 @@ environment.systemPackages = with pkgs; [ nodejs_24 python3 git curl foot xwayla
 ## 2. Get it
 
 ```
-git clone https://github.com/ElSargo/plutonium-desktop.git plutonium && cd plutonium
+git clone https://github.com/ElSargo/pluto.git && cd pluto
 echo PREBUILT=1 > plutonium.env
 bin/plutonium doctor
 ```
@@ -195,7 +195,7 @@ In `~/.local/share/plutonium/logs` for the release (`logs/` in a checkout), one 
 
 ## Reporting a bug
 
-Open an issue at https://github.com/ElSargo/plutonium-desktop/issues with:
+Open an issue at https://github.com/ElSargo/pluto/issues with:
 - what you did, what you expected and what happened;
 - your distribution, and your GPU (`lspci -k | grep -A3 -E 'VGA|3D'`);
 - the output of `plutonium doctor` and `plutonium status`;

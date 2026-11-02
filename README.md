@@ -28,7 +28,7 @@ The release is one package, with no podman or checkout. [INSTALL.md](INSTALL.md)
 1. Install it. The installer puts it in `/opt/plutonium` and adds Plutonium to your login screen, and says if anything is missing. On NixOS, it ends with the module to add to your configuration (INSTALL.md).
 
    ```sh
-   curl -fsSL https://…/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
+   curl -fsSL https://elsargo.github.io/pluto/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
    plutonium doctor                          # what's missing, and the command that fixes each
    ```
 
