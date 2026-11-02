@@ -93,8 +93,9 @@ lib_packages() {   # <soname>...
 }
 
 # A running session from the install: replacing its files under it breaks it.
+# Its browser process (Ash), not the renderers a stopped one leaves for a moment.
 running() {
-  pgrep -f "^$DEST/chrome/chrome " > /dev/null 2>&1 || pgrep -f "$DEST/helper/plutonium.ts daemon" > /dev/null 2>&1
+  pgrep -f "^$DEST/chrome/chrome --enable-wayland-server" > /dev/null 2>&1 || pgrep -f "$DEST/helper/plutonium.ts daemon" > /dev/null 2>&1
 }
 
 # --- Uninstall ---------------------------------------------------------------
