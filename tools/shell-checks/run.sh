@@ -25,7 +25,7 @@ done
 session_vars x11
 PORT=$(slot_port 8790)
 SHELL_URL=http://127.0.0.1:$PORT/index.html
-export CDP=localhost:$CDP_PORT
+export CDP=$CDP_ADDR
 plutonium() { "$ROOT/bin/plutonium" "$@"; }
 cdp_eval() { plutonium cdp eval "$@"; }
 

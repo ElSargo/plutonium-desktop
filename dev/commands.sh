@@ -24,7 +24,8 @@ Setup from source (INSTALL.md):
                              session uses (dev/nix/host-tools.nix): no container to run it
 
 Development:
-  cdp <args>                 DevTools, where Ash runs: tools/cdp.py --help
+  cdp [--x11] <args>         DevTools of this slot's DRM (or X11) session, where Ash runs:
+                             tools/cdp.py --help; 'cdp where' prints its socket (or host:port)
   live apply|revert|status   swap the shell library (shell.js) a running session serves, and
                              reload its shells: plutonium live --help
   chromium export            rewrite chromium/patches from the checkout's commits since BASE
@@ -67,7 +68,12 @@ dev_cmd() {
         *) usage; exit 2 ;;
       esac ;;
     # tools/cdp.py from the main checkout, which the container mounts.
-    cdp) need_ash_runtime; session_vars drm; on_ash -e "CDP=${CDP:-localhost:$CDP_PORT}" python3 "$MAIN_ROOT/tools/cdp.py" "$@" ;;
+    cdp)
+      local cdp_mode=drm
+      [[ ${1:-} == --x11 ]] && { cdp_mode=x11; shift; }
+      session_vars "$cdp_mode"
+      if [[ ${1:-} == where ]]; then echo "${CDP:-$CDP_ADDR}"; return; fi
+      need_ash_runtime; on_ash -e "CDP=${CDP:-$CDP_ADDR}" python3 "$MAIN_ROOT/tools/cdp.py" "$@" ;;
   esac
 }
 
@@ -778,9 +784,9 @@ worktree_cmd() {
     info)
       session_vars x11
       echo "$ROOT: slot $SLOT"
-      echo "  X11 sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT, Xvfb $PRIVATE_XDISP"
+      echo "  X11 sessions: $SOCKET, DevTools $CDP_WHERE, helper $HELPER_PORT, Xvfb $PRIVATE_XDISP"
       session_vars drm
-      echo "  DRM sessions: $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT"
+      echo "  DRM sessions: $SOCKET, DevTools $CDP_WHERE, helper $HELPER_PORT"
       echo "  shells: http://<name>.localhost:$SHELLS_PORT (server shells: their port + 100 × $SLOT); installed in $PLUTO_HOME"
       echo "  Chromium: $CHROME_BIN" ;;
     list)

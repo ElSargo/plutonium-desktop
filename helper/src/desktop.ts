@@ -1,6 +1,6 @@
 // The desktop's windows and tabs, straight from the browser: its DevTools
 // Plutonium domain (chrome/browser/devtools/cros_protocol.pdl), on the
-// --remote-debugging-port the session gives the helper. The helper drives
+// DevTools socket (or port) the session gives the helper. The helper drives
 // windows and tabs through it without a shell page: list them, open and close
 // tabs, snapshot both, and send windows mouse and keys.
 //

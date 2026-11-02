@@ -3,7 +3,8 @@
 
 Runs where python3-websockets is installed: `plutonium cdp ...` runs it where Ash
 runs (the container, or the host tools with HOST=1).
-CDP=host:port picks the session (DRM 9224, X11 9223).
+CDP picks the session: its DevTools socket (a path, which `plutonium cdp` sets),
+or host:port for a session with DEVTOOLS=port (DRM 9224, X11 9223).
 
   cdp.py list                              targets: type, url
   cdp.py browser <method> [json-params]    a browser-level command
@@ -18,18 +19,48 @@ CDP=host:port picks the session (DRM 9224, X11 9223).
 """
 import asyncio
 import base64
+import http.client
 import json
 import os
+import socket
 import sys
-import urllib.request
+from urllib.parse import urlsplit
 
 import websockets
 
-HOST = os.environ.get("CDP", "localhost:9224")
+CDP = os.environ.get("CDP", "localhost:9224")
+# A path is the browser's --plutonium-remote-debugging-socket.
+SOCKET = CDP if "/" in CDP else None
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost")
+        self.unix_path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self.unix_path)
+
+
+def get(path):
+    conn = UnixConnection(SOCKET) if SOCKET else http.client.HTTPConnection(CDP)
+    try:
+        conn.request("GET", path)
+        return json.load(conn.getresponse())
+    finally:
+        conn.close()
+
+
+def connect(ws_url):
+    """A WebSocket to a target, over the socket or the port."""
+    if SOCKET:
+        return websockets.unix_connect(SOCKET, f"ws://localhost{urlsplit(ws_url).path}", max_size=None)
+    return websockets.connect(ws_url, max_size=None)
 
 
 def targets():
-    return json.load(urllib.request.urlopen(f"http://{HOST}/json/list"))
+    return get("/json/list")
 
 
 def target(part):
@@ -56,7 +87,7 @@ class Session:
 
 
 async def with_target(part, body):
-    async with websockets.connect(target(part)["webSocketDebuggerUrl"], max_size=None) as ws:
+    async with connect(target(part)["webSocketDebuggerUrl"]) as ws:
         return await body(Session(ws))
 
 
@@ -71,13 +102,13 @@ async def main(args):
     elif cmd == "reload":
         pages = [t for t in targets() if t["type"] == "page" and t["url"].startswith(rest[0])]
         for t in pages:
-            async with websockets.connect(t["webSocketDebuggerUrl"], max_size=None) as ws:
+            async with connect(t["webSocketDebuggerUrl"]) as ws:
                 # Bypassing the cache: the files can be older than the cached ones.
                 await Session(ws).call("Page.reload", {"ignoreCache": True})
         print(f"reloaded {len(pages)} page{'' if len(pages) == 1 else 's'} at {rest[0]}")
     elif cmd == "browser":
-        url = json.load(urllib.request.urlopen(f"http://{HOST}/json/version"))["webSocketDebuggerUrl"]
-        async with websockets.connect(url, max_size=None) as ws:
+        url = get("/json/version")["webSocketDebuggerUrl"]
+        async with connect(url) as ws:
             params = json.loads(rest[1]) if len(rest) > 1 else {}
             print(json.dumps(await Session(ws).call(rest[0], params), indent=1))
     elif cmd == "eval":

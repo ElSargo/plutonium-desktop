@@ -146,8 +146,7 @@ echo "thread $thread"
 
 if [[ -n $show ]]; then
   env_id=$(cat "$T3_HOME/userdata/environment-id")
-  [[ -n $x11 ]] && export CDP=127.0.0.1:$((9223 + 100 * SLOT))
-  "$checkout/bin/plutonium" cdp eval "127.0.0.1:$T3_PORT" \
+  "$checkout/bin/plutonium" cdp ${x11:+--x11} eval "127.0.0.1:$T3_PORT" \
     "history.pushState({}, '', '/$env_id/${thread}'); dispatchEvent(new PopStateEvent('popstate')); location.pathname" ||
     echo "warning: couldn't open the thread in the shell" >&2
 fi

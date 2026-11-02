@@ -182,7 +182,7 @@ status_cmd() {
   for mode in drm x11; do
     session_vars "$mode"
     pgrep -f "^$ASH_BIN --enable-wayland-server .*--user-data-dir=$PROFILE( |\$)" > /dev/null &&
-      echo "$mode session: running ($SOCKET, DevTools $CDP_PORT)" || echo "$mode session: not running"
+      echo "$mode session: running ($SOCKET, DevTools $CDP_WHERE)" || echo "$mode session: not running"
   done
   local sock
   for sock in "$RUN_DIR"/plutonium/*.sock; do

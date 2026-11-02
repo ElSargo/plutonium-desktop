@@ -187,11 +187,12 @@ out/Cros/content_unittests --ozone-platform=headless --gtest_filter='RenderWidge
 ## Testing a session
 
 **Launching sessions:**
-- **X11** (`plutonium run --x11 [:0]`) is the quickest loop. It needs no console switching and runs beside a DRM session: they use different sockets (`wayland-plutonium-x11` and `wayland-plutonium`), DevTools ports (9223 and 9224), helper ports (3781 and 3782) and profiles. Those are slot 0's; a worktree's are higher (Working in parallel, above).
+- **X11** (`plutonium run --x11 [:0]`) is the quickest loop. It needs no console switching and runs beside a DRM session: they use different sockets (`wayland-plutonium-x11` and `wayland-plutonium`), DevTools sockets (`$XDG_RUNTIME_DIR/plutonium/<socket>.devtools`), helper ports (3781 and 3782) and profiles. Those are slot 0's; a worktree's are higher (Working in parallel, above).
 - **DRM**, unattended or from an agent: someone stays logged in on a text console, and you run `plutonium run --vt tty2 [--hold N] …`.
 
 **Inspecting and driving it:**
-- **DevTools:** `plutonium cdp list`, `cdp eval <url-part> '<js>'` (add `--gesture` for user activation), `cdp shot`, `cdp click`, `cdp console`. Set `CDP=localhost:9223` for the X11 session. Browser tabs are targets of type `page` too.
+- **DevTools:** `plutonium cdp list`, `cdp eval <url-part> '<js>'` (add `--gesture` for user activation), `cdp shot`, `cdp click`, `cdp console`; `plutonium cdp --x11 …` for the X11 session, `cdp where` for the socket's path (`curl --unix-socket <path> http://localhost/json/list`). Browser tabs are targets of type `page` too.
+- **DevTools on a port:** a session's DevTools are a Unix socket only your own processes can connect to (`--plutonium-remote-debugging-socket`). For a tool that needs a `ws://` URL or a port (another browser's `chrome://inspect`, Playwright's `connectOverCDP`), either bridge it for a while (`socat TCP-LISTEN:9224,bind=127.0.0.1 UNIX-CONNECT:$(plutonium cdp where)`), or set `DEVTOOLS=port` in `plutonium.local.env` to get Chrome's `--remote-debugging-port` back (9224, X11 9223, + 100 × slot). Any local process, of any user, can drive the browser through that port. A browser built before the socket gets the port automatically, with a note in the session log.
 - **Input on DRM without a person:**
   1. `sudo tools/uinput.py <fifo>` creates a virtual keyboard and mouse. Start it **before** the session, because the container doesn't see devices plugged in later.
   2. Write commands to the fifo: `type`, `key LEFTMETA+T`, `move`, `click`, `down`/`up`, `scroll`.

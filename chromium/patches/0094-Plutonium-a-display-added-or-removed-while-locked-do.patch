@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Sun, 1 Nov 2026 16:17:06 +1300
-Subject: [PATCH 94/96] Plutonium: a display added or removed while locked
+Subject: [PATCH 94/97] Plutonium: a display added or removed while locked
  doesn't crash Ash
 
 CloseWidgets() moved each lock widget out of widgets_ into DeleteSoon()

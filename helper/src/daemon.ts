@@ -31,7 +31,7 @@ import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { SiteIcons } from "./siteIcons.ts";
 import { uiLibraryFile } from "./uiLibrary.ts";
-import { BrowserCdp } from "./cdp.ts";
+import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
   Desktop,
   type DesktopDownload,
@@ -94,11 +94,12 @@ export interface DaemonOptions {
   readonly port: number;
   readonly socketPath: string;
   /**
-   * The browser's --remote-debugging-port: windows and tabs straight from the
-   * browser, agents' page automation, and server-driven tabs (none: the shell
-   * relays what it can, and there are no such tabs).
+   * The browser's DevTools (its Unix socket, or its --remote-debugging-port):
+   * windows and tabs straight from the browser, agents' page automation, and
+   * server-driven tabs (none: the shell relays what it can, and there are no
+   * such tabs).
    */
-  readonly cdpPort?: number | undefined;
+  readonly cdp?: CdpEndpoint | undefined;
   /** Where the threads' X servers go (tests use their own). */
   readonly xDisplays?: XDisplayOptions;
   /** Whether each thread's apps get their own session bus (threadBus.ts; default unless PLUTONIUM_THREAD_BUS=0). */
@@ -445,7 +446,7 @@ export class Daemon {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
     }));
-    const cdp = options.cdpPort ? new BrowserCdp(options.cdpPort) : null;
+    const cdp = options.cdp ? new BrowserCdp(options.cdp) : null;
     const notifications = new NotificationsService(
       undefined,
       {
@@ -2777,7 +2778,9 @@ export class Daemon {
       `plutoniumd: ${this.options.waylandDisplay}, shells ${this.options.shellOrigins.join(" ")}, ` +
         `socket ${socketPath}, shell API http://127.0.0.1:${port}` +
         (shells && shellsPort ? `, shells from ${shells.home} on http://<name>.localhost:${shellsPort}` : "") +
-        (this.options.cdpPort ? `, server-driven tabs on DevTools ${this.options.cdpPort}` : ""),
+        (this.options.cdp
+          ? `, server-driven tabs on DevTools ${"port" in this.options.cdp ? `port ${this.options.cdp.port}` : this.options.cdp.socketPath}`
+          : ""),
     );
     // Ash usually starts after the helper: check the GPU once Exo is up.
     const check = setInterval(() => {
@@ -2787,13 +2790,13 @@ export class Daemon {
     check.unref();
     // Apps' and tabs' notifications reach the shells from the start, whether or not one shows
     // them yet (on the bus only in the user's own session: notificationsOnBus).
-    if (this.options.cdpPort && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
+    if (this.options.cdp && process.env.PLUTONIUM_NOTIFICATIONS !== "0") {
       this.services
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
     }
     // EXO-LOCK: idle, logind and apps' inhibitors from the start.
-    if (this.options.cdpPort) {
+    if (this.options.cdp) {
       this.services.state("session").catch((error: unknown) => console.warn(`plutoniumd: no session: ${(error as Error).message}`));
     }
     if (this.desktop) {

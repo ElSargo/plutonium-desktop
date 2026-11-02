@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# tools/capture-checks.sh [DEVTOOLS_PORT] [SHELL_PORT]: checks screen capture
+# tools/capture-checks.sh [--x11] [SHELL_PORT]: checks screen capture
 # (docs/features/CAPTURE.md) in a running session, through DevTools: a
 # screenshot of the output, a shell's MediaStream of it, a PipeWire node of it
 # recorded with GStreamer's pipewiresrc, and the capture events. Writes what it
 # took to logs/capture-checks/ and prints a line per check.
 #
-# Defaults: this checkout's slot's DRM session (DevTools 9224 + 100 × slot,
-# this slot's niri). For an X11 session pass its DevTools port.
+# Defaults: this checkout's slot's DRM session (--x11: its X11 session), and
+# this slot's niri.
 set -u
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 slot=$(cd "$root" && bin/plutonium worktree info 2>/dev/null | sed -n 's/.*slot \([0-9]*\).*/\1/p' | head -1)
-port=${1:-$((9224 + 100 * ${slot:-0}))}
+mode=
+[[ ${1:-} == --x11 ]] && { mode=--x11; shift; }
+cdp=$(cd "$root" && bin/plutonium cdp $mode where)
+# BrowserCdp's endpoint: a socket's path, or a DEVTOOLS=port session's port.
+case $cdp in /*) endpoint="{ socketPath: '$cdp' }" ;; *) endpoint=${cdp##*:} ;; esac
 # The shells' servers have the same ports in a slot's DRM and X11 sessions.
-shell=${2:-$(cd "$root" && bin/plutonium worktree info 2>/dev/null | sed -n 's/.*niri \([0-9]*\).*/\1/p' | head -1)}
+shell=${1:-$(cd "$root" && bin/plutonium worktree info 2>/dev/null | sed -n 's/.*niri \([0-9]*\).*/\1/p' | head -1)}
 out=$root/logs/capture-checks
 mkdir -p "$out"
-export CDP=localhost:$port
+export CDP=$cdp
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; }
 
@@ -31,7 +35,7 @@ case $r in *x*captures\ 1*) pass "a shell's stream of the output: $r" ;; *) fail
 start=$(cd "$root/helper" && node --input-type=module -e "
 import { BrowserCdp } from './src/cdp.ts';
 import { Desktop } from './src/desktop.ts';
-const desktop = new Desktop(new BrowserCdp($port));
+const desktop = new Desktop(new BrowserCdp($endpoint));
 await desktop.available();
 const { outputs } = await desktop.captureSources();
 const output = outputs.find((o) => o.primary) ?? outputs[0];
@@ -56,7 +60,7 @@ else
   (cd "$root/helper" && node --input-type=module -e "
 import { BrowserCdp } from './src/cdp.ts';
 import { Desktop } from './src/desktop.ts';
-const desktop = new Desktop(new BrowserCdp($port));
+const desktop = new Desktop(new BrowserCdp($endpoint));
 await desktop.captureCommand('stop', { id: $capture_id }).catch(() => {});
 process.exit(0);")
 fi

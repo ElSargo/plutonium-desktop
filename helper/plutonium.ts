@@ -2,7 +2,7 @@
 // Plutonium helper CLI (Node 24+, no dependencies).
 //
 //   plutonium.ts daemon [--wayland-display wayland-plutonium] --shell-origin http://127.0.0.1:3773[,<origin>…] [--port 3780]
-//     [--cdp-port 9222]
+//     [--cdp-socket <path> | --cdp-port 9222]
 //   plutonium.ts thread-setup <thread-id>   JSON {env, mcpServer} for a thread's processes
 //   plutonium.ts launch <thread-id> <argv>…  start an app in a thread
 //   plutonium.ts mcp                        the agent bridge as a stdio MCP server
@@ -37,6 +37,7 @@ const { values, positionals } = parseArgs({
     port: { type: "string" },
     socket: { type: "string" },
     "cdp-port": { type: "string" },
+    "cdp-socket": { type: "string" },
     "pluto-home": { type: "string" },
     "shells-port": { type: "string" },
     slot: { type: "string" },
@@ -47,10 +48,18 @@ const { values, positionals } = parseArgs({
 const waylandDisplay = values["wayland-display"] ?? process.env.PLUTONIUM_WAYLAND_DISPLAY ?? "wayland-plutonium";
 const socketPath = values.socket ?? process.env[HELPER_VARIABLE] ?? defaultSocketPath(waylandDisplay);
 
+// The browser's DevTools: --cdp-socket (Unix socket) or --cdp-port.
+function cdpEndpoint(): { socketPath: string } | { port: number } | undefined {
+  const socketPath = values["cdp-socket"] ?? process.env.PLUTONIUM_CDP_SOCKET;
+  if (socketPath) return { socketPath };
+  const port = Number(values["cdp-port"] ?? process.env.PLUTONIUM_CDP_PORT ?? 0);
+  return port ? { port } : undefined;
+}
+
 function usage(): never {
   console.error(
     "usage: plutonium.ts daemon --shell-origin <origin>[,<origin>…] [--wayland-display <name>] [--port <n>]\n" +
-      "         [--cdp-port <n>]   (the browser's DevTools port, for server-driven tabs)\n" +
+      "         [--cdp-socket <path> | --cdp-port <n>]   (the browser's DevTools, for server-driven tabs)\n" +
       "         [--shells-port <n> --slot <n> [--pluto-home <dir>] [--persist-shells]]   (installed shells)\n" +
       "       plutonium.ts thread-setup <thread-id>\n" +
       "       plutonium.ts launch <thread-id> <program> [args…]\n" +
@@ -96,7 +105,7 @@ switch (command) {
       socketPath,
       shells,
       shellsPort,
-      cdpPort: Number(values["cdp-port"] ?? process.env.PLUTONIUM_CDP_PORT ?? 0) || undefined,
+      cdp: cdpEndpoint(),
     });
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
       process.once(signal, () => {
