@@ -300,6 +300,16 @@ export interface PermissionAnswer {
 /** How long a tab the server sent input to stays at full frame rate. */
 const AWAKE_MS = 60_000;
 
+/**
+ * How long Page.captureScreenshot gets before the browser's own tab capture
+ * answers instead. DevTools' screenshot waits for the page's next frame to be
+ * presented on a display, and a tab no shell shows is presented only when its
+ * display draws: with the displays off (idle, on DRM) that never happens, and
+ * every snapshot hung. The page still draws, so Plutonium.captureTab (a copy of
+ * the tab's surface) has the frame.
+ */
+const SCREENSHOT_FALLBACK_MS = 1_500;
+
 export interface Pointer extends ServerTabKey {
   readonly phase: "move" | "click";
   readonly x: number;
@@ -523,7 +533,9 @@ export class ServerTabs {
         send: async (method, params, child) => {
           if (child !== undefined && !tab.children.has(child)) throw new Error(`No session ${child} in this tab.`);
           if (child === undefined && method.startsWith("Input.")) await this.wake(tab);
-          return this.cdp.send(method, params, child ?? (await this.pageSession(tab)));
+          const sent = this.cdp.send(method, params, child ?? (await this.pageSession(tab)));
+          if (child === undefined && method === "Page.captureScreenshot") return this.screenshot(tab, params, sent);
+          return sent;
         },
         targetId: tab.info.targetId,
         browserTabId: tab.info.browserTabId,
@@ -558,6 +570,50 @@ export class ServerTabs {
     // Its events start with the page session.
     void this.pageSession(tab).catch(() => {});
     return relay;
+  }
+
+  /**
+   * Page.captureScreenshot's answer, or the browser's capture of the tab when
+   * that doesn't come in SCREENSHOT_FALLBACK_MS (SCREENSHOT_FALLBACK_MS says
+   * why). Only whole-viewport captures fall back: the browser's is the
+   * viewport, at the device scale, as DevTools' is without a clip.
+   */
+  private screenshot(tab: AttachedTab, params: Record<string, unknown>, sent: Promise<unknown>): Promise<unknown> {
+    const id = tab.info.browserTabId;
+    if (id < 0 || params.clip !== undefined) return sent;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        const format = params.format === "jpeg" ? "jpeg" : "png";
+        const quality = typeof params.quality === "number" ? { quality: params.quality } : {};
+        this.cdp.send("Plutonium.captureTab", { id, format, ...quality }).then(
+          (value) => {
+            if (settled) return;
+            settled = true;
+            debug("screenshot from Plutonium.captureTab for tab", id);
+            resolve({ data: (value as { data: string }).data });
+          },
+          // The browser's capture failed too: wait on DevTools' after all.
+          () => {},
+        );
+      }, SCREENSHOT_FALLBACK_MS);
+      timer.unref();
+      sent.then(
+        (value) => {
+          clearTimeout(timer);
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        },
+        (cause: unknown) => {
+          clearTimeout(timer);
+          if (settled) return;
+          settled = true;
+          reject(cause);
+        },
+      );
+    });
   }
 
   /** EXO-TAB-PERMISSIONS: the server can't grant a permission itself; the user is asked over the tab. */

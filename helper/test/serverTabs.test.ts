@@ -367,3 +367,73 @@ describe("the server's recordings as captures", () => {
     assert.deepEqual(second.stopped, [41]);
   });
 });
+
+describe("the relay's screenshots", () => {
+  const key = { threadId: "thread-1", tabId: "tab-1" };
+  /** A browser whose DevTools screenshot never answers, as with the displays off. */
+  class StuckCdp extends FakeCdp {
+    answer: string | null = null;
+    override async send(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      if (method === "Target.attachToTarget") return { sessionId: "page" };
+      if (method === "Page.captureScreenshot") {
+        this.sent.push({ method, params });
+        return this.answer === null ? new Promise(() => {}) : { data: this.answer };
+      }
+      if (method === "Plutonium.captureTab") {
+        this.sent.push({ method, params });
+        return { data: "from-tab", width: 2, height: 2 };
+      }
+      return super.send(method, params);
+    }
+  }
+  const relayed = (cdp: StuckCdp) => {
+    const tabs = new ServerTabs(cdp as unknown as BrowserCdp);
+    const socket = new FakeSocket();
+    tabs.serve(socket as unknown as Socket);
+    tabs.attach(key, { targetId: "shown", browserTabId: 2, page: "plutoniumd", url: () => "", title: () => "" }, () => true);
+    let id = 0;
+    const command = (method: string, params: Record<string, unknown> = {}) => {
+      socket.command({
+        type: "cdp",
+        ...key,
+        message: JSON.stringify({ id: ++id, method, params, sessionId: "plutonium-tab-page" }),
+      });
+      return id;
+    };
+    const reply = (id: number) =>
+      socket.events
+        .filter((event) => event["type"] === "cdp")
+        .map((event) => JSON.parse(String(event["message"])) as Record<string, unknown>)
+        .find((message) => message["id"] === id);
+    return { command, reply };
+  };
+
+  test("a screenshot DevTools doesn't answer comes from the browser's capture of the tab", async () => {
+    const cdp = new StuckCdp();
+    const { command, reply } = relayed(cdp);
+    command("Target.setAutoAttach", { autoAttach: true });
+    await settle();
+    const whole = command("Page.captureScreenshot", { format: "jpeg", quality: 60 });
+    const clipped = command("Page.captureScreenshot", { format: "png", clip: { x: 0, y: 0, width: 1, height: 1, scale: 0.5 } });
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    assert.deepEqual(reply(whole)?.["result"], { data: "from-tab" });
+    assert.deepEqual(
+      cdp.sent.filter((sent) => sent.method === "Plutonium.captureTab").map((sent) => sent.params),
+      [{ id: 2, format: "jpeg", quality: 60 }],
+    );
+    // A clip is DevTools' alone.
+    assert.equal(reply(clipped), undefined);
+  });
+
+  test("DevTools' own screenshot when it answers", async () => {
+    const cdp = new StuckCdp();
+    cdp.answer = "from-devtools";
+    const { command, reply } = relayed(cdp);
+    command("Target.setAutoAttach", { autoAttach: true });
+    await settle();
+    const id = command("Page.captureScreenshot", { format: "png" });
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    assert.deepEqual(reply(id)?.["result"], { data: "from-devtools" });
+    assert.equal(cdp.methods().includes("Plutonium.captureTab"), false);
+  });
+});
