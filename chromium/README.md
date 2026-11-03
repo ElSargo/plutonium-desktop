@@ -3,48 +3,30 @@
 Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland server (Exo), built as a Linux ChromeOS (`target_os = "chromeos"`) that runs on an ordinary Linux machine.
 
 - **`BASE`**: the upstream commit the patches apply to. It is `9f2eedcd653d` (2026-10-14, Chrome 158.0.8106.0).
-- **`patches/`**: the patch series, in order (`git am`). Together they change 251 files (about 20,900 lines).
+- **`patches/`**: the patch series, in order (`git am`). Together they change 363 files (about 42,500 lines, almost all of it new files).
 - **`args.gn`**: the build arguments.
 
 `plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [docs/BUILDING.md](../docs/BUILDING.md).
 
 ## The patches
 
-| # | What | Docs |
-|---|---|---|
-| 0001 | `<native-window>`: Exo windows embedded in a page as elements; the window broker (`navigator.windowBroker`), grants, and the shell origin (`--plutonium-shell-origin`) | [history/PHASE1_REPORT](../docs/history/PHASE1_REPORT.md), [PHASE2_REPORT](../docs/history/PHASE2_REPORT.md) |
-| 0002 | The broker reports each window's Wayland client pid | [ARCHITECTURE](../docs/ARCHITECTURE.md) |
-| 0003 | `windowBroker.showOnDesktop()`: pop an embedded window out | |
-| 0004 | Windows stay off the Ash desktop unless popped out (`--plutonium-hide-windows`); `wl_output` v4 | [history/T3_SHELL_TEST](../docs/history/T3_SHELL_TEST.md) |
-| 0005 | `windowBroker.close()` and `snapshot()`, for the agent bridge | [history/PHASE3_REPORT](../docs/history/PHASE3_REPORT.md) |
-| 0006 | Shell mode (`--plutonium-shell-url`): the page is the whole desktop on DRM; evdev input fix; the display-plane path | [history/PHASE4_PROGRESS](../docs/history/PHASE4_PROGRESS.md) |
-| 0007 | Browser tabs as elements (SurfaceEmbed), the tab registry and broker API; mouse wheel on DRM | [features/TABS](../docs/features/TABS.md) |
-| 0008 | Tab automation over DevTools (`sendTabDevToolsCommand`); SurfaceEmbed under transforms | [features/TABS](../docs/features/TABS.md) |
-| 0009 | The DRM device id for a Vulkan device shared with ANGLE (GPU for apps in X11-hosted sessions) | [features/GPU_X11](../docs/features/GPU_X11.md) |
-| 0010 | Parked (hidden) windows don't occlude the shell page | [features/GPU_X11](../docs/features/GPU_X11.md) |
-| 0011 | Fullscreen for embedded apps and tabs, Super+F; shell shortcuts | [features/CONTROLS](../docs/features/CONTROLS.md) |
-| 0012 | Pointer lock and confinement for embedded apps, Super+Escape | [features/CONTROLS](../docs/features/CONTROLS.md) |
-| 0013 | Several live shells (`--plutonium-shells`), Super+Tab | [features/SHELLS](../docs/features/SHELLS.md) |
-| 0014 | Tags and groups on windows and tabs; the Super+Tab overlay | [features/SHELLS](../docs/features/SHELLS.md) |
-| 0015 | Overlay fix: no empty "Shells" heading | |
-| 0016 | Shell shortcuts beat Ash's accelerators; no Search+arrow rewriting; transparent gutter; touchpads through libinput and scrolling fixes; drag and drop; links from shell pages open as tabs | [features/STYX_SHELL](../docs/features/STYX_SHELL.md), [DRAG_AND_DROP](../docs/features/DRAG_AND_DROP.md), [OPENING_LINKS](../docs/features/OPENING_LINKS.md) |
-| 0017 | The page alone sizes an embedded window: its maximize, minimize, move and resize requests are refused, and Ash's changes undone | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
-| 0018 | `object-fit` for `<native-window>`; `crossfade`, the resize cross-fade | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
-| 0019 | `windowrequest` events; which element drives a window several show | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
-| 0020 | The box is where the window is (the app's frame stretched to it until it answers a resize); `crossfade-easing`, and niri's cross-fade; no fade on a window's first size | [features/WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
-| 0021 | Seat management through logind (`--plutonium-logind-session`): devices from `TakeDevice`, given up and taken back across VT switches; Ctrl+Alt+F1…F12 and Ctrl+Alt+Backspace | [features/SEAT](../docs/features/SEAT.md) |
-| 0022 | Chrome's own UI in the shell: docked DevTools for shell pages, a tab's DevTools as a tab, context menus without browser-window items drawn by the shell (`contextmenurequest`), only DevTools and clipboard commands in shell windows, keys in tabs, only hardware keys of Ash's accelerators, no status bubble | [features/CHROME_UI](../docs/features/CHROME_UI.md) |
-| 0023 | The switcher: Super+Tab's sidebar of shells over windows and tabs, with a page for each (shell status and management, a window's shells, snapshot and details); `EmbeddedWindows::Present()` opens a window fullscreen above every shell (EXO-PRESENT); the backup terminal and browser; launching a desktop app through the helper's socket (`--plutonium-helper-url`, `--plutonium-helper-socket`) | [features/SHELLS](../docs/features/SHELLS.md) |
-| 0024 | Google sign-in works: shell mode turns off Mirror account consistency (EXO-SIGNIN), so Gaia's sign-in pages aren't cancelled for an OS "Add account" dialog Plutonium doesn't have. Tabs open fullscreen from the switcher, the tab's own page in an Ash window (`PlutoniumTabs::Present()`, `PlutoniumTabPresenter`) | [features/SHELLS](../docs/features/SHELLS.md) |
-| 0025 | Agents drive windows and tabs (EXO-AGENT): the `Plutonium` DevTools domain on the browser target, for trusted clients only (lists and events, `createTab`, `captureTab`, `captureWindow`, window mouse and keys, `setTabAwake`, `setWindowAwake`, window screencasts); `EmbeddedWindows::InjectMouseEvent()`, `InjectKeyEvents()` (`Seat::DispatchAgentKeyEvent()`), `KeepDrawing()` (frames without the undrawn throttle) | [features/AGENT_CONTROL](../docs/features/AGENT_CONTROL.md) |
-| 0026 | A tab's context menu item runs with the tab focused: the shell had the keyboard while it showed the menu, so spelling suggestions, paste, cut, undo and select all did nothing (`SurfaceEmbedConnector::FocusInnerWebContents`) | [features/CHROME_UI](../docs/features/CHROME_UI.md) |
-| 0027 | Agent keyboard focus beside the user's (EXO-AGENT): a client focuses the window an agent drives while the user's focus is in another app (`Seat::AddAgentFocus()`), held between calls (`EmbeddedWindows::HoldAgentFocus()`, `Plutonium.setWindowAgentFocus`). The compositor decorates every window (EXO-DECOR): xdg-decoration always answers server side, and KDE's server-decoration protocol (for GTK 3) always answers server | [features/AGENT_CONTROL](../docs/features/AGENT_CONTROL.md) |
-| 0028 | Shared-memory buffers the GPU can't import don't stall the display (EXO-IMPORT): the GPU process reports which formats it can import (`SharedImageCapabilities::shared_memory_import_formats`), `wl_shm` imports an X format it can't as its A twin and refuses a format with no twin (`invalid_format`), and Exo never sends an unimportable one (which stopped the browser's GPU channel on every commit). The `EXO-DIAG` logging is `VLOG(1)` | [features/GPU_X11](../docs/features/GPU_X11.md) |
-| 0029 | A drag that ends outside an embedded window sends `wl_pointer.leave` with the release, not at the next move | [features/CONTROLS](../docs/features/CONTROLS.md) |
-| 0030 | Embedded focus follows modal dialogs (EXO-MODAL): `xdg_wm_dialog_v1`, and while a page shows a window's modal dialog, focus on the window goes to the dialog, and back when it closes | [features/CONTROLS](../docs/features/CONTROLS.md) |
-| 0031 | Broker follow-ups (EXO-BROKER): a `grantrevoked` event for the shell's own grants, removing the last listener of a kind of broker event unsubscribes, `new NativeWindowEvent(type, init)`. The broker tells observers one event at a time (`revokeGrant()` crashed dev builds on a re-entrant observer list) | [features/BROKER](../docs/features/BROKER.md) |
-| 0032 | Unit tests for the broker and grant checks: `plutonium_unittests` (its own target), and the input router's foreign-sink checks in `content_unittests` | [features/BROKER](../docs/features/BROKER.md) |
-| 0033 | A logind session started on a VT that isn't in front: the displays wait for the session to be in front (`DrmDisplayHostManager::AddDelegate()` revokes display control), and the first real configuration is the one on resume. Input devices aren't asked of logind meanwhile | [features/SEAT](../docs/features/SEAT.md) |
+One patch per part of Plutonium. Each holds every change to its own files, so no two patches touch the same file: they apply in any order, but build only together (`chrome/browser/BUILD.gn`, in the first, lists every part's sources). Each patch's message lists the changes it holds.
+
+| # | Part | What | Docs |
+|---|---|---|---|
+| 0001 | The shell page and the window broker, in the browser | The shell page (`--plutonium-shell-origin`, `--plutonium-shell-url`) and what makes it the desktop: the window broker and its grants, the embedder that puts Exo's windows in the page, several shells, tags and groups, the keys the shell takes | [BROKER](../docs/features/BROKER.md), [SHELLS](../docs/features/SHELLS.md) |
+| 0002 | Exo: embedded windows | Windows parked off the desktop until a page shows them, the page alone sizing them, focus, keyboard and pointer for embedded windows (pointer lock, modal dialogs, popups), drag and drop, input methods, window icons | [WINDOW_SIZING](../docs/features/WINDOW_SIZING.md), [CONTROLS](../docs/features/CONTROLS.md), [DRAG_AND_DROP](../docs/features/DRAG_AND_DROP.md) |
+| 0003 | Embedded surfaces | SurfaceEmbed, and input routing and viz hit testing for the surfaces a page embeds | [TABS](../docs/features/TABS.md) |
+| 0004 | The shell page's API | `<native-window>` (its layout, `object-fit`, the cross-fade), `navigator.windowBroker`, and the events and entries for windows, tabs, displays, captures, downloads and context menus | [BROKER](../docs/features/BROKER.md), [WINDOW_SIZING](../docs/features/WINDOW_SIZING.md) |
+| 0005 | DRM | Shell mode on the display hardware: the display-plane path, logind seats (also on a VT that isn't in front), evdev and libinput, touchpad swipes, and the GPU details (Vulkan device ids, shm buffers the GPU can't import) | [SEAT](../docs/features/SEAT.md), [GPU_X11](../docs/features/GPU_X11.md) |
+| 0006 | Ash in shell mode | Ash's accelerators and gestures go to the shell; no toasts, nudges or clipboard history | [CHROME_UI](../docs/features/CHROME_UI.md) |
+| 0007 | The switcher | Super+Tab's overlay: shells, windows and tabs, installed shells, a prompt for the user's agent, the backup terminal, desktop settings and display configuration | [SHELLS](../docs/features/SHELLS.md), [MULTI_MONITOR](../docs/features/MULTI_MONITOR.md) |
+| 0008 | Browser tabs | Real Chromium tabs as elements of the shell page: opening, driving and restoring them, incognito tabs, fullscreen, their requests to the shell | [TABS](../docs/features/TABS.md) |
+| 0009 | Tab features | Permission prompts and per-thread grants, downloads, file pickers, printing, zoom, find in page, context menus, MPRIS media sessions, speechSynthesis voices; pages see Linux | [TAB_FEATURES](../docs/features/TAB_FEATURES.md), [CHROME_UI](../docs/features/CHROME_UI.md), [LINUX_COMPAT](../docs/features/LINUX_COMPAT.md) |
+| 0010 | The Plutonium DevTools domain | `Plutonium` on the browser target (`cros_protocol.pdl`), for the helper and its agents: windows, tabs, input, notifications, media, the hardware keys. DevTools on a Unix socket for this user only (`--plutonium-remote-debugging-socket`) | [AGENT_CONTROL](../docs/features/AGENT_CONTROL.md), [DESKTOP_SERVICES](../docs/features/DESKTOP_SERVICES.md) |
+| 0011 | Screen capture | Capture requests to the focused shell, `getDisplayMedia`, PipeWire video nodes (with dmabufs), window captures from the window's own frames, `ext-image-copy-capture-v1` for grim | [CAPTURE](../docs/features/CAPTURE.md) |
+| 0012 | Wayland protocols | `zwp_text_input_v3`, `xdg_activation_v1`, `wp_cursor_shape_v1`, `ext_idle_notify_v1`, `ext_data_control_v1`, server-side decorations | [WAYLAND_PROTOCOLS](../docs/features/WAYLAND_PROTOCOLS.md), [IME](../docs/features/IME.md) |
+| 0013 | The lock screen and idle | Ash's lock over every display (Super+L), idle and inhibitors | [DESKTOP_SERVICES](../docs/features/DESKTOP_SERVICES.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).
@@ -66,15 +48,16 @@ use_libinput = true         # touchpads on DRM (features/STYX_SHELL)
 
 A first build takes about two hours on 32 threads, and incremental builds take seconds to minutes.
 
-**Release build** (`args.release.gn`, `plutonium chromium build --release`, into `out/Release`): the same features, as one self-contained `chrome` with no assertions or symbols. It took 1 h 22 min on 32 threads (68,749 steps). `plutonium image build` stages it into the prebuilt image:
+**Release build** (`args.release.gn`, `plutonium chromium build --release`, into `out/Release`): the same features, as one self-contained `chrome` with no assertions or symbols. It took 1 h 22 min on 32 threads (68,749 steps). `plutonium host build` and the release bundle stage it the same way:
 - what Chrome's Linux installer ships (`chrome/installer/linux/common/installer.py`), plus every top-level `.pak`, `.bin` and `.dat`, `locales/` and `resources/`;
 - the binaries, stripped: 607 MB in all;
 - Chromium's license notices (`LICENSES.chromium.html`).
 
-**Official build** (`args.official.gn`, `plutonium chromium build --official`, into `out/Official`): the release build optimized the way Google ships Chrome, for a published tarball (`plutonium bundle build --chrome-out ~/chromium/src/out/Official`). It turns on `is_official_build` and ThinLTO (which gn leaves off for a non-device ChromeOS build) and uses ChromeOS's AFDO sample profile for big x86 cores. Chrome's Linux PGO profile is for a different binary, and CFI is off, since a bad cast in a patch would take the session down.
+**Official build** (`args.official.gn`, `plutonium chromium build --official`, into `out/Official`): the release build optimized the way Google ships Chrome, for a published tarball (`plutonium bundle build` takes chrome from it). It turns on `is_official_build` and ThinLTO (which gn leaves off for a non-device ChromeOS build) and uses ChromeOS's AFDO sample profile for big x86 cores. Chrome's Linux PGO profile is for a different binary, and CFI is off, since a bad cast in a patch would take the session down.
 
 ## Changing Chromium
 
 See [docs/DEVELOPING.md](../docs/DEVELOPING.md):
 1. Commit your work on the `plutonium` branch of the checkout.
 2. Run `plutonium chromium export` to rewrite `patches/` from the commits since `BASE`.
+3. Keep one patch per part. A change goes into the commit that owns its files: `git commit --fixup=<that commit>`, then `git rebase -i --autosquash <BASE>`. Each part has its own files, so the fixups always apply. Split a change that touches several parts into one fixup per part, and put a new file in the part it belongs to. A new commit of its own becomes a new patch. That's fine while you work, but fold it in before a release.

@@ -1,0 +1,775 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 06/13] Plutonium: Ash in shell mode
+
+Ash's own UI gets out of the way of the shell page: accelerators and gestures go to the shell, and there are no toasts, nudges or clipboard history.
+
+It holds these changes:
+- no clipboard history nudges in shell mode
+- a touchpad swipe's begin and end keep their finger count
+- no Ash toasts, nudges or clipboard history, no Chrome toasts or clipboard bubble over the shell
+
+and the parts in these files of:
+- Exo embedding (Phase 1) and window broker (Phase 2)
+- pointer capture (lock, confine) for embedded apps, Super+Escape
+- niri shell keys, touchpad and scrolling, drag and drop, shell links as tabs
+- Chrome's own UI in the shell (DevTools, context menus, keys)
+- the hardware keys go to the helper's desktop services; the browser's media session in the Plutonium domain
+- touchpad swipes with three fingers or more go to the shell page
+---
+ .../accelerator_controller_impl.cc            | 133 ++++++++++++++++++
+ .../accelerator_controller_impl.h             |  13 ++
+ .../clipboard_history_controller_impl.cc      |   9 ++
+ ash/clipboard/clipboard_nudge_controller.cc   |   9 ++
+ .../display_configuration_controller.cc       |   6 +-
+ ash/drag_drop/drag_drop_controller.cc         |  21 +++
+ ash/drag_drop/drag_drop_controller.h          |  10 ++
+ ash/shell.cc                                  |   5 +-
+ .../toast/anchored_nudge_manager_impl.cc      |  11 ++
+ ash/system/toast/toast_manager_impl.cc        |  14 ++
+ ash/wm/system_gesture_event_filter.cc         |  22 +++
+ ash/wm/system_gesture_event_filter.h          |  12 +-
+ .../ash/exo/chrome_security_delegate.cc       |  22 ++-
+ .../ash/login/signin/signin_error_notifier.cc |   7 +
+ ui/events/ash/event_rewriter_ash.cc           |   9 ++
+ ui/events/event.cc                            |   5 +
+ ui/wm/core/accelerator_filter.cc              |   4 +
+ ui/wm/core/accelerator_filter.h               |   5 +
+ ui/wm/core/compound_event_filter.cc           |   2 +
+ ui/wm/core/compound_event_filter.h            |   6 +
+ ui/wm/core/focus_controller.cc                |   5 +
+ 21 files changed, 324 insertions(+), 6 deletions(-)
+
+diff --git a/ash/accelerators/accelerator_controller_impl.cc b/ash/accelerators/accelerator_controller_impl.cc
+index 5497f10e39..5ca7196375 100644
+--- a/ash/accelerators/accelerator_controller_impl.cc
++++ b/ash/accelerators/accelerator_controller_impl.cc
+@@ -35,13 +35,17 @@
+ #include "ash/wm/screen_pinning_controller.h"
+ #include "ash/wm/window_state.h"
+ #include "base/check.h"
++#include "base/command_line.h"
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/metrics/user_metrics.h"
+ #include "base/metrics/user_metrics_action.h"
++#include "base/no_destructor.h"
+ #include "base/strings/strcat.h"
+ #include "base/system/sys_info.h"
+ #include "chromeos/ash/components/audio/cras_audio_handler.h"
+@@ -66,6 +70,116 @@ namespace ash {
+ 
+ namespace {
+ 
++// PLUTONIUM (EXO-CHROME): Chrome's shell mode (--plutonium-shell-url, see
++// chrome/browser/plutonium_shell.h), where a web page is the desktop.
++bool IsPlutoniumShellMode() {
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  return shell_mode;
++}
++
++AcceleratorControllerImpl::PlutoniumSystemKeyHandler&
++PlutoniumSystemKeyHandlerInstance() {
++  static base::NoDestructor<
++      AcceleratorControllerImpl::PlutoniumSystemKeyHandler>
++      handler;
++  return *handler;
++}
++
++// The helper's name for a hardware key's action, and Ash's own action, run
++// when the helper had nothing to do with it (the browser's media session
++// still answers the media keys). nullptr for the other actions.
++const char* PlutoniumSystemKey(AcceleratorAction action,
++                               base::OnceClosure* own_action) {
++  switch (action) {
++    case AcceleratorAction::kVolumeUp:
++      return "volume-up";
++    case AcceleratorAction::kVolumeDown:
++      return "volume-down";
++    case AcceleratorAction::kVolumeMute:
++    case AcceleratorAction::kVolumeMuteToggle:
++      return "volume-mute";
++    case AcceleratorAction::kMicrophoneMuteToggle:
++      return "mic-mute";
++    case AcceleratorAction::kBrightnessUp:
++      return "brightness-up";
++    case AcceleratorAction::kBrightnessDown:
++      return "brightness-down";
++    case AcceleratorAction::kMediaPlayPause:
++      *own_action = base::BindOnce(&accelerators::MediaPlayPause);
++      return "play-pause";
++    case AcceleratorAction::kMediaPlay:
++      *own_action = base::BindOnce(&accelerators::MediaPlay);
++      return "play";
++    case AcceleratorAction::kMediaPause:
++      *own_action = base::BindOnce(&accelerators::MediaPause);
++      return "pause";
++    case AcceleratorAction::kMediaStop:
++      *own_action = base::BindOnce(&accelerators::MediaStop);
++      return "stop";
++    case AcceleratorAction::kMediaNextTrack:
++      *own_action = base::BindOnce(&accelerators::MediaNextTrack);
++      return "next";
++    case AcceleratorAction::kMediaPrevTrack:
++      *own_action = base::BindOnce(&accelerators::MediaPrevTrack);
++      return "previous";
++    default:
++      return nullptr;
++  }
++}
++
++// In shell mode the shell is the desktop, as a Wayland compositor's is: of
++// Ash's own keys only the hardware ones stay (brightness, volume, media,
++// power, the Caps Lock key), and the debug ones when they're turned on. The
++// rest (screen scaling and rotation, switching input methods, accessibility
++// toggles, clipboard history, Shift ending Caps Lock) reach the app or page.
++bool IsAllowedInPlutoniumShell(AcceleratorAction action,
++                               const ui::Accelerator& accelerator) {
++  switch (action) {
++    case AcceleratorAction::kBrightnessDown:
++    case AcceleratorAction::kBrightnessUp:
++    case AcceleratorAction::kKeyboardBacklightToggle:
++    case AcceleratorAction::kKeyboardBrightnessDown:
++    case AcceleratorAction::kKeyboardBrightnessUp:
++    case AcceleratorAction::kMediaFastForward:
++    case AcceleratorAction::kMediaNextTrack:
++    case AcceleratorAction::kMediaPause:
++    case AcceleratorAction::kMediaPlay:
++    case AcceleratorAction::kMediaPlayPause:
++    case AcceleratorAction::kMediaPrevTrack:
++    case AcceleratorAction::kMediaRewind:
++    case AcceleratorAction::kMediaStop:
++    case AcceleratorAction::kMicrophoneMuteToggle:
++    case AcceleratorAction::kPowerPressed:
++    case AcceleratorAction::kPowerReleased:
++    case AcceleratorAction::kPrivacyScreenToggle:
++    case AcceleratorAction::kVolumeDown:
++    case AcceleratorAction::kVolumeMute:
++    case AcceleratorAction::kVolumeUp:
++      return true;
++    case AcceleratorAction::kToggleCapsLock:
++      // Not Alt+Search.
++      return accelerator.key_code() == ui::VKEY_CAPITAL;
++    default:
++      break;
++  }
++  if (debug::DebugAcceleratorsEnabled()) {
++    for (const AcceleratorData& data : kDebugAcceleratorData) {
++      if (data.action == action) {
++        return true;
++      }
++    }
++  }
++  if (debug::DeveloperAcceleratorsEnabled()) {
++    for (const AcceleratorData& data : kDeveloperAcceleratorData) {
++      if (data.action == action) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ using ::base::UserMetricsAction;
+ using ::chromeos::WindowStateType;
+ using input_method::InputMethodManager;
+@@ -761,6 +875,11 @@ bool AcceleratorControllerImpl::CanPerformAction(
+   if (accelerator.IsRepeat() && !repeatable_actions_.contains(action))
+     return false;
+ 
++  if (IsPlutoniumShellMode() &&
++      !IsAllowedInPlutoniumShell(action, accelerator)) {
++    return false;
++  }
++
+   AcceleratorProcessingRestriction restriction =
+       GetAcceleratorProcessingRestriction(action);
+   if (restriction != RESTRICTION_NONE)
+@@ -1008,6 +1127,12 @@ bool AcceleratorControllerImpl::CanPerformAction(
+   }
+ }
+ 
++// static
++void AcceleratorControllerImpl::SetPlutoniumSystemKeyHandler(
++    PlutoniumSystemKeyHandler handler) {
++  PlutoniumSystemKeyHandlerInstance() = std::move(handler);
++}
++
+ void AcceleratorControllerImpl::PerformAction(
+     AcceleratorAction action,
+     const ui::Accelerator& accelerator) {
+@@ -1029,6 +1154,14 @@ void AcceleratorControllerImpl::PerformAction(
+         action == AcceleratorAction::kVolumeUp);
+   }
+ 
++  if (IsPlutoniumShellMode() && PlutoniumSystemKeyHandlerInstance()) {
++    base::OnceClosure own_action = base::DoNothing();
++    if (const char* key = PlutoniumSystemKey(action, &own_action)) {
++      PlutoniumSystemKeyHandlerInstance().Run(key, std::move(own_action));
++      return;
++    }
++  }
++
+   const bool key_pressed =
+       accelerator.key_state() == ui::Accelerator::KeyState::PRESSED;
+ 
+diff --git a/ash/accelerators/accelerator_controller_impl.h b/ash/accelerators/accelerator_controller_impl.h
+index bdc0567bec..b4b100feaa 100644
+--- a/ash/accelerators/accelerator_controller_impl.h
++++ b/ash/accelerators/accelerator_controller_impl.h
+@@ -10,6 +10,7 @@
+ #include <map>
+ #include <memory>
+ #include <set>
++#include <string>
+ #include <vector>
+ 
+ #include "ash/accelerators/accelerator_capslock_state_machine.h"
+@@ -30,6 +31,7 @@
+ #include "ash/system/input_device_settings/input_device_settings_notification_controller.h"
+ #include "base/containers/span.h"
+ #include "base/files/file_path.h"
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/timer/timer.h"
+ #include "ui/base/accelerators/accelerator.h"
+@@ -114,6 +116,17 @@ class ASH_EXPORT AcceleratorControllerImpl
+     raw_ptr<AcceleratorControllerImpl> controller_;  // Not owned.
+   };
+ 
++  // PLUTONIUM (EXO-SERVICES): in shell mode, the hardware keys (volume,
++  // brightness, media) go to the helper's desktop services, which drive
++  // PipeWire, the backlight and the media players, through |handler|: the
++  // key's name ("volume-up", "play-pause", …) and Ash's own action, to run if
++  // the helper didn't do anything with it. Ash's own (CRAS, powerd) do
++  // nothing on Linux.
++  using PlutoniumSystemKeyHandler =
++      base::RepeatingCallback<void(const std::string& key,
++                                   base::OnceClosure own_action)>;
++  static void SetPlutoniumSystemKeyHandler(PlutoniumSystemKeyHandler handler);
++
+   explicit AcceleratorControllerImpl(AshAcceleratorConfiguration* config);
+   AcceleratorControllerImpl(const AcceleratorControllerImpl&) = delete;
+   AcceleratorControllerImpl& operator=(const AcceleratorControllerImpl&) =
+diff --git a/ash/clipboard/clipboard_history_controller_impl.cc b/ash/clipboard/clipboard_history_controller_impl.cc
+index b30656aa4e..b783c9aaa0 100644
+--- a/ash/clipboard/clipboard_history_controller_impl.cc
++++ b/ash/clipboard/clipboard_history_controller_impl.cc
+@@ -34,6 +34,7 @@
+ #include "base/check.h"
+ #include "base/check_is_test.h"
+ #include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/json/values_util.h"
+ #include "base/memory/raw_ptr.h"
+@@ -522,6 +523,14 @@ bool ClipboardHistoryControllerImpl::ShowMenu(
+     ui::mojom::MenuSourceType source_type,
+     chromeos::clipboard_history::ShowSource show_source,
+     OnMenuClosingCallback callback) {
++  // PLUTONIUM (EXO-CHROME): in shell mode (--plutonium-shell-url) a web page
++  // is the desktop, and Ash's clipboard history menu isn't its UI (Search+V
++  // already reaches the page; this is for the menu's other ways in).
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (shell_mode) {
++    return false;
++  }
+   if (IsMenuShowing() || !HasAvailableHistoryItems()) {
+     return false;
+   }
+diff --git a/ash/clipboard/clipboard_nudge_controller.cc b/ash/clipboard/clipboard_nudge_controller.cc
+index c3019be716..627eb27a81 100644
+--- a/ash/clipboard/clipboard_nudge_controller.cc
++++ b/ash/clipboard/clipboard_nudge_controller.cc
+@@ -15,6 +15,7 @@
+ #include "ash/session/session_controller_impl.h"
+ #include "ash/shell.h"
+ #include "ash/strings/grit/ash_strings.h"
++#include "base/command_line.h"
+ #include "base/json/values_util.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/notreached.h"
+@@ -369,6 +370,14 @@ void ClipboardNudgeController::OnClipboardHistoryPasted() {
+ }
+ 
+ void ClipboardNudgeController::ShowNudge(ClipboardNudgeType nudge_type) {
++  // PLUTONIUM (EXO-CHROME): in shell mode (--plutonium-shell-url) a web page
++  // is the desktop, and Ash's clipboard history and its Search+V aren't its
++  // UI. Copying and pasting between apps and tabs shows no nudges.
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (shell_mode) {
++    return;
++  }
+   current_nudge_type_ = nudge_type;
+ 
+   const std::u16string shortcut_key =
+diff --git a/ash/display/display_configuration_controller.cc b/ash/display/display_configuration_controller.cc
+index f010b52a70..b5d2621f1a 100644
+--- a/ash/display/display_configuration_controller.cc
++++ b/ash/display/display_configuration_controller.cc
+@@ -15,6 +15,7 @@
+ #include "ash/shell.h"
+ #include "ash/strings/grit/ash_strings.h"
+ #include "ash/wallpaper/wallpaper_controller_impl.h"
++#include "base/command_line.h"
+ #include "base/check.h"
+ #include "base/functional/bind.h"
+ #include "base/system/sys_info.h"
+@@ -87,7 +88,10 @@ DisplayConfigurationController::DisplayConfigurationController(
+     : display_manager_(display_manager),
+       window_tree_host_manager_(window_tree_host_manager) {
+   display_manager_->AddDisplayManagerObserver(this);
+-  if (base::SysInfo::IsRunningOnChromeOS()) {
++  // EXO-VIABILITY experiment: see DisplayManager::DisplayManager().
++  if (base::SysInfo::IsRunningOnChromeOS() ||
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "exo-viability-real-displays")) {
+     limiter_ = std::make_unique<DisplayChangeLimiter>();
+   }
+   if (!g_disable_animator_for_test)
+diff --git a/ash/drag_drop/drag_drop_controller.cc b/ash/drag_drop/drag_drop_controller.cc
+index adfc2ad520..8bb22b5f65 100644
+--- a/ash/drag_drop/drag_drop_controller.cc
++++ b/ash/drag_drop/drag_drop_controller.cc
+@@ -14,6 +14,7 @@
+ #include "ash/wm/toplevel_window_event_handler.h"
+ #include "ash/wm/window_util.h"
+ #include "base/functional/bind.h"
++#include "base/no_destructor.h"
+ #include "base/run_loop.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/hang_watcher.h"
+@@ -143,6 +144,18 @@ bool DragDropController::IsDragDropCompleted() {
+   return drag_drop_completed_;
+ }
+ 
++namespace {
++DragDropController::TargetOverride& GetTargetOverride() {
++  static base::NoDestructor<DragDropController::TargetOverride> instance;
++  return *instance;
++}
++}  // namespace
++
++// static
++void DragDropController::SetTargetOverride(TargetOverride target_override) {
++  GetTargetOverride() = std::move(target_override);
++}
++
+ DragOperation DragDropController::StartDragAndDrop(
+     std::unique_ptr<ui::OSExchangeData> data,
+     aura::Window* root_window,
+@@ -397,6 +410,14 @@ void DragDropController::OnMouseEvent(ui::MouseEvent* event) {
+   }
+ 
+   auto translated_event = ConvertEvent(translated_target, *event);
++  if (GetTargetOverride()) {
++    gfx::PointF location = translated_event->location_f();
++    if (aura::Window* target =
++            GetTargetOverride().Run(translated_target, &location)) {
++      translated_target = target;
++      translated_event->set_location_f(location);
++    }
++  }
+   switch (translated_event->type()) {
+     case ui::EventType::kMouseDragged:
+       DragUpdate(translated_target, *translated_event.get());
+diff --git a/ash/drag_drop/drag_drop_controller.h b/ash/drag_drop/drag_drop_controller.h
+index 007153440f..1393278fcc 100644
+--- a/ash/drag_drop/drag_drop_controller.h
++++ b/ash/drag_drop/drag_drop_controller.h
+@@ -25,6 +25,7 @@
+ #include "ui/events/event_constants.h"
+ #include "ui/events/event_handler.h"
+ #include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/geometry/point_f.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/views/widget/unique_widget_ptr.h"
+ 
+@@ -47,6 +48,15 @@ class ASH_EXPORT DragDropController : public aura::client::DragDropClient,
+  public:
+   DragDropController();
+ 
++  // PLUTONIUM: finds the real drop target when |target| shows other windows'
++  // content (the shell page shows native windows, which aura's hit test
++  // can't see). Returns null to keep |target|; else the window to drop on,
++  // with |location_in_target| mapped into it.
++  using TargetOverride =
++      base::RepeatingCallback<aura::Window*(aura::Window* target,
++                                            gfx::PointF* location_in_target)>;
++  static void SetTargetOverride(TargetOverride target_override);
++
+   DragDropController(const DragDropController&) = delete;
+   DragDropController& operator=(const DragDropController&) = delete;
+ 
+diff --git a/ash/shell.cc b/ash/shell.cc
+index fb2b6030be..c7f787ab3f 100644
+--- a/ash/shell.cc
++++ b/ash/shell.cc
+@@ -1947,7 +1947,10 @@ void Shell::InitializeDisplayManager() {
+   bool display_initialized = display_manager_->InitFromCommandLine();
+ 
+   if (!display_initialized) {
+-    if (base::SysInfo::IsRunningOnChromeOS()) {
++    // EXO-VIABILITY experiment: see DisplayManager::DisplayManager().
++    if (base::SysInfo::IsRunningOnChromeOS() ||
++        base::CommandLine::ForCurrentProcess()->HasSwitch(
++            "exo-viability-real-displays")) {
+       display_change_observer_ =
+           std::make_unique<display::DisplayChangeObserver>(
+               display_manager_.get());
+diff --git a/ash/system/toast/anchored_nudge_manager_impl.cc b/ash/system/toast/anchored_nudge_manager_impl.cc
+index 4401662ae5..5b6f0ca930 100644
+--- a/ash/system/toast/anchored_nudge_manager_impl.cc
++++ b/ash/system/toast/anchored_nudge_manager_impl.cc
+@@ -14,6 +14,7 @@
+ #include "ash/session/session_controller_impl.h"
+ #include "ash/shell.h"
+ #include "ash/system/toast/anchored_nudge.h"
++#include "base/command_line.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "chromeos/ui/base/nudge_util.h"
+@@ -300,6 +301,16 @@ void AnchoredNudgeManagerImpl::Show(AnchoredNudgeData& nudge_data) {
+   std::string id = nudge_data.id;
+   CHECK(!id.empty());
+ 
++  // PLUTONIUM (EXO-CHROME): in shell mode (--plutonium-shell-url) a web page
++  // is the desktop, and Ash's nudges (education bubbles for its shelf,
++  // clipboard history, capture mode, the camera and the like) aren't its UI.
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (shell_mode) {
++    VLOG(1) << "EXO-CHROME nudge not shown in shell mode: " << id;
++    return;
++  }
++
+   // If `pause_counter_` is greater than 0, no nudges should be shown.
+   if (pause_counter_ > 0) {
+     return;
+diff --git a/ash/system/toast/toast_manager_impl.cc b/ash/system/toast/toast_manager_impl.cc
+index fa56dc4d18..1c3821f615 100644
+--- a/ash/system/toast/toast_manager_impl.cc
++++ b/ash/system/toast/toast_manager_impl.cc
+@@ -9,10 +9,12 @@
+ #include "ash/public/cpp/system/scoped_toast_pause.h"
+ #include "ash/session/session_controller_impl.h"
+ #include "ash/shell.h"
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/location.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/strings/stringprintf.h"
++#include "base/strings/utf_string_conversions.h"
+ #include "base/time/time.h"
+ 
+ namespace ash {
+@@ -122,6 +124,18 @@ void ToastManagerImpl::Show(ToastData data) {
+ 
+   LOG(ERROR) << "Show toast called, toast id: " << id;
+ 
++  // PLUTONIUM (EXO-CHROME): in shell mode (--plutonium-shell-url) a web page
++  // is the desktop, and Ash's toasts would show over it ("Copied to
++  // clipboard", capture mode's, the system features' that have no UI in
++  // shell mode). None shows.
++  static const bool shell_mode =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (shell_mode) {
++    VLOG(1) << "EXO-CHROME toast not shown in shell mode: " << id << ": "
++            << base::UTF16ToUTF8(data.text);
++    return;
++  }
++
+   // If `pause_counter_` is greater than 0, no toasts should be shown.
+   if (pause_counter_ > 0) {
+     LOG(ERROR)
+diff --git a/ash/wm/system_gesture_event_filter.cc b/ash/wm/system_gesture_event_filter.cc
+index 6f28f2155e..7dc062310c 100644
+--- a/ash/wm/system_gesture_event_filter.cc
++++ b/ash/wm/system_gesture_event_filter.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "ash/wm/gestures/wm_gesture_handler.h"
+ #include "base/metrics/user_metrics.h"
++#include "base/no_destructor.h"
+ #include "ui/aura/window.h"
+ #include "ui/base/pointer/pointer_device.h"
+ #include "ui/events/event.h"
+@@ -13,6 +14,22 @@
+ 
+ namespace ash {
+ 
++namespace {
++
++SystemGestureEventFilter::PlutoniumSwipeHandler& SwipeHandlerInstance() {
++  static base::NoDestructor<SystemGestureEventFilter::PlutoniumSwipeHandler>
++      handler;
++  return *handler;
++}
++
++}  // namespace
++
++// static
++void SystemGestureEventFilter::SetPlutoniumSwipeHandler(
++    PlutoniumSwipeHandler handler) {
++  SwipeHandlerInstance() = std::move(handler);
++}
++
+ SystemGestureEventFilter::SystemGestureEventFilter()
+     : wm_gesture_handler_(std::make_unique<WmGestureHandler>()) {}
+ 
+@@ -27,6 +44,11 @@ void SystemGestureEventFilter::OnMouseEvent(ui::MouseEvent* event) {
+ }
+ 
+ void SystemGestureEventFilter::OnScrollEvent(ui::ScrollEvent* event) {
++  if (SwipeHandlerInstance() && event->finger_count() >= 3) {
++    SwipeHandlerInstance().Run(*event);
++    event->StopPropagation();
++    return;
++  }
+   if (wm_gesture_handler_ && wm_gesture_handler_->ProcessScrollEvent(*event))
+     event->StopPropagation();
+ }
+diff --git a/ash/wm/system_gesture_event_filter.h b/ash/wm/system_gesture_event_filter.h
+index 37a1c08e71..b6747d2784 100644
+--- a/ash/wm/system_gesture_event_filter.h
++++ b/ash/wm/system_gesture_event_filter.h
+@@ -7,13 +7,15 @@
+ 
+ #include <memory>
+ 
++#include "ash/ash_export.h"
++#include "base/functional/callback.h"
+ #include "ui/events/event_handler.h"
+ 
+ namespace ash {
+ class WmGestureHandler;
+ 
+ // An event filter which handles system level gesture events.
+-class SystemGestureEventFilter : public ui::EventHandler {
++class ASH_EXPORT SystemGestureEventFilter : public ui::EventHandler {
+  public:
+   SystemGestureEventFilter();
+ 
+@@ -22,6 +24,14 @@ class SystemGestureEventFilter : public ui::EventHandler {
+ 
+   ~SystemGestureEventFilter() override;
+ 
++  // PLUTONIUM: in shell mode, touchpad swipes with three fingers or more go
++  // to |handler| (the visible shell page) instead of Ash's overview and desks,
++  // and no further.
++  using PlutoniumSwipeHandler =
++      base::RepeatingCallback<void(const ui::ScrollEvent& event)>;
++  static void SetPlutoniumSwipeHandler(
++      PlutoniumSwipeHandler handler);
++
+   // Overridden from ui::EventHandler:
+   void OnMouseEvent(ui::MouseEvent* event) override;
+   void OnScrollEvent(ui::ScrollEvent* event) override;
+diff --git a/chrome/browser/ash/exo/chrome_security_delegate.cc b/chrome/browser/ash/exo/chrome_security_delegate.cc
+index ff2020575c..125ba931ae 100644
+--- a/chrome/browser/ash/exo/chrome_security_delegate.cc
++++ b/chrome/browser/ash/exo/chrome_security_delegate.cc
+@@ -27,6 +27,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chromeos/ash/experiences/arc/arc_util.h"
++#include "components/exo/embedded_windows.h"
+ #include "components/exo/shell_surface_util.h"
+ #include "content/public/common/content_switches.h"
+ #include "content/public/common/drop_data.h"
+@@ -117,8 +118,16 @@ std::vector<FileInfo> TranslateVMToHost(const std::string& vm_name,
+   // Do not expose any paths to unknown VMs or to ArcVm.
+   // Arc doesn't currently support drag-drop or clipboard via exo.
+   // If Arc ever adds support, we must map paths correctly like other VMs.
+-  if (vm_name.empty() ||
+-      (vm_name == arc::kArcVmName &&
++  // PLUTONIUM: Wayland apps without a VM are the user's own host programs,
++  // which share this filesystem. Their paths are host paths, as they are.
++  if (vm_name.empty()) {
++    std::vector<FileInfo> file_infos;
++    for (ui::FileInfo& info : vm_paths) {
++      file_infos.push_back({std::move(info.path), storage::FileSystemURL()});
++    }
++    return file_infos;
++  }
++  if ((vm_name == arc::kArcVmName &&
+        base::FeatureList::IsEnabled(kChromeSecurityDelegateIgnoreArcVm))) {
+     return {};
+   }
+@@ -216,6 +225,10 @@ void ShareAndTranslateHostToVM(
+         LOG(WARNING) << "Could not convert into VM path " << info.path;
+         continue;
+       }
++    } else if (vm_name.empty() && !info.path.empty() &&
++               info.path.IsAbsolute()) {
++      // PLUTONIUM: host apps get host paths (see TranslateVMToHost()).
++      file_url = ui::FilePathToFileURL(info.path);
+     } else {
+       // Ignore unknown VMs
+       continue;
+@@ -303,7 +316,10 @@ bool ChromeSecurityDelegate::CanSelfActivate(aura::Window* window) const {
+ bool ChromeSecurityDelegate::CanLockPointer(aura::Window* window) const {
+   // TODO(b/200896773): Move this out from exo's default security delegate
+   // define in client's security delegates.
+-  return ash::IsArcWindow(window);
++  // EXO-CAPTURE: in the Plutonium shell, the user's own Wayland apps (games)
++  // may capture the pointer. Super+Escape or moving keyboard focus away
++  // breaks the capture (see plutonium_keys.h).
++  return ash::IsArcWindow(window) || exo::EmbeddedWindows::HideWindows();
+ }
+ 
+ ChromeSecurityDelegate::SetBoundsPolicy ChromeSecurityDelegate::CanSetBounds(
+diff --git a/chrome/browser/ash/login/signin/signin_error_notifier.cc b/chrome/browser/ash/login/signin/signin_error_notifier.cc
+index cf743acc37..97c4427a9c 100644
+--- a/chrome/browser/ash/login/signin/signin_error_notifier.cc
++++ b/chrome/browser/ash/login/signin/signin_error_notifier.cc
+@@ -13,6 +13,7 @@
+ #include "ash/login/resources/grit/ash_login_strings.h"
+ #include "ash/public/cpp/notification_utils.h"
+ #include "ash/webui/settings/public/constants/routes.mojom.h"
++#include "base/command_line.h"
+ #include "base/check_deref.h"
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
+@@ -324,6 +325,12 @@ void SigninErrorNotifier::OnErrorChanged() {
+ 
+ void SigninErrorNotifier::HandleDeviceAccountError(
+     const std::u16string& error_message) {
++  // EXO-VIABILITY experiment: the stub user's fake credentials raise this
++  // popup, which sits above fullscreen Exo windows and blocks overlays.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "exo-viability-no-signin-error")) {
++    return;
++  }
+   // If this error has occurred because a user's account has just been converted
+   // to a Family Link Supervised account, then suppress the notification.
+   if (supervised_user_service_->signout_required_after_supervision_enabled()) {
+diff --git a/ui/events/ash/event_rewriter_ash.cc b/ui/events/ash/event_rewriter_ash.cc
+index ae8361b378..bfea6f7378 100644
+--- a/ui/events/ash/event_rewriter_ash.cc
++++ b/ui/events/ash/event_rewriter_ash.cc
+@@ -12,6 +12,7 @@
+ #include <cstdint>
+ 
+ #include "ash/constants/ash_features.h"
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+@@ -1722,6 +1723,14 @@ void EventRewriterAsh::RewriteExtendedKeys(const KeyEvent& key_event,
+     return;
+   }
+ 
++  // EXO-NIRI: a Plutonium shell runs on desktop keyboards, which have real
++  // Home/End/Page keys; Search+arrows are the shell's (niri's Super+Left),
++  // and Alt+arrows the apps'.
++  static const bool plutonium_shell =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (plutonium_shell) {
++    return;
++  }
+   if (incoming.flags & (EF_COMMAND_DOWN | EF_ALT_DOWN)) {
+     MaybeRewriteKeyEventToSixPackKeyAction(delegate_, key_event, state,
+                                            last_keyboard_device_id_);
+diff --git a/ui/events/event.cc b/ui/events/event.cc
+index 20b5f8b72d..ba0cfa736b 100644
+--- a/ui/events/event.cc
++++ b/ui/events/event.cc
+@@ -1211,6 +1211,11 @@ ScrollEvent::ScrollEvent(const PlatformEvent& native_event)
+              type() == EventType::kScrollFlingCancel) {
+     GetFlingData(native_event, &x_offset_, &y_offset_, &x_offset_ordinal_,
+                  &y_offset_ordinal_, nullptr);
++#if BUILDFLAG(IS_OZONE)
++    // PLUTONIUM: a touchpad swipe's begin and end (a fling cancel and start)
++    // keep their finger count, so Ash can hand them to the shell.
++    finger_count_ = native_event->AsScrollEvent()->finger_count();
++#endif
+   } else {
+     NOTREACHED() << "Unexpected event type " << std::to_underlying(type())
+                  << " when constructing a ScrollEvent.";
+diff --git a/ui/wm/core/accelerator_filter.cc b/ui/wm/core/accelerator_filter.cc
+index c07d630f31..40f11d0f37 100644
+--- a/ui/wm/core/accelerator_filter.cc
++++ b/ui/wm/core/accelerator_filter.cc
+@@ -47,6 +47,10 @@ void AcceleratorFilter::OnKeyEvent(ui::KeyEvent* event) {
+   DCHECK(event->target());
+   if (ShouldFilter(event))
+     return;
++  if (event->properties() &&
++      event->properties()->contains(kShellShortcutEventKey)) {
++    return;
++  }
+ 
+   ui::Accelerator accelerator(*event);
+   if (delegate_->ProcessAccelerator(*event, accelerator))
+diff --git a/ui/wm/core/accelerator_filter.h b/ui/wm/core/accelerator_filter.h
+index 3be814082f..0529a8eb52 100644
+--- a/ui/wm/core/accelerator_filter.h
++++ b/ui/wm/core/accelerator_filter.h
+@@ -13,6 +13,11 @@
+ namespace wm {
+ class AcceleratorDelegate;
+ 
++// EXO-NIRI: a key event with this property is one of the Plutonium shell
++// page's own shortcuts (navigator.windowBroker.setShellShortcuts): it goes to
++// the page instead of running an Ash accelerator (Search+D is Dictation).
++inline constexpr char kShellShortcutEventKey[] = "plutonium-shell-shortcut";
++
+ // AcceleratorFilter filters key events for AcceleratorControler handling global
+ // keyboard accelerators.
+ class COMPONENT_EXPORT(UI_WM) AcceleratorFilter : public ui::EventHandler {
+diff --git a/ui/wm/core/compound_event_filter.cc b/ui/wm/core/compound_event_filter.cc
+index 90e274e73a..dd9313525d 100644
+--- a/ui/wm/core/compound_event_filter.cc
++++ b/ui/wm/core/compound_event_filter.cc
+@@ -228,6 +228,8 @@ void CompoundEventFilter::OnMouseEvent(ui::MouseEvent* event) {
+   // outside of the root window and moved back for some reasons (e.g. running on
+   // on Desktop for testing, or a bug in pointer barrier).
+   if (!(event->flags() & ui::EF_FROM_TOUCH) &&
++      !(event->properties() &&
++        event->properties()->contains(kSkipCursorUpdateEventKey)) &&
+       (event->type() == ui::EventType::kMouseEntered ||
+        event->type() == ui::EventType::kMouseMoved ||
+        event->type() == ui::EventType::kMousePressed ||
+diff --git a/ui/wm/core/compound_event_filter.h b/ui/wm/core/compound_event_filter.h
+index f81bd4838e..cdef6a40cc 100644
+--- a/ui/wm/core/compound_event_filter.h
++++ b/ui/wm/core/compound_event_filter.h
+@@ -22,6 +22,12 @@ class TouchEvent;
+ 
+ namespace wm {
+ 
++// Mouse events carrying this property (ui::Event::SetProperties) leave the
++// cursor alone: their target window does not own the cursor. Used for events
++// injected into windows shown inside another (e.g. Exo windows embedded in a
++// web page, where the page shows the cursor).
++inline constexpr char kSkipCursorUpdateEventKey[] = "wm-skip-cursor-update";
++
+ // TODO(beng): This class should die. AddEventHandler() on the root Window
+ //             should be used instead.
+ // CompoundEventFilter gets all events first and can provide actions to those
+diff --git a/ui/wm/core/focus_controller.cc b/ui/wm/core/focus_controller.cc
+index 2d364eb0ef..048d35c2cc 100644
+--- a/ui/wm/core/focus_controller.cc
++++ b/ui/wm/core/focus_controller.cc
+@@ -143,6 +143,11 @@ aura::Window* FocusController::GetFocusedWindow() {
+ void FocusController::OnKeyEvent(ui::KeyEvent* event) {}
+ 
+ void FocusController::OnMouseEvent(ui::MouseEvent* event) {
++  // EXO-EMBED spike: input routed from a web page into an embedded Exo surface
++  // must not activate (raise) that surface's own window.
++  if (event->properties() && event->properties()->contains("exo-embedded")) {
++    return;
++  }
+   if ((event->type() == ui::EventType::kMousePressed ||
+        (event->type() == ui::EventType::kMouseEntered &&
+         focus_follows_cursor_)) &&

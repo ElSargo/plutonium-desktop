@@ -5,7 +5,7 @@ Apps get Ash's input method (IME) through Exo's text-input protocols: what the I
 ## What works
 
 **Protocols.**
-- **`zwp_text_input_v3`** (patch 0061): GTK 4, Qt 6 and foot speak only this one.
+- **`zwp_text_input_v3`** (Chromium's Wayland protocols patch): GTK 4, Qt 6 and foot speak only this one.
   - It sits on the same `exo::TextInput` as v1, with its own delegate.
   - **Focus:** `enter` and `leave` follow the seat's keyboard focus on the client's surfaces.
   - **State:** `enable`, `disable`, surrounding text, content type and cursor rectangle are held until `commit`. Enabling attaches the IME to the entered surface; disabling, or losing focus, detaches it.
@@ -46,7 +46,7 @@ Why each step is needed:
   - On screen, the pre-edit `nihon` was underlined in the entry and became 日本.
 - **foot:** `preedit_string`/`commit_string` the same way; `echo你好` appeared at the prompt.
 - **Without an engine** (the US keyboard), both bind v3, get `enter`/`leave`, `enable`/`disable` and their state, and typing goes through `wl_keyboard` as before.
-- **Keys the IME passes on:** with the test IME current on build 0061–0064, gtk4-demo and foot got no `wl_keyboard.key` at all. With 0065 (build 3744b45d0cd4) they arrive:
+- **Keys the IME passes on:** with the test IME current on a dev build with text-input-v3, gtk4-demo and foot got no `wl_keyboard.key` at all. With 0065 (build 3744b45d0cd4) they arrive:
   - **gtk4-demo**, after committing 你好: BackSpace deleted 好, Left and Right moved the cursor, and Ctrl+A and Return reached it.
   - **foot:** `echo␣␣nihao␣⏎` ran `echo 你好` and printed 你好.
   - **With the US keyboard** (no engine): foot's `echo abc`, Left Left BackSpace ⏎ printed `bc`, and gtk4-demo took arrows, BackSpace, Ctrl+A and Return as before.

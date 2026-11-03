@@ -17,7 +17,7 @@
 # POSIX sh: `curl | sh` runs it with whatever sh is (dash on Debian and Ubuntu).
 set -eu
 
-RELEASE_URL=https://github.com/ElSargo/plutonium-desktop/releases/latest/download/plutonium-x86_64.tar.xz
+RELEASE_URL=https://github.com/ElSargo/pluto/releases/latest/download/plutonium-x86_64.tar.xz
 DEST=/opt/plutonium
 LINK=/usr/local/bin/plutonium
 ENTRY=/usr/share/wayland-sessions/plutonium.desktop
@@ -93,8 +93,9 @@ lib_packages() {   # <soname>...
 }
 
 # A running session from the install: replacing its files under it breaks it.
+# Its browser process (Ash), not the renderers a stopped one leaves for a moment.
 running() {
-  pgrep -f "^$DEST/chrome/chrome " > /dev/null 2>&1 || pgrep -f "$DEST/helper/plutonium.ts daemon" > /dev/null 2>&1
+  pgrep -f "^$DEST/chrome/chrome --enable-wayland-server" > /dev/null 2>&1 || pgrep -f "$DEST/helper/plutonium.ts daemon" > /dev/null 2>&1
 }
 
 # --- Uninstall ---------------------------------------------------------------

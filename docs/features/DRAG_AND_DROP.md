@@ -1,6 +1,6 @@
 # Drag and drop
 
-Drag and drop between native Wayland apps, browser tabs and shell pages, in any frontend. Tested on DRM (tty2) in Styx on 2026-10-17. The Chromium changes are in `chromium/patches/0016-*.patch`.
+Drag and drop between native Wayland apps, browser tabs and shell pages, in any frontend. Tested on DRM (tty2) in Styx on 2026-10-17. The Chromium changes are in Chromium's Exo patch.
 
 ## How a drag works here
 

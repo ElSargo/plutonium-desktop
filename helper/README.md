@@ -10,16 +10,16 @@ What it does:
 - **Agent bridge.** A thread's agent can list, launch, snapshot, focus and close its own windows, and open, navigate, snapshot, focus and close its own browser tabs (and answer their dialogs). The helper relays these to the shell page, which holds the window broker. Agents reach it through `plutonium.ts mcp`, a stdio MCP server.
 - **The backup terminal.** A page (`/v1/terminal/`) with tabs of login shells on this machine, for Ash's switcher to open when no shell works (`src/terminal.ts`, `src/ptybridge.py`, `web/terminal/`, xterm.js in `web/vendor/xterm/`). Each session is `$SHELL` on a pty, made by Python's `pty` module, in the thread `plutonium:terminal`. Needs `python3`.
 - **The desktop portal's screen capture and global shortcuts.** `org.freedesktop.impl.portal.ScreenCast` and `Screenshot` for apps (OBS, Firefox, Discord), through the browser's capture API: the focused shell (else Ash) asks the user, Ash publishes a PipeWire node. `Screenshot.PickColor`: the focused shell's picker. `GlobalShortcuts`: the focused shell binds the keys, every shell catches them. `FileChooser` (`OpenFile`, `SaveFile`, `SaveFiles`): the focused shell's file picker, the one tabs use, over the app's window. `Print`: the shell's print dialog, then CUPS, served by `src/printportal.py` (it takes the document's fd, which Node can't) (`src/portal.ts`, `src/printPortal.ts`, `src/shortcuts.ts`, `src/fileChooser.ts`, `portal/`, `docs/features/CAPTURE.md`, `docs/features/TAB_FEATURES.md`). On `$PLUTONIUM_PORTAL_BUS`, else the session bus; `PLUTONIUM_PORTAL=0` turns it off.
-- **Server-driven tabs.** A frontend's server can drive the tabs the shell shows for it over the DevTools protocol, as T3 Code drives its desktop app's tabs with Playwright (`src/serverTabs.ts`, `docs/features/TABS.md`). The helper connects to the browser's own DevTools (`--cdp-port`) and gives the server one relay per tab, which reaches that tab's page and nothing else.
+- **Server-driven tabs.** A frontend's server can drive the tabs the shell shows for it over the DevTools protocol, as T3 Code drives its desktop app's tabs with Playwright (`src/serverTabs.ts`, `docs/features/TABS.md`). The helper connects to the browser's own DevTools (`--cdp-socket`) and gives the server one relay per tab, which reaches that tab's page and nothing else.
 
 ## Running
 
 ```
 node helper/plutonium.ts daemon --shell-origin http://127.0.0.1:3773[,<origin>…] \
-  [--wayland-display wayland-plutonium] [--port 3780] [--cdp-port 9224]
+  [--wayland-display wayland-plutonium] [--port 3780] [--cdp-socket <path> | --cdp-port 9224]
 ```
 
-`--cdp-port` is the browser's `--remote-debugging-port`; without it there are no server-driven tabs. `PLUTONIUM_DEBUG_TABS=1` logs their traffic.
+`--cdp-socket` is the browser's `--plutonium-remote-debugging-socket` (a session's default: only this user's processes can connect to it); `--cdp-port` is its `--remote-debugging-port` instead (`DEVTOOLS=port`). Without either there are no server-driven tabs. `PLUTONIUM_DEBUG_TABS=1` logs their traffic.
 
 `/v1/shell.js` is `web/plutonium-shell.js`, or the file in `PLUTONIUM_SHELL_LIBRARY` (a session sets it to its live one, `plutonium live`), read on every request. `/v1/ui/<path>` serves the shells' UI library, `web/ui/` next to that file (src/uiLibrary.ts, `docs/features/UI_LIBRARY.md`): the dock, keys, settings, dragging, widgets and status indicators, as ES modules.
 

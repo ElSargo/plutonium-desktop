@@ -1,6 +1,6 @@
 # Seat management: starting, stopping and switching VTs
 
-On DRM, Ash is the controller of a logind session on a VT, like any Wayland compositor started from a text console (KWin, mutter, or wlroots through libseat). logind gives it the display and input devices, and takes them back while another VT is in front. `chromium/patches/0021-*.patch`, and `0033-*` for starting on a VT that isn't in front.
+On DRM, Ash is the controller of a logind session on a VT, like any Wayland compositor started from a text console (KWin, mutter, or wlroots through libseat). logind gives it the display and input devices, and takes them back while another VT is in front. Chromium's DRM patch has it, and starting on a VT that isn't in front.
 
 | | What happens |
 |---|---|

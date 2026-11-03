@@ -1,6 +1,6 @@
 # Window sizing and animation
 
-How a `<native-window>` sizes its app, what happens when the app wants another size, and how a shell animates windows. `chromium/patches/0017-*` to `0020-*`. Tested on Xvfb (`plutonium run --x11`, plain and niri shells, GTK 4 apps and foot) on 2026-10-18.
+How a `<native-window>` sizes its app, what happens when the app wants another size, and how a shell animates windows. Chromium's Exo and page API patches. Tested on Xvfb (`plutonium run --x11`, plain and niri shells, GTK 4 apps and foot) on 2026-10-18.
 
 ## The page sizes the window
 
@@ -63,7 +63,7 @@ The page also has the mouse captured for the rest of the drag (the router's capt
 
 ## Tiled or floating: client-side resize edges
 
-A parked window is told it is tiled (the four `xdg_toplevel` tiled states), so GTK 4 and other CSD apps drop their shadow, rounded corners and resize edges: the page lays it out. A page that shows a window floating sets the element's `floating` attribute (patch 0087):
+A parked window is told it is tiled (the four `xdg_toplevel` tiled states), so GTK 4 and other CSD apps drop their shadow, rounded corners and resize edges: the page lays it out. A page that shows a window floating sets the element's `floating` attribute (Chromium's page API patch):
 - **The app isn't told it's tiled.** It keeps its shadow, and the resize edges in it. The element still clips the shadow.
 - **Presses just outside the content box reach the app,** up to `kResizeEdgeMargin` (8) CSS pixels out, in the element's own space (through transforms), where nothing of the page's covers them. There the browser asks the renderer (`ForeignFrameSinkDelegate::NearResizeEdge()`), and the press is the window's if what Blink hit is the element or one of its ancestors (the background behind it, the tile it is in). A neighbour, a divider or an overlay keeps it. The pointer's moves go there too, so the app shows its resize cursors.
 - **The app then asks for a resize** from that edge, and the page gets the drag as above (`windowrequest`, `edge`).
@@ -92,7 +92,7 @@ Only the visible shell's elements count. When the driver changes, the window tak
 
 ## Popups
 
-An app's menus, context menus and tooltips (`xdg_popup`s, and X11 override-redirect menus, which xwayland-satellite turns into `xdg_popup`s) are Ash windows of their own, drawn above the page: the page only draws the window itself. So they show only where a page shows the window (patch 0045):
+An app's menus, context menus and tooltips (`xdg_popup`s, and X11 override-redirect menus, which xwayland-satellite turns into `xdg_popup`s) are Ash windows of their own, drawn above the page: the page only draws the window itself. So they show only where a page shows the window (Chromium's Exo patch):
 - **Shown:** an element in the visible shell is on screen with the window (the driver, else any such element). The parked window is kept where that element's content box is, so popups open next to the element. Its popups move with it, and are scaled about the window's origin when CSS transforms scale the element (T3 Code's panel shows a held window scaled).
 - **Shown nowhere** (another thread, the panel closed, another shell, the element off screen): its popups stay open but are invisible, take no input from the user and hold no pointer grab. They never cover the shell or another thread. Agents' keys still reach them through the window, as before. Showing the window again shows them again, at the element.
 

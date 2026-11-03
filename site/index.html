@@ -108,7 +108,7 @@ footer a{color:var(--soft)}
   <p class="lede">Plutonium is a Linux desktop whose shell (the window manager, the bar, the launcher) is a real HTML page, running on Chromium's browser engine. Your native apps and real browser tabs are elements in that page. You lay them out with CSS, script them with JavaScript, and save to see the change.</p>
   <div class="buttons">
     <a class="btn primary" href="#install">Install it</a>
-    <a class="btn" href="https://github.com/ElSargo/plutonium-desktop">Source on GitHub</a>
+    <a class="btn" href="https://github.com/ElSargo/pluto">Source on GitHub</a>
   </div>
 </div></div>
 
@@ -254,7 +254,7 @@ footer a{color:var(--soft)}
 
 <section id="status"><div class="wrap">
   <h2>Where it's at</h2>
-  <p>Plutonium is a public beta. Its developer uses it every day. It's new to everyone else, and so far it has run on only a handful of machines. Expect rough edges, and please <a href="https://github.com/ElSargo/plutonium-desktop/issues">report them</a>.</p>
+  <p>Plutonium is a public beta. Its developer uses it every day. It's new to everyone else, and so far it has run on only a handful of machines. Expect rough edges, and please <a href="https://github.com/ElSargo/pluto/issues">report them</a>.</p>
   <div class="pair" style="margin-top:8px">
     <div>
       <h3>Works</h3>
@@ -291,7 +291,7 @@ footer a{color:var(--soft)}
   <p class="soft">Plutonium is one package. The installer puts it in <code>/opt/plutonium</code>, links the <code>plutonium</code> command into <code>/usr/local/bin</code>, and adds Plutonium to your login screen. It uses sudo for those, and never touches your data.</p>
 
   <h3>1. Install it</h3>
-<pre><code>curl -fsSL <span class="site-origin">https://…</span>/install.sh | sh
+<pre><code>curl -fsSL <span class="site-origin">https://elsargo.github.io/pluto</span>/install.sh | sh
 plutonium doctor                    <span class="c"># checks everything is in place</span></code></pre>
   <p class="soft">If something is missing, the installer stops and gives you the command that installs it on your distribution.</p>
   <div class="note"><b>On NixOS,</b> the installer puts the release in place and prints the rest: copy its module, <code>/opt/plutonium/lib/nixos.nix</code>, next to your <code>configuration.nix</code>, add it to <code>imports</code>, and run <code>sudo nixos-rebuild switch</code>.</div>
@@ -303,11 +303,11 @@ plutonium doctor                    <span class="c"># checks everything is in pl
   <div class="note"><b>Just want a look first?</b> <code>plutonium run --x11 :0 niri</code> opens it as a window on the desktop you're using now, and <code>plutonium stop --x11</code> closes it. It's handy for a quick try or for working on a shell, but the login session is the real thing.</div>
 
   <h3>Removing it</h3>
-<pre><code>curl -fsSL <span class="site-origin">https://…</span>/install.sh | sh -s -- --uninstall</code></pre>
+<pre><code>curl -fsSL <span class="site-origin">https://elsargo.github.io/pluto</span>/install.sh | sh -s -- --uninstall</code></pre>
   <p class="soft">This removes <code>/opt/plutonium</code>, the command and the login screen entry. Your shells and settings in <code>~/.pluto</code> stay.</p>
 
   <h3>Building it yourself</h3>
-  <p class="soft">You don't have to: the release is all you need. Plutonium's changes to Chromium are kept as a numbered series of patches, small enough to read one at a time. To build your own, see <a href="https://github.com/ElSargo/plutonium-desktop/blob/main/docs/BUILDING.md">BUILDING.md</a>. Expect about 100 GB of disk space and an afternoon.</p>
+  <p class="soft">You don't have to: the release is all you need. Plutonium's changes to Chromium are kept as patches, one for each part of Plutonium. To build your own, see <a href="https://github.com/ElSargo/pluto/blob/main/docs/BUILDING.md">BUILDING.md</a>. Expect about 100 GB of disk space and an afternoon.</p>
 </div></section>
 
 <section id="faq"><div class="wrap">
@@ -332,11 +332,11 @@ plutonium doctor                    <span class="c"># checks everything is in pl
 
 <footer><div class="wide">
   <span>Plutonium · MIT licence</span>
-  <a href="https://github.com/ElSargo/plutonium-desktop">Source</a>
-  <a href="https://github.com/ElSargo/plutonium-desktop/blob/main/docs/USING.md">Using it</a>
-  <a href="https://github.com/ElSargo/plutonium-desktop/blob/main/docs/ARCHITECTURE.md">Architecture</a>
-  <a href="https://github.com/ElSargo/plutonium-desktop/blob/main/docs/BUILDING.md">Building</a>
-  <a href="https://github.com/ElSargo/plutonium-desktop/issues">Issues</a>
+  <a href="https://github.com/ElSargo/pluto">Source</a>
+  <a href="https://github.com/ElSargo/pluto/blob/main/docs/USING.md">Using it</a>
+  <a href="https://github.com/ElSargo/pluto/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+  <a href="https://github.com/ElSargo/pluto/blob/main/docs/BUILDING.md">Building</a>
+  <a href="https://github.com/ElSargo/pluto/issues">Issues</a>
 </div></footer>
 
 <script>

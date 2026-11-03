@@ -98,7 +98,7 @@ The raw broker API, for shells that don't use the library, is in `native_window_
 - The level is per site and shared by every tab and thread on it, so all of them report the change. It survives a reload.
 - The toast shows on the shell page that shows the tab, for any change of level, including going to a site that has its own level. `connect({ zoom: false })` turns it off; a function `(tab) => true` draws its own.
 - Verified on X11 (2026-10-23): the commands and their sharing over DevTools, then keys and the wheel as real X input through xdotool. DevTools' `Input.dispatchKeyEvent` can't test the keys: its events skip the browser's handling of keys the page didn't take (`skip_if_unhandled`).
-- **Not done:** T3's own zoom controls in its browser panel are still ignored by its bridge (`zoomIn`, `zoomOut`, `resetZoom`, `setZoomFactor` in patch 0012). T3 gets zoom through the keys, the wheel and the toast.
+- **Not done:** T3's own zoom controls in its browser panel are still ignored by its bridge (`zoomIn`, `zoomOut`, `resetZoom`, `setZoomFactor` in T3 patch 0012). T3 gets zoom through the keys, the wheel and the toast.
 
 ## Permission prompts
 
@@ -476,7 +476,7 @@ Addresses and payment cards. Passwords are not part of this (`PASSWORDS.md`), so
 
 - **Web notifications** (`Notification`). The permission is above, but showing them needs a notification UI. Shell mode has no Ash notifications. The shell (and the Notification portal for apps) should draw them, as a separate item.
 - Translate, Cast, picture-in-picture windows, "Save page as" beyond the picker, and Chrome's site settings UI.
-- Fullscreen requests from tabs already work (patch 0011).
+- Fullscreen requests from tabs already work (Chromium's shell patch).
 
 ## Decisions (2026-10-23)
 

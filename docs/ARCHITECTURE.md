@@ -22,7 +22,7 @@
 
 **Ash on DRM.**
 - Chromium built with `target_os = "chromeos"` is Ash, the ChromeOS desktop, as a Linux program. With `--ozone-platform=drm` it drives the display through KMS and reads input from evdev and libinput, like a Wayland compositor.
-- **Shell mode** (`--plutonium-shell-url`, patch 0006) turns Ash's own UI off: no shelf, tray, notifications, desks or window frames. The shell page opens as the single fullscreen window. Ash runs in kiosk mode, so only a few system keys remain.
+- **Shell mode** (`--plutonium-shell-url`, Chromium's shell patch) turns Ash's own UI off: no shelf, tray, notifications, desks or window frames. The shell page opens as the single fullscreen window. Ash runs in kiosk mode, so only a few system keys remain.
 - **Several shells:** `--plutonium-shells` runs more shell pages behind the first one. Super+Tab switches between them, and its overlay lists every window and tab.
 - **ChromeOS is an implementation detail.** We build ChromeOS only because that's where Ash and Exo are. Anything a user, an app or a website can see should look like ordinary Linux Chromium: web pages see Linux Chromium (user agent, client hints, web APIs), audio goes to the host's PipeWire through its PulseAudio server, and screen capture goes over PipeWire. Where a ChromeOS behaviour shows through, we switch on the Linux one or patch it out.
 
@@ -31,7 +31,7 @@
 - **X11 apps** go through a rootless Xwayland (`xwayland-satellite`), one per thread, which the helper starts on demand.
 - **Windows stay off Ash's desktop** (`--plutonium-hide-windows`). They are "parked" until a page embeds them.
 
-**`<native-window>`** (patch 0001) is an element that shows an Exo window inside the page.
+**`<native-window>`** (Chromium's page API patch) is an element that shows an Exo window inside the page.
 - **Drawing:** the window is a surface layer, composited by viz with the rest of the page. It gets no CPU copy, and a fullscreen one goes on a display plane.
 - **Size:** the element's size is sent to the app (`xdg_toplevel.configure`). The page alone sizes a window it shows: the app's own maximize, minimize and move/resize requests reach the page as `windowrequest` events instead, and anything in Ash that changes the window's state or size is undone. `object-fit` places a frame that isn't the box's size, and `crossfade` animates resizes (`features/WINDOW_SIZING.md`).
 - **Input:** pointer and keyboard input over the element is routed to the app, through the same hit testing that routes input into iframes. So are touchpad scrolling, drag and drop (`features/DRAG_AND_DROP.md`), pointer lock and fullscreen (`features/CONTROLS.md`).
@@ -41,11 +41,11 @@
 - **Grants:** these are per-document tokens. A page can embed a window only with one.
 - **Who gets it:** only a shell page does: a top-level document whose origin is one of `--plutonium-shell-origin` or the shells. Ordinary pages and iframes get nothing, and the browser enforces this (`features/BROKER.md`, `history/PHASE2_REPORT.md`).
 
-**Browser tabs** (patch 0007, `features/TABS.md`) are real `WebContents`, owned by the browser.
+**Browser tabs** (Chromium's tabs patch, `features/TABS.md`) are real `WebContents`, owned by the browser.
 - **Display:** the shell shows them as `<embed type="application/x-chromium-surface-embed">`. They are composited and get input like an out-of-process iframe, and there is no script channel between page and tab.
 - **Driving them:** the shell navigates them, answers their dialogs and snapshots them.
 - **Agents:** they automate them through a shell-only DevTools passthrough.
-- **New tabs:** links a tab opens in a new tab become tabs too, with the opener's tags. Since patch 0016, so do links from shell pages (`features/OPENING_LINKS.md`).
+- **New tabs:** links a tab opens in a new tab become tabs too, with the opener's tags. So do links from shell pages (`features/OPENING_LINKS.md`).
 
 **Tags and threads.** Every window and tab carries tags.
 - **The first tag** is its origin and never changes. For a window, it is the `PLUTONIUM_THREAD_ID` of its process, or of the nearest ancestor that has one; the browser reads this from `/proc`. For a tab, it is the thread it was opened for.

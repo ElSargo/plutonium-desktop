@@ -1,4 +1,4 @@
-# Release build: one self-contained chrome binary, for the prebuilt image.
+# Release build: one self-contained chrome binary, for HOST=1 (plutonium host build).
 # Same features as args.gn; no component libraries, DCHECKs or symbols.
 target_os = "chromeos"
 is_debug = false

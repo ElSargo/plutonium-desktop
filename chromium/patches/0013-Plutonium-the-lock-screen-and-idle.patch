@@ -1,0 +1,886 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 13/13] Plutonium: the lock screen and idle
+
+Ash's own lock over every display (Super+L), idle and inhibitors, and keeping the lock robust when windows or displays go away.
+
+It holds these changes:
+- the lock screen and idle: Ash's own lock over every display, Super+L, the idle time, the wake locks and the displays' power in the Plutonium domain
+- unlocking after the window that was active went away doesn't crash
+- a display added or removed while locked doesn't crash Ash
+
+and the parts in these files of:
+- shell mode on DRM, evdev input fix, display-plane path
+- desktop settings and a display configuration tool in the switcher
+---
+ chrome/browser/plutonium_lock.cc              |  39 ++
+ chrome/browser/plutonium_lock.h               |  66 +++
+ .../main_extra_parts/plutonium_lock_impl.cc   | 544 ++++++++++++++++++
+ .../main_extra_parts/plutonium_lock_impl.h    | 122 ++++
+ .../session/session_controller_client_impl.cc |   6 +-
+ .../dbus/power/power_policy_controller.cc     |  11 +
+ chromeos/dbus/power/power_policy_controller.h |   5 +
+ 7 files changed, 792 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/plutonium_lock.cc
+ create mode 100644 chrome/browser/plutonium_lock.h
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+ create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
+
+diff --git a/chrome/browser/plutonium_lock.cc b/chrome/browser/plutonium_lock.cc
+new file mode 100644
+index 0000000000..d7956a13d1
+--- /dev/null
++++ b/chrome/browser/plutonium_lock.cc
+@@ -0,0 +1,39 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/plutonium_lock.h"
++
++#include "base/check.h"
++
++namespace {
++PlutoniumLock* g_lock = nullptr;
++}  // namespace
++
++// static
++PlutoniumLock* PlutoniumLock::Get() {
++  return g_lock;
++}
++
++PlutoniumLock::PlutoniumLock() {
++  CHECK(!g_lock);
++  g_lock = this;
++}
++
++PlutoniumLock::~PlutoniumLock() {
++  g_lock = nullptr;
++}
++
++void PlutoniumLock::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void PlutoniumLock::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void PlutoniumLock::NotifyLockChanged(bool locked) {
++  for (Observer& observer : observers_) {
++    observer.OnLockChanged(locked);
++  }
++}
+diff --git a/chrome/browser/plutonium_lock.h b/chrome/browser/plutonium_lock.h
+new file mode 100644
+index 0000000000..7716efc6ad
+--- /dev/null
++++ b/chrome/browser/plutonium_lock.h
+@@ -0,0 +1,66 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PLUTONIUM_LOCK_H_
++#define CHROME_BROWSER_PLUTONIUM_LOCK_H_
++
++#include <string>
++#include <vector>
++
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "base/time/time.h"
++
++// EXO-LOCK (docs/features/DESKTOP_SERVICES.md, "session"): the lock screen
++// and idle, in shell mode. The helper's session service decides when to lock
++// (its action, Super+L, logind, before suspend, idle) and checks the
++// password; Ash draws the lock over every display, above every shell, page
++// and app, and keeps input from reaching them while it's up
++// (chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h). Only the
++// password typed on it, checked by the helper, takes it down: nothing here
++// unlocks. The Plutonium DevTools domain is the helper's way in.
++class PlutoniumLock {
++ public:
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnLockChanged(bool locked) {}
++  };
++
++  // Null outside shell mode.
++  static PlutoniumLock* Get();
++
++  PlutoniumLock(const PlutoniumLock&) = delete;
++  PlutoniumLock& operator=(const PlutoniumLock&) = delete;
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  virtual bool IsLocked() const = 0;
++  // Puts the lock up on every display, with |user| (the user's name) and
++  // |message| on it; if it's up, shows |message|.
++  virtual void Lock(const std::u16string& user,
++                    const std::u16string& message) = 0;
++
++  // Since the user last did anything (a key, the pointer, a touch).
++  virtual base::TimeDelta GetIdleTime() const = 0;
++  // Turns the displays off (on DRM) until the user does something, or on
++  // again. False where it can't (an X11 session).
++  virtual bool SetDisplaysOff(bool off) = 0;
++  virtual bool AreDisplaysOff() const = 0;
++  // What keeps the screen on: the browser's wake locks (a tab playing video,
++  // the Screen Wake Lock API) and Wayland apps' idle inhibitors, each its
++  // description.
++  virtual std::vector<std::string> GetWakeLocks() const = 0;
++
++ protected:
++  PlutoniumLock();
++  virtual ~PlutoniumLock();
++
++  void NotifyLockChanged(bool locked);
++
++ private:
++  base::ObserverList<Observer> observers_;
++};
++
++#endif  // CHROME_BROWSER_PLUTONIUM_LOCK_H_
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+new file mode 100644
+index 0000000000..913c0ac7f7
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.cc
+@@ -0,0 +1,544 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "ash/public/cpp/shell_window_ids.h"
++#include "ash/shell.h"
++#include "ash/wm/window_util.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/i18n/time_formatting.h"
++#include "base/logging.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.h"
++#include "chrome/browser/ui/ash/main_extra_parts/plutonium_helper_client.h"
++#include "chromeos/dbus/power/power_policy_controller.h"
++#include "components/exo/pointer.h"
++#include "ui/aura/window.h"
++#include "ui/base/ime/text_input_type.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/user_activity/user_activity_detector.h"
++#include "ui/color/color_provider_key.h"
++#include "ui/display/display.h"
++#include "ui/display/manager/display_configurator.h"
++#include "ui/display/screen.h"
++#include "ui/events/event.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/controls/label.h"
++#include "ui/views/controls/textfield/textfield.h"
++#include "ui/views/controls/textfield/textfield_controller.h"
++#include "ui/views/layout/box_layout.h"
++#include "ui/views/view.h"
++#include "ui/views/widget/widget.h"
++#include "ui/wm/core/window_util.h"
++#include "ui/wm/public/activation_client.h"
++
++namespace {
++
++// The switcher's colors (plutonium_overlay.cc).
++constexpr SkColor kBackground = SkColorSetRGB(0x17, 0x18, 0x1a);
++constexpr SkColor kField = SkColorSetRGB(0x2a, 0x2b, 0x2e);
++constexpr SkColor kTitle = SkColorSetRGB(0xe8, 0xea, 0xed);
++constexpr SkColor kDim = SkColorSetRGB(0x9a, 0xa0, 0xa6);
++constexpr SkColor kError = SkColorSetRGB(0xf2, 0x8b, 0x82);
++constexpr int kModifiers = ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN |
++                           ui::EF_SHIFT_DOWN | ui::EF_COMMAND_DOWN;
++
++bool IsDrm() {
++  return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++             "ozone-platform") == "drm";
++}
++
++views::Label* AddLabel(views::View* parent,
++                       std::u16string_view text,
++                       SkColor color,
++                       int size_delta,
++                       gfx::Font::Weight weight = gfx::Font::Weight::NORMAL) {
++  auto* label = parent->AddChildView(std::make_unique<views::Label>(text));
++  label->SetAutoColorReadabilityEnabled(false);
++  label->SetEnabledColor(color);
++  label->SetFontList(
++      gfx::FontList().DeriveWithSizeDelta(size_delta).DeriveWithWeight(weight));
++  return label;
++}
++
++}  // namespace
++
++// The lock on one display: the clock and date, and on the primary one the
++// user's name, the password field and a line for messages.
++class PlutoniumLockView : public views::View, public views::TextfieldController {
++  METADATA_HEADER(PlutoniumLockView, views::View)
++
++ public:
++  PlutoniumLockView(PlutoniumLockImpl* lock, bool primary) : lock_(lock) {
++    SetBackground(views::CreateSolidBackground(kBackground));
++    auto* layout = SetLayoutManager(std::make_unique<views::BoxLayout>(
++        views::BoxLayout::Orientation::kVertical, gfx::Insets(), 8));
++    layout->set_main_axis_alignment(
++        views::BoxLayout::MainAxisAlignment::kCenter);
++    layout->set_cross_axis_alignment(
++        views::BoxLayout::CrossAxisAlignment::kCenter);
++    clock_ = AddLabel(this, u"", kTitle, 56, gfx::Font::Weight::LIGHT);
++    date_ = AddLabel(this, u"", kDim, 6);
++    if (!primary) {
++      return;
++    }
++    auto* gap = AddChildView(std::make_unique<views::View>());
++    gap->SetPreferredSize(gfx::Size(0, 48));
++    user_ = AddLabel(this, u"", kTitle, 6, gfx::Font::Weight::MEDIUM);
++    password_ = AddChildView(std::make_unique<views::Textfield>());
++    password_->SetTextInputType(ui::TEXT_INPUT_TYPE_PASSWORD);
++    password_->SetController(this);
++    password_->SetPlaceholderText(u"Password");
++    password_->GetViewAccessibility().SetName(u"Password");
++    password_->SetFontList(gfx::FontList().DeriveWithSizeDelta(4));
++    password_->SetBackgroundColor(kField);
++    password_->SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(10, 14)));
++    password_->SetBackground(views::CreateRoundedRectBackground(kField, 10));
++    password_->SetPreferredSize(gfx::Size(340, 48));
++    message_ = AddLabel(this, u"", kDim, 2);
++    message_->SetMultiLine(true);
++    message_->SetMaximumWidth(520);
++    message_->SetHorizontalAlignment(gfx::ALIGN_CENTER);
++  }
++  PlutoniumLockView(const PlutoniumLockView&) = delete;
++  PlutoniumLockView& operator=(const PlutoniumLockView&) = delete;
++  ~PlutoniumLockView() override = default;
++
++  void SetTime(base::Time now) {
++    const std::u16string time = base::TimeFormatTimeOfDay(now);
++    if (time != clock_->GetText()) {
++      clock_->SetText(time);
++      date_->SetText(base::TimeFormatFriendlyDate(now));
++    }
++  }
++
++  void SetUser(const std::u16string& user) {
++    if (user_) {
++      user_->SetText(user);
++      user_->SetVisible(!user.empty());
++    }
++  }
++
++  void SetMessage(const std::u16string& message, bool error) {
++    if (message_ && message != message_->GetText()) {
++      message_->SetText(message);
++      message_->SetEnabledColor(error ? kError : kDim);
++    }
++  }
++
++  void ClearPassword() {
++    if (password_) {
++      password_->SetText(u"");
++    }
++  }
++
++  void FocusPassword() {
++    if (password_) {
++      password_->RequestFocus();
++    }
++  }
++
++  // views::TextfieldController:
++  bool HandleKeyEvent(views::Textfield* sender,
++                      const ui::KeyEvent& event) override {
++    if (event.type() != ui::EventType::kKeyPressed) {
++      return false;
++    }
++    if ((event.flags() & kModifiers) == 0 &&
++        event.key_code() == ui::VKEY_RETURN) {
++      // (Submit() ignores it while one is checked, or the helper asks to
++      // wait. The field stays editable: making a focused textfield read-only
++      // trips its cursor blink timer.)
++      if (!sender->GetText().empty()) {
++        lock_->Submit(std::u16string(sender->GetText()));
++      }
++      return true;
++    }
++    if ((event.flags() & kModifiers) == 0 &&
++        event.key_code() == ui::VKEY_ESCAPE) {
++      sender->SetText(u"");
++      return true;
++    }
++    return false;
++  }
++
++ private:
++  raw_ptr<PlutoniumLockImpl> lock_;
++  raw_ptr<views::Label> clock_ = nullptr;
++  raw_ptr<views::Label> date_ = nullptr;
++  raw_ptr<views::Label> user_ = nullptr;
++  raw_ptr<views::Textfield> password_ = nullptr;
++  raw_ptr<views::Label> message_ = nullptr;
++};
++
++BEGIN_METADATA(PlutoniumLockView)
++END_METADATA
++
++PlutoniumLockImpl::PlutoniumLockImpl() {
++  ash::Shell::Get()->AddPreTargetHandler(this,
++                                         ui::EventTarget::Priority::kSystem);
++  ash::Shell::Get()->activation_client()->AddObserver(this);
++  display::Screen::Get()->AddObserver(this);
++  if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++    detector->AddObserver(this);
++  }
++}
++
++PlutoniumLockImpl::~PlutoniumLockImpl() {
++  if (ui::UserActivityDetector* detector = ui::UserActivityDetector::Get()) {
++    detector->RemoveObserver(this);
++  }
++  display::Screen::Get()->RemoveObserver(this);
++  if (ash::Shell::HasInstance()) {
++    ash::Shell::Get()->activation_client()->RemoveObserver(this);
++    ash::Shell::Get()->RemovePreTargetHandler(this);
++  }
++  view_ = nullptr;
++  widgets_.clear();
++}
++
++bool PlutoniumLockImpl::IsLocked() const {
++  return locked_;
++}
++
++void PlutoniumLockImpl::Lock(const std::u16string& user,
++                             const std::u16string& message) {
++  if (!user.empty()) {
++    user_ = user;
++  }
++  message_ = message;
++  message_error_ = false;
++  if (locked_) {
++    if (view_) {
++      view_->SetUser(user_);
++      view_->SetMessage(message_, false);
++    }
++    return;
++  }
++  locked_ = true;
++  LOG(WARNING) << "EXO-LOCK locked";
++  previously_active_.RemoveAll();
++  if (aura::Window* active = ash::window_util::GetActiveWindow()) {
++    previously_active_.Add(active);
++  }
++  // Nothing keeps the pointer: a drag, a grab, an app's pointer lock.
++  if (aura::Window* capture = ash::window_util::GetCaptureWindow()) {
++    capture->ReleaseCapture();
++  }
++  exo::Pointer::UnconstrainAllByUserAction();
++  BuildWidgets();
++  clock_.Start(FROM_HERE, base::Seconds(1),
++               base::BindRepeating(&PlutoniumLockImpl::Tick,
++                                   base::Unretained(this)));
++  NotifyLockChanged(true);
++}
++
++base::TimeDelta PlutoniumLockImpl::GetIdleTime() const {
++  ui::UserActivityDetector* detector = ui::UserActivityDetector::Get();
++  base::TimeTicks last = detector ? detector->last_activity_time()
++                                  : base::TimeTicks();
++  return base::TimeTicks::Now() - std::max(last, started_);
++}
++
++bool PlutoniumLockImpl::SetDisplaysOff(bool off) {
++  // On X11 the displays are the host's.
++  if (!IsDrm()) {
++    return false;
++  }
++  if (off != displays_off_) {
++    displays_off_ = off;
++    LOG(WARNING) << "EXO-LOCK displays " << (off ? "off" : "on");
++    // The pointer events of the reconfiguration aren't the user's.
++    ui::UserActivityDetector::Get()->OnDisplayPowerChanging();
++    // EXO-DISPLAYS: on, the built-in panel stays off if it was turned off.
++    chromeos::DisplayPowerState on = chromeos::DISPLAY_POWER_ALL_ON;
++    if (PlutoniumDisplayConfig* config = PlutoniumDisplayConfig::Get()) {
++      on = config->PowerStateForOn();
++    }
++    ash::Shell::Get()->display_configurator()->SetDisplayPower(
++        off ? chromeos::DISPLAY_POWER_ALL_OFF : on,
++        display::DisplayConfigurator::kSetDisplayPowerNoFlags,
++        base::DoNothing());
++  }
++  return true;
++}
++
++bool PlutoniumLockImpl::AreDisplaysOff() const {
++  return displays_off_;
++}
++
++std::vector<std::string> PlutoniumLockImpl::GetWakeLocks() const {
++  if (!chromeos::PowerPolicyController::IsInitialized()) {
++    return {};
++  }
++  return chromeos::PowerPolicyController::Get()
++      ->GetScreenWakeLockDescriptions();
++}
++
++void PlutoniumLockImpl::Submit(const std::u16string& password) {
++  if (checking_ || base::TimeTicks::Now() < retry_at_) {
++    return;
++  }
++  if (!plutonium_helper::IsAvailable()) {
++    view_->SetMessage(u"There's no helper to check the password.", true);
++    return;
++  }
++  checking_ = true;
++  view_->SetMessage(u"Checking…", false);
++  plutonium_helper::Post(
++      "/v1/session/unlock",
++      base::DictValue().Set("password", base::UTF16ToUTF8(password)),
++      base::BindOnce(&PlutoniumLockImpl::OnUnlockAnswer,
++                     weak_ptr_factory_.GetWeakPtr()));
++}
++
++void PlutoniumLockImpl::OnUnlockAnswer(std::optional<base::Value> value,
++                                       const std::string& error) {
++  checking_ = false;
++  if (!locked_ || !view_) {
++    return;
++  }
++  const base::DictValue* answer = value ? value->GetIfDict() : nullptr;
++  if (answer && answer->FindBool("ok").value_or(false)) {
++    Unlock();
++    return;
++  }
++  view_->ClearPassword();
++  view_->FocusPassword();
++  if (!answer) {
++    view_->SetMessage(
++        base::StrCat({u"Couldn't check the password: ",
++                      base::UTF8ToUTF16(error)}),
++        true);
++    return;
++  }
++  const std::string* reason = answer->FindString("error");
++  message_ = base::UTF8ToUTF16(reason ? *reason : "That's not the password.");
++  message_error_ = true;
++  const int wait = answer->FindInt("retryAfter").value_or(0);
++  retry_at_ = base::TimeTicks::Now() + base::Seconds(wait);
++  Tick();
++}
++
++void PlutoniumLockImpl::Unlock() {
++  locked_ = false;
++  LOG(WARNING) << "EXO-LOCK unlocked";
++  clock_.Stop();
++  retry_at_ = base::TimeTicks();
++  message_.clear();
++  CloseWidgets();
++  // The window that was active may have gone while the lock was up (its app
++  // quit): the tracker is empty then, and Pop() mustn't be called.
++  if (!previously_active_.windows().empty()) {
++    wm::ActivateWindow(previously_active_.Pop());
++  }
++  NotifyLockChanged(false);
++}
++
++void PlutoniumLockImpl::Tick() {
++  if (!locked_) {
++    return;
++  }
++  const base::Time now = base::Time::Now();
++  for (const auto& widget : widgets_) {
++    static_cast<PlutoniumLockView*>(widget->GetContentsView())->SetTime(now);
++  }
++  if (!view_ || checking_) {
++    return;
++  }
++  const base::TimeDelta wait = retry_at_ - base::TimeTicks::Now();
++  if (wait.is_positive()) {
++    view_->SetMessage(
++        base::StrCat({message_, u" Try again in ",
++                      base::NumberToString16((wait.InMilliseconds() + 999) / 1000), u" s."}),
++        true);
++  } else {
++    view_->SetMessage(message_, message_error_);
++  }
++}
++
++void PlutoniumLockImpl::BuildWidgets() {
++  CloseWidgets();
++  aura::Window* primary = ash::Shell::GetPrimaryRootWindow();
++  for (aura::Window* root : ash::Shell::GetAllRootWindows()) {
++    const bool is_primary = root == primary;
++    views::Widget::InitParams params(
++        views::Widget::InitParams::CLIENT_OWNS_WIDGET,
++        views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
++    params.name = "PlutoniumLock";
++    params.parent =
++        ash::Shell::GetContainer(root, ash::kShellWindowId_OverlayContainer);
++    params.bounds =
++        display::Screen::Get()->GetDisplayNearestWindow(root).bounds();
++    params.opacity = views::Widget::InitParams::WindowOpacity::kOpaque;
++    params.activatable = is_primary
++                             ? views::Widget::InitParams::Activatable::kYes
++                             : views::Widget::InitParams::Activatable::kNo;
++    params.shadow_type = views::Widget::InitParams::ShadowType::kNone;
++    auto widget = std::make_unique<views::Widget>(std::move(params));
++    widget->SetColorModeOverride(ui::ColorProviderKey::ColorMode::kDark);
++    auto* view = widget->SetContentsView(
++        std::make_unique<PlutoniumLockView>(this, is_primary));
++    view->SetTime(base::Time::Now());
++    widget->Show();
++    widget->StackAtTop();
++    if (is_primary) {
++      view_ = view;
++      view_->SetUser(user_);
++      view_->SetMessage(message_, message_error_);
++      widget->Activate();
++      view_->FocusPassword();
++    }
++    widgets_.push_back(std::move(widget));
++  }
++}
++
++void PlutoniumLockImpl::CloseWidgets() {
++  view_ = nullptr;
++  // Out of widgets_ first: hiding one can activate another window, and
++  // OnWindowActivated() walks widgets_ (a moved-from entry there crashed).
++  std::vector<std::unique_ptr<views::Widget>> widgets;
++  widgets.swap(widgets_);
++  for (auto& widget : widgets) {
++    widget->Hide();
++    // Not from inside one of the widget's own calls (the Enter key).
++    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
++        FROM_HERE, std::move(widget));
++  }
++}
++
++void PlutoniumLockImpl::RebuildSoon() {
++  if (!locked_) {
++    return;
++  }
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](base::WeakPtr<PlutoniumLockImpl> lock) {
++                       if (lock && lock->locked_ && !lock->checking_) {
++                         lock->BuildWidgets();
++                       }
++                     },
++                     weak_ptr_factory_.GetWeakPtr()));
++}
++
++bool PlutoniumLockImpl::IsLockWindow(const aura::Window* window) const {
++  for (const auto& widget : widgets_) {
++    if (widget->GetNativeWindow()->Contains(window)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool PlutoniumLockImpl::HandleLockKey(const ui::KeyEvent& event) {
++  if (event.key_code() != ui::VKEY_L) {
++    return false;
++  }
++  if (event.type() != ui::EventType::kKeyPressed) {
++    const bool was_down = lock_key_down_;
++    lock_key_down_ = false;
++    return was_down;
++  }
++  if ((event.flags() & kModifiers) != ui::EF_COMMAND_DOWN) {
++    return false;
++  }
++  lock_key_down_ = true;
++  if (!locked_ && !event.is_repeat() && plutonium_helper::IsAvailable()) {
++    // The helper locks, through the DevTools domain, if it can check a
++    // password.
++    plutonium_helper::Post(
++        "/v1/session/lock", base::DictValue(),
++        base::BindOnce([](std::optional<base::Value> value,
++                          const std::string& error) {
++          if (!value) {
++            LOG(ERROR) << "EXO-LOCK Super+L: " << error;
++          }
++        }));
++  }
++  return true;
++}
++
++void PlutoniumLockImpl::OnEvent(ui::Event* event) {
++  if (event->IsKeyEvent() && HandleLockKey(*event->AsKeyEvent())) {
++    event->StopPropagation();
++    return;
++  }
++  if (!locked_ || !event->cancelable()) {
++    return;
++  }
++  const auto* target = static_cast<const aura::Window*>(event->target());
++  if (target && IsLockWindow(target)) {
++    return;
++  }
++  event->StopPropagation();
++}
++
++void PlutoniumLockImpl::OnWindowActivated(ActivationReason reason,
++                                          aura::Window* gained_active,
++                                          aura::Window* lost_active) {
++  if (!locked_ || (gained_active && IsLockWindow(gained_active))) {
++    return;
++  }
++  // Something else came up (a window opening, a shell shown): the lock
++  // stays in front, with the keyboard.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](base::WeakPtr<PlutoniumLockImpl> lock) {
++                       if (!lock || !lock->locked_) {
++                         return;
++                       }
++                       for (const auto& widget : lock->widgets_) {
++                         widget->StackAtTop();
++                       }
++                       if (lock->view_) {
++                         lock->view_->GetWidget()->Activate();
++                         lock->view_->FocusPassword();
++                       }
++                     },
++                     weak_ptr_factory_.GetWeakPtr()));
++}
++
++void PlutoniumLockImpl::OnDisplayAdded(const display::Display& new_display) {
++  RebuildSoon();
++}
++
++void PlutoniumLockImpl::OnDisplaysRemoved(
++    const display::Displays& removed_displays) {
++  RebuildSoon();
++}
++
++void PlutoniumLockImpl::OnDisplayMetricsChanged(const display::Display& display,
++                                                uint32_t changed_metrics) {
++  if (!locked_) {
++    return;
++  }
++  for (const auto& widget : widgets_) {
++    aura::Window* root = widget->GetNativeWindow()->GetRootWindow();
++    if (display::Screen::Get()->GetDisplayNearestWindow(root).id() ==
++        display.id()) {
++      widget->SetBounds(display.bounds());
++    }
++  }
++}
++
++void PlutoniumLockImpl::OnUserActivity(const ui::Event* event) {
++  if (displays_off_) {
++    SetDisplaysOff(false);
++  }
++}
+diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
+new file mode 100644
+index 0000000000..fad10e3bbf
+--- /dev/null
++++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_lock_impl.h
+@@ -0,0 +1,122 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_LOCK_IMPL_H_
++#define CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_LOCK_IMPL_H_
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "base/values.h"
++#include "chrome/browser/plutonium_lock.h"
++#include "ui/aura/window_tracker.h"
++#include "ui/base/user_activity/user_activity_observer.h"
++#include "ui/display/display_observer.h"
++#include "ui/events/event_handler.h"
++#include "ui/wm/public/activation_change_observer.h"
++
++class PlutoniumLockView;
++
++namespace views {
++class Widget;
++}
++
++// EXO-LOCK: Ash's lock screen in shell mode (PlutoniumLock). A full-screen
++// widget on every display, above the shells, tabs and apps (Ash's overlay
++// container, where the switcher is): the clock, the user's name and a
++// password field on the primary display, the clock on the others. While it's
++// up, an event handler ahead of everything else (Ash's system priority) drops
++// every event that isn't for it, so no key, click or touch reaches a shell,
++// a tab or an app, and the Plutonium keys (Super+Tab, Super+F…) are off; the
++// hardware keys (volume, brightness) still work, and VT switching and
++// Ctrl+Alt+Backspace (taken in evdev, before Ash) too. The password goes to
++// the helper (POST /v1/session/unlock over its socket), which checks it;
++// only its yes takes the lock down.
++//
++// Super+L asks the helper to lock (POST /v1/session/lock), which refuses
++// when it has no way to check a password. The helper's session service
++// (idle, logind, suspend) locks through the Plutonium DevTools domain.
++class PlutoniumLockImpl : public PlutoniumLock,
++                          public ui::EventHandler,
++                          public wm::ActivationChangeObserver,
++                          public display::DisplayObserver,
++                          public ui::UserActivityObserver {
++ public:
++  // After Ash's shell is made.
++  PlutoniumLockImpl();
++  PlutoniumLockImpl(const PlutoniumLockImpl&) = delete;
++  PlutoniumLockImpl& operator=(const PlutoniumLockImpl&) = delete;
++  ~PlutoniumLockImpl() override;
++
++  // PlutoniumLock:
++  bool IsLocked() const override;
++  void Lock(const std::u16string& user, const std::u16string& message) override;
++  base::TimeDelta GetIdleTime() const override;
++  bool SetDisplaysOff(bool off) override;
++  bool AreDisplaysOff() const override;
++  std::vector<std::string> GetWakeLocks() const override;
++
++  // From the lock's view: the password typed, to check.
++  void Submit(const std::u16string& password);
++
++  // ui::EventHandler:
++  void OnEvent(ui::Event* event) override;
++
++  // wm::ActivationChangeObserver:
++  void OnWindowActivated(ActivationReason reason,
++                         aura::Window* gained_active,
++                         aura::Window* lost_active) override;
++
++  // display::DisplayObserver:
++  void OnDisplayAdded(const display::Display& new_display) override;
++  void OnDisplaysRemoved(const display::Displays& removed_displays) override;
++  void OnDisplayMetricsChanged(const display::Display& display,
++                               uint32_t changed_metrics) override;
++
++  // ui::UserActivityObserver:
++  void OnUserActivity(const ui::Event* event) override;
++
++ private:
++  // Super+L: true if |event| was it (a press or its release).
++  bool HandleLockKey(const ui::KeyEvent& event);
++  bool IsLockWindow(const aura::Window* window) const;
++  // One widget per display, the primary's with the password field.
++  void BuildWidgets();
++  void CloseWidgets();
++  // Again, after the displays changed (from a task: Ash makes its root
++  // windows in its own display observer).
++  void RebuildSoon();
++  void Unlock();
++  void OnUnlockAnswer(std::optional<base::Value> value,
++                      const std::string& error);
++  void Tick();
++
++  bool locked_ = false;
++  bool displays_off_ = false;
++  // Super+L's press was taken here: so is its release.
++  bool lock_key_down_ = false;
++  // An answer to the password is awaited.
++  bool checking_ = false;
++  std::u16string user_;
++  std::u16string message_;
++  // |message_| says what went wrong (a wrong password): in the error color.
++  bool message_error_ = false;
++  // Until then, the field takes no password (the helper's rate limit).
++  base::TimeTicks retry_at_;
++  const base::TimeTicks started_ = base::TimeTicks::Now();
++  std::vector<std::unique_ptr<views::Widget>> widgets_;
++  raw_ptr<PlutoniumLockView> view_ = nullptr;
++  // What had the focus before it locked, given it back after.
++  aura::WindowTracker previously_active_;
++  base::RepeatingTimer clock_;
++  base::WeakPtrFactory<PlutoniumLockImpl> weak_ptr_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_LOCK_IMPL_H_
+diff --git a/chrome/browser/ui/ash/session/session_controller_client_impl.cc b/chrome/browser/ui/ash/session/session_controller_client_impl.cc
+index b9f2b2986a..372726ef6b 100644
+--- a/chrome/browser/ui/ash/session/session_controller_client_impl.cc
++++ b/chrome/browser/ui/ash/session/session_controller_client_impl.cc
+@@ -28,6 +28,7 @@
+ #include "chrome/browser/ash/system_web_apps/apps/personalization_app/personalization_app_utils.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/lifetime/termination_notification.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/policy/profile_policy_connector.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -575,7 +576,10 @@ void SessionControllerClientImpl::SendSessionInfoIfChanged() {
+   auto info = std::make_unique<ash::SessionInfo>();
+   info->can_lock_screen = CanLockScreen();
+   info->should_lock_screen_automatically = ShouldLockScreenAutomatically();
+-  info->is_running_in_app_mode = IsRunningInAppMode();
++  // EXO-BOOT: Ash treats shell mode as app (kiosk) mode: no shelf, tray,
++  // notifications or window-management accelerators.
++  info->is_running_in_app_mode =
++      IsRunningInAppMode() || plutonium_shell::IsShellMode();
+   info->is_demo_session =
+       ash::DemoSession::Get() && ash::DemoSession::Get()->started();
+   info->add_user_session_policy = GetAddUserSessionPolicy();
+diff --git a/chromeos/dbus/power/power_policy_controller.cc b/chromeos/dbus/power/power_policy_controller.cc
+index 2750e1ec46..865525398a 100644
+--- a/chromeos/dbus/power/power_policy_controller.cc
++++ b/chromeos/dbus/power/power_policy_controller.cc
+@@ -632,6 +632,17 @@ void PowerPolicyController::RemoveWakeLock(int id) {
+     SendCurrentPolicy();
+ }
+ 
++std::vector<std::string> PowerPolicyController::GetScreenWakeLockDescriptions()
++    const {
++  std::vector<std::string> descriptions;
++  for (const auto& it : wake_locks_) {
++    if (it.second.type != WakeLock::TYPE_SYSTEM) {
++      descriptions.push_back(it.second.description);
++    }
++  }
++  return descriptions;
++}
++
+ void PowerPolicyController::PowerManagerRestarted() {
+   SendCurrentPolicy();
+ }
+diff --git a/chromeos/dbus/power/power_policy_controller.h b/chromeos/dbus/power/power_policy_controller.h
+index 2954f49beb..eda419da8b 100644
+--- a/chromeos/dbus/power/power_policy_controller.h
++++ b/chromeos/dbus/power/power_policy_controller.h
+@@ -202,6 +202,11 @@ class COMPONENT_EXPORT(DBUS_POWER) PowerPolicyController
+   // and sends an updated policy.
+   void RemoveWakeLock(int id);
+ 
++  // PLUTONIUM (EXO-LOCK): the descriptions of the wake locks that keep the
++  // screen on (screen and dim ones), for Plutonium's own idle handling: there
++  // is no powerd to send the policy to.
++  std::vector<std::string> GetScreenWakeLockDescriptions() const;
++
+   // Adjusts policy while Chrome is exiting. The lid-closed action
+   // is overridden to ensure that the system doesn't suspend or shut
+   // down.

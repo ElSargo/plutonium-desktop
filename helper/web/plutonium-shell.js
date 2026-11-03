@@ -371,8 +371,8 @@ export class PlutoniumShell extends EventTarget {
     // visible shell gets them, and nothing else does): "touchpadswipe", its
     // detail {phase: "begin" | "update" | "end", fingers, dx, dy, x, y}, dx and
     // dy the fingers' movement since the last one. None on X11, or before
-    // Chromium patch 0074.
-    // Before patch 0076 the browser's swipe begin and end didn't arrive (only
+    // Chromium's DRM patch.
+    // Before 2026-10-27 the browser's swipe begin and end didn't arrive (only
     // updates), so until an end has come from it, a swipe begins at its first
     // update (or when the finger count changes) and ends once updates stop for
     // SWIPE_END_MS.

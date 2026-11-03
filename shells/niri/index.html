@@ -25,7 +25,7 @@
     bottom of a window), or a tab (the middle of a window; any of a tabbed
     column). Near a screen edge the view scrolls along.
   - niri's touchpad swipes follow the fingers and snap at the end: three
-    fingers (the shell library's touchpadswipe, Chromium patch 0074), or a
+    fingers (the shell library's touchpadswipe, Chromium's DRM patch), or a
     two-finger scroll with Super held (any in the overview) where the
     browser doesn't pass swipes on. Four fingers open and close the overview. Super+middle-drag, and a
     drag on a workspace in the overview, drag the view the same way.
@@ -2599,7 +2599,7 @@ try {
       commit();
     }
   });
-  // niri's touchpad swipes, where the browser passes them on (patch 0074; on older
+  // niri's touchpad swipes, where the browser passes them on (Chromium's DRM patch; on older
   // builds the event never comes, and Super+two-finger scroll stands in): three
   // fingers move the view and switch workspaces, the content following the fingers;
   // four fingers up open the overview, down close it.

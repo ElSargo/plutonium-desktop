@@ -1,5 +1,5 @@
 # Plutonium's Chromium (Ash + Exo) on the host, without the container: a
-# release build (the prebuilt image's /opt/plutonium/chrome, or out/Release),
+# release build (out/Release),
 # with its libraries from nixpkgs. `plutonium host build` stages the files and
 # builds this against the system's <nixpkgs>, so libgbm, libEGL and Vulkan
 # match the Mesa drivers in /run/opengl-driver.

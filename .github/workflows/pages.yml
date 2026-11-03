@@ -1,0 +1,30 @@
+# The site (site/) on GitHub Pages, with the installer beside it, so
+# `curl -fsSL https://elsargo.github.io/pluto/install.sh | sh` works.
+name: Pages
+on:
+  push:
+    branches: [main]
+    paths: [site/**, dev/bundle/install.sh, .github/workflows/pages.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir _site
+          cp -r site/. _site/
+          cp dev/bundle/install.sh _site/install.sh
+      - uses: actions/upload-pages-artifact@v3
+      - id: deployment
+        uses: actions/deploy-pages@v4

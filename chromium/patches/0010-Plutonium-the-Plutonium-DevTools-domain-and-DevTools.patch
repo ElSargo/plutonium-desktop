@@ -1,0 +1,2826 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 10/13] Plutonium: the Plutonium DevTools domain, and DevTools
+ on a Unix socket
+
+The browser target's Plutonium domain (cros_protocol.pdl) for the helper and its agents: windows, tabs, input, notifications, media, the hardware keys. DevTools are served on a Unix socket that only this user's processes may connect to (--plutonium-remote-debugging-socket).
+
+It holds these changes:
+- agents drive windows and tabs over DevTools
+- the hardware keys go to the helper's desktop services; the browser's media session in the Plutonium domain
+- tabs' web notifications and the host's color scheme in the Plutonium domain
+- DevTools Plutonium.setWindowOriginTag
+- DevTools on a Unix socket for this user only (--plutonium-remote-debugging-socket)
+
+and the parts in these files of:
+- Chrome's own UI in the shell (DevTools, context menus, keys)
+- agent keyboard focus beside the user's; the compositor decorates every window
+- common plumbing for tab features
+- downloads for the shells' tabs
+- incognito tabs, each in a throwaway off-the-record profile
+- screen capture for shells, capture requests to the focused shell
+- several displays, a shell per display, one window in one place
+- an agent sees and uses a window's popups
+- the lock screen and idle: Ash's own lock over every display, Super+L, the idle time, the wake locks and the displays' power in the Plutonium domain
+- agents type through the session's keymap, and a temporary one for what it lacks
+- ext_idle_notify_v1, apps hear when the user is idle
+- desktop settings and a display configuration tool in the switcher
+---
+ chrome/browser/devtools/BUILD.gn              |   12 +
+ .../chrome_devtools_manager_delegate.cc       |    9 +
+ .../devtools/chrome_devtools_session.cc       |    8 +
+ .../devtools/chrome_devtools_session.h        |    3 +
+ chrome/browser/devtools/cros_protocol.pdl     |  546 +++++++++
+ .../devtools/devtools_ui_controller.cc        |    6 +-
+ chrome/browser/devtools/devtools_window.cc    |   36 +-
+ chrome/browser/devtools/devtools_window.h     |   13 +
+ .../browser/devtools/devtools_window_views.cc |   20 +
+ .../devtools/inspector_protocol_config.json   |    4 +
+ .../devtools/protocol/plutonium_handler.cc    | 1089 +++++++++++++++++
+ .../devtools/protocol/plutonium_handler.h     |  239 ++++
+ .../devtools/protocol/plutonium_media.cc      |  132 ++
+ .../devtools/protocol/plutonium_media.h       |   78 ++
+ .../protocol/plutonium_notifications.cc       |  153 +++
+ .../protocol/plutonium_notifications.h        |   77 ++
+ .../devtools/remote_debugging_server.cc       |   64 +
+ 17 files changed, 2487 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.cc
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.h
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_media.cc
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_media.h
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.cc
+ create mode 100644 chrome/browser/devtools/protocol/plutonium_notifications.h
+
+diff --git a/chrome/browser/devtools/BUILD.gn b/chrome/browser/devtools/BUILD.gn
+index 9011cb9983..d988b5e7f2 100644
+--- a/chrome/browser/devtools/BUILD.gn
++++ b/chrome/browser/devtools/BUILD.gn
+@@ -51,6 +51,8 @@ if (enable_devtools_frontend) {
+ 
+   if (is_chromeos) {
+     _protocol_generated += [
++      "protocol/plutonium.cc",
++      "protocol/plutonium.h",
+       "protocol/window_manager.cc",
+       "protocol/window_manager.h",
+     ]
+@@ -507,8 +509,18 @@ static_library("devtools") {
+       deps += [
+         "//ash",
+         "//chromeos/dbus/constants",
++        "//services/media_session/public/cpp",
++        "//services/media_session/public/cpp:base_cpp",
++        "//services/media_session/public/mojom",
++        "//ui/message_center",
+       ]
+       sources += [
++        "protocol/plutonium_handler.cc",
++        "protocol/plutonium_handler.h",
++        "protocol/plutonium_media.cc",
++        "protocol/plutonium_media.h",
++        "protocol/plutonium_notifications.cc",
++        "protocol/plutonium_notifications.h",
+         "protocol/window_manager_handler.cc",
+         "protocol/window_manager_handler.h",
+       ]
+diff --git a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+index 34e568267b..be116a0c2e 100644
+--- a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
++++ b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+@@ -30,6 +30,7 @@
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/policy/developer_tools_policy_handler.h"
+ #include "chrome/browser/policy/profile_policy_connector.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -319,6 +320,14 @@ std::string ChromeDevToolsManagerDelegate::GetTargetType(
+     return DevToolsAgentHost::kTypePage;
+   }
+ 
++  // PLUTONIUM (EXO-CHROME): a shell's browser tab is a page too; DevTools
++  // for it (now a tab itself) shows nothing for an "other" target.
++  if (std::optional<PlutoniumTabs::TabInfo> tab =
++          PlutoniumTabs::Get()->GetTabFor(web_contents);
++      tab && tab->opened_by != "devtools") {
++    return DevToolsAgentHost::kTypePage;
++  }
++
+   std::string extension_name;
+   std::string extension_type;
+   if (GetExtensionInfo(web_contents, &extension_name, &extension_type)) {
+diff --git a/chrome/browser/devtools/chrome_devtools_session.cc b/chrome/browser/devtools/chrome_devtools_session.cc
+index a93a5d26c1..390aa48bf0 100644
+--- a/chrome/browser/devtools/chrome_devtools_session.cc
++++ b/chrome/browser/devtools/chrome_devtools_session.cc
+@@ -33,6 +33,7 @@
+ #include "third_party/blink/public/common/features.h"
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
++#include "chrome/browser/devtools/protocol/plutonium_handler.h"
+ #include "chrome/browser/devtools/protocol/window_manager_handler.h"
+ #include "chromeos/dbus/constants/dbus_switches.h"
+ #endif
+@@ -145,6 +146,13 @@ ChromeDevToolsSession::ChromeDevToolsSession(
+ #if BUILDFLAG(IS_CHROMEOS)
+   window_manager_handler_ =
+       std::make_unique<WindowManagerHandler>(dispatcher());
++  // PLUTONIUM (EXO-AGENT): the shells' windows and tabs, for the helper on
++  // the browser's debugging port. Never for pages, extensions or the shells'
++  // own (untrusted) tab automation.
++  if (agent_host->GetType() == content::DevToolsAgentHost::kTypeBrowser &&
++      channel->GetClient()->IsTrusted()) {
++    plutonium_handler_ = std::make_unique<PlutoniumHandler>(dispatcher());
++  }
+ #endif
+ }
+ 
+diff --git a/chrome/browser/devtools/chrome_devtools_session.h b/chrome/browser/devtools/chrome_devtools_session.h
+index f703912a1b..6a8991099e 100644
+--- a/chrome/browser/devtools/chrome_devtools_session.h
++++ b/chrome/browser/devtools/chrome_devtools_session.h
+@@ -27,6 +27,7 @@ class StorageHandler;
+ class SystemInfoHandler;
+ class TargetHandler;
+ class WebMCPHandler;
++class PlutoniumHandler;
+ class WindowManagerHandler;
+ 
+ class ChromeDevToolsSession : public ChromeDevToolsSessionBase {
+@@ -57,6 +58,8 @@ class ChromeDevToolsSession : public ChromeDevToolsSessionBase {
+   std::unique_ptr<WebMCPHandler> webmcp_handler_;
+ #if BUILDFLAG(IS_CHROMEOS)
+   std::unique_ptr<WindowManagerHandler> window_manager_handler_;
++  // PLUTONIUM (EXO-AGENT).
++  std::unique_ptr<PlutoniumHandler> plutonium_handler_;
+ #endif
+ };
+ 
+diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
+index a30bf0d965..3c2d18d12f 100644
+--- a/chrome/browser/devtools/cros_protocol.pdl
++++ b/chrome/browser/devtools/cros_protocol.pdl
+@@ -12,3 +12,549 @@ domain WindowManager
+ 
+   # Exit the overview mode.
+   command exitOverviewMode
++
++# PLUTONIUM (EXO-AGENT): the native windows and browser tabs shell pages show,
++# for the helper (plutoniumd) to drive without a shell page. Browser target,
++# trusted clients (--remote-debugging-port) only.
++experimental domain Plutonium
++  # One of the shells' browser tabs (a target of type "page").
++  type Tab extends object
++    properties
++      # The registry's id (the shell API's), stable for the tab's lifetime.
++      integer id
++      # Its DevTools target id.
++      string targetId
++      string url
++      string title
++      boolean loading
++      boolean canGoBack
++      boolean canGoForward
++      # Whether a shell page shows it.
++      boolean embedded
++      boolean focused
++      # Its origin tag (the thread it was opened for) first, then the rest.
++      array of string tags
++      # The tab whose page opened it, or 0.
++      integer openerId
++      # "shell", "shell:<id>", "page", "devtools" or "agent".
++      string openedBy
++      # In a throwaway off-the-record profile of its own (createTab incognito,
++      # or opened by such a tab's page).
++      boolean incognito
++      # The dialog the page waits on: alert, confirm, prompt or beforeunload.
++      optional string dialogType
++      optional string dialogMessage
++      optional string dialogDefaultPrompt
++      # EXO-TAB-FEATURES: what the tab's features report, a JSON object:
++      # "zoom", "pending" (the requests it waits on, by kind: {requestId,
++      # taken, detail}) and the like (docs/features/TAB_FEATURES.md).
++      string stateJson
++
++  # A native (Wayland or X11) toplevel window.
++  type Window extends object
++    properties
++      integer id
++      string appId
++      string title
++      # The window geometry's size, in DIPs.
++      integer width
++      integer height
++      number deviceScaleFactor
++      # Whether a shell page shows it.
++      boolean embedded
++      # Whether it has the keyboard through the page showing it.
++      boolean focused
++      # Whether it is on the Ash desktop (popped out or fullscreen), not
++      # parked.
++      boolean onDesktop
++      # The Wayland client's pid, or 0.
++      integer pid
++      # Its origin tag (the thread that started it) first, then the rest.
++      array of string tags
++
++  # A popup (menu, tooltip) open on a window, in the window geometry's
++  # coordinates (DIPs).
++  type Popup extends object
++    properties
++      integer x
++      integer y
++      integer width
++      integer height
++
++  type KeyEvent extends object
++    properties
++      enum type
++        keyDown
++        keyUp
++      # A DOM key code ("KeyA", "Enter", "ShiftLeft"), as KeyboardEvent.code.
++      string code
++      # Alt=1, Ctrl=2, Meta=4, Shift=8 (as Input.dispatchKeyEvent), and
++      # AltGr=16, held while this key goes.
++      optional integer modifiers
++
++  # A character the session's keymap types: its key, and the modifiers held
++  # for it (Shift=8, AltGr=16).
++  type TypedChar extends object
++    properties
++      string text
++      string code
++      integer modifiers
++
++  # Reports tabs and windows as they come, change and go; the current ones
++  # first.
++  command enable
++
++  command disable
++
++  command getTabs
++    returns
++      array of Tab tabs
++
++  # Opens a tab in the shells' profile. Like a tab a shell opens, it waits
++  # for a shell to show it.
++  command createTab
++    parameters
++      string url
++      # The first is its origin tag (its thread).
++      optional array of string tags
++      # In a throwaway off-the-record profile of its own, gone when it and
++      # the tabs its page opens close.
++      optional boolean incognito
++    returns
++      Tab tab
++
++  command navigateTab
++    parameters
++      integer id
++      string url
++
++  # Runs a command on the tab: back, forward, reload, stop, close, or a tab
++  # feature's ("zoom-in", "find", ...; TAB_FEATURES.md).
++  command tabCommand
++    parameters
++      integer id
++      string command
++      # Its arguments, a JSON object.
++      optional string argsJson
++    returns
++      # Its result, as JSON.
++      string resultJson
++
++  # EXO-TAB-FEATURES: answers a request the tab waits on (its state's
++  # "pending"), as the shell's prompt would. Each kind says which answers an
++  # agent may give.
++  command answerTabRequest
++    parameters
++      integer requestId
++      # The answer, as JSON (its form depends on the kind).
++      string answerJson
++
++  command answerTabDialog
++    parameters
++      integer id
++      boolean accept
++      optional string promptText
++
++  # EXO-TAB-FEATURES: the downloads, each a JSON object: {id, tabId, thread,
++  # url, filename, path, mime, receivedBytes, totalBytes, state, danger?,
++  # error?, canResume, startTime} (docs/features/TAB_FEATURES.md).
++  command getDownloads
++    returns
++      array of string downloadsJson
++
++  # Runs a command on a download: pause, resume, cancel, open, show, discard
++  # or remove. Not keep: whether to keep a dangerous file is the user's call.
++  command downloadCommand
++    parameters
++      integer id
++      string command
++
++  # Keeps a tab rendering at full rate (animation frames, timers) while no
++  # page shows it, for as long as this client wants: an agent driving it
++  # waits on frames. The tab stays hidden from the user.
++  command setTabAwake
++    parameters
++      integer id
++      boolean awake
++
++  # What the tab shows (its viewport), also while no page shows it.
++  command captureTab
++    parameters
++      integer id
++      optional enum format
++        png
++        jpeg
++      optional integer quality
++    returns
++      binary data
++      integer width
++      integer height
++
++  command getWindows
++    returns
++      array of Window windows
++
++  # What the window shows, cropped to its window geometry, at the window's
++  # scale (deviceScaleFactor pixels per DIP). Works while no page shows it.
++  command captureWindow
++    parameters
++      integer id
++      optional enum format
++        png
++        jpeg
++      # 0 to 100, for jpeg.
++      optional integer quality
++    returns
++      binary data
++      integer width
++      integer height
++
++  # The window's open popups (menus, tooltips), parents first. captureWindow
++  # draws them over the window, growing its image right and down to hold
++  # them, and dispatchWindowMouseEvent reaches them.
++  command getWindowPopups
++    parameters
++      integer id
++    returns
++      array of Popup popups
++
++  # Keeps a window drawing at full rate while no page shows it, for as long
++  # as this client wants: the app draws (and answers input visibly) at a
++  # frame a second otherwise. Window screencasts do this themselves.
++  command setWindowAwake
++    parameters
++      integer id
++      boolean awake
++
++  # Keeps the window's app keyboard focused for this client's keys
++  # (dispatchWindowKeyEvents), beside the user's focus in another app, until
++  # focused is false. Without it the app has focus only during each call: an
++  # app may move its own focus after a key (Enter in a toolbar box) only
++  # while it has focus.
++  command setWindowAgentFocus
++    parameters
++      integer id
++      boolean focused
++
++  # Asks the app to close the window, as its close button would.
++  command closeWindow
++    parameters
++      integer id
++
++  # Names window |id|'s origin tag (the thread that started it) when the
++  # browser couldn't read its client's environment, as a shell page's
++  # setWindowOriginTag does: once, for every shell.
++  command setWindowOriginTag
++    parameters
++      integer id
++      string tag
++    returns
++      # False if the browser read the origin itself, it was named already, or
++      # |tag| isn't a valid tag.
++      boolean ok
++
++  # Asks the app for this window geometry size (DIPs). Only while no page
++  # shows it: then the page decides.
++  command resizeWindow
++    parameters
++      integer id
++      integer width
++      integer height
++
++  # EXO-DISPLAYS: replaces the displays with host windows, for testing
++  # hotplug on X11; only with --plutonium-test-displays. Each spec is an
++  # --ash-host-window-bounds one ("1280+0-1280x800", "*2" for scale 2), and
++  # may start with "<id>:" to keep a display's id (else it is a new display).
++  command setDisplaysForTesting
++    parameters
++      array of string specs
++
++  # EXO-DISPLAYS: the displays' configuration, for the helper's display
++  # service (plutonium_display_config.h has the JSON): every display's place,
++  # mode, size, rotation, whether it's primary, and mirroring.
++  command getDisplayConfig
++    returns
++      string json
++
++  # Applies one change to the displays (plutonium_display_config.h); an
++  # error says why not.
++  command configureDisplays
++    parameters
++      string changeJson
++
++  # Opens the switcher (Super+Tab's overlay) on one of its settings pages:
++  # settings, displays, network, bluetooth, sound, power or notifications.
++  command openSwitcher
++    parameters
++      string page
++
++  # A display came, went or changed, or keyboard focus moved to another.
++  event displayConfigChanged
++
++  # A mouse event at (x, y), in DIPs from the window geometry's top left (a
++  # captureWindow image's pixels divided by deviceScaleFactor). Neither the
++  # user's pointer nor the keyboard focus moves.
++  command dispatchWindowMouseEvent
++    parameters
++      integer id
++      enum type
++        mousePressed
++        mouseReleased
++        mouseMoved
++        mouseWheel
++      number x
++      number y
++      optional enum button
++        none
++        left
++        middle
++        right
++        back
++        forward
++      # Buttons held: left=1, right=2, middle=4, back=8, forward=16.
++      optional integer buttons
++      optional integer clickCount
++      # mouseWheel: wheel notches to scroll, down and right positive.
++      optional number deltaX
++      optional number deltaY
++      optional integer modifiers
++
++  # Keys, in order. The window has the keyboard for them, and whatever had
++  # it gets it back.
++  command dispatchWindowKeyEvents
++    parameters
++      integer id
++      array of KeyEvent events
++
++  # The keymap Exo sends apps (XKB text, as wl_keyboard.keymap), and the
++  # characters its first layout types.
++  command getKeymap
++    returns
++      string keymap
++      array of TypedChar chars
++
++  # The window's app gets |keymap| (XKB text) in place of the session's,
++  # until this comes again without one: for characters the session's keymap
++  # lacks. Keys keep their codes, so the keymap should be the session's with
++  # symbols changed on spare keys.
++  command setWindowKeymap
++    parameters
++      integer id
++      optional string keymap
++
++  # Sends windowScreencastFrame events as the window draws, one at a time:
++  # the next waits for windowScreencastFrameAck.
++  command startWindowScreencast
++    parameters
++      integer id
++      optional enum format
++        png
++        jpeg
++      optional integer quality
++      optional integer maxWidth
++      optional integer maxHeight
++
++  command stopWindowScreencast
++    parameters
++      integer id
++
++  command windowScreencastFrameAck
++    parameters
++      integer id
++      integer sessionId
++
++  event windowScreencastFrame
++    parameters
++      integer id
++      binary data
++      integer width
++      integer height
++      integer sessionId
++
++  # The window's screencast stopped (the window closed).
++  event windowScreencastStopped
++    parameters
++      integer id
++
++  # EXO-CAPTURE (docs/features/CAPTURE.md): runs capture command |command|
++  # with |argsJson| (a JSON object), as a shell's captureCommand() does:
++  # "sources", "list", "settings", "stop", "setSize", and for the helper's
++  # portal backend "request" (asks the focused shell, else Ash's picker; the
++  # answer, or null if the user refused) and "cancelRequest" {handle}.
++  command captureCommand
++    parameters
++      string command
++      optional string argsJson
++    returns
++      # Its result, as JSON.
++      string resultJson
++
++  # EXO-CAPTURE: a PNG of a source ({type: "output" | "window" | "tab", id,
++  # region?}), refused while screenshots are switched off.
++  command screenshot
++    parameters
++      string sourceJson
++    returns
++      binary data
++      integer width
++      integer height
++
++  # EXO-CAPTURE: a capture started, changed or stopped (|json| is the
++  # capture), or the capture settings changed (|json| is them).
++  event captureEvent
++    parameters
++      # "start", "change", "stop" or "settings".
++      string type
++      string json
++
++  event tabAdded
++    parameters
++      Tab tab
++
++  event tabChanged
++    parameters
++      Tab tab
++
++  event tabRemoved
++    parameters
++      integer id
++
++  # EXO-TAB-FEATURES: a download started (or, on enable, was there).
++  event downloadAdded
++    parameters
++      string downloadJson
++
++  event downloadChanged
++    parameters
++      string downloadJson
++
++  event downloadRemoved
++    parameters
++      integer id
++
++  event windowAdded
++    parameters
++      Window window
++
++  event windowChanged
++    parameters
++      Window window
++
++  event windowRemoved
++    parameters
++      integer id
++
++  # EXO-SERVICES: the browser's active media session (a tab or a shell page
++  # playing), for the helper's media service.
++  type MediaSession extends object
++    properties
++      # False when nothing is playing or paused; the rest is then empty.
++      boolean active
++      boolean playing
++      string title
++      string artist
++      string album
++      # The site or app playing.
++      string source
++      # The Media Session actions it handles: play, pause, nexttrack,
++      # previoustrack, seekbackward, seekforward, stop.
++      array of string actions
++      # The shells' tab playing, if it's one.
++      optional integer tabId
++
++  command getMediaSession
++    returns
++      MediaSession session
++
++  # play, pause, play-pause, next, previous or stop.
++  command mediaSessionAction
++    parameters
++      string action
++
++  event mediaSessionChanged
++    parameters
++      MediaSession session
++
++  # EXO-LOCK: the lock screen and idle, for the helper's session service. The
++  # lock is Ash's own, over every display; only the password typed on it,
++  # checked by the helper, takes it down (there's no unlock command).
++  command lock
++    parameters
++      # The user's name, shown on it.
++      optional string user
++      # Why it locked, or what to say ("Locked before suspend").
++      optional string message
++
++  command getIdle
++    returns
++      boolean locked
++      # Since the user last did anything (a key, the pointer, a touch).
++      number idleSeconds
++      boolean displaysOff
++      # What keeps the screen on: the browser's wake locks ("Video Wake Lock",
++      # "Blink Wake Lock": the Screen Wake Lock API) and Wayland apps' idle
++      # inhibitors, by their descriptions.
++      array of string wakeLocks
++
++  # Turns the displays off until the user does something (on DRM), or on.
++  command setDisplaysOff
++    parameters
++      boolean off
++    returns
++      # False where it can't (an X11 session).
++      boolean applied
++
++  # Whether something holds idle off (any of the session service's
++  # inhibitors), for Wayland apps' ext_idle_notify_v1: while it does, they
++  # aren't told the user is idle, and idle counts again from when it stops.
++  # Taken back when the client that said so goes.
++  command setIdleInhibited
++    parameters
++      boolean inhibited
++
++  event lockChanged
++    parameters
++      boolean locked
++
++  # EXO-SERVICES: a tab's web notification (new Notification(), a service
++  # worker's showNotification()), for the helper's notifications service.
++  # Ash's message center has them, and shell mode never shows it.
++  type WebNotification extends object
++    properties
++      string id
++      # The site's origin.
++      string origin
++      string title
++      string body
++      # A PNG data URL, or empty.
++      string icon
++      # Its action buttons' labels.
++      array of string buttons
++      boolean requireInteraction
++      boolean silent
++
++  # A new or updated one; on enable, each there is.
++  event notificationShown
++    parameters
++      WebNotification notification
++
++  # It went: the page closed it, or it was acted on.
++  event notificationClosed
++    parameters
++      string id
++
++  # click (the notification, or with button one of its buttons: the page's
++  # onclick, the worker's notificationclick), or close (dismissed by the
++  # user).
++  command notificationAction
++    parameters
++      string id
++      string action
++      optional integer button
++
++  # EXO-SERVICES: the host's color scheme (the settings portal's
++  # org.freedesktop.appearance color-scheme), which Ash's dark mode then
++  # follows: prefers-color-scheme in shells and tabs, and Ash's own views.
++  command setColorScheme
++    parameters
++      boolean dark
+diff --git a/chrome/browser/devtools/devtools_ui_controller.cc b/chrome/browser/devtools/devtools_ui_controller.cc
+index f2a3fe25fe..cf6319e52d 100644
+--- a/chrome/browser/devtools/devtools_ui_controller.cc
++++ b/chrome/browser/devtools/devtools_ui_controller.cc
+@@ -7,6 +7,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
+ #include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/views/frame/contents_container_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+@@ -19,8 +20,11 @@ DevtoolsUIController::DevtoolsUIController(
+     BrowserWindowInterface* browser,
+     const std::vector<raw_ptr<ContentsContainerView, DanglingUntriaged>>&
+         contents_container_views)
++    // PLUTONIUM (EXO-CHROME): a shell's window docks its page's DevTools,
++    // as a browser window does, rather than opening a window of its own.
+     : can_dock_devtools_(browser->GetType() ==
+-                         BrowserWindowInterface::Type::TYPE_NORMAL),
++                             BrowserWindowInterface::Type::TYPE_NORMAL ||
++                         plutonium_shell::IsShellBrowser(browser)),
+       scoped_data_holder_(browser->GetUnownedUserDataHost(), *this) {
+   for (ContentsContainerView* contents_container_view :
+        contents_container_views) {
+diff --git a/chrome/browser/devtools/devtools_window.cc b/chrome/browser/devtools/devtools_window.cc
+index e9803277ee..ec9b76585d 100644
+--- a/chrome/browser/devtools/devtools_window.cc
++++ b/chrome/browser/devtools/devtools_window.cc
+@@ -37,6 +37,8 @@
+ #include "chrome/browser/infobars/browser_infobar_manager.h"
+ #include "chrome/browser/infobars/confirm_infobar_creator.h"
+ #include "chrome/browser/infobars/infobar_features.h"
++#include "chrome/browser/plutonium_shell.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/policy/chrome_policy_blocklist_service_factory.h"
+ #include "chrome/browser/policy/developer_tools_policy_checker.h"
+ #include "chrome/browser/policy/developer_tools_policy_checker_factory.h"
+@@ -1100,6 +1102,12 @@ void DevToolsWindow::Show(const DevToolsToggleAction& action) {
+   bool should_show_window =
+       !browser_ || (action.type() != DevToolsToggleAction::kInspect);
+ 
++  if (ShowInShellTab(/*activate=*/!in_shell_tab_ ||
++                     action.type() != DevToolsToggleAction::kInspect)) {
++    DoAction(action);
++    return;
++  }
++
+   if (!browser_) {
+     CreateDevToolsBrowser();
+   }
+@@ -1727,6 +1735,8 @@ void DevToolsWindow::ActivateWindow() {
+ #else
+   if (is_docked_ && GetInspectedBrowserWindow()) {
+     main_web_contents_->Focus();
++  } else if (in_shell_tab_) {
++    PlutoniumTabs::Get()->RequestShow(main_web_contents_);
+   } else if (!is_docked_ && browser_ && !browser_->GetWindow()->IsActive()) {
+     browser_->GetWindow()->Activate();
+   }
+@@ -1736,6 +1746,9 @@ void DevToolsWindow::ActivateWindow() {
+ void DevToolsWindow::CloseWindow() {
+   if (is_docked_) {
+     Close(DevToolsClosedByAction::kCloseButton);
++  } else if (in_shell_tab_) {
++    life_stage_ = kClosing;
++    main_web_contents_->DispatchBeforeUnload(false /* auto_cancel */);
+   } else {
+ #if BUILDFLAG(IS_ANDROID)
+     main_web_contents_->Close();
+@@ -1969,7 +1982,7 @@ void DevToolsWindow::RenderProcessGone(bool crashed) {
+   // Docked DevToolsWindow owns its main_web_contents_ and must delete it.
+   // Undocked main_web_contents_ are owned and handled by browser.
+   // see crbug.com/40363970
+-  if (is_docked_) {
++  if (is_docked_ || in_shell_tab_) {
+     CloseContents(main_web_contents_);
+   } else {
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -2064,6 +2077,27 @@ void DevToolsWindow::SetOpenNewWindowForPopups(bool value) {
+   open_new_window_for_popups_ = value;
+ }
+ 
++bool DevToolsWindow::ShowInShellTab(bool activate) {
++  if (in_shell_tab_) {
++    if (activate) {
++      PlutoniumTabs::Get()->RequestShow(main_web_contents_);
++    }
++    return true;
++  }
++  content::WebContents* inspected_web_contents = GetInspectedWebContents();
++  if (!plutonium_shell::IsShellMode() || browser_ ||
++      !owned_main_web_contents_ || !inspected_web_contents ||
++      !PlutoniumTabs::Get()->IsTab(inspected_web_contents)) {
++    return false;
++  }
++  in_shell_tab_ = true;
++  main_web_contents_->SetDelegate(this);
++  OverrideAndSyncDevToolsRendererPrefs();
++  PlutoniumTabs::Get()->AddDevToolsTab(main_web_contents_,
++                                       inspected_web_contents);
++  return true;
++}
++
+ void DevToolsWindow::CreateDevToolsBrowser() {
+   PrefService* prefs = profile_->GetPrefs();
+   bool resetPrefs = false;
+diff --git a/chrome/browser/devtools/devtools_window.h b/chrome/browser/devtools/devtools_window.h
+index b2fd119f42..03e0e0f2fc 100644
+--- a/chrome/browser/devtools/devtools_window.h
++++ b/chrome/browser/devtools/devtools_window.h
+@@ -147,6 +147,10 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   static DevToolsWindow* AsDevToolsWindow(BrowserWindowInterface* browser);
+   static DevToolsWindow* FindDevToolsWindow(content::DevToolsAgentHost*);
+ 
++  // PLUTONIUM (EXO-CHROME): closes DevTools shown as a shell's tab (the
++  // shell closed the tab, see ShowInShellTab()).
++  void CloseShellTab() { CloseWindow(); }
++
+   // Open or reveal DevTools window, and perform the specified action.
+   // How to get pointer to the created window see comments for
+   // ToggleDevToolsWindow().
+@@ -522,6 +526,13 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   void LoadCompleted();
+   void UpdateBrowserToolbar();
+   void UpdateBrowserWindow();
++  // PLUTONIUM (EXO-CHROME): in shell mode, the DevTools of a shell's browser
++  // tab (plutonium_tabs.h), which has no Browser to dock in, isn't a window
++  // either: its page is a tab of its own, which the shell shows beside the
++  // one it inspects. Owned and driven as when docked. False if the inspected
++  // page isn't such a tab (DevTools is a window); otherwise adds the tab, or
++  // asks the shell to show it (if |activate|).
++  bool ShowInShellTab(bool activate);
+ 
+   // Registers a WebContentsModalDialogManager for our WebContents in order to
+   // display web modal dialogs triggered by it.
+@@ -587,6 +598,8 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   std::unique_ptr<OwnedMainWebContents> owned_main_web_contents_;
+ 
+   const bool can_dock_;
++  // PLUTONIUM: see ShowInShellTab().
++  bool in_shell_tab_ = false;
+   bool close_on_detach_;
+   LifeStage life_stage_;
+   DevToolsToggleAction action_on_load_;
+diff --git a/chrome/browser/devtools/devtools_window_views.cc b/chrome/browser/devtools/devtools_window_views.cc
+index 937debfe3f..94870e76ab 100644
+--- a/chrome/browser/devtools/devtools_window_views.cc
++++ b/chrome/browser/devtools/devtools_window_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/devtools/devtools_ui_controller.h"
+ #include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/plutonium_keys.h"
++#include "chrome/browser/plutonium_tabs.h"
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -80,6 +82,13 @@ DevToolsWindow* DevToolsWindow::AsDevToolsWindow(
+ content::KeyboardEventProcessingResult DevToolsWindow::PreHandleKeyboardEvent(
+     WebContents* source,
+     const input::NativeWebKeyboardEvent& event) {
++  // PLUTONIUM (EXO-KEYS): a DevTools tab is a tab: the shell's shortcuts are
++  // the shell's.
++  if (in_shell_tab_) {
++    return PlutoniumTabs::Get()->ForwardShellShortcut(event)
++               ? content::KeyboardEventProcessingResult::HANDLED
++               : content::KeyboardEventProcessingResult::NOT_HANDLED;
++  }
+   BrowserWindow* inspected_window = GetInspectedBrowserWindow();
+   if (inspected_window) {
+     return inspected_window->PreHandleKeyboardEvent(event);
+@@ -94,6 +103,17 @@ bool DevToolsWindow::HandleKeyboardEvent(
+     // Do not navigate back in history on Windows (http://crbug.com/40529649).
+     return true;
+   }
++  // PLUTONIUM (EXO-CHROME): F12 and Ctrl+Shift+I close a DevTools tab, as
++  // they close a DevTools window.
++  if (in_shell_tab_) {
++    if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
++        plutonium_keys::GetDevToolsKey(event) ==
++            plutonium_keys::DevToolsKey::kToggle) {
++      CloseWindow();
++      return true;
++    }
++    return false;
++  }
+   BrowserWindow* inspected_window = GetInspectedBrowserWindow();
+   return inspected_window && inspected_window->HandleKeyboardEvent(event);
+ }
+diff --git a/chrome/browser/devtools/inspector_protocol_config.json b/chrome/browser/devtools/inspector_protocol_config.json
+index c972f74e20..885d1c9fba 100644
+--- a/chrome/browser/devtools/inspector_protocol_config.json
++++ b/chrome/browser/devtools/inspector_protocol_config.json
+@@ -37,6 +37,10 @@
+             {
+                 "domain": "WindowManager"
+             },
++            {
++                "domain": "Plutonium",
++                "async": [ "captureTab", "captureWindow", "tabCommand", "downloadCommand", "captureCommand", "screenshot" ]
++            },
+             {
+                 "domain": "Extensions",
+                 "include": [ "triggerAction", "loadUnpacked", "getStorageItems", "setStorageItems", "removeStorageItems", "clearStorageItems", "uninstall", "getExtensions" ],
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
+new file mode 100644
+index 0000000000..03a471ba33
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
+@@ -0,0 +1,1089 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/devtools/protocol/plutonium_handler.h"
++
++#include <utility>
++#include <vector>
++
++#include "ash/constants/ash_pref_names.h"
++#include "ash/session/session_controller_impl.h"
++#include "ash/shell.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/utf_string_conversion_utils.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/plutonium_agent.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "chrome/browser/plutonium_tab_requests.h"
++#include "components/exo/embedded_windows.h"
++#include "components/exo/session_idle.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/events/base_event_utils.h"
++#include "ui/events/event.h"
++#include "ui/events/event_constants.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/events/keycodes/dom_us_layout_data.h"
++#include "ui/events/keycodes/keyboard_code_conversion.h"
++#include "ui/gfx/codec/jpeg_codec.h"
++#include "ui/gfx/codec/png_codec.h"
++
++namespace {
++
++using protocol::Response;
++namespace Plutonium = protocol::Plutonium;
++
++// Input.dispatch*Event's modifier bits.
++int EventFlagsForModifiers(int modifiers) {
++  int flags = 0;
++  if (modifiers & 1) {
++    flags |= ui::EF_ALT_DOWN;
++  }
++  if (modifiers & 2) {
++    flags |= ui::EF_CONTROL_DOWN;
++  }
++  if (modifiers & 4) {
++    flags |= ui::EF_COMMAND_DOWN;
++  }
++  if (modifiers & 8) {
++    flags |= ui::EF_SHIFT_DOWN;
++  }
++  if (modifiers & 16) {
++    flags |= ui::EF_ALTGR_DOWN;
++  }
++  return flags;
++}
++
++// Input.dispatchMouseEvent's |buttons| bits.
++int EventFlagsForButtons(int buttons) {
++  int flags = 0;
++  if (buttons & 1) {
++    flags |= ui::EF_LEFT_MOUSE_BUTTON;
++  }
++  if (buttons & 2) {
++    flags |= ui::EF_RIGHT_MOUSE_BUTTON;
++  }
++  if (buttons & 4) {
++    flags |= ui::EF_MIDDLE_MOUSE_BUTTON;
++  }
++  if (buttons & 8) {
++    flags |= ui::EF_BACK_MOUSE_BUTTON;
++  }
++  if (buttons & 16) {
++    flags |= ui::EF_FORWARD_MOUSE_BUTTON;
++  }
++  return flags;
++}
++
++std::optional<int> EventFlagForButton(const std::string& button) {
++  if (button == "none") {
++    return 0;
++  }
++  if (button == "left") {
++    return ui::EF_LEFT_MOUSE_BUTTON;
++  }
++  if (button == "middle") {
++    return ui::EF_MIDDLE_MOUSE_BUTTON;
++  }
++  if (button == "right") {
++    return ui::EF_RIGHT_MOUSE_BUTTON;
++  }
++  if (button == "back") {
++    return ui::EF_BACK_MOUSE_BUTTON;
++  }
++  if (button == "forward") {
++    return ui::EF_FORWARD_MOUSE_BUTTON;
++  }
++  return std::nullopt;
++}
++
++std::optional<std::vector<uint8_t>> Encode(const SkBitmap& bitmap,
++                                           bool jpeg,
++                                           int quality) {
++  return jpeg ? gfx::JPEGCodec::Encode(bitmap, quality)
++              : gfx::PNGCodec::EncodeBGRASkBitmap(bitmap,
++                                                  /*discard_transparency=*/
++                                                  false);
++}
++
++std::unique_ptr<Plutonium::Tab> ToProtocol(const PlutoniumTabs::TabInfo& tab) {
++  std::string target_id;
++  if (content::WebContents* contents =
++          PlutoniumTabs::Get()->GetContents(tab.id)) {
++    target_id = content::DevToolsAgentHost::GetOrCreateFor(contents)->GetId();
++  }
++  auto tags = std::make_unique<protocol::Array<std::string>>(tab.tags);
++  std::unique_ptr<Plutonium::Tab> result =
++      Plutonium::Tab::Create()
++          .SetId(tab.id)
++          .SetTargetId(target_id)
++          .SetUrl(tab.url.possibly_invalid_spec())
++          .SetTitle(base::UTF16ToUTF8(tab.title))
++          .SetLoading(tab.loading)
++          .SetCanGoBack(tab.can_go_back)
++          .SetCanGoForward(tab.can_go_forward)
++          .SetEmbedded(tab.embedded)
++          .SetFocused(tab.focused)
++          .SetTags(std::move(tags))
++          .SetOpenerId(tab.opener_id)
++          .SetOpenedBy(tab.opened_by)
++          .SetIncognito(tab.incognito)
++          .SetStateJson(tab.state_json)
++          .Build();
++  if (!tab.dialog_type.empty()) {
++    result->SetDialogType(tab.dialog_type);
++    result->SetDialogMessage(base::UTF16ToUTF8(tab.dialog_message));
++    result->SetDialogDefaultPrompt(
++        base::UTF16ToUTF8(tab.dialog_default_prompt));
++  }
++  return result;
++}
++
++std::unique_ptr<Plutonium::Window> ToProtocol(
++    const ExoWindowBroker::WindowInfo& window) {
++  std::optional<exo::EmbeddedWindows::Info> info =
++      exo::EmbeddedWindows::Get()->GetInfo(window.id);
++  return Plutonium::Window::Create()
++      .SetId(window.id)
++      .SetAppId(window.app_id)
++      .SetTitle(base::UTF16ToUTF8(window.title))
++      .SetWidth(window.size.width())
++      .SetHeight(window.size.height())
++      .SetDeviceScaleFactor(window.device_scale_factor)
++      .SetEmbedded(window.embedded)
++      .SetFocused(window.focused)
++      .SetOnDesktop(info && info->on_desktop)
++      .SetPid(window.pid)
++      .SetTags(std::make_unique<protocol::Array<std::string>>(window.tags))
++      .Build();
++}
++
++Response NoWindow() {
++  return Response::InvalidParams("No such window");
++}
++
++Response NoTab() {
++  return Response::InvalidParams("No such tab");
++}
++
++}  // namespace
++
++PlutoniumHandler::Screencast::Screencast() = default;
++PlutoniumHandler::Screencast::~Screencast() = default;
++
++PlutoniumHandler::PlutoniumHandler(protocol::UberDispatcher* dispatcher)
++    : frontend_(std::make_unique<Plutonium::Frontend>(dispatcher->channel())) {
++  Plutonium::Dispatcher::wire(dispatcher, this);
++}
++
++PlutoniumHandler::~PlutoniumHandler() {
++  if (idle_inhibited_) {
++    exo::SessionIdle::Get()->SetInhibited(false);
++  }
++}
++
++Response PlutoniumHandler::Enable() {
++  if (enabled_) {
++    return Response::Success();
++  }
++  enabled_ = true;
++  // The current ones first, as the shell API's subscriptions do.
++  if (ExoWindowBroker* broker = ExoWindowBroker::Get()) {
++    for (const ExoWindowBroker::WindowInfo& window : broker->GetWindows()) {
++      frontend_->WindowAdded(ToProtocol(window));
++    }
++    broker_observation_.Observe(broker);
++  }
++  for (const PlutoniumTabs::TabInfo& tab : PlutoniumTabs::Get()->GetTabs()) {
++    frontend_->TabAdded(ToProtocol(tab));
++  }
++  tabs_observation_.Observe(PlutoniumTabs::Get());
++  // EXO-TAB-FEATURES: downloads, the shells' profile's included.
++  PlutoniumDownloads* downloads = PlutoniumDownloads::Get();
++  if (content::WebContents* shell = PlutoniumTabs::Get()->shell()) {
++    downloads->ObserveContext(shell->GetBrowserContext());
++  }
++  for (const base::DictValue& download : downloads->GetDownloads()) {
++    OnDownloadAdded(download);
++  }
++  downloads_observation_.Observe(downloads);
++  // EXO-CAPTURE: the settings, then the captures there are.
++  OnCaptureSettingsChanged(PlutoniumCapture::Get()->GetSettings());
++  for (const base::DictValue& capture : PlutoniumCapture::Get()->GetCaptures()) {
++    OnCaptureStarted(capture.FindInt("id").value_or(0), capture);
++  }
++  capture_observation_.Observe(PlutoniumCapture::Get());
++  // EXO-SERVICES: the media session there is, then its changes.
++  media_session_ = std::make_unique<PlutoniumMediaSession>(base::BindRepeating(
++      &PlutoniumHandler::OnMediaSessionChanged, base::Unretained(this)));
++  // EXO-LOCK
++  if (PlutoniumLock* lock = PlutoniumLock::Get()) {
++    lock_observation_.Observe(lock);
++  }
++  // EXO-DISPLAYS
++  if (PlutoniumShells* shells = PlutoniumShells::Get()) {
++    shells_observation_.Observe(shells);
++  }
++  // EXO-SERVICES: the web notifications there are, then the new ones.
++  notifications_ = std::make_unique<PlutoniumWebNotifications>(
++      base::BindRepeating(&PlutoniumHandler::OnNotificationShown,
++                          base::Unretained(this)),
++      base::BindRepeating(&PlutoniumHandler::OnNotificationClosed,
++                          base::Unretained(this)));
++  for (const PlutoniumWebNotifications::Info& info :
++       notifications_->GetNotifications()) {
++    OnNotificationShown(info);
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::Disable() {
++  enabled_ = false;
++  broker_observation_.Reset();
++  tabs_observation_.Reset();
++  downloads_observation_.Reset();
++  capture_observation_.Reset();
++  lock_observation_.Reset();
++  shells_observation_.Reset();
++  media_session_.reset();
++  notifications_.reset();
++  screencasts_.clear();
++  awake_tabs_.clear();
++  awake_windows_.clear();
++  agent_focus_windows_.clear();
++  return Response::Success();
++}
++
++Response PlutoniumHandler::GetTabs(
++    std::unique_ptr<protocol::Array<Plutonium::Tab>>* tabs) {
++  *tabs = std::make_unique<protocol::Array<Plutonium::Tab>>();
++  for (const PlutoniumTabs::TabInfo& tab : PlutoniumTabs::Get()->GetTabs()) {
++    (*tabs)->push_back(ToProtocol(tab));
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::CreateTab(
++    const std::string& url,
++    std::unique_ptr<protocol::Array<std::string>> tags,
++    std::optional<bool> incognito,
++    std::unique_ptr<Plutonium::Tab>* tab) {
++  std::optional<PlutoniumTabs::TabInfo> created =
++      PlutoniumTabs::Get()->CreateAgentTab(
++          url, tags ? *tags : std::vector<std::string>(),
++          incognito.value_or(false));
++  if (!created) {
++    return Response::ServerError(
++        "Can't open that URL (or no shell page has started)");
++  }
++  *tab = ToProtocol(*created);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::NavigateTab(int id, const std::string& url) {
++  if (!PlutoniumTabs::Get()->GetTab(id)) {
++    return NoTab();
++  }
++  return PlutoniumTabs::Get()->Navigate(id, url)
++             ? Response::Success()
++             : Response::InvalidParams("Can't open that URL");
++}
++
++void PlutoniumHandler::TabCommand(
++    int id,
++    const std::string& command,
++    std::optional<std::string> args_json,
++    std::unique_ptr<TabCommandCallback> callback) {
++  if (!PlutoniumTabs::Get()->GetTab(id)) {
++    callback->sendFailure(NoTab());
++    return;
++  }
++  PlutoniumTabs::Get()->RunNamedCommand(
++      id, command, args_json.value_or(std::string()),
++      base::BindOnce(
++          [](std::unique_ptr<TabCommandCallback> callback, bool ok,
++             const std::string& result) {
++            if (!ok) {
++              callback->sendFailure(Response::InvalidParams(result));
++              return;
++            }
++            callback->sendSuccess(result);
++          },
++          std::move(callback)));
++}
++
++Response PlutoniumHandler::AnswerTabRequest(int request_id,
++                                            const std::string& answer_json) {
++  return PlutoniumTabRequests::Get()->Answer(
++             request_id, PlutoniumTabRequests::From::kAgent, /*taker=*/0,
++             answer_json)
++             ? Response::Success()
++             : Response::InvalidParams(
++                   "No such open request, or it doesn't take that answer");
++}
++
++Response PlutoniumHandler::GetDownloads(
++    std::unique_ptr<protocol::Array<std::string>>* downloads_json) {
++  *downloads_json = std::make_unique<protocol::Array<std::string>>();
++  for (const base::DictValue& download :
++       PlutoniumDownloads::Get()->GetDownloads()) {
++    std::string json;
++    base::JSONWriter::Write(download, &json);
++    (*downloads_json)->push_back(std::move(json));
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::DownloadCommand(
++    int id,
++    const std::string& command,
++    std::unique_ptr<DownloadCommandCallback> callback) {
++  PlutoniumDownloads::Get()->RunCommand(
++      id, command, /*from_agent=*/true,
++      base::BindOnce(
++          [](std::unique_ptr<DownloadCommandCallback> callback, bool ok,
++             const std::string& error) {
++            if (!ok) {
++              callback->sendFailure(Response::InvalidParams(error));
++              return;
++            }
++            callback->sendSuccess();
++          },
++          std::move(callback)));
++}
++
++Response PlutoniumHandler::AnswerTabDialog(
++    int id,
++    bool accept,
++    std::optional<std::string> prompt_text) {
++  std::optional<PlutoniumTabs::TabInfo> tab = PlutoniumTabs::Get()->GetTab(id);
++  if (!tab) {
++    return NoTab();
++  }
++  if (tab->dialog_type.empty()) {
++    return Response::InvalidParams("The tab has no dialog");
++  }
++  PlutoniumTabs::Get()->AnswerDialog(
++      id, accept, base::UTF8ToUTF16(prompt_text.value_or(std::string())));
++  return Response::Success();
++}
++
++Response PlutoniumHandler::GetWindows(
++    std::unique_ptr<protocol::Array<Plutonium::Window>>* windows) {
++  *windows = std::make_unique<protocol::Array<Plutonium::Window>>();
++  if (ExoWindowBroker* broker = ExoWindowBroker::Get()) {
++    for (const ExoWindowBroker::WindowInfo& window : broker->GetWindows()) {
++      (*windows)->push_back(ToProtocol(window));
++    }
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetTabAwake(int id, bool awake) {
++  content::WebContents* contents = PlutoniumTabs::Get()->GetContents(id);
++  if (!contents) {
++    return NoTab();
++  }
++  if (!awake) {
++    awake_tabs_.erase(id);
++  } else if (!awake_tabs_.contains(id)) {
++    // As tab capture does for a background tab: frames without showing it.
++    awake_tabs_.emplace(id, contents->IncrementCapturerCount(
++                                gfx::Size(), /*stay_hidden=*/true,
++                                /*stay_awake=*/true, /*is_activity=*/false));
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::CaptureTab(int id,
++                                  std::optional<std::string> format,
++                                  std::optional<int> quality,
++                                  std::unique_ptr<CaptureTabCallback> callback) {
++  if (!PlutoniumTabs::Get()->GetTab(id)) {
++    callback->sendFailure(NoTab());
++    return;
++  }
++  const bool jpeg =
++      format.value_or("png") == Plutonium::CaptureTab::FormatEnum::Jpeg;
++  PlutoniumTabs::Get()->Snapshot(
++      id, base::BindOnce(
++              [](std::unique_ptr<CaptureTabCallback> callback, bool jpeg,
++                 int quality, const SkBitmap& bitmap) {
++                std::optional<std::vector<uint8_t>> data;
++                if (!bitmap.drawsNothing()) {
++                  data = Encode(bitmap, jpeg, quality);
++                }
++                if (!data) {
++                  callback->sendFailure(
++                      Response::ServerError("The tab has nothing to show"));
++                  return;
++                }
++                callback->sendSuccess(
++                    protocol::Binary::fromVector(std::move(*data)),
++                    bitmap.width(), bitmap.height());
++              },
++              std::move(callback), jpeg, quality.value_or(80)));
++}
++
++void PlutoniumHandler::CaptureWindow(
++    int id,
++    std::optional<std::string> format,
++    std::optional<int> quality,
++    std::unique_ptr<CaptureWindowCallback> callback) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    callback->sendFailure(NoWindow());
++    return;
++  }
++  const bool jpeg =
++      format.value_or("png") == Plutonium::CaptureWindow::FormatEnum::Jpeg;
++  exo::EmbeddedWindows::Get()->Snapshot(
++      id, base::BindOnce(
++              [](std::unique_ptr<CaptureWindowCallback> callback, bool jpeg,
++                 int quality, const SkBitmap& bitmap) {
++                if (bitmap.drawsNothing()) {
++                  callback->sendFailure(
++                      Response::ServerError("The window has nothing to show"));
++                  return;
++                }
++                std::optional<std::vector<uint8_t>> data =
++                    Encode(bitmap, jpeg, quality);
++                if (!data) {
++                  callback->sendFailure(
++                      Response::ServerError("Couldn't encode the image"));
++                  return;
++                }
++                callback->sendSuccess(
++                    protocol::Binary::fromVector(std::move(*data)),
++                    bitmap.width(), bitmap.height());
++              },
++              std::move(callback), jpeg, quality.value_or(80)));
++}
++
++Response PlutoniumHandler::GetWindowPopups(
++    int id,
++    std::unique_ptr<protocol::Array<Plutonium::Popup>>* popups) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  *popups = std::make_unique<protocol::Array<Plutonium::Popup>>();
++  for (const gfx::Rect& rect :
++       exo::EmbeddedWindows::Get()->GetPopupBounds(id)) {
++    (*popups)->push_back(Plutonium::Popup::Create()
++                             .SetX(rect.x())
++                             .SetY(rect.y())
++                             .SetWidth(rect.width())
++                             .SetHeight(rect.height())
++                             .Build());
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetWindowAwake(int id, bool awake) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  if (!awake) {
++    awake_windows_.erase(id);
++  } else if (!awake_windows_.contains(id)) {
++    awake_windows_.emplace(id, exo::EmbeddedWindows::Get()->KeepDrawing(id));
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetWindowAgentFocus(int id, bool focused) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  if (!focused) {
++    agent_focus_windows_.erase(id);
++  } else if (!agent_focus_windows_.contains(id)) {
++    agent_focus_windows_.emplace(
++        id, exo::EmbeddedWindows::Get()->HoldAgentFocus(id));
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::CloseWindow(int id) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  exo::EmbeddedWindows::Get()->Close(id);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetWindowOriginTag(int id,
++                                              const std::string& tag,
++                                              bool* ok) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  *ok = broker->SetOriginTag(id, tag);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::ResizeWindow(int id, int width, int height) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  std::optional<ExoWindowBroker::WindowInfo> window =
++      broker ? broker->GetWindow(id) : std::nullopt;
++  if (!window) {
++    return NoWindow();
++  }
++  if (window->embedded) {
++    return Response::InvalidParams(
++        "A page shows the window: its size is the page's");
++  }
++  if (width < 1 || height < 1) {
++    return Response::InvalidParams("Empty size");
++  }
++  exo::EmbeddedWindows::Get()->SetSize(id, gfx::Size(width, height));
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetDisplaysForTesting(
++    std::unique_ptr<protocol::Array<std::string>> specs) {
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!shells || !shells->SetDisplaysForTesting(*specs)) {
++    return Response::ServerError(
++        "Needs shell mode and --plutonium-test-displays, and valid specs");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::DispatchWindowMouseEvent(
++    int id,
++    const std::string& type,
++    double x,
++    double y,
++    std::optional<std::string> button,
++    std::optional<int> buttons,
++    std::optional<int> click_count,
++    std::optional<double> delta_x,
++    std::optional<double> delta_y,
++    std::optional<int> modifiers) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  std::optional<int> changed = EventFlagForButton(button.value_or("none"));
++  if (!changed) {
++    return Response::InvalidParams("Unknown button");
++  }
++  int flags = EventFlagsForModifiers(modifiers.value_or(0)) |
++              EventFlagsForButtons(buttons.value_or(0));
++  const gfx::PointF location(x, y);
++  std::unique_ptr<ui::MouseEvent> event;
++  if (type == Plutonium::DispatchWindowMouseEvent::TypeEnum::MouseWheel) {
++    // Down and right positive, as wheel notches; aura's offsets are the
++    // content's direction, 120 to a notch.
++    const gfx::Vector2d offset(
++        static_cast<int>(-delta_x.value_or(0) * ui::MouseWheelEvent::kWheelDelta),
++        static_cast<int>(-delta_y.value_or(0) *
++                         ui::MouseWheelEvent::kWheelDelta));
++    event = std::make_unique<ui::MouseWheelEvent>(
++        offset, location, location, ui::EventTimeForNow(), flags, 0);
++  } else {
++    ui::EventType event_type;
++    if (type == Plutonium::DispatchWindowMouseEvent::TypeEnum::MousePressed) {
++      event_type = ui::EventType::kMousePressed;
++      flags |= *changed;
++    } else if (type ==
++               Plutonium::DispatchWindowMouseEvent::TypeEnum::MouseReleased) {
++      event_type = ui::EventType::kMouseReleased;
++      flags |= *changed;
++    } else if (type ==
++               Plutonium::DispatchWindowMouseEvent::TypeEnum::MouseMoved) {
++      event_type = flags & (ui::EF_LEFT_MOUSE_BUTTON |
++                            ui::EF_MIDDLE_MOUSE_BUTTON |
++                            ui::EF_RIGHT_MOUSE_BUTTON)
++                       ? ui::EventType::kMouseDragged
++                       : ui::EventType::kMouseMoved;
++    } else {
++      return Response::InvalidParams("Unknown type");
++    }
++    if (event_type != ui::EventType::kMousePressed &&
++        event_type != ui::EventType::kMouseReleased && *changed) {
++      return Response::InvalidParams("Only presses and releases change a button");
++    }
++    if ((event_type == ui::EventType::kMousePressed ||
++         event_type == ui::EventType::kMouseReleased) &&
++        !*changed) {
++      return Response::InvalidParams("Which button?");
++    }
++    event = std::make_unique<ui::MouseEvent>(event_type, location, location,
++                                             ui::EventTimeForNow(), flags,
++                                             *changed);
++    if (click_count && *click_count > 0 &&
++        (event_type == ui::EventType::kMousePressed ||
++         event_type == ui::EventType::kMouseReleased)) {
++      event->SetClickCount(*click_count);
++    }
++  }
++  if (!exo::EmbeddedWindows::Get()->InjectMouseEvent(id, location,
++                                                     std::move(event))) {
++    return Response::ServerError("The window takes no input yet");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::DispatchWindowKeyEvents(
++    int id,
++    std::unique_ptr<protocol::Array<Plutonium::KeyEvent>> events) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  std::vector<std::unique_ptr<ui::KeyEvent>> keys;
++  for (const std::unique_ptr<Plutonium::KeyEvent>& key : *events) {
++    const ui::DomCode code =
++        ui::KeycodeConverter::CodeStringToDomCode(key->GetCode());
++    if (code == ui::DomCode::NONE) {
++      return Response::InvalidParams("Unknown key code \"" + key->GetCode() +
++                                     "\"");
++    }
++    const ui::EventType type =
++        key->GetType() == Plutonium::KeyEvent::TypeEnum::KeyDown
++            ? ui::EventType::kKeyPressed
++            : ui::EventType::kKeyReleased;
++    keys.push_back(std::make_unique<ui::KeyEvent>(
++        type, ui::DomCodeToUsLayoutKeyboardCode(code), code,
++        EventFlagsForModifiers(key->GetModifiers(0)), ui::EventTimeForNow()));
++  }
++  if (!exo::EmbeddedWindows::Get()->InjectKeyEvents(id, std::move(keys))) {
++    return Response::ServerError(
++        "The window takes no keys yet (or nothing has focus to lend it)");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::GetKeymap(
++    std::string* keymap,
++    std::unique_ptr<protocol::Array<Plutonium::TypedChar>>* chars) {
++  exo::EmbeddedWindows* windows = exo::EmbeddedWindows::Get();
++  *keymap = windows->GetKeymap();
++  *chars = std::make_unique<protocol::Array<Plutonium::TypedChar>>();
++  for (const exo::EmbeddedWindows::TypedChar& typed :
++       windows->GetTypedChars()) {
++    std::string text;
++    base::WriteUnicodeCharacter(static_cast<base_icu::UChar32>(typed.character),
++                                &text);
++    (*chars)->push_back(
++        Plutonium::TypedChar::Create()
++            .SetText(std::move(text))
++            .SetCode(typed.code)
++            .SetModifiers(((typed.flags & ui::EF_SHIFT_DOWN) ? 8 : 0) |
++                          ((typed.flags & ui::EF_ALTGR_DOWN) ? 16 : 0))
++            .Build());
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetWindowKeymap(int id,
++                                           std::optional<std::string> keymap) {
++  if (!exo::EmbeddedWindows::Get()->SetAgentKeymap(id, keymap)) {
++    return NoWindow();
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::StartWindowScreencast(
++    int id,
++    std::optional<std::string> format,
++    std::optional<int> quality,
++    std::optional<int> max_width,
++    std::optional<int> max_height) {
++  ExoWindowBroker* broker = ExoWindowBroker::Get();
++  if (!broker || !broker->GetWindow(id)) {
++    return NoWindow();
++  }
++  screencasts_.erase(id);
++  gfx::Size max_size(max_width.value_or(0), max_height.value_or(0));
++  if (max_size.width() <= 0 || max_size.height() <= 0) {
++    max_size = gfx::Size();
++  }
++  Screencast& screencast = screencasts_[id];
++  screencast.jpeg =
++      format.value_or("jpeg") == Plutonium::StartWindowScreencast::FormatEnum::Jpeg;
++  screencast.quality = quality.value_or(80);
++  screencast.capture = plutonium_agent::WindowScreencast::Start(
++      id, max_size,
++      base::BindRepeating(&PlutoniumHandler::OnScreencastFrame,
++                          weak_factory_.GetWeakPtr(), id));
++  if (!screencast.capture) {
++    screencasts_.erase(id);
++    return Response::ServerError("The window has nothing to show yet");
++  }
++  screencast.keep_drawing = exo::EmbeddedWindows::Get()->KeepDrawing(id);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::StopWindowScreencast(int id) {
++  screencasts_.erase(id);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::WindowScreencastFrameAck(int id, int session_id) {
++  auto it = screencasts_.find(id);
++  if (it == screencasts_.end()) {
++    return Response::Success();
++  }
++  Screencast& screencast = it->second;
++  if (screencast.pending_session_id != session_id) {
++    return Response::Success();
++  }
++  screencast.pending_session_id = 0;
++  if (std::unique_ptr<SkBitmap> next = std::move(screencast.next)) {
++    SendScreencastFrame(id, *next);
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::OnScreencastFrame(int32_t window_id,
++                                         const SkBitmap& frame) {
++  auto it = screencasts_.find(window_id);
++  if (it == screencasts_.end()) {
++    return;
++  }
++  if (it->second.pending_session_id) {
++    // Keep only the newest until the client catches up.
++    it->second.next = std::make_unique<SkBitmap>(frame);
++    return;
++  }
++  SendScreencastFrame(window_id, frame);
++}
++
++void PlutoniumHandler::SendScreencastFrame(int32_t window_id,
++                                           const SkBitmap& frame) {
++  Screencast& screencast = screencasts_[window_id];
++  std::optional<std::vector<uint8_t>> data =
++      Encode(frame, screencast.jpeg, screencast.quality);
++  if (!data) {
++    return;
++  }
++  screencast.pending_session_id = next_session_id_++;
++  frontend_->WindowScreencastFrame(
++      window_id, protocol::Binary::fromVector(std::move(*data)), frame.width(),
++      frame.height(), screencast.pending_session_id);
++}
++
++void PlutoniumHandler::OnWindowAdded(const ExoWindowBroker::WindowInfo& window) {
++  frontend_->WindowAdded(ToProtocol(window));
++}
++
++void PlutoniumHandler::OnWindowChanged(
++    const ExoWindowBroker::WindowInfo& window) {
++  frontend_->WindowChanged(ToProtocol(window));
++}
++
++void PlutoniumHandler::OnWindowRemoved(int32_t window_id) {
++  awake_windows_.erase(window_id);
++  agent_focus_windows_.erase(window_id);
++  if (screencasts_.erase(window_id)) {
++    frontend_->WindowScreencastStopped(window_id);
++  }
++  frontend_->WindowRemoved(window_id);
++}
++
++void PlutoniumHandler::OnTabAdded(const PlutoniumTabs::TabInfo& tab) {
++  frontend_->TabAdded(ToProtocol(tab));
++}
++
++void PlutoniumHandler::OnTabChanged(const PlutoniumTabs::TabInfo& tab) {
++  frontend_->TabChanged(ToProtocol(tab));
++}
++
++void PlutoniumHandler::OnTabRemoved(int32_t tab_id) {
++  awake_tabs_.erase(tab_id);
++  frontend_->TabRemoved(tab_id);
++}
++
++void PlutoniumHandler::OnDownloadAdded(const base::DictValue& download) {
++  std::string json;
++  base::JSONWriter::Write(download, &json);
++  frontend_->DownloadAdded(json);
++}
++
++void PlutoniumHandler::OnDownloadChanged(const base::DictValue& download) {
++  std::string json;
++  base::JSONWriter::Write(download, &json);
++  frontend_->DownloadChanged(json);
++}
++
++void PlutoniumHandler::OnDownloadRemoved(int32_t id) {
++  frontend_->DownloadRemoved(id);
++}
++
++void PlutoniumHandler::CaptureCommand(
++    const std::string& command,
++    std::optional<std::string> args_json,
++    std::unique_ptr<CaptureCommandCallback> callback) {
++  PlutoniumCapture::Get()->RunCommand(
++      command, args_json.value_or(std::string()), /*frame=*/nullptr,
++      /*taker=*/0,
++      base::BindOnce(
++          [](std::unique_ptr<CaptureCommandCallback> callback, bool ok,
++             const std::string& result) {
++            if (!ok) {
++              callback->sendFailure(Response::InvalidParams(result));
++              return;
++            }
++            callback->sendSuccess(result);
++          },
++          std::move(callback)));
++}
++
++void PlutoniumHandler::Screenshot(const std::string& source_json,
++                                  std::unique_ptr<ScreenshotCallback> callback) {
++  std::optional<base::Value> parsed = base::JSONReader::Read(
++      source_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
++  std::optional<PlutoniumCapture::Source> source =
++      parsed ? PlutoniumCapture::Source::FromValue(*parsed) : std::nullopt;
++  if (!source) {
++    callback->sendFailure(Response::InvalidParams("Which source?"));
++    return;
++  }
++  PlutoniumCapture::Get()->Screenshot(
++      *source,
++      base::BindOnce(
++          [](std::unique_ptr<ScreenshotCallback> callback,
++             const SkBitmap& bitmap, const std::string& error) {
++            if (bitmap.drawsNothing()) {
++              callback->sendFailure(Response::ServerError(error));
++              return;
++            }
++            std::optional<std::vector<uint8_t>> data =
++                Encode(bitmap, /*jpeg=*/false, 0);
++            if (!data) {
++              callback->sendFailure(
++                  Response::ServerError("Couldn't encode the image"));
++              return;
++            }
++            callback->sendSuccess(
++                protocol::Binary::fromVector(std::move(*data)), bitmap.width(),
++                bitmap.height());
++          },
++          std::move(callback)));
++}
++
++void PlutoniumHandler::OnCaptureStarted(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("start", json);
++}
++
++void PlutoniumHandler::OnCaptureChanged(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("change", json);
++}
++
++void PlutoniumHandler::OnCaptureStopped(int32_t id,
++                                        const base::DictValue& capture) {
++  std::string json;
++  base::JSONWriter::Write(capture, &json);
++  frontend_->CaptureEvent("stop", json);
++}
++
++void PlutoniumHandler::OnCaptureSettingsChanged(
++    const base::DictValue& settings) {
++  std::string json;
++  base::JSONWriter::Write(settings, &json);
++  frontend_->CaptureEvent("settings", json);
++}
++
++namespace {
++
++std::unique_ptr<Plutonium::MediaSession> ToProtocol(
++    const std::optional<PlutoniumMediaSession::Info>& info) {
++  std::unique_ptr<Plutonium::MediaSession> result =
++      Plutonium::MediaSession::Create()
++          .SetActive(info.has_value())
++          .SetPlaying(info && info->playing)
++          .SetTitle(info ? base::UTF16ToUTF8(info->title) : std::string())
++          .SetArtist(info ? base::UTF16ToUTF8(info->artist) : std::string())
++          .SetAlbum(info ? base::UTF16ToUTF8(info->album) : std::string())
++          .SetSource(info ? base::UTF16ToUTF8(info->source) : std::string())
++          .SetActions(std::make_unique<protocol::Array<std::string>>(
++              info ? info->actions : std::vector<std::string>()))
++          .Build();
++  if (info && info->tab_id) {
++    result->SetTabId(*info->tab_id);
++  }
++  return result;
++}
++
++}  // namespace
++
++Response PlutoniumHandler::GetMediaSession(
++    std::unique_ptr<Plutonium::MediaSession>* session) {
++  *session = ToProtocol(media_session_ ? media_session_->GetInfo()
++                                       : std::nullopt);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::MediaSessionAction(const std::string& action) {
++  if (!media_session_) {
++    return Response::ServerError("Plutonium.enable first.");
++  }
++  if (!media_session_->Perform(action)) {
++    return Response::InvalidParams("No such media session action.");
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::OnMediaSessionChanged() {
++  frontend_->MediaSessionChanged(ToProtocol(media_session_->GetInfo()));
++}
++
++Response PlutoniumHandler::Lock(std::optional<std::string> user,
++                                std::optional<std::string> message) {
++  PlutoniumLock* lock = PlutoniumLock::Get();
++  if (!lock) {
++    return Response::ServerError("There's a lock only in shell mode.");
++  }
++  lock->Lock(base::UTF8ToUTF16(user.value_or("")),
++             base::UTF8ToUTF16(message.value_or("")));
++  return Response::Success();
++}
++
++Response PlutoniumHandler::GetIdle(
++    bool* locked,
++    double* idle_seconds,
++    bool* displays_off,
++    std::unique_ptr<protocol::Array<std::string>>* wake_locks) {
++  PlutoniumLock* lock = PlutoniumLock::Get();
++  if (!lock) {
++    return Response::ServerError("There's a lock only in shell mode.");
++  }
++  *locked = lock->IsLocked();
++  *idle_seconds = lock->GetIdleTime().InSecondsF();
++  *displays_off = lock->AreDisplaysOff();
++  *wake_locks =
++      std::make_unique<protocol::Array<std::string>>(lock->GetWakeLocks());
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetDisplaysOff(bool off, bool* applied) {
++  PlutoniumLock* lock = PlutoniumLock::Get();
++  if (!lock) {
++    return Response::ServerError("There's a lock only in shell mode.");
++  }
++  *applied = lock->SetDisplaysOff(off);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetIdleInhibited(bool inhibited) {
++  idle_inhibited_ = inhibited;
++  exo::SessionIdle::Get()->SetInhibited(inhibited);
++  return Response::Success();
++}
++
++void PlutoniumHandler::OnLockChanged(bool locked) {
++  frontend_->LockChanged(locked);
++}
++
++Response PlutoniumHandler::GetDisplayConfig(std::string* json) {
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!shells) {
++    return Response::ServerError(
++        "There are displays to configure only in "
++        "shell mode.");
++  }
++  *json = shells->GetDisplayConfigJson();
++  return Response::Success();
++}
++
++Response PlutoniumHandler::ConfigureDisplays(const std::string& change_json) {
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!shells) {
++    return Response::ServerError(
++        "There are displays to configure only in "
++        "shell mode.");
++  }
++  const std::string error = shells->ConfigureDisplays(change_json);
++  return error.empty() ? Response::Success() : Response::InvalidParams(error);
++}
++
++Response PlutoniumHandler::OpenSwitcher(const std::string& page) {
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  if (!shells) {
++    return Response::ServerError("There's a switcher only in shell mode.");
++  }
++  if (!shells->OpenSwitcher(page)) {
++    return Response::InvalidParams("The switcher has no page \"" + page +
++                                   "\".");
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::OnDisplaysChanged() {
++  frontend_->DisplayConfigChanged();
++}
++
++void PlutoniumHandler::OnShellsDestroying() {
++  shells_observation_.Reset();
++}
++
++void PlutoniumHandler::OnNotificationShown(
++    const PlutoniumWebNotifications::Info& info) {
++  auto buttons = std::make_unique<protocol::Array<std::string>>();
++  for (const std::u16string& button : info.buttons) {
++    buttons->push_back(base::UTF16ToUTF8(button));
++  }
++  frontend_->NotificationShown(Plutonium::WebNotification::Create()
++                                   .SetId(info.id)
++                                   .SetOrigin(info.origin)
++                                   .SetTitle(base::UTF16ToUTF8(info.title))
++                                   .SetBody(base::UTF16ToUTF8(info.body))
++                                   .SetIcon(info.icon)
++                                   .SetButtons(std::move(buttons))
++                                   .SetRequireInteraction(
++                                       info.require_interaction)
++                                   .SetSilent(info.silent)
++                                   .Build());
++}
++
++void PlutoniumHandler::OnNotificationClosed(const std::string& id) {
++  frontend_->NotificationClosed(id);
++}
++
++Response PlutoniumHandler::NotificationAction(const std::string& id,
++                                              const std::string& action,
++                                              std::optional<int> button) {
++  if (!notifications_) {
++    return Response::ServerError("Plutonium.enable first.");
++  }
++  if (action != "click" && action != "close") {
++    return Response::InvalidParams("action is click or close.");
++  }
++  if (!notifications_->Perform(id, action, button)) {
++    return Response::InvalidParams("No such notification or button.");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetColorScheme(bool dark) {
++  // Ash's dark mode is the user's pref: its controller, then the color
++  // palette controller, carry it to the web's and Ash's native themes.
++  PrefService* prefs =
++      ash::Shell::HasInstance()
++          ? ash::Shell::Get()->session_controller()->GetActivePrefService()
++          : nullptr;
++  if (!prefs) {
++    return Response::ServerError("There's no user session yet.");
++  }
++  prefs->SetBoolean(ash::prefs::kDarkModeEnabled, dark);
++  return Response::Success();
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
+new file mode 100644
+index 0000000000..c3f20b841b
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_handler.h
+@@ -0,0 +1,239 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_HANDLER_H_
++#define CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_HANDLER_H_
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/functional/callback_helpers.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/devtools/protocol/plutonium.h"
++#include "chrome/browser/devtools/protocol/plutonium_media.h"
++#include "chrome/browser/devtools/protocol/plutonium_notifications.h"
++#include "chrome/browser/exo_window_broker.h"
++#include "chrome/browser/plutonium_capture.h"
++#include "chrome/browser/plutonium_downloads.h"
++#include "chrome/browser/plutonium_lock.h"
++#include "chrome/browser/plutonium_shells.h"
++#include "chrome/browser/plutonium_tabs.h"
++
++class SkBitmap;
++
++namespace plutonium_agent {
++class WindowScreencast;
++}
++
++// PLUTONIUM (EXO-AGENT): the Plutonium domain (cros_protocol.pdl). The
++// helper drives the shells' windows and tabs through it, on the browser
++// target, without a shell page. Only for trusted clients on the browser
++// target (see ChromeDevToolsSession).
++class PlutoniumHandler : public protocol::Plutonium::Backend,
++                         public ExoWindowBroker::Observer,
++                         public PlutoniumTabs::Observer,
++                         public PlutoniumDownloads::Observer,
++                         public PlutoniumCapture::Observer,
++                         public PlutoniumLock::Observer,
++                         public PlutoniumShells::Observer {
++ public:
++  explicit PlutoniumHandler(protocol::UberDispatcher* dispatcher);
++  PlutoniumHandler(const PlutoniumHandler&) = delete;
++  PlutoniumHandler& operator=(const PlutoniumHandler&) = delete;
++  ~PlutoniumHandler() override;
++
++  // protocol::Plutonium::Backend:
++  protocol::Response Enable() override;
++  protocol::Response Disable() override;
++  protocol::Response GetTabs(
++      std::unique_ptr<protocol::Array<protocol::Plutonium::Tab>>* tabs)
++      override;
++  protocol::Response CreateTab(
++      const std::string& url,
++      std::unique_ptr<protocol::Array<std::string>> tags,
++      std::optional<bool> incognito,
++      std::unique_ptr<protocol::Plutonium::Tab>* tab) override;
++  protocol::Response NavigateTab(int id, const std::string& url) override;
++  void TabCommand(int id,
++                  const std::string& command,
++                  std::optional<std::string> args_json,
++                  std::unique_ptr<TabCommandCallback> callback) override;
++  protocol::Response AnswerTabRequest(int request_id,
++                                      const std::string& answer_json) override;
++  protocol::Response AnswerTabDialog(
++      int id,
++      bool accept,
++      std::optional<std::string> prompt_text) override;
++  protocol::Response SetTabAwake(int id, bool awake) override;
++  protocol::Response GetDownloads(
++      std::unique_ptr<protocol::Array<std::string>>* downloads_json) override;
++  void DownloadCommand(
++      int id,
++      const std::string& command,
++      std::unique_ptr<DownloadCommandCallback> callback) override;
++  void CaptureTab(int id,
++                  std::optional<std::string> format,
++                  std::optional<int> quality,
++                  std::unique_ptr<CaptureTabCallback> callback) override;
++  protocol::Response GetWindows(
++      std::unique_ptr<protocol::Array<protocol::Plutonium::Window>>* windows)
++      override;
++  void CaptureWindow(int id,
++                     std::optional<std::string> format,
++                     std::optional<int> quality,
++                     std::unique_ptr<CaptureWindowCallback> callback) override;
++  protocol::Response GetWindowPopups(
++      int id,
++      std::unique_ptr<protocol::Array<protocol::Plutonium::Popup>>* popups)
++      override;
++  protocol::Response SetWindowAwake(int id, bool awake) override;
++  protocol::Response SetWindowAgentFocus(int id, bool focused) override;
++  protocol::Response CloseWindow(int id) override;
++  protocol::Response SetWindowOriginTag(int id,
++                                       const std::string& tag,
++                                       bool* ok) override;
++  protocol::Response ResizeWindow(int id, int width, int height) override;
++  protocol::Response SetDisplaysForTesting(
++      std::unique_ptr<protocol::Array<std::string>> specs) override;
++  protocol::Response DispatchWindowMouseEvent(
++      int id,
++      const std::string& type,
++      double x,
++      double y,
++      std::optional<std::string> button,
++      std::optional<int> buttons,
++      std::optional<int> click_count,
++      std::optional<double> delta_x,
++      std::optional<double> delta_y,
++      std::optional<int> modifiers) override;
++  protocol::Response DispatchWindowKeyEvents(
++      int id,
++      std::unique_ptr<protocol::Array<protocol::Plutonium::KeyEvent>> events)
++      override;
++  protocol::Response GetKeymap(
++      std::string* keymap,
++      std::unique_ptr<protocol::Array<protocol::Plutonium::TypedChar>>* chars)
++      override;
++  protocol::Response SetWindowKeymap(
++      int id,
++      std::optional<std::string> keymap) override;
++  protocol::Response StartWindowScreencast(
++      int id,
++      std::optional<std::string> format,
++      std::optional<int> quality,
++      std::optional<int> max_width,
++      std::optional<int> max_height) override;
++  protocol::Response StopWindowScreencast(int id) override;
++  protocol::Response WindowScreencastFrameAck(int id, int session_id) override;
++  void CaptureCommand(const std::string& command,
++                      std::optional<std::string> args_json,
++                      std::unique_ptr<CaptureCommandCallback> callback) override;
++  void Screenshot(const std::string& source_json,
++                  std::unique_ptr<ScreenshotCallback> callback) override;
++  protocol::Response GetMediaSession(
++      std::unique_ptr<protocol::Plutonium::MediaSession>* session) override;
++  protocol::Response MediaSessionAction(const std::string& action) override;
++  protocol::Response Lock(std::optional<std::string> user,
++                          std::optional<std::string> message) override;
++  protocol::Response GetIdle(
++      bool* locked,
++      double* idle_seconds,
++      bool* displays_off,
++      std::unique_ptr<protocol::Array<std::string>>* wake_locks) override;
++  protocol::Response SetDisplaysOff(bool off, bool* applied) override;
++  // EXO-DISPLAYS
++  protocol::Response GetDisplayConfig(std::string* json) override;
++  protocol::Response ConfigureDisplays(const std::string& change_json) override;
++  protocol::Response OpenSwitcher(const std::string& page) override;
++  protocol::Response SetIdleInhibited(bool inhibited) override;
++  protocol::Response NotificationAction(const std::string& id,
++                                        const std::string& action,
++                                        std::optional<int> button) override;
++  protocol::Response SetColorScheme(bool dark) override;
++
++  // PlutoniumLock::Observer:
++  void OnLockChanged(bool locked) override;
++
++  // PlutoniumShells::Observer:
++  void OnDisplaysChanged() override;
++  void OnShellsDestroying() override;
++
++  // ExoWindowBroker::Observer:
++  void OnWindowAdded(const ExoWindowBroker::WindowInfo& window) override;
++  void OnWindowChanged(const ExoWindowBroker::WindowInfo& window) override;
++  void OnWindowRemoved(int32_t window_id) override;
++
++  // PlutoniumTabs::Observer:
++  void OnTabAdded(const PlutoniumTabs::TabInfo& tab) override;
++  void OnTabChanged(const PlutoniumTabs::TabInfo& tab) override;
++  void OnTabRemoved(int32_t tab_id) override;
++
++  // PlutoniumDownloads::Observer:
++  void OnDownloadAdded(const base::DictValue& download) override;
++  void OnDownloadChanged(const base::DictValue& download) override;
++  void OnDownloadRemoved(int32_t id) override;
++
++  // PlutoniumCapture::Observer:
++  void OnCaptureStarted(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureChanged(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureStopped(int32_t id, const base::DictValue& capture) override;
++  void OnCaptureSettingsChanged(const base::DictValue& settings) override;
++
++ private:
++  struct Screencast {
++    Screencast();
++    ~Screencast();
++    std::unique_ptr<plutonium_agent::WindowScreencast> capture;
++    // At full rate while watched.
++    base::ScopedClosureRunner keep_drawing;
++    bool jpeg = true;
++    int quality = 80;
++    // The frame the client hasn't acknowledged yet, or 0.
++    int pending_session_id = 0;
++    // A frame that came while waiting for the ack; sent on the ack.
++    std::unique_ptr<SkBitmap> next;
++  };
++
++  void OnScreencastFrame(int32_t window_id, const SkBitmap& frame);
++  void SendScreencastFrame(int32_t window_id, const SkBitmap& frame);
++  void OnMediaSessionChanged();
++  void OnNotificationShown(const PlutoniumWebNotifications::Info& info);
++  void OnNotificationClosed(const std::string& id);
++
++  std::unique_ptr<protocol::Plutonium::Frontend> frontend_;
++  bool enabled_ = false;
++  // EXO-LOCK: whether this client said idle is inhibited (SetIdleInhibited()).
++  bool idle_inhibited_ = false;
++  base::ScopedObservation<ExoWindowBroker, ExoWindowBroker::Observer>
++      broker_observation_{this};
++  base::ScopedObservation<PlutoniumTabs, PlutoniumTabs::Observer>
++      tabs_observation_{this};
++  base::ScopedObservation<PlutoniumDownloads, PlutoniumDownloads::Observer>
++      downloads_observation_{this};
++  base::ScopedObservation<PlutoniumCapture, PlutoniumCapture::Observer>
++      capture_observation_{this};
++  base::ScopedObservation<PlutoniumLock, PlutoniumLock::Observer>
++      lock_observation_{this};
++  // EXO-DISPLAYS: for displayConfigChanged.
++  base::ScopedObservation<PlutoniumShells, PlutoniumShells::Observer>
++      shells_observation_{this};
++  std::map<int32_t, Screencast> screencasts_;
++  // Tabs kept awake (SetTabAwake): their capture handles.
++  std::map<int32_t, base::ScopedClosureRunner> awake_tabs_;
++  // Windows kept awake (SetWindowAwake).
++  std::map<int32_t, base::ScopedClosureRunner> awake_windows_;
++  // Windows kept focused for the agent (SetWindowAgentFocus).
++  std::map<int32_t, base::ScopedClosureRunner> agent_focus_windows_;
++  int next_session_id_ = 1;
++  // EXO-SERVICES: the browser's active media session, while enabled.
++  std::unique_ptr<PlutoniumMediaSession> media_session_;
++  // EXO-SERVICES: the tabs' web notifications, while enabled.
++  std::unique_ptr<PlutoniumWebNotifications> notifications_;
++  base::WeakPtrFactory<PlutoniumHandler> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_HANDLER_H_
+diff --git a/chrome/browser/devtools/protocol/plutonium_media.cc b/chrome/browser/devtools/protocol/plutonium_media.cc
+new file mode 100644
+index 0000000000..fb2607236a
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_media.cc
+@@ -0,0 +1,132 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/devtools/protocol/plutonium_media.h"
++
++#include <utility>
++
++#include "chrome/browser/plutonium_tabs.h"
++#include "content/public/browser/media_session.h"
++#include "content/public/browser/media_session_service.h"
++#include "services/media_session/public/cpp/media_metadata.h"
++#include "services/media_session/public/mojom/media_session.mojom.h"
++#include "services/media_session/public/cpp/media_session_service.h"
++
++namespace {
++
++using media_session::mojom::MediaSessionAction;
++
++// The Media Session API's names for them.
++const char* ActionName(MediaSessionAction action) {
++  switch (action) {
++    case MediaSessionAction::kPlay:
++      return "play";
++    case MediaSessionAction::kPause:
++      return "pause";
++    case MediaSessionAction::kPreviousTrack:
++      return "previoustrack";
++    case MediaSessionAction::kNextTrack:
++      return "nexttrack";
++    case MediaSessionAction::kSeekBackward:
++      return "seekbackward";
++    case MediaSessionAction::kSeekForward:
++      return "seekforward";
++    case MediaSessionAction::kStop:
++      return "stop";
++    default:
++      return nullptr;
++  }
++}
++
++}  // namespace
++
++PlutoniumMediaSession::Info::Info() = default;
++PlutoniumMediaSession::Info::Info(const Info&) = default;
++PlutoniumMediaSession::Info::~Info() = default;
++
++PlutoniumMediaSession::PlutoniumMediaSession(base::RepeatingClosure changed)
++    : changed_(std::move(changed)) {
++  mojo::Remote<media_session::mojom::MediaControllerManager> manager;
++  content::GetMediaSessionService().BindMediaControllerManager(
++      manager.BindNewPipeAndPassReceiver());
++  manager->CreateActiveMediaController(
++      controller_.BindNewPipeAndPassReceiver());
++  controller_->AddObserver(receiver_.BindNewPipeAndPassRemote());
++}
++
++PlutoniumMediaSession::~PlutoniumMediaSession() = default;
++
++std::optional<PlutoniumMediaSession::Info> PlutoniumMediaSession::GetInfo()
++    const {
++  if (!active_) {
++    return std::nullopt;
++  }
++  Info info = info_;
++  // Looked up now: tab ids come and go with the tabs.
++  if (request_id_) {
++    if (content::WebContents* contents =
++            content::MediaSession::GetWebContentsFromRequestId(
++                *request_id_)) {
++      if (std::optional<PlutoniumTabs::TabInfo> tab =
++              PlutoniumTabs::Get()->GetTabFor(contents)) {
++        info.tab_id = tab->id;
++      }
++    }
++  }
++  return info;
++}
++
++bool PlutoniumMediaSession::Perform(const std::string& action) {
++  if (action == "play") {
++    controller_->Resume();
++  } else if (action == "pause") {
++    controller_->Suspend();
++  } else if (action == "play-pause") {
++    controller_->ToggleSuspendResume();
++  } else if (action == "next") {
++    controller_->NextTrack();
++  } else if (action == "previous") {
++    controller_->PreviousTrack();
++  } else if (action == "stop") {
++    controller_->Stop();
++  } else {
++    return false;
++  }
++  return true;
++}
++
++void PlutoniumMediaSession::MediaSessionInfoChanged(
++    media_session::mojom::MediaSessionInfoPtr info) {
++  active_ = !info.is_null();
++  info_.playing =
++      active_ && info->playback_state ==
++                     media_session::mojom::MediaPlaybackState::kPlaying;
++  changed_.Run();
++}
++
++void PlutoniumMediaSession::MediaSessionMetadataChanged(
++    const std::optional<media_session::MediaMetadata>& metadata) {
++  info_.title = metadata ? metadata->title : std::u16string();
++  info_.artist = metadata ? metadata->artist : std::u16string();
++  info_.album = metadata ? metadata->album : std::u16string();
++  info_.source = metadata ? metadata->source_title : std::u16string();
++  changed_.Run();
++}
++
++void PlutoniumMediaSession::MediaSessionActionsChanged(
++    const std::vector<MediaSessionAction>& actions) {
++  info_.actions.clear();
++  for (MediaSessionAction action : actions) {
++    if (const char* name = ActionName(action)) {
++      info_.actions.push_back(name);
++    }
++  }
++  changed_.Run();
++}
++
++void PlutoniumMediaSession::MediaSessionChanged(
++    const std::optional<base::UnguessableToken>& request_id) {
++  request_id_ = request_id;
++  changed_.Run();
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_media.h b/chrome/browser/devtools/protocol/plutonium_media.h
+new file mode 100644
+index 0000000000..c164d8a230
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_media.h
+@@ -0,0 +1,78 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_MEDIA_H_
++#define CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_MEDIA_H_
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/unguessable_token.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "services/media_session/public/cpp/media_metadata.h"
++#include "services/media_session/public/cpp/media_position.h"
++#include "services/media_session/public/mojom/media_controller.mojom.h"
++
++// PLUTONIUM (EXO-SERVICES): the browser's active media session (a tab or a
++// shell page playing), for the helper's media service, which has the MPRIS
++// players beside it. This ChromeOS build has no MPRIS of its own. Watches
++// the media session service's active controller and controls it.
++class PlutoniumMediaSession
++    : public media_session::mojom::MediaControllerObserver {
++ public:
++  struct Info {
++    Info();
++    Info(const Info&);
++    ~Info();
++    bool playing = false;
++    std::u16string title;
++    std::u16string artist;
++    std::u16string album;
++    std::u16string source;
++    // Media Session action names: "play", "pause", "nexttrack", …
++    std::vector<std::string> actions;
++    // The shells' tab playing, if it's one.
++    std::optional<int32_t> tab_id;
++  };
++
++  // |changed| runs whenever the session or what it plays changes.
++  explicit PlutoniumMediaSession(base::RepeatingClosure changed);
++  PlutoniumMediaSession(const PlutoniumMediaSession&) = delete;
++  PlutoniumMediaSession& operator=(const PlutoniumMediaSession&) = delete;
++  ~PlutoniumMediaSession() override;
++
++  // The active session, or nullopt if there's none.
++  std::optional<Info> GetInfo() const;
++
++  // "play", "pause", "play-pause", "next", "previous" or "stop"; false for
++  // anything else.
++  bool Perform(const std::string& action);
++
++  // media_session::mojom::MediaControllerObserver:
++  void MediaSessionInfoChanged(
++      media_session::mojom::MediaSessionInfoPtr info) override;
++  void MediaSessionMetadataChanged(
++      const std::optional<media_session::MediaMetadata>& metadata) override;
++  void MediaSessionActionsChanged(
++      const std::vector<media_session::mojom::MediaSessionAction>& actions)
++      override;
++  void MediaSessionChanged(
++      const std::optional<base::UnguessableToken>& request_id) override;
++  void MediaSessionPositionChanged(
++      const std::optional<media_session::MediaPosition>& position) override {}
++
++ private:
++  base::RepeatingClosure changed_;
++  mojo::Remote<media_session::mojom::MediaController> controller_;
++  mojo::Receiver<media_session::mojom::MediaControllerObserver> receiver_{
++      this};
++  bool active_ = false;
++  Info info_;
++  std::optional<base::UnguessableToken> request_id_;
++};
++
++#endif  // CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_MEDIA_H_
+diff --git a/chrome/browser/devtools/protocol/plutonium_notifications.cc b/chrome/browser/devtools/protocol/plutonium_notifications.cc
+new file mode 100644
+index 0000000000..aed0bbbde9
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_notifications.cc
+@@ -0,0 +1,153 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/devtools/protocol/plutonium_notifications.h"
++
++#include <utility>
++
++#include "base/base64.h"
++#include "base/memory/scoped_refptr.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/base/models/image_model.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image.h"
++#include "ui/message_center/public/cpp/notification.h"
++#include "ui/message_center/public/cpp/notification_delegate.h"
++#include "ui/message_center/public/cpp/notifier_id.h"
++#include "url/origin.h"
++
++namespace {
++
++using message_center::MessageCenter;
++using message_center::Notification;
++
++// A web page's (a tab's, a service worker's): the rest are Ash's own.
++const Notification* FindWebNotification(const std::string& id) {
++  MessageCenter* center = MessageCenter::Get();
++  const Notification* notification =
++      center ? center->FindNotificationById(id) : nullptr;
++  if (!notification || notification->notifier_id().type !=
++                           message_center::NotifierType::WEB_PAGE) {
++    return nullptr;
++  }
++  return notification;
++}
++
++std::string PngDataUrl(const ui::ImageModel& model) {
++  if (!model.IsImage()) {
++    return std::string();
++  }
++  const gfx::Image image = model.GetImage();
++  const SkBitmap* bitmap = image.ToSkBitmap();
++  if (!bitmap || bitmap->drawsNothing()) {
++    return std::string();
++  }
++  std::optional<std::vector<uint8_t>> png =
++      gfx::PNGCodec::EncodeBGRASkBitmap(*bitmap, /*discard_transparency=*/false);
++  if (!png) {
++    return std::string();
++  }
++  return "data:image/png;base64," + base::Base64Encode(*png);
++}
++
++PlutoniumWebNotifications::Info ToInfo(const Notification& notification) {
++  PlutoniumWebNotifications::Info info;
++  info.id = notification.id();
++  info.origin = url::Origin::Create(notification.origin_url()).Serialize();
++  info.title = notification.title();
++  info.body = notification.message();
++  info.icon = PngDataUrl(notification.icon());
++  for (const message_center::ButtonInfo& button : notification.buttons()) {
++    info.buttons.push_back(button.title);
++  }
++  info.require_interaction = notification.never_timeout();
++  info.silent = notification.silent();
++  return info;
++}
++
++}  // namespace
++
++PlutoniumWebNotifications::Info::Info() = default;
++PlutoniumWebNotifications::Info::Info(const Info&) = default;
++PlutoniumWebNotifications::Info::~Info() = default;
++
++PlutoniumWebNotifications::PlutoniumWebNotifications(
++    base::RepeatingCallback<void(const Info&)> shown,
++    base::RepeatingCallback<void(const std::string& id)> closed)
++    : shown_(std::move(shown)), closed_(std::move(closed)) {
++  if (MessageCenter* center = MessageCenter::Get()) {
++    observation_.Observe(center);
++  }
++}
++
++PlutoniumWebNotifications::~PlutoniumWebNotifications() = default;
++
++std::vector<PlutoniumWebNotifications::Info>
++PlutoniumWebNotifications::GetNotifications() const {
++  std::vector<Info> result;
++  MessageCenter* center = MessageCenter::Get();
++  if (!center) {
++    return result;
++  }
++  for (const Notification* notification : center->GetNotifications()) {
++    if (notification->notifier_id().type ==
++        message_center::NotifierType::WEB_PAGE) {
++      result.push_back(ToInfo(*notification));
++    }
++  }
++  return result;
++}
++
++bool PlutoniumWebNotifications::Perform(const std::string& id,
++                                        const std::string& action,
++                                        std::optional<int> button) {
++  const Notification* notification = FindWebNotification(id);
++  if (!notification) {
++    return false;
++  }
++  if (action == "click") {
++    if (button && (*button < 0 || static_cast<size_t>(*button) >=
++                                      notification->buttons().size())) {
++      return false;
++    }
++    // Its delegate, as the message center's click does: that click ignores
++    // notifications its blockers hide, which in shell mode is all of them.
++    scoped_refptr<message_center::NotificationDelegate> delegate =
++        notification->delegate();
++    if (delegate) {
++      delegate->Click(button, std::nullopt);
++    }
++    return true;
++  }
++  if (action == "close") {
++    MessageCenter::Get()->RemoveNotification(id, /*by_user=*/true);
++    return true;
++  }
++  return false;
++}
++
++void PlutoniumWebNotifications::OnNotificationAdded(
++    const std::string& notification_id) {
++  Shown(notification_id);
++}
++
++void PlutoniumWebNotifications::OnNotificationUpdated(
++    const std::string& notification_id) {
++  Shown(notification_id);
++}
++
++void PlutoniumWebNotifications::OnNotificationRemoved(
++    const std::string& notification_id,
++    bool by_user) {
++  // Gone from the center, so its type isn't known: the helper ignores ids
++  // it never had.
++  closed_.Run(notification_id);
++}
++
++void PlutoniumWebNotifications::Shown(const std::string& notification_id) {
++  if (const Notification* notification =
++          FindWebNotification(notification_id)) {
++    shown_.Run(ToInfo(*notification));
++  }
++}
+diff --git a/chrome/browser/devtools/protocol/plutonium_notifications.h b/chrome/browser/devtools/protocol/plutonium_notifications.h
+new file mode 100644
+index 0000000000..f498bf702c
+--- /dev/null
++++ b/chrome/browser/devtools/protocol/plutonium_notifications.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_
++#define CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/scoped_observation.h"
++#include "ui/message_center/message_center.h"
++#include "ui/message_center/message_center_observer.h"
++
++// PLUTONIUM (EXO-SERVICES): the tabs' web notifications (new Notification(),
++// a service worker's showNotification()), for the helper's notifications
++// service. Chrome puts them in Ash's message center, which shell mode never
++// shows: this watches it for web pages' notifications and acts on them as
++// its popups would (click, a button, close), so Chrome's own handling (the
++// page's onclick, the worker's notificationclick) runs.
++class PlutoniumWebNotifications
++    : public message_center::MessageCenterObserver {
++ public:
++  struct Info {
++    Info();
++    Info(const Info&);
++    ~Info();
++    std::string id;
++    // The site's origin.
++    std::string origin;
++    std::u16string title;
++    std::u16string body;
++    // A PNG data URL, or empty.
++    std::string icon;
++    std::vector<std::u16string> buttons;
++    bool require_interaction = false;
++    bool silent = false;
++  };
++
++  // |shown| runs for a new or updated notification, |closed| when one goes
++  // (the page closed it, or it was acted on).
++  PlutoniumWebNotifications(
++      base::RepeatingCallback<void(const Info&)> shown,
++      base::RepeatingCallback<void(const std::string& id)> closed);
++  PlutoniumWebNotifications(const PlutoniumWebNotifications&) = delete;
++  PlutoniumWebNotifications& operator=(const PlutoniumWebNotifications&) =
++      delete;
++  ~PlutoniumWebNotifications() override;
++
++  // The web notifications there are, in the message center's order.
++  std::vector<Info> GetNotifications() const;
++
++  // "click" (the notification, or with |button| one of its buttons) or
++  // "close" (dismissed by the user); false if there's no such notification.
++  bool Perform(const std::string& id,
++               const std::string& action,
++               std::optional<int> button);
++
++  // message_center::MessageCenterObserver:
++  void OnNotificationAdded(const std::string& notification_id) override;
++  void OnNotificationUpdated(const std::string& notification_id) override;
++  void OnNotificationRemoved(const std::string& notification_id,
++                             bool by_user) override;
++
++ private:
++  void Shown(const std::string& notification_id);
++
++  base::RepeatingCallback<void(const Info&)> shown_;
++  base::RepeatingCallback<void(const std::string& id)> closed_;
++  base::ScopedObservation<message_center::MessageCenter,
++                          message_center::MessageCenterObserver>
++      observation_{this};
++};
++
++#endif  // CHROME_BROWSER_DEVTOOLS_PROTOCOL_PLUTONIUM_NOTIFICATIONS_H_
+diff --git a/chrome/browser/devtools/remote_debugging_server.cc b/chrome/browser/devtools/remote_debugging_server.cc
+index 084c1427a6..607d0de454 100644
+--- a/chrome/browser/devtools/remote_debugging_server.cc
++++ b/chrome/browser/devtools/remote_debugging_server.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/devtools/remote_debugging_server.h"
+ 
++#include <unistd.h>
++
+ #include <memory>
+ #include <optional>
+ #include <string_view>
+@@ -12,6 +14,7 @@
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/path_service.h"
+@@ -39,6 +42,7 @@
+ #include "net/base/net_errors.h"
+ #include "net/log/net_log_source.h"
+ #include "net/socket/tcp_server_socket.h"
++#include "net/socket/unix_domain_server_socket_posix.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ #include "third_party/blink/public/public_buildflags.h"
+ #include "ui/base/resource/resource_bundle.h"
+@@ -157,6 +161,50 @@ class TCPServerSocketFactoryWithPortFallback : public TCPServerSocketFactory {
+   }
+ };
+ 
++// Plutonium: --plutonium-remote-debugging-socket=<path> serves DevTools on a
++// Unix socket at <path> instead of a TCP port, as Chrome on Android does. A
++// port on 127.0.0.1 can be reached by every process on the machine (other
++// users, sandboxed apps that share the network), and DevTools has no
++// authentication of its own; the socket takes only this user's processes
++// (SO_PEERCRED), and its directory can be private as well.
++constexpr char kPlutoniumRemoteDebuggingSocketSwitch[] =
++    "plutonium-remote-debugging-socket";
++
++bool IsSameUser(const net::UnixDomainServerSocket::Credentials& credentials) {
++  return credentials.user_id == geteuid();
++}
++
++class PlutoniumUnixSocketFactory : public content::DevToolsSocketFactory {
++ public:
++  explicit PlutoniumUnixSocketFactory(std::string path)
++      : path_(std::move(path)) {}
++
++  PlutoniumUnixSocketFactory(const PlutoniumUnixSocketFactory&) = delete;
++  PlutoniumUnixSocketFactory& operator=(const PlutoniumUnixSocketFactory&) =
++      delete;
++
++ private:
++  // content::DevToolsSocketFactory.
++  std::unique_ptr<net::ServerSocket> CreateForHttpServer() override {
++    // A socket left by a browser that crashed would make the bind fail.
++    unlink(path_.c_str());
++    auto socket = std::make_unique<net::UnixDomainServerSocket>(
++        base::BindRepeating(&IsSameUser), /*use_abstract_namespace=*/false);
++    if (socket->BindAndListen(path_, kBackLog) != net::OK) {
++      LOG(ERROR) << "Plutonium: couldn't listen for DevTools on " << path_;
++      return nullptr;
++    }
++    return socket;
++  }
++
++  std::unique_ptr<net::ServerSocket> CreateForTethering(
++      std::string* name) override {
++    return nullptr;
++  }
++
++  const std::string path_;
++};
++
+ // Returns true, or a reason why remote debugging is not allowed.
+ base::expected<bool, RemoteDebuggingServer::NotStartedReason>
+ IsRemoteDebuggingAllowed(const std::optional<bool>& is_default_user_data_dir,
+@@ -360,6 +408,22 @@ RemoteDebuggingServer::GetInstance(PrefService* local_state) {
+     server->StartPipeHandler();
+   }
+ 
++  if (command_line.HasSwitch(kPlutoniumRemoteDebuggingSocketSwitch)) {
++    if (const auto maybe_allow_debugging =
++            IsRemoteDebuggingAllowed(is_default_user_data_dir, local_state);
++        !maybe_allow_debugging.has_value()) {
++      return base::unexpected(maybe_allow_debugging.error());
++    }
++    debugging_server_started = true;
++    server->StartHttpServer(
++        std::make_unique<PlutoniumUnixSocketFactory>(
++            command_line.GetSwitchValueASCII(
++                kPlutoniumRemoteDebuggingSocketSwitch)),
++        /*output_dir=*/base::FilePath(), /*debug_frontend_dir=*/base::FilePath(),
++        content::DevToolsAgentHost::RemoteDebuggingServerMode::kDefault);
++    return server;
++  }
++
+   std::string port_str =
+       command_line.GetSwitchValueASCII(::switches::kRemoteDebuggingPort);
+   if (auto port = ParsePort(port_str)) {

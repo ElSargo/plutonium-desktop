@@ -25,7 +25,7 @@ The helper writes the openers to `$XDG_RUNTIME_DIR/plutonium/open/` at startup, 
 - **Anything else** goes to the real `xdg-open`, with the thread's environment.
 - **With no helper or shell,** web links go to the real `xdg-open` with the openers taken out of the environment, so the user's browser opens as before.
 
-## Shell pages (Chromium, `chromium/patches/0016-*.patch`)
+## Shell pages (Chromium)
 
 - **`chrome::Navigate()`** asks `PlutoniumTabs::MaybeOpenFromShell()` first. In shell mode, a new-tab, new-window or popup navigation from one of the shells' own pages becomes a Plutonium tab instead of a Chrome window. A `window.open` keeps its opener. The tab starts untagged, with `openedBy` set to `"shell:<shell id>"`.
 - **The shell library** (`connect({ onOpenTab })`) gives such a tab to the shell that opened it. `onOpenTab` returns a thread, and the library tags the tab with it and shows it with `onFocusTab`.

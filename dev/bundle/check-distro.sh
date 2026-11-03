@@ -109,7 +109,8 @@ session() {
   uid=$(id -u pluto)
   mkdir -p "/run/user/$uid" && chown pluto "/run/user/$uid" && chmod 700 "/run/user/$uid"
   su pluto -c "XDG_RUNTIME_DIR=/run/user/$uid timeout 240 plutonium run --x11 hydra plain" > /tmp/run.log 2>&1 || { tail -8 /tmp/run.log; return 1; }
-  pages=$(su pluto -c "curl -s localhost:9223/json/list" | grep -o '"url": *"http://[^"]*' | sed 's/.*"//')
+  # A release's DevTools are its session's Unix socket (lib/common.sh, devtools_vars).
+  pages=$(su pluto -c "curl -s --unix-socket /run/user/$uid/plutonium/wayland-plutonium-x11.devtools http://localhost/json/list" | grep -o '"url": *"http://[^"]*' | sed 's/.*"//')
   su pluto -c "XDG_RUNTIME_DIR=/run/user/$uid plutonium stop" > /dev/null 2>&1
   echo "$pages" | grep -q '^http://127.0.0.1:3773/' && echo "$pages" | grep -q '^http://plain.localhost:' ||
     { echo "the shells' pages aren't open: $pages"; tail -5 /tmp/run.log; return 1; }

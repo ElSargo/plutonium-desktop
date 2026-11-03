@@ -10,7 +10,7 @@
 #   ORIGINS      every shell's origin, comma-separated (for the helper)
 #   PERSIST_SHELLS  the shells are shells.json's: the switcher's changes go back to it
 #   SAFE_MODE    the shipped plain shell only (plutonium run --safe)
-#   SOCKET       Exo's Wayland socket name; CDP_PORT, HELPER_PORT, PROFILE
+#   SOCKET       Exo's Wayland socket name; CDP_SOCKET (or CDP_PORT, DEVTOOLS=port), HELPER_PORT, PROFILE
 #   drm:  VT (run in the session logged in on ttyN), HOLD_S (stop after N
 #         seconds)
 #   x11:  XDISP (PRIVATE_XDISP, :99 in slot 0, starts a private Xvfb), BOUNDS
@@ -25,6 +25,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 TAG=$SOCKET
+devtools_vars
 LOG=$LOGS/session-$TAG.log
 ASH_LOG=$LOGS/ash-$TAG.log
 HELPER_LOG=$LOGS/helper-$TAG.log
@@ -131,7 +132,7 @@ restore_portal() {
 start_helper() {
   shell_library
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
-  mkdir -p "$RUN_DIR/plutonium"
+  mkdir -p "$RUN_DIR/plutonium" && chmod 700 "$RUN_DIR/plutonium"
   ensure_helper_deps
   setup_portal
   [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null && sleep 1
@@ -145,7 +146,7 @@ start_helper() {
   setsid env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') "${logind[@]}" \
     PLUTONIUM_SHELL_LIBRARY="$SHELL_LIBRARY/plutonium-shell.js" \
     "$NODE" "$ROOT/helper/plutonium.ts" daemon --wayland-display "$SOCKET" --socket "$RUN_DIR/plutonium/$SOCKET.sock" \
-    --shell-origin "$ORIGINS" --port "$HELPER_PORT" --cdp-port "$CDP_PORT" \
+    --shell-origin "$ORIGINS" --port "$HELPER_PORT" "${CDP_HELPER[@]}" \
     --shells-port "$SHELLS_PORT" --slot "$SLOT" --pluto-home "$PLUTO_HOME" ${PERSIST_SHELLS:+--persist-shells} \
     > "$HELPER_LOG" 2>&1 < /dev/null &
   echo $! > "$pidfile"
@@ -179,8 +180,16 @@ report_gpu() {
 # BarcodeDetector follow these features (Web Share and Web Bluetooth are off
 # in the UA patch). Not --disable-blink-features, which shows Chrome's
 # "unsupported command-line flag" infobar.
+# A browser from before --plutonium-remote-debugging-socket (an older dev
+# build or image) would have no DevTools at all, and the session wouldn't come
+# up: give it the port. A release's browser always has the socket.
+if [[ ${DEVTOOLS:-socket} != port ]] && ! on_ash grep -qaF -- plutonium-remote-debugging-socket "$CHROME_BIN"; then
+  DEVTOOLS=port
+  devtools_vars
+  log "note: $CHROME_BIN has no DevTools socket (it predates it); DevTools on $CDP_WHERE, which any local process can reach"
+fi
 FLAGS=(--enable-wayland-server "--wayland-server-socket=$SOCKET"
-       "--remote-debugging-port=$CDP_PORT" "--user-data-dir=$PROFILE"
+       "${CDP_FLAG[@]}" "--user-data-dir=$PROFILE"
        --disable-features=Forest,HandwritingRecognition,BarcodeDetector
        --disable-sync --exo-viability-no-signin-error
        "--plutonium-shell-origin=${ORIGINS%%,*}" "--plutonium-shell-url=$SHELL_URL"
@@ -215,7 +224,7 @@ ash_prepare
 chrome_built || { log "ABORT: no Chromium at $CHROME_BIN ($CHROME_FIX)"; exit 1; }
 ash_running && { log "ABORT: an Ash with profile $PROFILE is already running (plutonium stop)"; exit 1; }
 mkdir -p "$PROFILE"
-log "$MODE session: $SHELL_URL${SHELLS:+ + $SHELLS}; socket $SOCKET, DevTools $CDP_PORT, helper $HELPER_PORT"
+log "$MODE session: $SHELL_URL${SHELLS:+ + $SHELLS}; socket $SOCKET, DevTools $CDP_WHERE, helper $HELPER_PORT"
 rm -f "$RUN_DIR/$SOCKET" "$RUN_DIR/$SOCKET.lock"
 [[ -f $ASH_LOG ]] && mv "$ASH_LOG" "${ASH_LOG%.log}.prev.log"
 
@@ -259,7 +268,7 @@ if [[ $MODE == x11 ]]; then
   up=
   for i in $(seq 1 40); do
     sleep 1
-    [[ -S $RUN_DIR/$SOCKET ]] && curl -s "localhost:$CDP_PORT/json/version" > /dev/null && { up=1; break; }
+    [[ -S $RUN_DIR/$SOCKET ]] && curl -s "${CDP_CURL[@]}" "$CDP_HTTP/json/version" > /dev/null && { up=1; break; }
     (( i < 5 )) || ash_running || break
   done
   if [[ -z $up ]]; then

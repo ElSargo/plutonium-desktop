@@ -3,19 +3,19 @@
 **The release.** One package, no podman or checkout: the installer puts it in `/opt/plutonium`, sets up Chromium's `chrome-sandbox`, and adds Plutonium to the login screen. It needs x86-64 Linux with systemd, glibc 2.35 or newer, a desktop's libraries (Mesa, X11, GLib, ALSA), and python3, git and curl; it says what's missing. On NixOS the installer puts the release in place, and the rest is a module it carries, `/opt/plutonium/lib/nixos.nix`: copy it beside `configuration.nix` as `plutonium.nix`, add it to `imports`, and `sudo nixos-rebuild switch`. It sets up nix-ld (the release's binaries are generic Linux ones), the login screen's entry, the `plutonium` command, the keyboard layout links, and Python, git, curl, foot and xwayland-satellite.
 
 ```
-curl -fsSL https://…/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
+curl -fsSL https://elsargo.github.io/pluto/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
 plutonium doctor
 ```
 
 Then steps 4 to 6 below, with `~/.config/plutonium/plutonium.env` in place of the checkout's `plutonium.env`. `sh install.sh --uninstall` removes it (your data stays). The rest of this page installs from a checkout instead.
 
-From a fresh clone to a running desktop, with the prebuilt Chromium. Most of the time is the 1.3 GB download. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each. Building Chromium yourself is its own page, [docs/BUILDING.md](docs/BUILDING.md).
+From a fresh clone to a running desktop. A checkout runs Plutonium's Chromium built from source, so expect an afternoon, mostly the download and the first build. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each.
 
 ## 1. What you need
 
 **Machine**
 - x86-64 Linux with an AMD or Intel GPU on Mesa. It has been developed on AMD graphics; Intel should work. NVIDIA is untested, and its proprietary driver probably doesn't work.
-- 16 GB of RAM is comfortable (less is untested), and about 3 GB of disk for the image.
+- 16 GB of RAM is comfortable (32 GB is better for building Chromium), and about 60 GB of disk for Chromium's checkout and build.
 - systemd (logind and a user session), and rootless podman.
 
 **Distributions.** It's developed on NixOS, and has run on real hardware with Debian and Fedora too. Ubuntu 24.04 is tested in a container, from the packages below up to `plutonium doctor` and the helper's tests; not yet booted on hardware. Others with systemd, podman and Node 24 should work. If yours doesn't, please say so (Reporting a bug, below).
@@ -53,27 +53,27 @@ environment.systemPackages = with pkgs; [ nodejs_24 python3 git curl foot xwayla
 ## 2. Get it
 
 ```
-git clone https://github.com/ElSargo/plutonium-desktop.git plutonium && cd plutonium
-echo PREBUILT=1 > plutonium.env
+git clone https://github.com/ElSargo/pluto.git && cd pluto
 bin/plutonium doctor
 ```
 
-`plutonium.env` holds your settings; `plutonium.env.example` lists them all, each with its default. Add `bin/` to your `PATH`, or call `bin/plutonium`.
+`plutonium.env` (create it if you need it) holds your settings; `plutonium.env.example` lists them all, each with its default. Add `bin/` to your `PATH`, or call `bin/plutonium`.
 
 `doctor` prints a line for each missing piece, and the command that fixes it on your distribution. It exits with 1 until everything it needs is there. Run it again after each step.
 
-## 3. Chromium: the prebuilt image
+## 3. Chromium: build it
 
 ```
-plutonium image pull          # ghcr.io/elsargo/plutonium, ~1.3 GB
-plutonium container create    # the container, from that image, started
+plutonium container build     # the build container's image (~1.6 GB, ~10 min)
+plutonium container create    # the container 'plutonium', started
+plutonium chromium fetch      # depot_tools and Chromium at chromium/BASE (28 GB)
+plutonium chromium patch      # Plutonium's patches, on a branch 'plutonium'
+plutonium chromium build      # out/Plutonium/chrome (about two hours on 32 threads, the first time)
 ```
 
-The image holds a release build of Plutonium's Chromium and the libraries it needs. Its tag is a hash of `chromium/` (the base revision, the patches and the build settings), so it always matches your checkout. Everything else, including the helper, the shells and T3 Code, runs from this repository.
+[docs/BUILDING.md](docs/BUILDING.md) has the details. Everything else, including the helper, the shells and T3 Code, runs from this repository.
 
-- **"no prebuilt image for this checkout's chromium/".** The patches changed after the last published image. Check out a commit that has one, or build Chromium yourself ([docs/BUILDING.md](docs/BUILDING.md)).
-- **"won't give … without a login".** The image isn't public yet. Log in with a GitHub token that can read packages: `gh auth refresh -s read:packages && gh auth token | podman login ghcr.io -u <you> --password-stdin`.
-- **After `git pull`**, `doctor` says whether the container still runs this checkout's image. If not: `plutonium image pull`, `plutonium container stop`, `podman rm plutonium`, `plutonium container create`.
+- **After `git pull`**, if `chromium/` changed: `plutonium chromium patch`, then `plutonium chromium build` (it rebuilds only what changed).
 - **After a reboot**, `plutonium container start` (a login session from the login screen entry starts it itself).
 
 ## 4. First session: in a window
@@ -187,7 +187,7 @@ Styx's launcher (Super+D) has an entry that starts Claude Code with these tools.
 
 ## Logs
 
-In `logs/` in your checkout, one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
+In `~/.local/share/plutonium/logs` for the release (`logs/` in a checkout), one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
 - `session-*.log`: the launcher: what it checked, and why it stopped;
 - `ash-*.log`: Ash, Plutonium's Chromium, with the previous run kept as `*.prev.log`;
 - `helper-*.log`: the helper (apps, threads, the GPU check);
@@ -195,7 +195,7 @@ In `logs/` in your checkout, one set per session (the name is its Wayland socket
 
 ## Reporting a bug
 
-Open an issue at https://github.com/ElSargo/plutonium-desktop/issues with:
+Open an issue at https://github.com/ElSargo/pluto/issues with:
 - what you did, what you expected and what happened;
 - your distribution, and your GPU (`lspci -k | grep -A3 -E 'VGA|3D'`);
 - the output of `plutonium doctor` and `plutonium status`;

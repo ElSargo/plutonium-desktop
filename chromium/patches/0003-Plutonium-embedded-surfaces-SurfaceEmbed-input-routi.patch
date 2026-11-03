@@ -1,0 +1,1947 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 2 Nov 2026 12:00:00 +1300
+Subject: [PATCH 03/13] Plutonium: embedded surfaces: SurfaceEmbed, input
+ routing and hit testing
+
+Pages show other surfaces (Exo windows, tabs) through SurfaceEmbed; input reaches them through the input router and viz's hit testing, and drags that leave them end properly.
+
+It holds these changes:
+- shell mode on DRM, evdev input fix, display-plane path
+- a tab's context menu item runs with the tab focused
+- a drag that ends outside an embedded window leaves it
+- an app's interactive move or resize hands the drag to the page
+- a tab dragged partly off the screen overflows instead of laying out again
+- a tab's <embed> ignores surface ids from its last embedding
+
+and the parts in these files of:
+- Exo embedding (Phase 1) and window broker (Phase 2)
+- keep windows off the desktop, wl_output v4, embed input logs
+- tab automation over DevTools, SurfaceEmbed fixes
+- native fullscreen for embedded apps and tabs, Super+F, shell shortcuts
+- several live shells, Super+Tab switches between them
+- niri shell keys, touchpad and scrolling, drag and drop, shell links as tabs
+- Chrome's own UI in the shell (DevTools, context menus, keys)
+- Google sign-in on the web; tabs fullscreen outside the shells
+- shm buffers the GPU can't import don't stall the display; EXO-DIAG logs at VLOG(1)
+- unit tests for the broker and grant checks
+- several displays, a shell per display, one window in one place
+- a floating native window keeps its client-side resize edges
+---
+ cc/trees/presentation_time_callback_buffer.cc |  13 +-
+ components/input/cursor_manager.cc            |  14 +
+ components/input/cursor_manager.h             |   8 +
+ .../render_widget_host_input_event_router.cc  | 430 +++++++++++++++++-
+ .../render_widget_host_input_event_router.h   |  89 ++++
+ components/input/render_widget_targeter.cc    |  19 +
+ components/input/render_widget_targeter.h     |  10 +
+ .../browser/surface_embed_host.cc             | 135 +++++-
+ .../browser/surface_embed_host.h              |  43 ++
+ .../surface_embed/common/surface_embed.mojom  |  10 +
+ .../renderer/surface_embed_web_plugin.cc      |  81 +++-
+ .../renderer/surface_embed_web_plugin.h       |   3 +
+ .../display/overlay_candidate_factory.cc      |  22 +
+ .../display/overlay_candidate_factory.h       |   3 +
+ .../display/overlay_processor_ozone.cc        |  51 +++
+ .../service/display/overlay_processor_ozone.h |   7 +
+ .../overlay_processor_using_strategy.cc       |  61 +++
+ .../overlay_processor_using_strategy.h        |   4 +
+ .../service/hit_test/hit_test_aggregator.cc   |  38 +-
+ ...widget_host_input_event_router_unittest.cc | 158 +++++++
+ .../surface_embed_connector_impl.cc           |  10 +
+ .../surface_embed_connector_impl.h            |   3 +-
+ .../public/browser/surface_embed_connector.h  |  12 +
+ 23 files changed, 1207 insertions(+), 17 deletions(-)
+
+diff --git a/cc/trees/presentation_time_callback_buffer.cc b/cc/trees/presentation_time_callback_buffer.cc
+index c3957ea519..0a3158daf6 100644
+--- a/cc/trees/presentation_time_callback_buffer.cc
++++ b/cc/trees/presentation_time_callback_buffer.cc
+@@ -7,6 +7,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/logging.h"
+ #include "components/viz/common/quads/compositor_frame_metadata.h"
+ 
+ namespace cc {
+@@ -132,7 +133,17 @@ PresentationTimeCallbackBuffer::GetOrMakeRegistration(uint32_t frame_token) {
+   if (frame_token_infos_.empty() ||
+       frame_token > frame_token_infos_.back().token) {
+     frame_token_infos_.emplace_back(frame_token);
+-    DCHECK_LE(frame_token_infos_.size(), kMaxBufferSize);
++    // EXO-BOOT: was a DCHECK (fatal in our DCHECK_ALWAYS_ON build); see
++    // blink::LayerTreeView::AddCallback.
++    // Logged at the threshold, then every 100 frames.
++    if (frame_token_infos_.size() == kMaxBufferSize + 1 ||
++        (frame_token_infos_.size() > kMaxBufferSize &&
++         frame_token_infos_.size() % 100 == 0)) {
++      LOG(ERROR)
++          << "EXO-STALL cc: " << frame_token_infos_.size()
++          << " frames await presentation feedback (frame token "
++          << frame_token << ")";
++    }
+   }
+ 
+   // Registrations should use monotonically increasing frame tokens.
+diff --git a/components/input/cursor_manager.cc b/components/input/cursor_manager.cc
+index b7aa370345..edaade317e 100644
+--- a/components/input/cursor_manager.cc
++++ b/components/input/cursor_manager.cc
+@@ -119,7 +119,21 @@ void CursorManager::DisallowCustomCursorScopeExpired(int max_dimension_dips) {
+   }
+ }
+ 
++void CursorManager::SetForeignCursor(std::optional<ui::Cursor> cursor) {
++  if (foreign_cursor_ == cursor) {
++    return;
++  }
++  foreign_cursor_ = std::move(cursor);
++  UpdateCursor();
++}
++
+ void CursorManager::UpdateCursor() {
++  if (foreign_cursor_) {
++    last_set_cursor_type_for_testing_ = foreign_cursor_->type();
++    root_view_->DisplayCursor(*foreign_cursor_);
++    return;
++  }
++
+   ui::Cursor cursor(ui::mojom::CursorType::kPointer);
+ 
+   auto it = cursor_map_.find(view_under_cursor_);
+diff --git a/components/input/cursor_manager.h b/components/input/cursor_manager.h
+index 4d8052bc0f..231d228981 100644
+--- a/components/input/cursor_manager.h
++++ b/components/input/cursor_manager.h
+@@ -6,6 +6,7 @@
+ #define COMPONENTS_INPUT_CURSOR_MANAGER_H_
+ 
+ #include <map>
++#include <optional>
+ #include <vector>
+ 
+ #include "base/component_export.h"
+@@ -43,6 +44,10 @@ class COMPONENT_EXPORT(INPUT) CursorManager
+   // Called when the mouse moves over a different RenderWidgetHostView.
+   void UpdateViewUnderCursor(RenderWidgetHostViewInput*);
+ 
++  // EXO-EMBED: while set, |cursor| is shown instead of the cursor of the view
++  // under the pointer (the pointer is over an embedded native window).
++  void SetForeignCursor(std::optional<ui::Cursor> cursor);
++
+   // Notification of a RenderWidgetHostView being destroyed, so that its
+   // cursor map entry can be removed if it has one. If it is the current
+   // view_under_cursor_, then the root_view_'s cursor will be displayed.
+@@ -97,6 +102,9 @@ class COMPONENT_EXPORT(INPUT) CursorManager
+ 
+   ui::mojom::CursorType last_set_cursor_type_for_testing_;
+ 
++  // EXO-EMBED: see SetForeignCursor().
++  std::optional<ui::Cursor> foreign_cursor_;
++
+   base::WeakPtrFactory<CursorManager> weak_factory_{this};
+ };
+ 
+diff --git a/components/input/render_widget_host_input_event_router.cc b/components/input/render_widget_host_input_event_router.cc
+index c8e5f07465..01f4c24854 100644
+--- a/components/input/render_widget_host_input_event_router.cc
++++ b/components/input/render_widget_host_input_event_router.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <deque>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <vector>
+@@ -15,6 +16,7 @@
+ #include "base/debug/dump_without_crashing.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
++#include "base/no_destructor.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+@@ -55,10 +57,57 @@ bool IsMouseButtonDown(const blink::WebMouseEvent& event) {
+   return event.GetModifiers() & mouse_button_modifiers;
+ }
+ 
++constexpr int kMouseButtonModifiers = blink::WebInputEvent::kLeftButtonDown |
++                                      blink::WebInputEvent::kMiddleButtonDown |
++                                      blink::WebInputEvent::kRightButtonDown;
++
++int ButtonToModifier(blink::WebPointerProperties::Button button) {
++  switch (button) {
++    case blink::WebPointerProperties::Button::kLeft:
++      return blink::WebInputEvent::kLeftButtonDown;
++    case blink::WebPointerProperties::Button::kMiddle:
++      return blink::WebInputEvent::kMiddleButtonDown;
++    case blink::WebPointerProperties::Button::kRight:
++      return blink::WebInputEvent::kRightButtonDown;
++    default:
++      return 0;
++  }
++}
++
++// Whether any of left/middle/right stays pressed after |event|.
++bool ButtonsDownAfter(const blink::WebMouseEvent& event) {
++  int buttons = event.GetModifiers() & kMouseButtonModifiers;
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseUp) {
++    buttons &= ~ButtonToModifier(event.button);
++  } else if (event.GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    buttons |= ButtonToModifier(event.button);
++  }
++  return buttons;
++}
++
+ }  // anonymous namespace
+ 
+ namespace input {
+ 
++namespace {
++
++// EXO-EMBED: the embedder's delegate, and which router has the pointer over
++// each foreign frame sink (for cursor updates).
++input::ForeignFrameSinkDelegate*& ForeignDelegate() {
++  static input::ForeignFrameSinkDelegate* delegate = nullptr;
++  return delegate;
++}
++
++std::map<viz::FrameSinkId, RenderWidgetHostInputEventRouter*>&
++ForeignHoverRouters() {
++  static base::NoDestructor<
++      std::map<viz::FrameSinkId, RenderWidgetHostInputEventRouter*>>
++      routers;
++  return *routers;
++}
++
++}  // namespace
++
+ // Helper method also used from hit_test_debug_key_event_observer.cc
+ viz::HitTestQuery* GetHitTestQuery(viz::HitTestDataProvider* provider,
+                                    const viz::FrameSinkId& frame_sink_id) {
+@@ -382,6 +431,11 @@ void RenderWidgetHostInputEventRouter::OnRenderWidgetHostViewInputDestroyed(
+   // without cleaning up dangling pointers to it.
+   view->RemoveObserver(this);
+ 
++  if (view == foreign_hover_root_view_) {
++    foreign_hover_root_view_ = nullptr;
++    ForeignHoverLeave();
++  }
++
+   // Remove this view from the owner_map.
+   for (auto entry : owner_map_) {
+     if (entry.second.get() == view) {
+@@ -520,6 +574,9 @@ RenderWidgetHostInputEventRouter::RenderWidgetHostInputEventRouter(
+ }
+ 
+ RenderWidgetHostInputEventRouter::~RenderWidgetHostInputEventRouter() {
++  if (foreign_hover_sink_.is_valid()) {
++    ForeignHoverRouters().erase(foreign_hover_sink_);
++  }
+   // We may be destroyed before some of the owners in the map, so we must
+   // remove ourself from their observer lists.
+   ClearAllObserverRegistrations();
+@@ -623,7 +680,7 @@ RenderWidgetTargetResult RenderWidgetHostInputEventRouter::FindViewAtLocation(
+     gfx::PointF* transformed_point) const {
+   // Short circuit if owner_map has only one RenderWidgetHostView, no need for
+   // hit testing.
+-  if (owner_map_.size() <= 1) {
++  if (owner_map_.size() <= 1 && !ForeignDelegate()) {
+     *transformed_point = point;
+     return {root_view, /*should_query_view=*/false, *transformed_point};
+   }
+@@ -659,6 +716,19 @@ RenderWidgetTargetResult RenderWidgetHostInputEventRouter::FindViewAtLocation(
+   // The code that implements c) locates in |FindMouseEventTarget|.
+   if (target.flags & viz::HitTestRegionFlags::kHitTestAsk)
+     query_renderer = true;
++  // EXO-EMBED: foreign frame sinks have no view; the renderer that embeds one
++  // reports it (RouteToForeignFrameSink()).
++  if (IsForeignFrameSink(frame_sink_id)) {
++    query_renderer = true;
++  }
++  // EXO-EMBED: just outside a floating window, where its client-side resize
++  // edges are, the page decides whether it covers the point or the press is
++  // the window's (WebFrameWidgetImpl::GetFrameSinkIdAtPoint()).
++  if (!query_renderer && source == viz::EventSource::MOUSE &&
++      ForeignDelegate() && frame_sink_id == root_view->GetFrameSinkId() &&
++      ForeignDelegate()->NearResizeEdge(frame_sink_id, point)) {
++    query_renderer = true;
++  }
+ 
+   auto* view = FindViewFromFrameSinkId(frame_sink_id);
+   // Send the event to |root_view| if |view| is not in |root_view|'s sub-tree
+@@ -671,6 +741,331 @@ RenderWidgetTargetResult RenderWidgetHostInputEventRouter::FindViewAtLocation(
+   return {view, query_renderer, *transformed_point};
+ }
+ 
++// static
++void RenderWidgetHostInputEventRouter::SetForeignFrameSinkDelegate(
++    ForeignFrameSinkDelegate* delegate) {
++  ForeignDelegate() = delegate;
++}
++
++// static
++bool RenderWidgetHostInputEventRouter::HandForeignDragToPage(
++    const viz::FrameSinkId& frame_sink_id) {
++  // A drag on the sink made it the hover sink of the router that routes it.
++  auto it = ForeignHoverRouters().find(frame_sink_id);
++  if (it == ForeignHoverRouters().end() ||
++      it->second->foreign_capture_sink_ != frame_sink_id) {
++    return false;
++  }
++  RenderWidgetHostInputEventRouter* router = it->second;
++  VLOG(1) << "EXO-EMBED drag on " << frame_sink_id.ToString()
++          << " handed to the page";
++  router->foreign_capture_sink_ = viz::FrameSinkId();
++  // As a drag that started on page content: foreign sinks get nothing until
++  // the buttons are released (OnPageMouseEvent() clears it), and the page
++  // has the mouse captured, so neither a tab nor the window under the pointer
++  // gets the moves or the release.
++  router->page_mouse_down_ = true;
++  router->mouse_capture_target_ = router->foreign_hover_root_view_;
++  router->ForeignHoverLeave();
++  return true;
++}
++
++// static
++void RenderWidgetHostInputEventRouter::SetForeignFrameSinkCursor(
++    const viz::FrameSinkId& frame_sink_id,
++    const ui::Cursor& cursor) {
++  auto it = ForeignHoverRouters().find(frame_sink_id);
++  if (it == ForeignHoverRouters().end()) {
++    return;
++  }
++  RenderWidgetHostViewInput* root_view = it->second->foreign_hover_root_view_;
++  if (root_view && root_view->GetCursorManager()) {
++    root_view->GetCursorManager()->SetForeignCursor(cursor);
++  }
++}
++
++bool RenderWidgetHostInputEventRouter::MaybeRouteToForeignFrameSink(
++    RenderWidgetHostViewInput* root_view,
++    const blink::WebMouseEvent& event) {
++  if (!ForeignDelegate()) {
++    return false;
++  }
++  const auto type = event.GetType();
++  if (type == blink::WebInputEvent::Type::kMouseLeave) {
++    ForeignHoverLeave();
++    return false;
++  }
++  if (type != blink::WebInputEvent::Type::kMouseMove &&
++      type != blink::WebInputEvent::Type::kMouseDown &&
++      type != blink::WebInputEvent::Type::kMouseUp &&
++      type != blink::WebInputEvent::Type::kMouseWheel) {
++    return false;
++  }
++  // Keep event order: while the targeter is resolving earlier events
++  // asynchronously, later ones queue behind them (see FindViewAtLocation()).
++  if (event_targeter_->HasEventsPendingDispatch()) {
++    return false;
++  }
++  if (RouteToForeignCapture(root_view, event)) {
++    return true;
++  }
++  // A drag that started on page content stays with the page.
++  if (page_mouse_down_) {
++    return false;
++  }
++
++  viz::HitTestQuery* query =
++      GetHitTestQuery(hit_test_provider_, root_view->GetRootFrameSinkId());
++  if (!query) {
++    return false;
++  }
++  float device_scale_factor = root_view->GetDeviceScaleFactor();
++  viz::Target target = query->FindTargetForLocationStartingFrom(
++      viz::EventSource::MOUSE,
++      gfx::ConvertPointToPixels(event.PositionInWidget(), device_scale_factor),
++      root_view->GetFrameSinkId());
++  // Foreign sinks are those without a view. Regions that viz marks "ask"
++  // (page content may overlap the sink) go through the targeter, which asks
++  // the renderer; see RouteToForeignFrameSink(). EXO-BROKER: only sinks the
++  // browser linked to one of this page's widgets (after checking a grant)
++  // take input.
++  if (type == blink::WebInputEvent::Type::kMouseDown) {
++    VLOG(1) << "EXO-EMBED down hit " << target.frame_sink_id.ToString()
++            << " flags " << target.flags << " foreign "
++            << IsForeignFrameSink(target.frame_sink_id) << " here "
++            << IsForeignFrameSinkEmbeddedHere(target.frame_sink_id);
++    // EXO-EMBED: the aggregated hit-test tree this press was targeted with.
++    VLOG(2) << "EXO-EMBED hit-test data at "
++            << gfx::ConvertPointToPixels(event.PositionInWidget(),
++                                         device_scale_factor)
++                   .ToString()
++            << ":\n"
++            << query->PrintHitTestData();
++  }
++  if (!IsForeignFrameSinkEmbeddedHere(target.frame_sink_id) ||
++      (target.flags & viz::HitTestRegionFlags::kHitTestAsk)) {
++    return false;
++  }
++  if (type == blink::WebInputEvent::Type::kMouseDown) {
++    foreign_capture_sink_ = target.frame_sink_id;
++  }
++  RouteToForeign(
++      root_view, target.frame_sink_id,
++      gfx::ConvertPointToDips(target.location_in_target, device_scale_factor),
++      event);
++  return true;
++}
++
++bool RenderWidgetHostInputEventRouter::IsForeignFrameSink(
++    const viz::FrameSinkId& frame_sink_id) const {
++  return ForeignDelegate() && frame_sink_id.is_valid() &&
++         !owner_map_.contains(frame_sink_id);
++}
++
++bool RenderWidgetHostInputEventRouter::IsForeignFrameSinkEmbeddedHere(
++    const viz::FrameSinkId& frame_sink_id) const {
++  if (!IsForeignFrameSink(frame_sink_id)) {
++    return false;
++  }
++  for (const auto& [view_frame_sink_id, view] : owner_map_) {
++    if (ForeignDelegate()->IsEmbeddedIn(frame_sink_id, view_frame_sink_id)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool RenderWidgetHostInputEventRouter::RouteToForeignCapture(
++    RenderWidgetHostViewInput* root_view,
++    const blink::WebMouseEvent& event) {
++  if (!foreign_capture_sink_.is_valid() ||
++      event.GetType() == blink::WebInputEvent::Type::kMouseDown ||
++      event.GetType() == blink::WebInputEvent::Type::kMouseLeave) {
++    return false;
++  }
++  viz::FrameSinkId sink = foreign_capture_sink_;
++  const bool ends = !ButtonsDownAfter(event);
++  if (ends) {
++    foreign_capture_sink_ = viz::FrameSinkId();
++  }
++  RouteToForeignSink(root_view, sink, event);
++  // A drag that ends outside the window leaves it now (wl_pointer.leave), as
++  // on other compositors, rather than at the next move.
++  if (ends && HitTestFrameSink(root_view, event) != sink) {
++    ForeignHoverLeave();
++  }
++  return true;
++}
++
++viz::FrameSinkId RenderWidgetHostInputEventRouter::HitTestFrameSink(
++    RenderWidgetHostViewInput* root_view,
++    const blink::WebMouseEvent& event) {
++  viz::HitTestQuery* query =
++      GetHitTestQuery(hit_test_provider_, root_view->GetRootFrameSinkId());
++  if (!query) {
++    return viz::FrameSinkId();
++  }
++  return query
++      ->FindTargetForLocationStartingFrom(
++          viz::EventSource::MOUSE,
++          gfx::ConvertPointToPixels(event.PositionInWidget(),
++                                    root_view->GetDeviceScaleFactor()),
++          root_view->GetFrameSinkId())
++      .frame_sink_id;
++}
++
++// EXO-EMBED: the rest of a wheel sequence (phases changed/ended, momentum)
++// goes where its first event went. The targeter only hit-tests the first one
++// and sends the others to |wheel_target_|, a view; a native window has none,
++// so they were dropped, and an app only saw the first event of each scroll.
++bool RenderWidgetHostInputEventRouter::RouteWheelToForeignLatch(
++    RenderWidgetHostViewInput* root_view,
++    const blink::WebMouseWheelEvent& event) {
++  if (!foreign_wheel_sink_.is_valid()) {
++    return false;
++  }
++  const bool starts =
++      event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++      event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin;
++  const bool unlatched =
++      event.phase == blink::WebMouseWheelEvent::kPhaseNone &&
++      event.momentum_phase == blink::WebMouseWheelEvent::kPhaseNone;
++  if (starts || unlatched) {
++    foreign_wheel_sink_ = viz::FrameSinkId();
++    return false;
++  }
++  RouteToForeignSink(root_view, foreign_wheel_sink_, event);
++  return true;
++}
++
++void RenderWidgetHostInputEventRouter::RouteToForeignSink(
++    RenderWidgetHostViewInput* root_view,
++    const viz::FrameSinkId& sink,
++    const blink::WebMouseEvent& event) {
++  // Map the point through the page's view: the sink may also be embedded
++  // elsewhere (e.g. by Ash, for the parked window), and the point may be
++  // outside the sink.
++  viz::HitTestQuery* query =
++      GetHitTestQuery(hit_test_provider_, root_view->GetRootFrameSinkId());
++  gfx::Transform to_view;
++  if (!query ||
++      !query->GetTransformToTarget(root_view->GetFrameSinkId(), &to_view)) {
++    return;  // The page went away; drop the rest of the drag.
++  }
++  float device_scale_factor = root_view->GetDeviceScaleFactor();
++  gfx::PointF point = gfx::ConvertPointToPixels(event.PositionInWidget(),
++                                                device_scale_factor);
++  gfx::PointF in_root = to_view.InverseMapPoint(point).value_or(point);
++  gfx::PointF in_sink;
++  if (!query->TransformLocationForTarget(
++          {sink, root_view->GetFrameSinkId(), root_view->GetRootFrameSinkId()},
++          in_root, &in_sink)) {
++    return;  // The sink went away; drop the rest of the drag.
++  }
++  RouteToForeign(root_view, sink,
++                 gfx::ConvertPointToDips(in_sink, device_scale_factor), event);
++}
++
++bool RenderWidgetHostInputEventRouter::RouteToForeignFrameSink(
++    RenderWidgetHostViewInput* root_view,
++    RenderWidgetHostViewInput* queried_view,
++    const viz::FrameSinkId& frame_sink_id,
++    const gfx::PointF& location,
++    const blink::WebInputEvent& event) {
++  if (!blink::WebInputEvent::IsMouseEventType(event.GetType()) &&
++      event.GetType() != blink::WebInputEvent::Type::kMouseWheel) {
++    return false;
++  }
++  const auto& mouse_event = static_cast<const blink::WebMouseEvent&>(event);
++  if (RouteToForeignCapture(root_view, mouse_event)) {
++    return true;
++  }
++  // As in RouteMouseEvent(): a drag that started on page content, or that a
++  // window handed to the page (HandForeignDragToPage()), stays with the page.
++  if (page_mouse_down_) {
++    return false;
++  }
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    VLOG(1) << "EXO-EMBED queried down " << frame_sink_id.ToString()
++            << " foreign " << IsForeignFrameSink(frame_sink_id);
++  }
++  if (!IsForeignFrameSink(frame_sink_id) ||
++      !ForeignDelegate()->IsEmbeddedIn(frame_sink_id,
++                                       queried_view->GetFrameSinkId())) {
++    return false;
++  }
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    foreign_capture_sink_ = frame_sink_id;
++  }
++  RouteToForeign(root_view, frame_sink_id, location, mouse_event);
++  return true;
++}
++
++void RenderWidgetHostInputEventRouter::RouteToForeign(
++    RenderWidgetHostViewInput* root_view,
++    const viz::FrameSinkId& frame_sink_id,
++    const gfx::PointF& location,
++    const blink::WebMouseEvent& event) {
++  // EXO-BROKER: the last check before input reaches a native window. Every
++  // caller has checked already; this also covers a capture or hover that
++  // outlived the link (grant revoked mid-drag).
++  if (!IsForeignFrameSinkEmbeddedHere(frame_sink_id)) {
++    if (foreign_capture_sink_ == frame_sink_id) {
++      foreign_capture_sink_ = viz::FrameSinkId();
++    }
++    return;
++  }
++  page_mouse_down_ = false;
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseWheel) {
++    const auto& wheel = static_cast<const blink::WebMouseWheelEvent&>(event);
++    if (wheel.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++        wheel.phase == blink::WebMouseWheelEvent::kPhaseMayBegin) {
++      foreign_wheel_sink_ = frame_sink_id;
++      wheel_target_ = nullptr;
++    }
++  }
++  if (foreign_hover_sink_ != frame_sink_id) {
++    ForeignHoverLeave();
++    foreign_hover_sink_ = frame_sink_id;
++    foreign_hover_root_view_ = root_view;
++    ForeignHoverRouters()[frame_sink_id] = this;
++  }
++  ForeignDelegate()->RouteMouseEvent(frame_sink_id, location, event);
++}
++
++void RenderWidgetHostInputEventRouter::OnPageMouseEvent(
++    const blink::WebMouseEvent& event) {
++  if (!ForeignDelegate()) {
++    return;
++  }
++  ForeignHoverLeave();
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    ForeignDelegate()->PageMouseDown();
++  }
++  page_mouse_down_ = ButtonsDownAfter(event);
++}
++
++void RenderWidgetHostInputEventRouter::ForeignHoverLeave() {
++  if (!foreign_hover_sink_.is_valid()) {
++    return;
++  }
++  viz::FrameSinkId sink = foreign_hover_sink_;
++  auto it = ForeignHoverRouters().find(sink);
++  if (it != ForeignHoverRouters().end() && it->second == this) {
++    ForeignHoverRouters().erase(it);
++  }
++  if (foreign_hover_root_view_ &&
++      foreign_hover_root_view_->GetCursorManager()) {
++    foreign_hover_root_view_->GetCursorManager()->SetForeignCursor(
++        std::nullopt);
++  }
++  foreign_hover_sink_ = viz::FrameSinkId();
++  foreign_hover_root_view_ = nullptr;
++  if (ForeignDelegate()) {
++    ForeignDelegate()->PointerLeft(sink);
++  }
++}
++
+ void RenderWidgetHostInputEventRouter::RouteMouseEvent(
+     RenderWidgetHostViewInput* root_view,
+     const blink::WebMouseEvent* event,
+@@ -678,6 +1073,15 @@ void RenderWidgetHostInputEventRouter::RouteMouseEvent(
+   if (!IsViewInMap(root_view)) {
+     return;
+   }
++  if (event->GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    VLOG(1) << "EXO-EMBED route down pending="
++            << event_targeter_->HasEventsPendingDispatch() << " capture="
++            << foreign_capture_sink_.ToString()
++            << " page_down=" << page_mouse_down_;
++  }
++  if (MaybeRouteToForeignFrameSink(root_view, *event)) {
++    return;
++  }
+   event_targeter_->FindTargetAndDispatch(root_view, *event, latency);
+ }
+ 
+@@ -693,6 +1097,12 @@ void RenderWidgetHostInputEventRouter::DispatchMouseEvent(
+     return;
+   }
+ 
++  // EXO-EMBED: a drag that started in a foreign frame sink stays there.
++  if (RouteToForeignCapture(root_view, mouse_event)) {
++    return;
++  }
++  OnPageMouseEvent(mouse_event);
++
+   ScopedInputDispatchPin pin(target);
+ 
+   // Implicitly release any capture when a MouseUp arrives, so that if any
+@@ -785,6 +1195,13 @@ void RenderWidgetHostInputEventRouter::RouteMouseWheelEvent(
+   if (!IsViewInMap(root_view)) {
+     return;
+   }
++  if (!event_targeter_->HasEventsPendingDispatch() &&
++      RouteWheelToForeignLatch(root_view, *event)) {
++    return;
++  }
++  if (MaybeRouteToForeignFrameSink(root_view, *event)) {
++    return;
++  }
+   event_targeter_->FindTargetAndDispatch(root_view, *event, latency);
+ }
+ 
+@@ -822,6 +1239,17 @@ void RenderWidgetHostInputEventRouter::DispatchMouseWheelEvent(
+               PhaseToString(mouse_wheel_event.momentum_phase), "target",
+               static_cast<void*>(target), "wheel_target_",
+               static_cast<void*>(wheel_target_));
++  // EXO-EMBED: events that queued behind the targeter while it resolved the
++  // first one of a sequence that went to a native window.
++  if (!root_view->IsPointerLocked() &&
++      RouteWheelToForeignLatch(root_view, mouse_wheel_event)) {
++    return;
++  }
++  if (!root_view->IsPointerLocked() &&
++      (mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
++       mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin)) {
++    foreign_wheel_sink_ = viz::FrameSinkId();
++  }
+   if (!root_view->IsPointerLocked()) {
+     if (mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseBegan ||
+         mouse_wheel_event.phase == blink::WebMouseWheelEvent::kPhaseMayBegin) {
+diff --git a/components/input/render_widget_host_input_event_router.h b/components/input/render_widget_host_input_event_router.h
+index a7d8d96d06..19667040a7 100644
+--- a/components/input/render_widget_host_input_event_router.h
++++ b/components/input/render_widget_host_input_event_router.h
+@@ -24,6 +24,7 @@
+ #include "components/viz/common/hit_test/hit_test_region_observer.h"
+ #include "components/viz/common/surfaces/surface_id.h"
+ #include "third_party/blink/public/mojom/input/input_event_result.mojom-shared.h"
++#include "ui/base/cursor/cursor.h"
+ #include "ui/base/mojom/menu_source_type.mojom-forward.h"
+ #include "ui/gfx/geometry/transform.h"
+ #include "ui/gfx/geometry/vector2d_conversions.h"
+@@ -96,6 +97,33 @@ class TouchEventAckQueue;
+ viz::HitTestQuery* GetHitTestQuery(viz::HitTestDataProvider* provider,
+                                    const viz::FrameSinkId& frame_sink_id);
+ 
++// EXO-EMBED: handles mouse and wheel input for frame sinks that a page embeds
++// but that aren't RenderWidgetHostViews (native windows shown as page
++// elements). Set by the embedder; must outlive all routers.
++class COMPONENT_EXPORT(INPUT) ForeignFrameSinkDelegate {
++ public:
++  virtual ~ForeignFrameSinkDelegate() = default;
++
++  // Whether the renderer that owns |parent_frame_sink_id| embeds
++  // |frame_sink_id|.
++  virtual bool IsEmbeddedIn(const viz::FrameSinkId& frame_sink_id,
++                            const viz::FrameSinkId& parent_frame_sink_id) = 0;
++  // |location| is in |frame_sink_id|'s coordinate space (DIPs).
++  virtual void RouteMouseEvent(const viz::FrameSinkId& frame_sink_id,
++                               const gfx::PointF& location,
++                               const blink::WebMouseEvent& event) = 0;
++  // The pointer moved off |frame_sink_id|.
++  virtual void PointerLeft(const viz::FrameSinkId& frame_sink_id) = 0;
++  // A mouse button was pressed on page content.
++  virtual void PageMouseDown() = 0;
++  // Whether |point| (DIPs in the view whose frame sink is
++  // |parent_frame_sink_id|) is just outside a window shown floating, where
++  // its client-side resize edges are: the renderer is asked whether the
++  // press is the window's.
++  virtual bool NearResizeEdge(const viz::FrameSinkId& parent_frame_sink_id,
++                              const gfx::PointF& point) = 0;
++};
++
+ // Class owned by WebContentsImpl uniquely for the purpose of directing input
+ // events to the correct RenderWidgetHost on pages with multiple
+ // RenderWidgetHosts in the browser process. With InputVizard
+@@ -131,6 +159,18 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   void OnRenderWidgetHostViewInputDestroyed(
+       RenderWidgetHostViewInput* view) override;
+ 
++  // EXO-EMBED: see ForeignFrameSinkDelegate.
++  static void SetForeignFrameSinkDelegate(ForeignFrameSinkDelegate* delegate);
++  // Shows |cursor| while the pointer is over the foreign |frame_sink_id|.
++  static void SetForeignFrameSinkCursor(const viz::FrameSinkId& frame_sink_id,
++                                        const ui::Cursor& cursor);
++  // EXO-EMBED: the app on the foreign |frame_sink_id| asked for an
++  // interactive move or resize during the drag it has: the rest of that drag
++  // goes to the page instead (until the buttons are released), which does
++  // the move or resize, and the app gets a pointer leave. False if no drag
++  // started on it.
++  static bool HandForeignDragToPage(const viz::FrameSinkId& frame_sink_id);
++
+   void RouteMouseEvent(RenderWidgetHostViewInput* root_view,
+                        const blink::WebMouseEvent* event,
+                        const ui::LatencyInfo& latency);
+@@ -199,6 +239,11 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   bool ShouldContinueHitTesting(
+       RenderWidgetHostViewInput* target_view) const override;
+   void CancelAutoscroll(RenderWidgetHostViewInput* view) override;
++  bool RouteToForeignFrameSink(RenderWidgetHostViewInput* root_view,
++                               RenderWidgetHostViewInput* queried_view,
++                               const viz::FrameSinkId& frame_sink_id,
++                               const gfx::PointF& location,
++                               const blink::WebInputEvent& event) override;
+ 
+   // Allows a target to claim or release capture of mouse events.
+   void SetMouseCaptureTarget(RenderWidgetHostViewInput* target,
+@@ -262,6 +307,37 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   ~RenderWidgetHostInputEventRouter() final;
+ 
+  private:
++  // EXO-EMBED: routes |event| to a foreign frame sink if viz hit-tests it onto
++  // one (or one has the mouse captured). Returns true if routed.
++  bool MaybeRouteToForeignFrameSink(RenderWidgetHostViewInput* root_view,
++                                    const blink::WebMouseEvent& event);
++  bool IsForeignFrameSink(const viz::FrameSinkId& frame_sink_id) const;
++  // EXO-BROKER: a foreign sink that the embedder linked to one of this
++  // router's views (ForeignFrameSinkDelegate::IsEmbeddedIn()).
++  bool IsForeignFrameSinkEmbeddedHere(
++      const viz::FrameSinkId& frame_sink_id) const;
++  // Routes |event| to the foreign frame sink that has the mouse captured, if
++  // any. Returns true if routed (or dropped because the sink is gone).
++  bool RouteToForeignCapture(RenderWidgetHostViewInput* root_view,
++                             const blink::WebMouseEvent& event);
++  // The frame sink viz hit-tests |event| to in |root_view|, or an invalid id.
++  viz::FrameSinkId HitTestFrameSink(RenderWidgetHostViewInput* root_view,
++                                    const blink::WebMouseEvent& event);
++  // Routes the rest of a wheel sequence to the native window it started on.
++  bool RouteWheelToForeignLatch(RenderWidgetHostViewInput* root_view,
++                                const blink::WebMouseWheelEvent& event);
++  // Routes |event| to |sink|, mapping its point through |root_view|.
++  void RouteToForeignSink(RenderWidgetHostViewInput* root_view,
++                          const viz::FrameSinkId& sink,
++                          const blink::WebMouseEvent& event);
++  void RouteToForeign(RenderWidgetHostViewInput* root_view,
++                      const viz::FrameSinkId& frame_sink_id,
++                      const gfx::PointF& location,
++                      const blink::WebMouseEvent& event);
++  // Called for mouse events that go to page content.
++  void OnPageMouseEvent(const blink::WebMouseEvent& event);
++  void ForeignHoverLeave();
++
+   FRIEND_TEST_ALL_PREFIXES(
+       content::BrowserSideFlingBrowserTest,
+       DISABLED_InertialGSUBubblingStopsWhenParentCannotScroll);
+@@ -436,6 +512,19 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   raw_ptr<RenderWidgetHostViewInput> wheel_target_ = nullptr;
+   // Maintains the same target between mouse down and mouse up.
+   raw_ptr<RenderWidgetHostViewInput> mouse_capture_target_ = nullptr;
++
++  // EXO-EMBED: the foreign frame sink under the pointer, and the root view
++  // whose cursor shows its cursor.
++  viz::FrameSinkId foreign_hover_sink_;
++  raw_ptr<RenderWidgetHostViewInput> foreign_hover_root_view_ = nullptr;
++  // A mouse button went down on this foreign frame sink; it gets all mouse
++  // events until the buttons are released (like an implicit grab).
++  viz::FrameSinkId foreign_capture_sink_;
++  // EXO-EMBED: the native window the current wheel sequence started on.
++  viz::FrameSinkId foreign_wheel_sink_;
++  // A mouse button went down on page content; foreign frame sinks don't get
++  // events until the buttons are released.
++  bool page_mouse_down_ = false;
+   // There is no mouse capture set if a mouse down event dispatches to main
+   // frame. The subsequent mouse events might not be delivered to the main frame
+   // if mouse is moved over to an OOP iframe. There is caches mouse state in
+diff --git a/components/input/render_widget_targeter.cc b/components/input/render_widget_targeter.cc
+index bd52a04f5a..71caa84b1d 100644
+--- a/components/input/render_widget_targeter.cc
++++ b/components/input/render_widget_targeter.cc
+@@ -179,6 +179,15 @@ void RenderWidgetTargeter::FindTargetAndCallback(
+   ResolveTargetingRequest(std::move(request));
+ }
+ 
++bool RenderWidgetTargeter::Delegate::RouteToForeignFrameSink(
++    RenderWidgetHostViewInput* root_view,
++    RenderWidgetHostViewInput* queried_view,
++    const viz::FrameSinkId& frame_sink_id,
++    const gfx::PointF& location,
++    const blink::WebInputEvent& event) {
++  return false;
++}
++
+ void RenderWidgetTargeter::ResolveTargetingRequest(TargetingRequest request) {
+   if (request_in_flight_) {
+     requests_.push(std::move(request));
+@@ -396,6 +405,16 @@ void RenderWidgetTargeter::FoundFrameSinkId(
+       ->input_target_client()
+       .set_disconnect_handler(base::OnceClosure());
+ 
++  // EXO-EMBED: the renderer may report a foreign frame sink it embeds (a
++  // native window), which has no view.
++  if (request.IsWebInputEventRequest() && request.GetRootView() &&
++      delegate_->RouteToForeignFrameSink(request.GetRootView(), target.get(),
++                                         frame_sink_id, transformed_location,
++                                         *request.GetEvent())) {
++    FlushEventQueue();
++    return;
++  }
++
+   // Ensure the returned view is a valid descendant of the frame we queried
+   // (|target.get()|) to prevent a compromised renderer from redirecting input.
+   RenderWidgetHostViewInput* resolved_view =
+diff --git a/components/input/render_widget_targeter.h b/components/input/render_widget_targeter.h
+index 011bf17d49..59f7e16e8d 100644
+--- a/components/input/render_widget_targeter.h
++++ b/components/input/render_widget_targeter.h
+@@ -84,6 +84,16 @@ class RenderWidgetTargeter {
+         RenderWidgetHostViewInput* target_view) const = 0;
+ 
+     virtual void CancelAutoscroll(RenderWidgetHostViewInput* view) = 0;
++
++    // EXO-EMBED: |queried_view|'s renderer reported that |event| hits
++    // |frame_sink_id| at |location| (DIPs, in that frame sink's space).
++    // Returns true if |frame_sink_id| is a foreign frame sink that the
++    // renderer embeds and the event was routed to it.
++    virtual bool RouteToForeignFrameSink(RenderWidgetHostViewInput* root_view,
++                                         RenderWidgetHostViewInput* queried_view,
++                                         const viz::FrameSinkId& frame_sink_id,
++                                         const gfx::PointF& location,
++                                         const blink::WebInputEvent& event);
+   };
+ 
+   enum class HitTestResultsMatch {
+diff --git a/components/surface_embed/browser/surface_embed_host.cc b/components/surface_embed/browser/surface_embed_host.cc
+index 036eaf20f4..c7767a9af5 100644
+--- a/components/surface_embed/browser/surface_embed_host.cc
++++ b/components/surface_embed/browser/surface_embed_host.cc
+@@ -6,10 +6,12 @@
+ 
+ #include <algorithm>
+ #include <optional>
++#include <vector>
+ 
+ #include "base/check.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
++#include "base/no_destructor.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/viz/common/surfaces/frame_sink_id.h"
+ #include "content/public/browser/document_user_data.h"
+@@ -24,6 +26,26 @@
+ 
+ namespace surface_embed {
+ 
++namespace {
++
++// EXO-SHELLS (Plutonium): every host, and the attach filter.
++std::vector<SurfaceEmbedHost*>& AllHosts() {
++  static base::NoDestructor<std::vector<SurfaceEmbedHost*>> hosts;
++  return *hosts;
++}
++
++SurfaceEmbedHost::AttachFilter& AttachFilterCallback() {
++  static base::NoDestructor<SurfaceEmbedHost::AttachFilter> filter;
++  return *filter;
++}
++
++SurfaceEmbedHost::ChildFilter& ChildFilterCallback() {
++  static base::NoDestructor<SurfaceEmbedHost::ChildFilter> filter;
++  return *filter;
++}
++
++}  // namespace
++
+ // Owns all the SurfaceEmbedHost instances for a given document.
+ class SurfaceEmbedHostCollection
+     : public content::DocumentUserData<SurfaceEmbedHostCollection> {
+@@ -81,9 +103,12 @@ SurfaceEmbedHost* SurfaceEmbedHost::Create(
+ }
+ 
+ SurfaceEmbedHost::SurfaceEmbedHost(SurfaceEmbedHostCollection* collection)
+-    : collection_(*collection) {}
++    : collection_(*collection) {
++  AllHosts().push_back(this);
++}
+ 
+ SurfaceEmbedHost::~SurfaceEmbedHost() {
++  std::erase(AllHosts(), this);
+   DetachConnector();
+   if (destruction_callback_for_testing_) {
+     std::move(destruction_callback_for_testing_).Run();
+@@ -125,9 +150,21 @@ void SurfaceEmbedHost::AttachConnector(const base::UnguessableToken& content_id,
+   // If this host already has a child attached, we need to detach it first. Note
+   // that this request comes from the parent side, so we don't notify the
+   // SurfaceEmbed as it initiated the detachment.
+-  DetachConnector();
++  DetachChild();
+ 
+-  SurfaceEmbedHandle* handle = SurfaceEmbedHandle::FromID(content_id);
++  wanted_content_id_ = content_id;
++  wanted_allow_pinch_zoom_ = allow_pinch_zoom;
++  if (AttachFilterCallback() &&
++      !AttachFilterCallback().Run(&collection_->render_frame_host())) {
++    // EXO-SHELLS: attached later, by ReattachHosts().
++    return;
++  }
++  AttachWanted(is_embed_element_focused);
++}
++
++void SurfaceEmbedHost::AttachWanted(bool is_embed_element_focused) {
++  const bool allow_pinch_zoom = wanted_allow_pinch_zoom_;
++  SurfaceEmbedHandle* handle = SurfaceEmbedHandle::FromID(wanted_content_id_);
+   if (!handle) {
+     // The child may have been destroyed while the renderer was asynchronously
+     // creating the embed element.
+@@ -136,6 +173,11 @@ void SurfaceEmbedHost::AttachConnector(const base::UnguessableToken& content_id,
+ 
+   content::WebContents* web_contents_to_attach = handle->web_contents();
+   CHECK(web_contents_to_attach);
++  if (ChildFilterCallback() &&
++      !ChildFilterCallback().Run(web_contents_to_attach)) {
++    // EXO-PRESENT: shown elsewhere; attached later, by ReattachHosts().
++    return;
++  }
+ 
+   // If the child WebContents is already attached to a SurfaceEmbedConnector, we
+   // need to detach it first. Since we're detaching some other SurfaceEmbedHost,
+@@ -176,6 +218,7 @@ void SurfaceEmbedHost::AttachConnector(const base::UnguessableToken& content_id,
+ }
+ 
+ void SurfaceEmbedHost::SetAllowPinchZoom(bool allow_pinch_zoom) {
++  wanted_allow_pinch_zoom_ = allow_pinch_zoom;
+   content::SurfaceEmbedConnector* connector = GetConnector();
+   if (!connector) {
+     return;
+@@ -194,6 +237,11 @@ void SurfaceEmbedHost::FocusChildWebContents() {
+ }
+ 
+ void SurfaceEmbedHost::DetachConnector() {
++  wanted_content_id_ = base::UnguessableToken();
++  DetachChild();
++}
++
++void SurfaceEmbedHost::DetachChild() {
+   if (GetConnector()) {
+     content::SurfaceEmbedConnector::Detach(child_contents_.get());
+     child_contents_ = nullptr;
+@@ -313,7 +361,8 @@ void SurfaceEmbedHost::DetachedByHost() {
+   // TODO(surface-embed): Notify the renderer's SurfaceEmbedWebPlugin that the
+   // host initiated the detachment.
+ 
+-  DetachConnector();
++  // EXO-SHELLS: still wanted, for ReattachHosts().
++  DetachChild();
+ }
+ 
+ void SurfaceEmbedHost::RequestFocusOnEmbedElement() {
+@@ -334,6 +383,84 @@ void SurfaceEmbedHost::OnRequestFocusOnEmbedElementCompleted() {
+   pending_request_focus_on_embed_element_ = false;
+ }
+ 
++// static
++void SurfaceEmbedHost::SetAttachFilter(AttachFilter filter) {
++  AttachFilterCallback() = std::move(filter);
++}
++
++// static
++void SurfaceEmbedHost::SetChildFilter(ChildFilter filter) {
++  ChildFilterCallback() = std::move(filter);
++}
++
++// static
++void SurfaceEmbedHost::DetachFromHost(content::WebContents* child) {
++  if (content::SurfaceEmbedConnector* connector =
++          child->GetSurfaceEmbedConnector()) {
++    connector->GetDelegate()->DetachedByHost();
++  }
++}
++
++// static
++void SurfaceEmbedHost::ReattachHosts(const AttachFilter& filter,
++                                     const ChildFilter& may_take) {
++  // Attaching one host can detach another (DetachedByHost), never add or
++  // remove one.
++  for (SurfaceEmbedHost* host : std::vector<SurfaceEmbedHost*>(AllHosts())) {
++    if (host->wanted_content_id_.is_empty() || host->GetConnector() ||
++        !host->surface_embed_ ||
++        !filter.Run(&host->collection_->render_frame_host())) {
++      continue;
++    }
++    if (may_take) {
++      SurfaceEmbedHandle* handle =
++          SurfaceEmbedHandle::FromID(host->wanted_content_id_);
++      if (!handle || !handle->web_contents() ||
++          !may_take.Run(handle->web_contents())) {
++        continue;
++      }
++    }
++    host->AttachWanted(/*is_embed_element_focused=*/false);
++  }
++}
++
++// static
++content::RenderFrameHost* SurfaceEmbedHost::GetEmbedderFrame(
++    content::WebContents* child) {
++  for (SurfaceEmbedHost* host : AllHosts()) {
++    if (host->child_contents_.get() == child && host->GetConnector()) {
++      return &host->collection_->render_frame_host();
++    }
++  }
++  return nullptr;
++}
++
++namespace {
++SurfaceEmbedHost::FullscreenChangedCallback& FullscreenChanged() {
++  static base::NoDestructor<SurfaceEmbedHost::FullscreenChangedCallback>
++      callback;
++  return *callback;
++}
++}  // namespace
++
++// static
++void SurfaceEmbedHost::SetFullscreenChangedCallback(
++    FullscreenChangedCallback callback) {
++  FullscreenChanged() = std::move(callback);
++}
++
++void SurfaceEmbedHost::OnEmbedElementFullscreenChanged(bool fullscreen) {
++  if (child_contents_ && FullscreenChanged()) {
++    FullscreenChanged().Run(child_contents_.get(), fullscreen);
++  }
++}
++
++void SurfaceEmbedHost::SetEmbedElementFullscreen(bool fullscreen) {
++  if (surface_embed_) {
++    surface_embed_->SetFullscreen(fullscreen);
++  }
++}
++
+ void SurfaceEmbedHost::AdvanceFocusFromEmbedElement(bool reverse) {
+   if (surface_embed_) {
+     surface_embed_->AdvanceFocusFromEmbedElement(reverse);
+diff --git a/components/surface_embed/browser/surface_embed_host.h b/components/surface_embed/browser/surface_embed_host.h
+index cee4472f6e..1b49593842 100644
+--- a/components/surface_embed/browser/surface_embed_host.h
++++ b/components/surface_embed/browser/surface_embed_host.h
+@@ -65,6 +65,7 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+   void OnEmbedElementThrottlingStatusChanged(
+       mojom::RenderThrottlingStatusPtr status) override;
+   void SetParentAccessibilityInfo(ui::AXNodeID ax_node_id) override;
++  void OnEmbedElementFullscreenChanged(bool fullscreen) override;
+ 
+   // content::SurfaceEmbedConnector::Delegate implementation:
+   void SetFrameSinkId(const viz::FrameSinkId& frame_sink_id,
+@@ -75,8 +76,41 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+   void DetachedByHost() override;
+   void RequestFocusOnEmbedElement() override;
+   void AdvanceFocusFromEmbedElement(bool reverse) override;
++  void SetEmbedElementFullscreen(bool fullscreen) override;
+   bool IsAttachedForTesting() const override;
+ 
++  // EXO-FULLSCREEN (Plutonium): told whenever an <embed> showing |child|
++  // enters or leaves fullscreen.
++  using FullscreenChangedCallback =
++      base::RepeatingCallback<void(content::WebContents* child,
++                                   bool fullscreen)>;
++  static void SetFullscreenChangedCallback(FullscreenChangedCallback callback);
++
++  // EXO-SHELLS (Plutonium): which parent documents may attach a child right
++  // now. A host refused attachment keeps the content id it was given, as
++  // does a host whose child another host takes, and attaches it in
++  // ReattachHosts() (the plugin then sends fresh visual properties, as for
++  // any attachment).
++  using ChildFilter = base::RepeatingCallback<bool(content::WebContents* child)>;
++  using AttachFilter =
++      base::RepeatingCallback<bool(content::RenderFrameHost* parent)>;
++  static void SetAttachFilter(AttachFilter filter);
++  // Attaches the child of every detached host that has one and whose parent
++  // document |filter| accepts, and, if |may_take| is given, that it accepts
++  // (it may then be shown by another host, which loses it).
++  static void ReattachHosts(const AttachFilter& filter,
++                            const ChildFilter& may_take = ChildFilter());
++  // EXO-DISPLAYS (Plutonium): the document whose <embed> shows |child|, or
++  // null.
++  static content::RenderFrameHost* GetEmbedderFrame(
++      content::WebContents* child);
++  // EXO-PRESENT (Plutonium): which children may be attached right now. A
++  // host refused one keeps wanting it, as with the attach filter.
++  static void SetChildFilter(ChildFilter filter);
++  // Detaches |child| from the host that shows it, if any. That host keeps
++  // wanting it, for ReattachHosts().
++  static void DetachFromHost(content::WebContents* child);
++
+   void SetDestructionCallbackForTesting(base::OnceClosure callback);
+ 
+   bool HasReceivedParentAccessibilityInfoForTesting() const {
+@@ -94,6 +128,11 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+   void Bind(mojo::PendingAssociatedReceiver<mojom::SurfaceEmbedHost> receiver);
+ 
+   void OnMojoDisconnect();
++  // Attaches wanted_content_id_'s WebContents, taking it from any other
++  // host.
++  void AttachWanted(bool is_embed_element_focused);
++  // Detaches the child, if any, and keeps wanting it.
++  void DetachChild();
+   void OnRequestFocusOnEmbedElementCompleted();
+   void FocusChildWebContents();
+ 
+@@ -115,6 +154,10 @@ class SurfaceEmbedHost : public mojom::SurfaceEmbedHost,
+ 
+   ui::AXNodeID container_accessibility_node_id_ = ui::kInvalidAXNodeID;
+ 
++  // EXO-SHELLS: what the <embed> shows, whether or not it's attached.
++  base::UnguessableToken wanted_content_id_;
++  bool wanted_allow_pinch_zoom_ = false;
++
+   mojo::AssociatedRemote<mojom::SurfaceEmbed> surface_embed_;
+   mojo::AssociatedReceiver<mojom::SurfaceEmbedHost> receiver_{this};
+   base::WeakPtrFactory<SurfaceEmbedHost> weak_ptr_factory_{this};
+diff --git a/components/surface_embed/common/surface_embed.mojom b/components/surface_embed/common/surface_embed.mojom
+index a2c72d6adc..3220746063 100644
+--- a/components/surface_embed/common/surface_embed.mojom
++++ b/components/surface_embed/common/surface_embed.mojom
+@@ -46,6 +46,12 @@ interface SurfaceEmbed {
+   // When `reverse` is true, advances backward (e.g. Shift+Tab), otherwise
+   // advances forward (e.g. Tab).
+   AdvanceFocusFromEmbedElement(bool reverse);
++
++  // EXO-FULLSCREEN (Plutonium): makes the <embed> element its document's
++  // fullscreen element, or leaves fullscreen if it is. Entering needs no
++  // user activation: the browser decided (the user pressed Super+F, or the
++  // embedded page asked to be fullscreen).
++  SetFullscreen(bool fullscreen);
+ };
+ 
+ // Represents the render throttling status of an embedded frame.
+@@ -110,4 +116,8 @@ interface SurfaceEmbedHost {
+   // browser process. This may happen during creation or later
+   // if accessibility is not yet enabled.
+   SetParentAccessibilityInfo(int32 ax_node_id);
++
++  // EXO-FULLSCREEN (Plutonium): the <embed> element became, or stopped
++  // being, its document's fullscreen element.
++  OnEmbedElementFullscreenChanged(bool fullscreen);
+ };
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.cc b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+index 612a7d36f5..8312c5ddce 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.cc
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "components/surface_embed/renderer/surface_embed_web_plugin.h"
+ 
++#include <algorithm>
++
+ #include "base/notimplemented.h"
+ #include "cc/layers/picture_layer.h"
+ #include "cc/layers/surface_layer.h"
+@@ -214,15 +216,20 @@ void SurfaceEmbedWebPlugin::UpdateGeometry(const gfx::Rect& window_rect,
+   // Note: Layer bounds are set by WebPluginContainerImpl::Paint()
+   // so we don't need to set them here for the time being.
+ 
++  // EXO-TABS: read here, where layout is clean.
++  const gfx::Size content_size =
++      container_ ? container_->ContentBoxSize() : gfx::Size();
+   if (last_window_rect_ == window_rect && last_clip_rect_ == clip_rect &&
+       last_unobscured_rect_ == unobscured_rect &&
+-      last_is_visible_ == is_visible && !frame_sink_id_changed_) {
++      last_content_size_ == content_size && last_is_visible_ == is_visible &&
++      !frame_sink_id_changed_) {
+     return;
+   }
+ 
+   last_window_rect_ = window_rect;
+   last_clip_rect_ = clip_rect;
+   last_unobscured_rect_ = unobscured_rect;
++  last_content_size_ = content_size;
+   last_is_visible_ = is_visible;
+ 
+   if (frame_sink_id_.is_valid()) {
+@@ -391,20 +398,45 @@ void SurfaceEmbedWebPlugin::SynchronizeVisualProperties(
+       ancestor_widget->PinchGestureActiveInMainFrame();
+   pending_visual_properties.screen_infos = ancestor_widget->GetScreenInfos();
+ 
+-  // For separate WebContents acting like an iframe, the "visible viewport" is
+-  // the portion of the plugin that is visible within the plugin bounds.
+-  pending_visual_properties.visible_viewport_size =
+-      gfx::Size(last_clip_rect_.width(), last_clip_rect_.height());
+-
+   const std::vector<gfx::Rect>& viewport_segments =
+       ancestor_widget->ViewportSegments();
+   pending_visual_properties.root_widget_viewport_segments.assign(
+       viewport_segments.begin(), viewport_segments.end());
+   pending_visual_properties.rect_in_local_root = last_window_rect_;
+-  pending_visual_properties.local_frame_size =
+-      gfx::Size(last_window_rect_.width(), last_window_rect_.height());
++  // EXO-TABS: like an out-of-process iframe, the embedded page lays out at
++  // the element's own size; CSS transforms on the element or its ancestors
++  // only change how it is drawn. |last_window_rect_| is the transformed
++  // bounding box, so a scaled-down <embed> would otherwise get a scaled-down
++  // page (drawn scaled down a second time).
++  // |last_content_size_| is the element's content box in its own space,
++  // untransformed and unclipped, kept from the last UpdateGeometry(): reading
++  // it here could force a layout, which this may run in the middle of (e.g.
++  // while the element is being removed). |last_unobscured_rect_| is clipped
++  // by ancestors' overflow (MapToVisualRectInAncestorSpace), so a tab in a
++  // shell whose desktop is overflow: hidden laid out at its visible part.
++  const gfx::Size local_frame_size =
++      !last_content_size_.IsEmpty()      ? last_content_size_
++      : !last_unobscured_rect_.IsEmpty() ? last_unobscured_rect_.size()
++                                         : last_window_rect_.size();
++  pending_visual_properties.local_frame_size = local_frame_size;
++  // EXO-TABS: the embedded page is a main frame, so the visible viewport is
++  // its visual viewport (innerWidth, visualViewport, what fixed elements fit
++  // in). A tab is a window: dragged partly off the screen or clipped by its
++  // container it overflows, as a native window does, instead of laying out
++  // again to fit what's left visible. (Upstream used the visible part of the
++  // plugin, as for an iframe.)
++  pending_visual_properties.visible_viewport_size = local_frame_size;
++  // How much smaller the page is drawn than it lays out.
++  const float scale =
++      local_frame_size.width() > 0
++          ? std::clamp(static_cast<float>(last_window_rect_.width()) /
++                           local_frame_size.width(),
++                       0.01f, 1.0f)
++          : 1.0f;
++  // |last_clip_rect_| is already in the element's own (untransformed) space.
+   pending_visual_properties.compositor_viewport = last_clip_rect_;
+-  pending_visual_properties.compositing_scale_factor = 1.0f;
++  // Raster at the scale the page ends up on screen at.
++  pending_visual_properties.compositing_scale_factor = scale;
+   pending_visual_properties.cursor_accessibility_scale_factor = 1.0f;
+ 
+   bool synchronized_props_changed =
+@@ -505,6 +537,18 @@ void SurfaceEmbedWebPlugin::SetFrameSinkId(
+ 
+ void SurfaceEmbedWebPlugin::UpdateLocalSurfaceIdFromChild(
+     const ::viz::LocalSurfaceId& local_surface_id) {
++  // EXO-TABS: a tab moves between <embed>s (the panel, the floating preview,
++  // the background), and an id its renderer allocated under the last one can
++  // arrive after this one's first. Merging it would take that embedding's
++  // child sequence number, which the renderer drops when it adopts this
++  // embed token: every id allocated here after would stay one ahead of what
++  // it submits, so the surface never activates and copies of it (DevTools
++  // screenshots) wait forever.
++  if (local_surface_id.embed_token() !=
++      parent_local_surface_id_allocator_->GetCurrentLocalSurfaceId()
++          .embed_token()) {
++    return;
++  }
+   if (!parent_local_surface_id_allocator_->UpdateFromChild(local_surface_id)) {
+     return;
+   }
+@@ -603,4 +647,23 @@ void SurfaceEmbedWebPlugin::ReleaseCrashedLayer() {
+   }
+ }
+ 
++void SurfaceEmbedWebPlugin::SetFullscreen(bool fullscreen) {
++  if (!container_) {
++    return;
++  }
++  if (fullscreen) {
++    if (!container_->IsFullscreenElement()) {
++      container_->RequestFullscreenForBrowser();
++    }
++  } else if (container_->IsFullscreenElement()) {
++    container_->CancelFullscreen();
++  }
++}
++
++void SurfaceEmbedWebPlugin::DidChangeFullscreen(bool fullscreen) {
++  if (host_) {
++    host_->OnEmbedElementFullscreenChanged(fullscreen);
++  }
++}
++
+ }  // namespace surface_embed
+diff --git a/components/surface_embed/renderer/surface_embed_web_plugin.h b/components/surface_embed/renderer/surface_embed_web_plugin.h
+index d1d14cdb5a..ebda619dd5 100644
+--- a/components/surface_embed/renderer/surface_embed_web_plugin.h
++++ b/components/surface_embed/renderer/surface_embed_web_plugin.h
+@@ -64,6 +64,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+                       bool is_visible) override;
+   void UpdateFocus(bool focused, blink::mojom::FocusType focus_type) override;
+   void UpdateVisibility(bool visible) override;
++  void DidChangeFullscreen(bool fullscreen) override;
+   void UpdateRenderThrottlingStatus(bool is_throttled,
+                                     bool subtree_throttled,
+                                     bool display_locked) override;
+@@ -110,6 +111,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+   void RequestFocusOnEmbedElement(
+       RequestFocusOnEmbedElementCallback callback) override;
+   void AdvanceFocusFromEmbedElement(bool reverse) override;
++  void SetFullscreen(bool fullscreen) override;
+ 
+   // cc::ContentLayerClient, used only if we're painting a sad plugin.
+   scoped_refptr<cc::DisplayItemList> PaintContentsToDisplayList() override;
+@@ -133,6 +135,7 @@ class SurfaceEmbedWebPlugin : public blink::WebPlugin,
+   gfx::Rect last_window_rect_;
+   gfx::Rect last_clip_rect_;
+   gfx::Rect last_unobscured_rect_;
++  gfx::Size last_content_size_;
+   bool last_is_visible_ = false;
+   bool last_is_throttled_ = false;
+   bool last_subtree_throttled_ = false;
+diff --git a/components/viz/service/display/overlay_candidate_factory.cc b/components/viz/service/display/overlay_candidate_factory.cc
+index d0377af906..80114c5756 100644
+--- a/components/viz/service/display/overlay_candidate_factory.cc
++++ b/components/viz/service/display/overlay_candidate_factory.cc
+@@ -142,6 +142,28 @@ OverlayCandidateFactory::OverlayContext::OverlayContext(const OverlayContext&) =
+ OverlayCandidate::CandidateStatus OverlayCandidateFactory::FromDrawQuad(
+     const DrawQuad* quad,
+     OverlayCandidate& candidate) const {
++  auto status = FromDrawQuadImpl(quad, candidate);
++  // EXO-DIAG: rate-limited log of why quads are (not) overlay candidates.
++  static int count = 0;
++  const bool large = quad->rect.width() >= 200 && quad->rect.height() >= 200;
++  static int large_count = 0;
++  if ((large && large_count++ % 20 == 0) || count++ % 200 == 0) {
++    VLOG(1) << "EXO-DIAG candidate material="
++            << static_cast<int>(quad->material)
++            << " rect=" << quad->rect.ToString()
++            << " status=" << static_cast<int>(status)
++            << " res_size=" << candidate.resource_size_in_pixels.ToString()
++            << " display_rect=" << candidate.display_rect.ToString() << " clip="
++            << (candidate.clip_rect ? candidate.clip_rect->ToString()
++                                    : std::string("none"))
++            << " mask=" << !quad->shared_quad_state->mask_filter_info.IsEmpty();
++  }
++  return status;
++}
++
++OverlayCandidate::CandidateStatus OverlayCandidateFactory::FromDrawQuadImpl(
++    const DrawQuad* quad,
++    OverlayCandidate& candidate) const {
+   // It is currently not possible to set a color conversion matrix on an HW
+   // overlay plane.
+   // TODO(https://crbug.com/792757): Remove this check once the bug is resolved.
+diff --git a/components/viz/service/display/overlay_candidate_factory.h b/components/viz/service/display/overlay_candidate_factory.h
+index c38c6e14f6..60d3924541 100644
+--- a/components/viz/service/display/overlay_candidate_factory.h
++++ b/components/viz/service/display/overlay_candidate_factory.h
+@@ -83,6 +83,9 @@ class VIZ_SERVICE_EXPORT OverlayCandidateFactory {
+   // freshly constructed |OverlayCandidate| object.
+   CandidateStatus FromDrawQuad(const DrawQuad* quad,
+                                OverlayCandidate& candidate) const;
++  // EXO-DIAG: implementation of FromDrawQuad; the wrapper logs the status.
++  CandidateStatus FromDrawQuadImpl(const DrawQuad* quad,
++                                   OverlayCandidate& candidate) const;
+ 
+   // Returns an estimate of this |quad|'s actual visible damage area as float
+   // pixels squared. This visible damage is computed by combining from input
+diff --git a/components/viz/service/display/overlay_processor_ozone.cc b/components/viz/service/display/overlay_processor_ozone.cc
+index 294faf5b23..c85d8de4e8 100644
+--- a/components/viz/service/display/overlay_processor_ozone.cc
++++ b/components/viz/service/display/overlay_processor_ozone.cc
+@@ -5,12 +5,15 @@
+ #include "components/viz/service/display/overlay_processor_ozone.h"
+ 
+ #include <algorithm>
++#include <map>
++#include <string>
+ #include <memory>
+ #include <utility>
+ #include <vector>
+ 
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
++#include "base/no_destructor.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "build/build_config.h"
+@@ -74,6 +77,21 @@ gfx::ColorSpace GetColorSpaceForOzone(SharedImageFormat format,
+   return orig_color_space;
+ }
+ 
++// EXO-DIAG: why a candidate was blanked before reaching DRM (rate limited
++// per reason).
++void LogBlanked(const char* reason, const ui::OverlaySurfaceCandidate& c) {
++  static base::NoDestructor<std::map<std::string, int>> counts;
++  int& n = (*counts)[reason];
++  if (n++ % 200 == 0) {
++    VLOG(1) << "EXO-DIAG blanked (" << reason << ", #" << n
++            << ") z=" << c.plane_z_order
++            << " display_rect=" << c.display_rect.ToString()
++            << " buffer_size=" << c.buffer_size.ToString()
++            << " format=" << c.format.ToString()
++            << " color_space=" << c.color_space.ToString();
++  }
++}
++
+ void ConvertToOzoneOverlaySurface(
+     const OverlayCandidate& overlay_candidate,
+     ui::OverlaySurfaceCandidate* ozone_candidate) {
+@@ -319,6 +337,7 @@ void OverlayProcessorOzone::CheckOverlaySupportImpl(
+         // We cannot validate an overlay configuration without the buffer for
+         // primary plane present.
+         if (!result) {
++          LogBlanked("no primary pixmap", *ozone_surface_iterator);
+           for (auto& candidate : *surfaces) {
+             candidate.overlay_handled = false;
+           }
+@@ -356,6 +375,7 @@ void OverlayProcessorOzone::CheckOverlaySupportImpl(
+               /*source_format=*/surface_iterator->format,
+               /*source_color_space=*/surface_iterator->color_space,
+               /*destination_color_space=*/primary_plane_color_space_)) {
++        LogBlanked("color space", *ozone_surface_iterator);
+         *ozone_surface_iterator = ui::OverlaySurfaceCandidate();
+         ozone_surface_iterator->plane_z_order = surface_iterator->plane_z_order;
+         continue;
+@@ -376,6 +396,7 @@ void OverlayProcessorOzone::CheckOverlaySupportImpl(
+ 
+         // Skip the candidate if the corresponding NativePixmap is not found.
+         if (!result) {
++          LogBlanked("no native pixmap", *ozone_surface_iterator);
+           *ozone_surface_iterator = ui::OverlaySurfaceCandidate();
+           ozone_surface_iterator->plane_z_order =
+               surface_iterator->plane_z_order;
+@@ -401,6 +422,8 @@ void OverlayProcessorOzone::CheckOverlaySupportImpl(
+         if (!display_rect.origin().IsOrigin() ||
+             buffer_size != gfx::ToFlooredSize(display_rect.size())) {
+           int zindex = highest_zindex_surface->plane_z_order;
++          LogBlanked("topmost scaled, no cursor plane",
++                     *highest_zindex_surface);
+           *highest_zindex_surface = ui::OverlaySurfaceCandidate();
+           highest_zindex_surface->plane_z_order = zindex;
+         }
+@@ -430,6 +453,34 @@ void OverlayProcessorOzone::CheckOverlaySupportImpl(
+   }
+ }
+ 
++void OverlayProcessorOzone::SortProposedOverlayCandidates(
++    std::vector<OverlayProposedCandidate>* proposed_candidates) {
++  OverlayProcessorUsingStrategy::SortProposedOverlayCandidates(
++      proposed_candidates);
++#if BUILDFLAG(IS_CHROMEOS)
++  if (has_independent_cursor_plane_) {
++    return;
++  }
++  // EXO-GPU: SingleOnTop and Fullscreen candidates are the topmost plane, and
++  // CheckOverlaySupportImpl() blanks a topmost plane that is translated or
++  // scaled when the cursor has no plane of its own. Proposing them anyway
++  // stops the multiple-overlay path from ever testing an underlay for the
++  // same quad: OverlayCombinationCache considers one candidate per quad
++  // (the highest power gain), and retries it when every combination failed.
++  std::erase_if(*proposed_candidates, [](const OverlayProposedCandidate& c) {
++    const OverlayStrategy type = c.strategy->GetUMAEnum();
++    if (type != OverlayStrategy::kSingleOnTop &&
++        type != OverlayStrategy::kFullscreen) {
++      return false;
++    }
++    const gfx::RectF& display_rect = c.candidate.display_rect;
++    return !display_rect.origin().IsOrigin() ||
++           c.candidate.resource_size_in_pixels !=
++               gfx::ToFlooredSize(display_rect.size());
++  });
++#endif  // BUILDFLAG(IS_CHROMEOS)
++}
++
+ void OverlayProcessorOzone::MaybeObserveHardwareCapabilities() {
+   if (tried_observing_hardware_capabilities_) {
+     return;
+diff --git a/components/viz/service/display/overlay_processor_ozone.h b/components/viz/service/display/overlay_processor_ozone.h
+index 349bce7720..091ee86160 100644
+--- a/components/viz/service/display/overlay_processor_ozone.h
++++ b/components/viz/service/display/overlay_processor_ozone.h
+@@ -72,6 +72,13 @@ class VIZ_SERVICE_EXPORT OverlayProcessorOzone
+   bool ShouldCreatePrimaryPlane() const override;
+ 
+  private:
++  // OverlayProcessorUsingStrategy:
++  // Without an independent cursor plane, also drops proposals that
++  // CheckOverlaySupportImpl() would always blank (see there), so other
++  // strategies for the same quad get tested.
++  void SortProposedOverlayCandidates(
++      std::vector<OverlayProposedCandidate>* proposed_candidates) override;
++
+   // Populates |native_pixmap| in |candidate|
+   // based on |mailbox|. |is_primary| should be true if this is the primary
+   // surface. Return false if the corresponding NativePixmap cannot be found.
+diff --git a/components/viz/service/display/overlay_processor_using_strategy.cc b/components/viz/service/display/overlay_processor_using_strategy.cc
+index d23ff942e8..0ee1695b2c 100644
+--- a/components/viz/service/display/overlay_processor_using_strategy.cc
++++ b/components/viz/service/display/overlay_processor_using_strategy.cc
+@@ -17,6 +17,7 @@
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
++#include "base/no_destructor.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/strings/string_number_conversions.h"
+@@ -276,6 +277,24 @@ void OverlayProcessorUsingStrategy::ProcessForOverlays(
+   primary_plane_color_space_ = primary_plane_params.color_space;
+ #endif
+   TRACE_EVENT0("viz", "OverlayProcessorUsingStrategy::ProcessForOverlays");
++  // EXO-DIAG: render pass structure, rate limited.
++  static int frames = 0;
++  if (frames++ % 300 == 0) {
++    std::string passes;
++    for (const auto& pass : *render_passes) {
++      passes += " [" + pass->output_rect.size().ToString() + " q=" +
++                base::NumberToString(pass->quad_list.size()) + "]";
++    }
++    std::string root;
++    for (const auto* q : render_passes->back()->quad_list) {
++      if (q->rect.width() * q->rect.height() >= 100 * 100) {
++        root += " m" + base::NumberToString(static_cast<int>(q->material)) + ":" +
++                q->rect.ToString();
++      }
++    }
++    VLOG(1) << "EXO-DIAG frame passes=" << render_passes->size() << passes
++            << " root_large_quads:" << root;
++  }
+   DCHECK(candidates->empty());
+   auto* render_pass = render_passes->back().get();
+   bool success = false;
+@@ -306,6 +325,19 @@ void OverlayProcessorUsingStrategy::ProcessForOverlays(
+   if (primary_plane) {
+     render_pass->has_transparent_background |= !primary_plane->is_opaque;
+   }
++  // EXO-DIAG: strategy outcome, rate limited.
++  static int outcomes = 0;
++  if (outcomes++ % 120 == 0) {
++    VLOG(1) << "EXO-DIAG outcome success=" << success << " strategy="
++            << (last_successful_strategy_
++                    ? static_cast<int>(last_successful_strategy_->GetUMAEnum())
++                    : -1)
++            << " overlays=" << candidates->size() << " primary="
++            << (primary_plane
++                    ? primary_plane->format.ToString() +
++                          (primary_plane->is_opaque ? " opaque" : " alpha")
++                    : std::string("none"));
++  }
+ 
+   DCHECK(candidates->empty() || success);
+   UMA_HISTOGRAM_COUNTS_100(kNumOverlaysPromotedHistogramName,
+@@ -699,6 +731,19 @@ bool OverlayProcessorUsingStrategy::AttemptWithStrategies(
+   }
+ 
+   size_t num_proposed_pre_sort = proposed_candidates.size();
++  // EXO-DIAG: what each strategy proposed, rate limited.
++  static int proposals = 0;
++  if (proposals++ % 120 == 0) {
++    std::string proposed;
++    for (const auto& c : proposed_candidates) {
++      proposed += " s" +
++                  base::NumberToString(
++                      static_cast<int>(c.strategy->GetUMAEnum())) +
++                  ":" + c.candidate.display_rect.ToString() +
++                  (c.candidate.is_opaque ? " opaque" : " alpha");
++    }
++    VLOG(1) << "EXO-DIAG proposed " << num_proposed_pre_sort << ":" << proposed;
++  }
+   UMA_HISTOGRAM_COUNTS_1000(
+       "Viz.DisplayCompositor.OverlayNumProposedCandidates",
+       num_proposed_pre_sort);
+@@ -930,6 +975,22 @@ bool OverlayProcessorUsingStrategy::AttemptMultipleOverlays(
+   }
+ 
+   const int num_overlays_attempted = candidates.size();
++  {
++    // EXO-DIAG: each distinct tested combination and its result, once.
++    std::string combo;
++    for (size_t i = 0; i < candidates.size(); ++i) {
++      combo += " s" +
++               base::NumberToString(static_cast<int>(
++                   test_candidates[i].strategy->GetUMAEnum())) +
++               " z=" + base::NumberToString(candidates[i].plane_z_order) +
++               " " + candidates[i].display_rect.ToString() +
++               (candidates[i].overlay_handled ? " ok" : " fail");
++    }
++    static base::NoDestructor<std::set<std::string>> seen;
++    if (seen->size() < 200 && seen->insert(combo).second) {
++      VLOG(1) << "EXO-DIAG multi tested" << combo;
++    }
++  }
+ 
+   // Update the test candidates so we can process the result, use EraseIf below
+   // and tell the OverlayCombinationCache which ones succeeded/failed.
+diff --git a/components/viz/service/display/overlay_processor_using_strategy.h b/components/viz/service/display/overlay_processor_using_strategy.h
+index 4d788e29d6..93f60f9d07 100644
+--- a/components/viz/service/display/overlay_processor_using_strategy.h
++++ b/components/viz/service/display/overlay_processor_using_strategy.h
+@@ -235,13 +235,17 @@ class VIZ_SERVICE_EXPORT OverlayProcessorUsingStrategy
+       std::vector<std::vector<OverlayProposedCandidate>::iterator>&
+           underlay_iters);
+ 
++ protected:
+   // This function reorders and removes |proposed_candidates| based on a
+   // heuristic designed to maximize the effectiveness of the limited number
+   // of Hardware overlays. Effectiveness here is primarily about power and
+   // secondarily about of performance.
++  // EXO-GPU: protected, so OverlayProcessorOzone can extend it.
+   virtual void SortProposedOverlayCandidates(
+       std::vector<OverlayProposedCandidate>* proposed_candidates);
+ 
++ private:
++
+   // Used by Android pre-SurfaceControl to notify promotion hints, and by
+   // Ozone to notify overlay manager what overlays are actually promoted.
+   virtual void NotifyOverlayPromotion(
+diff --git a/components/viz/service/hit_test/hit_test_aggregator.cc b/components/viz/service/hit_test/hit_test_aggregator.cc
+index becbe53926..15494f885e 100644
+--- a/components/viz/service/hit_test/hit_test_aggregator.cc
++++ b/components/viz/service/hit_test/hit_test_aggregator.cc
+@@ -5,6 +5,7 @@
+ #include "components/viz/service/hit_test/hit_test_aggregator.h"
+ 
+ #include "base/feature.h"
++#include "base/logging.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/types/expected.h"
+ #include "components/viz/common/hit_test/hit_test_region_list.h"
+@@ -133,9 +134,11 @@ void HitTestAggregator::AppendRoot(const SurfaceId& surface_id) {
+ 
+ base::expected<size_t, HitTestAggregator::AggregationError>
+ HitTestAggregator::AppendRegion(size_t region_index,
+-                                const HitTestRegion& region,
++                                const HitTestRegion& submitted_region,
+                                 const FrameSinkId& submitting_frame_sink_id) {
+   size_t parent_index = region_index++;
++  // EXO-EMBED: may be rewritten below (browser-owned child sinks).
++  HitTestRegion region = submitted_region;
+   if (region_index >= hit_test_data_capacity_ - 1) {
+     if (hit_test_data_capacity_ > max_region_size_) {
+       return region_index;
+@@ -150,6 +153,31 @@ HitTestAggregator::AppendRegion(size_t region_index,
+   gfx::Transform transform = region.transform;
+ 
+   if (region.flags & HitTestRegionFlags::kHitTestChildSurface) {
++    // EXO-EMBED: HitTestManager rewrites client id 0 to the submitter's
++    // client id, which breaks regions for browser-owned frame sinks (Exo
++    // windows) that a renderer embeds. Map such a region back to the
++    // browser-owned sink only if
++    //  - the submitter is a client (client id != 0), not the browser, and
++    //    the region as submitted isn't already a valid child;
++    //  - the browser registered the browser-owned sink as a child of the
++    //    submitting frame sink. Only the browser registers hierarchy (and a
++    //    renderer can only register its own client id's sinks through
++    //    EmbeddedFrameSinkProvider), and EXO-BROKER: ExoEmbedder registers
++    //    an Exo window under a page's frame sink only after checking the
++    //    page's grant for that window. So the rewrite can never reach a sink
++    //    the browser didn't hand to this submitter.
++    // This runs before the cycle check: the rewritten id can equal the
++    // submitter's own (page (6, 3) embedding Exo window (0, 3) arrives as
++    // (6, 3)), which the cycle check would otherwise drop.
++    if (submitting_frame_sink_id.client_id() != 0 &&
++        region.frame_sink_id.client_id() ==
++            submitting_frame_sink_id.client_id() &&
++        !delegate_->IsChildOf(submitting_frame_sink_id, region.frame_sink_id)) {
++      FrameSinkId browser_owned(0, region.frame_sink_id.sink_id());
++      if (delegate_->IsChildOf(submitting_frame_sink_id, browser_owned)) {
++        region.frame_sink_id = browser_owned;
++      }
++    }
+     if (referenced_child_regions_.count(region.frame_sink_id)) {
+       // This detects potential cycles within the HitTestRegions. We want to
+       // keep the single entry as a valid region.
+@@ -158,6 +186,14 @@ HitTestAggregator::AppendRegion(size_t region_index,
+ 
+     // Verify that the child is actually a child of the submitting frame sink.
+     if (!delegate_->IsChildOf(submitting_frame_sink_id, region.frame_sink_id)) {
++      // EXO-EMBED: diagnostics for regions dropped here (rate-limited).
++      static int logged = 0;
++      if (logged < 40) {
++        ++logged;
++        VLOG(1) << "EXO-HIT invalid child " << region.frame_sink_id.ToString()
++                << " (submitted " << submitted_region.frame_sink_id.ToString()
++                << ") of " << submitting_frame_sink_id.ToString();
++      }
+       return base::unexpected(AggregationError::INVALID_CHILD_REGION);
+     }
+ 
+diff --git a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+index 54ec67760c..db0e3625ad 100644
+--- a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
++++ b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
+@@ -5,6 +5,9 @@
+ #include "components/input/render_widget_host_input_event_router.h"
+ 
+ #include <memory>
++#include <set>
++#include <utility>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/run_loop.h"
+@@ -470,6 +473,24 @@ class RenderWidgetHostInputEventRouterTest : public testing::Test {
+ 
+   void FlushInkRenderer() { delegate_->FlushInkRenderer(); }
+ 
++  // EXO-BROKER: the router's checks before input reaches a native window.
++  bool IsForeignFrameSinkEmbeddedHere(const viz::FrameSinkId& sink) {
++    return rwhier()->IsForeignFrameSinkEmbeddedHere(sink);
++  }
++  void RouteToForeign(const viz::FrameSinkId& sink,
++                      const blink::WebMouseEvent& event) {
++    rwhier()->RouteToForeign(view_root_.get(), sink, gfx::PointF(5, 5), event);
++  }
++  viz::FrameSinkId& foreign_capture_sink() {
++    return rwhier()->foreign_capture_sink_;
++  }
++  bool QueriesRendererAt(const gfx::PointF& point, viz::EventSource source) {
++    gfx::PointF transformed;
++    return rwhier()
++        ->FindViewAtLocation(view_root_.get(), point, source, &transformed)
++        .should_query_view;
++  }
++
+   BrowserTaskEnvironment task_environment_;
+ 
+   std::unique_ptr<MockRenderWidgetHostDelegate> delegate_;
+@@ -3061,4 +3082,141 @@ TEST_F(RenderWidgetHostInputEventRouterTest, AutoscrollValidation) {
+ 
+ #endif  // defined(USE_AURA)
+ 
++// EXO-BROKER: a native window's frame sink is linked to the page that embeds
++// it (with a grant) through ExoEmbedder, which is the router's
++// ForeignFrameSinkDelegate. The router only sends input to foreign sinks
++// linked to one of its own views.
++class FakeForeignFrameSinkDelegate : public input::ForeignFrameSinkDelegate {
++ public:
++  FakeForeignFrameSinkDelegate() {
++    input::RenderWidgetHostInputEventRouter::SetForeignFrameSinkDelegate(this);
++  }
++  ~FakeForeignFrameSinkDelegate() override {
++    input::RenderWidgetHostInputEventRouter::SetForeignFrameSinkDelegate(
++        nullptr);
++  }
++
++  void Link(const viz::FrameSinkId& sink, const viz::FrameSinkId& parent) {
++    links_.insert({sink, parent});
++  }
++  void Unlink(const viz::FrameSinkId& sink, const viz::FrameSinkId& parent) {
++    links_.erase({sink, parent});
++  }
++
++  // input::ForeignFrameSinkDelegate:
++  bool IsEmbeddedIn(const viz::FrameSinkId& sink,
++                    const viz::FrameSinkId& parent) override {
++    return links_.contains({sink, parent});
++  }
++  void RouteMouseEvent(const viz::FrameSinkId& sink,
++                       const gfx::PointF& location,
++                       const blink::WebMouseEvent& event) override {
++    routed.push_back(sink);
++  }
++  void PointerLeft(const viz::FrameSinkId& sink) override {}
++  void PageMouseDown() override {}
++  bool NearResizeEdge(const viz::FrameSinkId& parent,
++                      const gfx::PointF& point) override {
++    return parent == edge_parent && point == edge_point;
++  }
++
++  std::vector<viz::FrameSinkId> routed;
++  // Where NearResizeEdge() says yes.
++  viz::FrameSinkId edge_parent;
++  gfx::PointF edge_point;
++
++ private:
++  std::set<std::pair<viz::FrameSinkId, viz::FrameSinkId>> links_;
++};
++
++// Client id 0: what Exo's windows have (the browser's own sinks).
++const viz::FrameSinkId kNativeWindowSink(0, 41);
++const viz::FrameSinkId kOtherNativeWindowSink(0, 42);
++
++TEST_F(RenderWidgetHostInputEventRouterTest, NoForeignSinksWithoutDelegate) {
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToThisPage) {
++  FakeForeignFrameSinkDelegate delegate;
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  EXPECT_TRUE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  // Only that window.
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kOtherNativeWindowSink));
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(viz::FrameSinkId()));
++  delegate.Unlink(kNativeWindowSink, view_root_->GetFrameSinkId());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToAChildView) {
++  FakeForeignFrameSinkDelegate delegate;
++  ChildViewState child = MakeChildView(view_root_.get());
++  delegate.Link(kNativeWindowSink, child.view->GetFrameSinkId());
++  EXPECT_TRUE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++  rwhier()->OnRenderWidgetHostViewInputDestroyed(child.view.get());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignSinkLinkedToAnotherPage) {
++  FakeForeignFrameSinkDelegate delegate;
++  // A view this router doesn't have (another tab's).
++  delegate.Link(kNativeWindowSink, viz::FrameSinkId(77, 1));
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(kNativeWindowSink));
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, OwnViewsAreNeverForeign) {
++  FakeForeignFrameSinkDelegate delegate;
++  ChildViewState child = MakeChildView(view_root_.get());
++  delegate.Link(child.view->GetFrameSinkId(), view_root_->GetFrameSinkId());
++  EXPECT_FALSE(IsForeignFrameSinkEmbeddedHere(child.view->GetFrameSinkId()));
++  rwhier()->OnRenderWidgetHostViewInputDestroyed(child.view.get());
++}
++
++TEST_F(RenderWidgetHostInputEventRouterTest, RouteToForeignChecksTheLink) {
++  FakeForeignFrameSinkDelegate delegate;
++  blink::WebMouseEvent down =
++      blink::SyntheticWebMouseEventBuilder::Build(
++          blink::WebInputEvent::Type::kMouseDown, 5, 5, 0);
++  down.button = blink::WebPointerProperties::Button::kLeft;
++  RouteToForeign(kNativeWindowSink, down);
++  EXPECT_TRUE(delegate.routed.empty());
++
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  RouteToForeign(kNativeWindowSink, down);
++  ASSERT_EQ(1u, delegate.routed.size());
++  EXPECT_EQ(kNativeWindowSink, delegate.routed[0]);
++}
++
++// A drag that started on a window loses its capture when the link goes (the
++// grant was revoked mid-drag).
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignCaptureEndsWithTheLink) {
++  FakeForeignFrameSinkDelegate delegate;
++  delegate.Link(kNativeWindowSink, view_root_->GetFrameSinkId());
++  foreign_capture_sink() = kNativeWindowSink;
++  delegate.Unlink(kNativeWindowSink, view_root_->GetFrameSinkId());
++  blink::WebMouseEvent move = blink::SyntheticWebMouseEventBuilder::Build(
++      blink::WebInputEvent::Type::kMouseMove, 6, 6,
++      blink::WebInputEvent::kLeftButtonDown);
++  RouteToForeign(kNativeWindowSink, move);
++  EXPECT_TRUE(delegate.routed.empty());
++  EXPECT_FALSE(foreign_capture_sink().is_valid());
++}
++
++// Just outside a floating window (its client-side resize edges), the page's
++// renderer is asked whether the press is the window's; elsewhere on the page
++// it isn't, and touch never is.
++TEST_F(RenderWidgetHostInputEventRouterTest, ForeignResizeEdgeQueriesRenderer) {
++  FakeForeignFrameSinkDelegate delegate;
++  view_root_->SetHittestResult(view_root_.get(), false);
++  const gfx::PointF edge(100, 50);
++  EXPECT_FALSE(QueriesRendererAt(edge, viz::EventSource::MOUSE));
++
++  delegate.edge_parent = view_root_->GetFrameSinkId();
++  delegate.edge_point = edge;
++  EXPECT_TRUE(QueriesRendererAt(edge, viz::EventSource::MOUSE));
++  EXPECT_FALSE(QueriesRendererAt(gfx::PointF(10, 10), viz::EventSource::MOUSE));
++  EXPECT_FALSE(QueriesRendererAt(edge, viz::EventSource::TOUCH));
++}
++
+ }  // namespace content
+diff --git a/content/browser/surface_embed/surface_embed_connector_impl.cc b/content/browser/surface_embed/surface_embed_connector_impl.cc
+index 25a35f343a..6cd8bb8e7d 100644
+--- a/content/browser/surface_embed/surface_embed_connector_impl.cc
++++ b/content/browser/surface_embed/surface_embed_connector_impl.cc
+@@ -366,6 +366,16 @@ void SurfaceEmbedConnectorImpl::ClearFocusOnInnerWebContents() {
+       ->SetAsFocusedWebContentsIfNecessary();
+ }
+ 
++void SurfaceEmbedConnectorImpl::FocusInnerWebContents() {
++  if (!parent_web_contents_) {
++    CHECK_IS_TEST();
++    return;
++  }
++  // The child's frame tree keeps its focused frame while it doesn't have
++  // focus, so this is where focus was.
++  child_web_contents()->SetAsFocusedWebContentsIfNecessary();
++}
++
+ WebContentsImpl* SurfaceEmbedConnectorImpl::parent_web_contents() const {
+   return static_cast<WebContentsImpl*>(parent_web_contents_.get());
+ }
+diff --git a/content/browser/surface_embed/surface_embed_connector_impl.h b/content/browser/surface_embed/surface_embed_connector_impl.h
+index d91a8f6369..36dfd1a513 100644
+--- a/content/browser/surface_embed/surface_embed_connector_impl.h
++++ b/content/browser/surface_embed/surface_embed_connector_impl.h
+@@ -165,7 +165,8 @@ class CONTENT_EXPORT SurfaceEmbedConnectorImpl
+   // WebContents.
+   FrameTree* GetFocusFrameTreeIfContainsFocus();
+   void SetFocusedFrameTree(FrameTree* frame_tree_to_focus);
+-  void ClearFocusOnInnerWebContents();
++  void ClearFocusOnInnerWebContents() override;
++  void FocusInnerWebContents() override;
+ 
+   // Returns true if any WebContents in the parent chain has a pointer lock
+   // widget.
+diff --git a/content/public/browser/surface_embed_connector.h b/content/public/browser/surface_embed_connector.h
+index 95b2b18de7..6cb3284900 100644
+--- a/content/public/browser/surface_embed_connector.h
++++ b/content/public/browser/surface_embed_connector.h
+@@ -79,6 +79,10 @@ class CONTENT_EXPORT SurfaceEmbedConnector {
+ 
+     // Advances focus from the embedding element in the parent.
+     virtual void AdvanceFocusFromEmbedElement(bool reverse) = 0;
++
++    // EXO-FULLSCREEN (Plutonium): makes the embedding element fullscreen in
++    // the parent, or leaves fullscreen.
++    virtual void SetEmbedElementFullscreen(bool fullscreen) {}
+   };
+ 
+   // Attach a child WebContents to a parent WebContents. This creates a
+@@ -97,6 +101,14 @@ class CONTENT_EXPORT SurfaceEmbedConnector {
+ 
+   virtual Delegate* GetDelegate() = 0;
+ 
++  // PLUTONIUM (EXO-CHROME): if the child WebContents has focus, moves it to
++  // the root WebContents (the embedder's page keeps its focused element).
++  virtual void ClearFocusOnInnerWebContents() = 0;
++
++  // PLUTONIUM (EXO-CHROME): gives the child WebContents focus again, with
++  // the frame and element it had (the embedding element gets focus too).
++  virtual void FocusInnerWebContents() = 0;
++
+   // Called when the visibility of the parent frame changes.
+   virtual void OnVisibilityChanged(
+       blink::mojom::FrameVisibility visibility) = 0;

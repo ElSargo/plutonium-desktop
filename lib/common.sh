@@ -70,13 +70,36 @@ shell_library() { SHELL_LIBRARY=$ROOT/helper/web; }
 # A session's Wayland socket, DevTools and helper ports, and profile, for a
 # mode (drm or x11) in this checkout's slot. PRIVATE_XDISP is the Xvfb an X11
 # session starts when it's given no display.
+# DevTools are on CDP_SOCKET (only this user's processes may connect), or on
+# CDP_PORT with DEVTOOLS=port (any local process may: other users, sandboxed
+# apps; for tools that need a ws:// URL). Not *.sock: those are helpers.
 session_vars() {
   if [[ $1 == drm ]]; then
     SOCKET=wayland-plutonium$SLOT_SUFFIX CDP_PORT=$(slot_port 9224) HELPER_PORT=$(slot_port 3782)
   else
     SOCKET=wayland-plutonium-x11$SLOT_SUFFIX CDP_PORT=$(slot_port 9223) HELPER_PORT=$(slot_port 3781)
   fi
+  devtools_vars running
   PROFILE=$DATA_DIR/profile-$1$SLOT_SUFFIX
+}
+# From SOCKET and CDP_PORT: Chromium's flag and the helper's (CDP_FLAG,
+# CDP_HELPER), where they are for logs (CDP_WHERE), and how tools reach them
+# (CDP_ADDR for tools/cdp.py's CDP; curl "${CDP_CURL[@]}" "$CDP_HTTP/json/list").
+# `devtools_vars running`, for a session that may be up: the port if it has
+# no socket but answers there (its browser is from before
+# --plutonium-remote-debugging-socket, lib/session.sh).
+devtools_vars() {
+  CDP_SOCKET=$RUN_DIR/plutonium/$SOCKET.devtools
+  local how=${DEVTOOLS:-socket}
+  [[ ${1:-} == running && $how == socket && ! -S $CDP_SOCKET ]] &&
+    curl -s -m 1 -o /dev/null "http://localhost:$CDP_PORT/json/version" 2> /dev/null && how=port
+  if [[ $how == port ]]; then
+    CDP_FLAG=("--remote-debugging-port=$CDP_PORT") CDP_HELPER=(--cdp-port "$CDP_PORT") CDP_WHERE="port $CDP_PORT"
+    CDP_ADDR=localhost:$CDP_PORT CDP_CURL=() CDP_HTTP=http://localhost:$CDP_PORT
+  else
+    CDP_FLAG=("--plutonium-remote-debugging-socket=$CDP_SOCKET") CDP_HELPER=(--cdp-socket "$CDP_SOCKET")
+    CDP_WHERE=$CDP_SOCKET CDP_ADDR=$CDP_SOCKET CDP_CURL=(--unix-socket "$CDP_SOCKET") CDP_HTTP=http://localhost
+  fi
 }
 PRIVATE_XDISP=:$(( 99 + SLOT ))
 

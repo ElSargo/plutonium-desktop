@@ -1,6 +1,6 @@
 # Chrome's own UI in the shell
 
-In shell mode the page is the desktop, so Chrome's browser-window UI shouldn't show through it. `chromium/patches/0022-*.patch` (EXO-CHROME in the code) covers DevTools, the context menu, Chrome's and Ash's keys, and the link status bubble.
+In shell mode the page is the desktop, so Chrome's browser-window UI shouldn't show through it. Chromium's tab features patch (EXO-CHROME in the code) covers DevTools, the context menu, Chrome's and Ash's keys, and the link status bubble.
 
 ## DevTools
 
@@ -33,7 +33,7 @@ Separators left at either end or doubled go too, and a menu with nothing left is
 
 T3 Code loads the shell library too, so its menus are the library's.
 
-**Focus.** While the shell shows a tab's menu, the shell page has the keyboard, so the menu's arrow keys work. Before Chrome runs the chosen item, the tab gets back its focus, with the frame and element it had (`chromium/patches/0026-*.patch`). Spelling suggestions, paste, cut, undo, delete and select all act on the focused frame. Before this they ran against nothing, and picking a suggestion did nothing, because the shell's `focus()` on the `<embed>` reaches the browser after `closeContextMenu()`. Copy link address and Open link in new tab didn't depend on focus, and worked.
+**Focus.** While the shell shows a tab's menu, the shell page has the keyboard, so the menu's arrow keys work. Before Chrome runs the chosen item, the tab gets back its focus, with the frame and element it had (Chromium's embedded surfaces patch). Spelling suggestions, paste, cut, undo, delete and select all act on the focused frame. Before this they ran against nothing, and picking a suggestion did nothing, because the shell's `focus()` on the `<embed>` reaches the browser after `closeContextMenu()`. Copy link address and Open link in new tab didn't depend on focus, and worked.
 
 ## Keys
 
@@ -76,7 +76,7 @@ Chrome's and Ash's own toasts, nudges and bubbles don't show over the shell (pat
 | Chrome's toasts in a shell's window ("Link copied", "Image copied", "Link to highlight copied", from the shell's context menu) | Not shown (`ToastController::CanShowToast`); other browser windows keep theirs |
 | The clipboard permission bubble ("wants to see text and images copied to the clipboard") on a shell page | No bubble: a shell document has clipboard read-write and sanitized write. It already reaches every window and tab through the broker. Tabs ask the shell as for any permission (`TAB_FEATURES.md`) |
 | Screenshot and recording keys, capture mode's bar | Ash's accelerators for them are off in shell mode (Keys, above). Capture requests go to the shell (`CAPTURE.md`); Ash's picker and indicator only show as its fallback, when no shell answers |
-| "Screenshot taken" and Ash's other notifications | The message center never shows in shell mode (kiosk blocks it). Web notifications go to the helper's notifications service (patch 0071) |
+| "Screenshot taken" and Ash's other notifications | The message center never shows in shell mode (kiosk blocks it). Web notifications go to the helper's notifications service (Chromium's DevTools patch) |
 | A folder upload's "Upload N files to this site?" | Asked by the library's picker; Chrome's dialog is skipped for a folder a shell or agent chose (`TAB_FEATURES.md`, "Folder uploads"). It still shows behind the Files app picker, the fallback |
 
 None of the dropped toasts or nudges says something the user needs in shell mode: they're about ChromeOS features that have no UI here (the shelf, clipboard history, capture mode, phone hub and the like) or confirm a copy the user just made.
@@ -102,7 +102,7 @@ On Xvfb (slot 6 of a worktree, niri at startup and the plain shell behind it), w
 | Alt+Left and Alt+Right in a tab | ✓ |
 | Ctrl+Shift+= and Ctrl+Space reach the tab's page; the UI scale stays | ✓ |
 
-On DRM (tty6, slot 8 of a worktree, T3 Code, DPR 1.78, a uinput mouse), 2026-10-20, with patch 0026:
+On DRM (tty6, slot 8 of a worktree, T3 Code, DPR 1.78, a uinput mouse), 2026-10-20, with the fix for context menu items:
 
 | | |
 |---|---|

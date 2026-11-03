@@ -77,7 +77,6 @@ up() {
   fi
   cat > "$WT/plutonium.local.env" <<EOF
 # The agent tool tests' session (tools/agent-tests/session.sh writes this).
-PREBUILT=
 CONTAINER=plutonium
 T3_HOME=$STATE/t3-home
 T3CODE_DIR=$t3dir
@@ -152,15 +151,15 @@ EOF
   sudo -n chvt "$vt"
 
   # Ready: T3 Code's server answers and the shell's page is open.
-  local cdp=$(( 9224 + 100 * $(cat "$WT/.plutonium-slot") )) t3=$(( 3773 + 100 * $(cat "$WT/.plutonium-slot") ))
+  local t3=$(( 3773 + 100 * $(cat "$WT/.plutonium-slot") ))
   for _ in $(seq 1 120); do
-    curl -s -m 2 "http://127.0.0.1:$cdp/json/list" 2>/dev/null | grep -q "127.0.0.1:$t3" && break
+    "$WT/bin/plutonium" cdp list 2>/dev/null | grep -q "127.0.0.1:$t3" && break
     systemctl --user -q is-active "$UNIT" || die "the session stopped (journalctl --user -u $UNIT; $WT/logs/)"
     sleep 1
   done
-  curl -s -m 2 "http://127.0.0.1:$cdp/json/list" | grep -q "127.0.0.1:$t3" || die "the shell didn't come up ($WT/logs/)"
+  "$WT/bin/plutonium" cdp list 2>/dev/null | grep -q "127.0.0.1:$t3" || die "the shell didn't come up ($WT/logs/)"
   sleep 5   # the page pairs and loads its threads
-  say "up on tty$vt: T3 Code on $t3, DevTools $cdp. Test with: tools/agent-tests/run.sh --checkout $WT <scenario>"
+  say "up on tty$vt: T3 Code on $t3, DevTools $("$WT/bin/plutonium" cdp where). Test with: tools/agent-tests/run.sh --checkout $WT <scenario>"
 }
 
 # Whether the user has a logind session on the VT (not one of ours).
