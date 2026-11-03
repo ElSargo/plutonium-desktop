@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 13:13:29 +1300
-Subject: [PATCH 51/51] Plutonium: a desktop tab's file picker is the desktop's
+Subject: [PATCH 51/53] Plutonium: a desktop tab's file picker is the desktop's
 
 The server listened for "filechooser" on every tab, and Playwright
 intercepts every picker while that listener is attached. Only the streamed

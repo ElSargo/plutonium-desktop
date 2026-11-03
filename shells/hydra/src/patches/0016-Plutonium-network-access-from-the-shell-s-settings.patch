@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Mon, 19 Oct 2026 13:39:28 +1300
-Subject: [PATCH 16/51] Plutonium: network access from the shell's settings
+Subject: [PATCH 16/53] Plutonium: network access from the shell's settings
 
 T3's desktop app switches "Network access" by restarting its backend on
 another host. The Plutonium shell is a browser page, so the switch was

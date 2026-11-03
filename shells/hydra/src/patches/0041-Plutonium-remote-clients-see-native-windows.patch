@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 28 Oct 2026 23:21:09 +1300
-Subject: [PATCH 41/51] Plutonium: remote clients see native windows
+Subject: [PATCH 41/53] Plutonium: remote clients see native windows
 
 Away from the desktop (another machine's browser) the Apps panel has no
 <native-window>. The server streams windows instead, through the helper's

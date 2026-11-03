@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Tue, 3 Nov 2026 13:31:57 +1300
+Subject: [PATCH 53/53] Plutonium: a desktop tab's viewers get its size
+
+A page Playwright attaches to over CDP has no viewport of its own, so
+`viewportSize()` is null for every desktop tab and viewers never got a
+`viewport` message. The mobile viewer maps touches through that size and
+dropped every one: the stream played, but taking control did nothing.
+The page's inner size is measured when a viewer attaches, and again when
+its screencast frames change shape (the desktop's window resized).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/preview/ServerBrowser.test.ts | 41 +++++++++++++++++++
+ apps/server/src/preview/ServerBrowser.ts      | 25 +++++++++++
+ 2 files changed, 66 insertions(+)
+
+diff --git a/apps/server/src/preview/ServerBrowser.test.ts b/apps/server/src/preview/ServerBrowser.test.ts
+index 1f8747092e..854a16e083 100644
+--- a/apps/server/src/preview/ServerBrowser.test.ts
++++ b/apps/server/src/preview/ServerBrowser.test.ts
+@@ -51,6 +51,14 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
+     }
+     async connectDesktopPage(endpoint: string) {
+       const context = makeContext();
++      // Playwright attaches to the desktop's page without a viewport of its own.
++      context.page.viewportSize = () => null as unknown as { width: number; height: number };
++      const evaluate = context.page.evaluate.getMockImplementation()!;
++      context.page.evaluate.mockImplementation(async (expression?: unknown) =>
++        typeof expression === "string" && expression.includes("innerWidth")
++          ? (desktopLayout as never)
++          : evaluate(),
++      );
+       desktopConnections.push({ endpoint, context });
+       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
+     }
+@@ -190,6 +198,8 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
+ let contextFailure: Error | null = null;
+ /** Server tabs the fake desktop renders, and the endpoints the server connected to. */
+ let desktopRendersNext = false;
++/** The CSS size the desktop's window lays its page out in. */
++let desktopLayout = { width: 1024, height: 700 };
+ /** Pages the fake desktop takes back or returns; the channel's streams emit them. */
+ const desktopDetaches = new NodeEvents.EventEmitter();
+ const desktopTabs = new Set<string>();
+@@ -322,6 +332,7 @@ beforeEach(() => {
+   focusedFrame = null;
+   desktopTabs.clear();
+   desktopRendersNext = false;
++  desktopLayout = { width: 1024, height: 700 };
+   releasedDesktopTabs.length = 0;
+   desktopConnections.length = 0;
+   recordingRefusal = null;
+@@ -1443,6 +1454,36 @@ it.live("drives the desktop's own page for a tab the desktop renders", () =>
+   ).pipe(Effect.provide(layer)),
+ );
+ 
++it.live("Plutonium: a desktop tab's viewers get its size, and its new size when it resizes", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const browser = yield* ServerBrowser.ServerBrowser;
++      const manager = yield* Manager.PreviewManager;
++      yield* Effect.yieldNow;
++      desktopRendersNext = true;
++      const opened = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
++      const viewer = yield* browser.attachViewer(viewerInput(opened.tabId, true));
++      // Without a size a touch viewer cannot map a touch to the page, and drops it.
++      const nextViewport = Effect.gen(function* () {
++        let output = yield* Queue.take(viewer.output);
++        while (output._tag !== "viewport") output = yield* Queue.take(viewer.output);
++        return { width: output.width, height: output.height };
++      });
++      expect(yield* nextViewport).toEqual({ width: 1024, height: 700 });
++      const session = desktopConnections[0]!.context.sessions.at(-1)!;
++      const onFrame = session.on.mock.calls.find(
++        ([name]) => name === "Page.screencastFrame",
++      )![1] as (frame: unknown) => void;
++      const frame = (deviceWidth: number, deviceHeight: number) =>
++        onFrame({ data: "ZnJhbWU=", sessionId: 1, metadata: { deviceWidth, deviceHeight } });
++      frame(1024, 700);
++      desktopLayout = { width: 800, height: 600 };
++      frame(800, 600);
++      expect(yield* nextViewport).toEqual({ width: 800, height: 600 });
++    }),
++  ).pipe(Effect.provide(layer)),
++);
++
+ it.live("Plutonium: the recording switch refuses a desktop tab's recording", () =>
+   Effect.scoped(
+     Effect.gen(function* () {
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index 2b2b2ae82b..7df7db8f72 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -2643,9 +2643,33 @@ const make = Effect.gen(function* () {
+           if (settleTimer !== null) clearTimeout(settleTimer);
+         }),
+       );
++      // Plutonium: a desktop page has no Playwright viewport (it lays out in the
++      // desktop's window), so viewers got no size and dropped every touch. Its
++      // size is measured, and measured again when its frames change shape.
++      let desktopFrameShape: string | null = null;
++      let desktopViewport: { readonly width: number; readonly height: number } | null = null;
++      let desktopMeasuring = Promise.resolve();
++      const measureDesktopViewport = () => {
++        desktopMeasuring = desktopMeasuring.then(async () => {
++          const size = await settledDesktopViewport(tab, null).catch(() => null);
++          if (!size || !(size.width >= 1) || !(size.height >= 1)) return;
++          if (desktopViewport?.width === size.width && desktopViewport.height === size.height)
++            return;
++          desktopViewport = size;
++          viewer.push({ _tag: "viewport", width: size.width, height: size.height });
++        });
++        return desktopMeasuring;
++      };
+       let screencastStarted = false;
+       session.on("Page.screencastFrame", (frame) => {
+         screencastStarted = true;
++        if (tab.desktop) {
++          const shape = `${frame.metadata.deviceWidth}x${frame.metadata.deviceHeight}`;
++          if (shape !== desktopFrameShape) {
++            desktopFrameShape = shape;
++            void measureDesktopViewport();
++          }
++        }
+         if (framesInFlight > 0) mayHaveDropped = true;
+         framesInFlight += 1;
+         const arrivedAt = Date.now();
+@@ -2690,6 +2714,7 @@ const make = Effect.gen(function* () {
+         });
+       });
+       broadcastViewport(tab);
++      if (tab.desktop) yield* Effect.promise(measureDesktopViewport);
+       yield* Effect.promise(() => startScreencast(1));
+       // An idle page does not repaint for a new screencast, so the viewer
+       // starts from a still unless a live frame beat it.

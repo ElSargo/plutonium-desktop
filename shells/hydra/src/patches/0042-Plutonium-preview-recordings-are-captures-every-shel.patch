@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <oliversargisonb@gmail.com>
 Date: Wed, 28 Oct 2026 23:41:34 +1300
-Subject: [PATCH 42/51] Plutonium: preview recordings are captures every shell
+Subject: [PATCH 42/53] Plutonium: preview recordings are captures every shell
  sees
 
 preview_recording_start on a tab Plutonium's helper shows registers the
