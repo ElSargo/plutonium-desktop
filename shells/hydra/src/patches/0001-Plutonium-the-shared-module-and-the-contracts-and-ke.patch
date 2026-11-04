@@ -1,0 +1,630 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:47 +1300
+Subject: [PATCH 01/10] Plutonium: the shared module, and the contracts and
+ keybindings it adds
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Folded from:
+- list agent-launched native windows under their thread
+- per-thread Xwayland for X11 apps
+- use the Plutonium helper and its agent bridge
+- panel tab keys, new browser tab, app launcher
+- thread tags, groups and the Elsewhere list
+- what the user starts comes to the front; a toast for the rest
+- agents drive windows and tabs
+- recordings encode in a hidden page of Plutonium's browser; visible counts desktop-shown tabs
+- Preview tools: drag along a path; snapshot images in click coordinates; cursor follows a scaled tab
+- Preview tools: a stuck action no longer wedges its tab
+- incognito tabs on the desktop
+- the dock: Super+1…9 slots for the terminal, apps and sites
+- usage-limit warnings in orchestrator_capabilities
+- preview recordings are captures every shell sees
+- native windows are their threads' server tabs
+---
+ packages/contracts/src/desktopBrowser.ts      |  40 ++++++
+ packages/contracts/src/ipc.ts                 |   2 +
+ packages/contracts/src/keybindings.ts         |  61 +++++++++
+ packages/contracts/src/orchestratorMcp.ts     |  16 +++
+ packages/contracts/src/previewAutomation.ts   |  92 ++++++++++++-
+ .../provider-core/src/server/mcpSession.ts    |  12 +-
+ packages/shared/package.json                  |   8 ++
+ packages/shared/src/keybindings.ts            |  32 +++++
+ packages/shared/src/plutonium.ts              | 124 ++++++++++++++++++
+ packages/shared/src/plutoniumWindowTabs.ts    |  25 ++++
+ 10 files changed, 405 insertions(+), 7 deletions(-)
+ create mode 100644 packages/shared/src/plutonium.ts
+ create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
+
+diff --git a/packages/contracts/src/desktopBrowser.ts b/packages/contracts/src/desktopBrowser.ts
+index 17d256f0d8..2ac1b3de9a 100644
+--- a/packages/contracts/src/desktopBrowser.ts
++++ b/packages/contracts/src/desktopBrowser.ts
+@@ -12,6 +12,17 @@ export const DesktopBrowserEvent = Schema.Union([
+   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
+   Schema.Struct({ type: Schema.Literal("detached"), ...TabKey }),
+   Schema.Struct({ type: Schema.Literal("cdp"), ...TabKey, message: Schema.String }),
++  /**
++   * Plutonium: the tab's recording as a capture. "started" or "refused" (with
++   * why: the recording switch is off) answers `recording` start; "ended" says
++   * a shell, the switch or the tab ended it first.
++   */
++  Schema.Struct({
++    type: Schema.Literal("recording"),
++    ...TabKey,
++    phase: Schema.Literals(["started", "refused", "ended"]),
++    message: Schema.optional(Schema.String),
++  }),
+ ]);
+ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
+ 
+@@ -31,5 +42,34 @@ export const DesktopBrowserCommand = Schema.Union([
+     threadId: TrimmedNonEmptyString,
+     active: Schema.Boolean,
+   }),
++  /**
++   * Plutonium: no page shows this tab yet, so the helper opens one itself,
++   * tagged `tag` (the thread's Plutonium tag), rather than the server waiting
++   * for a shell page.
++   */
++  Schema.Struct({
++    type: Schema.Literal("open"),
++    ...TabKey,
++    tag: TrimmedNonEmptyString,
++    /** Open it in throwaway storage of its own (the incognito profile). */
++    incognito: Schema.optional(Schema.Boolean),
++  }),
++  /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
++  Schema.Struct({ type: Schema.Literal("close"), ...TabKey }),
++  /**
++   * Plutonium: the helper opens a hidden page, in no window, for the server's
++   * own work (a recording's encoder) and attaches it under this key. `close`
++   * closes it.
++   */
++  Schema.Struct({ type: Schema.Literal("scratch"), ...TabKey }),
++  /**
++   * Plutonium: the server records this tab ("start") or stopped ("stop"); the
++   * helper registers it as a capture, which every shell sees and can stop.
++   */
++  Schema.Struct({
++    type: Schema.Literal("recording"),
++    ...TabKey,
++    phase: Schema.Literals(["start", "stop"]),
++  }),
+ ]);
+ export type DesktopBrowserCommand = typeof DesktopBrowserCommand.Type;
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index 5aa9acf277..0ebd7d50cf 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -954,6 +954,8 @@ export interface DesktopPreviewTabDefaults {
+   readonly zoomFactor?: number | undefined;
+   readonly colorScheme?: DesktopPreviewColorScheme | undefined;
+   readonly serverTab?: { readonly threadId: string; readonly tabId: string } | undefined;
++  /** Plutonium: open the tab in throwaway storage of its own (the incognito profile). */
++  readonly incognito?: boolean | undefined;
+ }
+ 
+ export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
+diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
+index 714e0a1d48..cc1dabf864 100644
+--- a/packages/contracts/src/keybindings.ts
++++ b/packages/contracts/src/keybindings.ts
+@@ -34,6 +34,58 @@ export const MODEL_PICKER_JUMP_KEYBINDING_COMMANDS = [
+ export type ModelPickerJumpKeybindingCommand =
+   (typeof MODEL_PICKER_JUMP_KEYBINDING_COMMANDS)[number];
+ 
++/** Plutonium: focus the right panel's tab at an index (Alt+1…9). */
++export const RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS = [
++  "rightPanel.tab.1",
++  "rightPanel.tab.2",
++  "rightPanel.tab.3",
++  "rightPanel.tab.4",
++  "rightPanel.tab.5",
++  "rightPanel.tab.6",
++  "rightPanel.tab.7",
++  "rightPanel.tab.8",
++  "rightPanel.tab.9",
++] as const;
++export type RightPanelTabJumpKeybindingCommand =
++  (typeof RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS)[number];
++
++/** Plutonium: the dock's slots, in their own layout (Super+1…9). */
++export const DOCK_SLOT_KEYBINDING_COMMANDS = [
++  "dock.slot.1",
++  "dock.slot.2",
++  "dock.slot.3",
++  "dock.slot.4",
++  "dock.slot.5",
++  "dock.slot.6",
++  "dock.slot.7",
++  "dock.slot.8",
++  "dock.slot.9",
++] as const;
++/** Plutonium: a dock slot in its other layout this time (Super+Ctrl+1…9). */
++export const DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS = [
++  "dock.slotOther.1",
++  "dock.slotOther.2",
++  "dock.slotOther.3",
++  "dock.slotOther.4",
++  "dock.slotOther.5",
++  "dock.slotOther.6",
++  "dock.slotOther.7",
++  "dock.slotOther.8",
++  "dock.slotOther.9",
++] as const;
++/** Plutonium: put what has the keyboard in a dock slot (Super+Shift+1…9). */
++export const DOCK_ASSIGN_KEYBINDING_COMMANDS = [
++  "dock.assign.1",
++  "dock.assign.2",
++  "dock.assign.3",
++  "dock.assign.4",
++  "dock.assign.5",
++  "dock.assign.6",
++  "dock.assign.7",
++  "dock.assign.8",
++  "dock.assign.9",
++] as const;
++
+ const THREAD_KEYBINDING_COMMANDS = [
+   "thread.stop",
+   "thread.steerQueuedMessage",
+@@ -71,6 +123,13 @@ export const STATIC_KEYBINDING_COMMANDS = [
+   "rightPanel.toggleMaximized",
+   "rightPanel.close",
+   "view.reopenClosed",
++  "rightPanel.nextTab",
++  "rightPanel.previousTab",
++  ...RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
++  ...DOCK_SLOT_KEYBINDING_COMMANDS,
++  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  ...DOCK_ASSIGN_KEYBINDING_COMMANDS,
++  "dock.toggleLayout",
+   "pullRequest.copyNumber",
+   "diff.toggle",
+   "preview.toggle",
+@@ -79,6 +138,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
+   "preview.zoomIn",
+   "preview.zoomOut",
+   "preview.resetZoom",
++  "preview.newTab",
++  "appLauncher.toggle",
+   "commandPalette.toggle",
+   "filePicker.toggle",
+   "projectSearch.toggle",
+diff --git a/packages/contracts/src/orchestratorMcp.ts b/packages/contracts/src/orchestratorMcp.ts
+index 1d6d7f3d67..2d4b57d8a6 100644
+--- a/packages/contracts/src/orchestratorMcp.ts
++++ b/packages/contracts/src/orchestratorMcp.ts
+@@ -585,6 +585,20 @@ export const OrchestratorMcpModelOption = Schema.Struct({
+   default: Schema.optional(ProviderOptionSelectionValue),
+ });
+ export type OrchestratorMcpModelOption = typeof OrchestratorMcpModelOption.Type;
++/**
++ * An instance near or at one of its subscription usage limits (the window
++ * closest to it), for choosing where new work goes.
++ */
++export const OrchestratorMcpUsageWarning = Schema.Struct({
++  level: Schema.Literals(["near_limit", "at_limit"]),
++  /** The window's label, e.g. "Session" or "Weekly". */
++  window: Schema.String,
++  usedPercent: Schema.Number,
++  /** When the window resets, if the provider says. */
++  resetsAt: Schema.optional(Schema.String),
++  message: Schema.String,
++});
++export type OrchestratorMcpUsageWarning = typeof OrchestratorMcpUsageWarning.Type;
+ 
+ export const OrchestratorMcpProviderCapability = Schema.Struct({
+   providerInstanceId: ProviderInstanceId,
+@@ -604,6 +618,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
+   canRunChildTask: Schema.Boolean,
+   canRunCrossProviderChildTask: Schema.Boolean,
+   constraints: Schema.Array(Schema.String),
++  /** Omitted while the instance is clear of its usage limits. */
++  usageWarning: Schema.optional(OrchestratorMcpUsageWarning),
+ });
+ export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
+ 
+diff --git a/packages/contracts/src/previewAutomation.ts b/packages/contracts/src/previewAutomation.ts
+index bfeb5cf916..e0de7d0c52 100644
+--- a/packages/contracts/src/previewAutomation.ts
++++ b/packages/contracts/src/previewAutomation.ts
+@@ -71,6 +71,12 @@ export const PreviewAutomationProfile = Schema.Struct({
+ });
+ export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
+ 
++const PreviewAutomationActivity = Schema.Struct({
++  operation: Schema.String,
++  since: Schema.String,
++  abandonedAt: Schema.optional(Schema.String),
++});
++
+ export const PreviewAutomationStatus = Schema.Struct({
+   available: Schema.Boolean,
+   visible: Schema.Boolean,
+@@ -94,6 +100,16 @@ export const PreviewAutomationStatus = Schema.Struct({
+       }),
+     ),
+   ),
++  /**
++   * Server hosts, only while something is: the agent action running on this
++   * tab, and actions that passed their timeout without finishing (`stuck`).
++   */
++  busy: Schema.optional(
++    Schema.Struct({
++      running: Schema.optional(PreviewAutomationActivity),
++      stuck: Schema.optional(Schema.Array(PreviewAutomationActivity)),
++    }),
++  ),
+   viewportSetting: Schema.optional(PreviewViewportSetting),
+   viewport: Schema.optional(PreviewRenderedViewportSize),
+   fileChooser: Schema.optional(
+@@ -343,12 +359,70 @@ export const PreviewAutomationSelectResult = Schema.Struct({
+ });
+ export type PreviewAutomationSelectResult = typeof PreviewAutomationSelectResult.Type;
+ 
++export const PREVIEW_DRAG_MAX_POINTS = 500;
++
++const DragPoint = Schema.Struct({
++  x: Schema.Finite.annotate({
++    description: "X in CSS pixels from the left edge of the tab's viewport.",
++  }),
++  y: Schema.Finite.annotate({
++    description: "Y in CSS pixels from the top edge of the tab's viewport.",
++  }),
++});
++
+ export const PreviewAutomationDragInput = Schema.Struct({
+   ...PreviewAutomationTabTargetFields,
+-  source: Locator,
+-  target: Locator,
++  source: Schema.optional(Locator).annotate({
++    description:
++      "Locator of the element to drag, for example aria-ref=<ref> from the latest snapshot. Use with target.",
++  }),
++  target: Schema.optional(Locator).annotate({
++    description:
++      "Locator of the element to drop onto, for example aria-ref=<ref>. Use with source.",
++  }),
++  path: Schema.optional(
++    Schema.Array(DragPoint)
++      .check(Schema.isMinLength(2), Schema.isMaxLength(PREVIEW_DRAG_MAX_POINTS))
++      .annotate({
++        description:
++          "Points to drag through, in place of source and target: the button goes down at the first point, the pointer moves through each point in turn, and the button comes up at the last. Two points draw a straight stroke or drag a box; more points draw a curve or freehand line. Coordinates are CSS pixels from the viewport's top-left, the same as preview_click x/y and a snapshot image's pixels.",
++      }),
++  ),
++  button: Schema.optional(
++    Schema.Literals(["left", "right", "middle"]).annotate({
++      description: "Mouse button held during a path drag. Defaults to left.",
++    }),
++  ),
++  modifiers: Schema.optional(
++    Schema.Array(Schema.Literals(["Alt", "Control", "Meta", "Shift"])).annotate({
++      description:
++        "Modifier keys held for the whole path drag, for example Shift to constrain a shape.",
++    }),
++  ),
+   timeoutMs: OptionalTimeoutMs,
+-});
++})
++  .check(
++    Schema.makeFilter(
++      (input: {
++        readonly source?: string | undefined;
++        readonly target?: string | undefined;
++        readonly path?: ReadonlyArray<unknown> | undefined;
++      }) => {
++        const elements = input.source !== undefined || input.target !== undefined;
++        if (elements && input.path !== undefined)
++          return "Provide either path or source and target.";
++        if (input.path !== undefined) return true;
++        return (
++          (input.source !== undefined && input.target !== undefined) ||
++          "Provide path, or both source and target."
++        );
++      },
++    ),
++  )
++  .annotate({
++    description:
++      "Drags one element onto another, or drags the mouse along a path of viewport points.",
++  });
+ export type PreviewAutomationDragInput = typeof PreviewAutomationDragInput.Type;
+ 
+ export const PreviewAutomationUploadInput = Schema.Struct({
+@@ -448,6 +522,8 @@ export const PreviewAutomationActInput = Schema.Struct({
+   values: Schema.optional(Schema.Array(Schema.String)),
+   source: Schema.optional(Locator),
+   target: Schema.optional(Locator),
++  // Plutonium: a path drag's points.
++  path: PreviewAutomationDragInput.fields.path,
+   paths: Schema.optional(Schema.Array(Schema.String)),
+   key: Schema.optional(Schema.String),
+   modifiers: PreviewAutomationPressInput.fields.modifiers,
+@@ -549,8 +625,14 @@ export const PreviewAutomationSnapshot = Schema.Struct({
+   screenshot: Schema.Struct({
+     mimeType: Schema.Literal("image/png"),
+     data: Schema.String,
+-    width: Schema.Int,
+-    height: Schema.Int,
++    width: Schema.Int.annotate({ description: "The image's width in pixels." }),
++    height: Schema.Int.annotate({ description: "The image's height in pixels." }),
++    viewport: Schema.optional(
++      Schema.Struct({ width: Schema.Int, height: Schema.Int }).annotate({
++        description:
++          "The tab's viewport in CSS pixels, the space click, hover and drag x/y are in. The image shows it one image pixel per CSS pixel unless it is wider than 1280, when the image is scaled down by width / viewport.width.",
++      }),
++    ),
+   }),
+ });
+ export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
+diff --git a/packages/provider-core/src/server/mcpSession.ts b/packages/provider-core/src/server/mcpSession.ts
+index f2152dde0c..649b477edb 100644
+--- a/packages/provider-core/src/server/mcpSession.ts
++++ b/packages/provider-core/src/server/mcpSession.ts
+@@ -1,5 +1,7 @@
+ import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+ 
++import { plutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
++
+ export interface McpProviderSessionConfig {
+   readonly environmentId: EnvironmentId;
+   readonly threadId: ThreadId;
+@@ -15,15 +17,21 @@ export interface McpProviderSessionConfig {
+ 
+ export function withAgentDeviceEnvironment(
+   base: NodeJS.ProcessEnv,
+-  config: Pick<McpProviderSessionConfig, "agentDeviceEnvironment"> | undefined,
++  config:
++    | (Pick<McpProviderSessionConfig, "agentDeviceEnvironment"> &
++        Partial<Pick<McpProviderSessionConfig, "threadId">>)
++    | undefined,
+ ): NodeJS.ProcessEnv {
++  // Plutonium: tag the agent's processes with its thread (no-op unless enabled).
++  const plutonium = plutoniumAgentEnvironment(config?.threadId);
+   const extra = config?.agentDeviceEnvironment;
+-  if (!extra) return base;
++  if (!extra) return Object.keys(plutonium).length > 0 ? { ...base, ...plutonium } : base;
+   const separator = extra.PATH_SEPARATOR ?? ":";
+   const basePath = base.PATH ?? base.Path;
+   const { PATH: shimDir, PATH_SEPARATOR: _separator, ...rest } = extra;
+   return {
+     ...base,
++    ...plutonium,
+     ...rest,
+     ...(shimDir ? { PATH: basePath ? `${shimDir}${separator}${basePath}` : shimDir } : {}),
+   };
+diff --git a/packages/shared/package.json b/packages/shared/package.json
+index 19542c4459..82baedba2a 100644
+--- a/packages/shared/package.json
++++ b/packages/shared/package.json
+@@ -522,6 +522,14 @@
+     "./cloneUrl": {
+       "types": "./src/cloneUrl.ts",
+       "import": "./src/cloneUrl.ts"
++    },
++    "./plutonium": {
++      "types": "./src/plutonium.ts",
++      "import": "./src/plutonium.ts"
++    },
++    "./plutoniumWindowTabs": {
++      "types": "./src/plutoniumWindowTabs.ts",
++      "import": "./src/plutoniumWindowTabs.ts"
+     }
+   },
+   "scripts": {
+diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
+index 32292c0f9e..fc0ad6f75d 100644
+--- a/packages/shared/src/keybindings.ts
++++ b/packages/shared/src/keybindings.ts
+@@ -5,6 +5,10 @@ import {
+   MAX_KEYBINDINGS_COUNT,
+   MAX_WHEN_EXPRESSION_DEPTH,
+   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
++  RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
++  DOCK_SLOT_KEYBINDING_COMMANDS,
++  DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  DOCK_ASSIGN_KEYBINDING_COMMANDS,
+   type ResolvedKeybindingRule,
+   type ResolvedKeybindingsConfig,
+   THREAD_JUMP_KEYBINDING_COMMANDS,
+@@ -157,6 +161,34 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "mod+alt+b", command: "rightPanel.toggle" },
+   { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
+   { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
++  // Right panel tabs, and the app launcher (Plutonium). These also work while
++  // an app or browser tab in the panel has the keyboard, in the Plutonium shell.
++  ...RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `alt+${index + 1}`,
++    command,
++  })),
++  { key: "ctrl+tab", command: "rightPanel.nextTab" },
++  { key: "ctrl+shift+tab", command: "rightPanel.previousTab" },
++  { key: "mod+t", command: "preview.newTab" },
++  { key: "meta+space", command: "appLauncher.toggle" },
++  // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
++  // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
++  ...DOCK_SLOT_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+ctrl+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  ...DOCK_ASSIGN_KEYBINDING_COMMANDS.map((command, index) => ({
++    key: `meta+shift+${index + 1}`,
++    command,
++    when: "plutoniumShell",
++  })),
++  { key: "meta+arrowup", command: "dock.toggleLayout", when: "plutoniumShell" },
+   { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
+   { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
+   { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
+diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
+new file mode 100644
+index 0000000000..1b9f679371
+--- /dev/null
++++ b/packages/shared/src/plutonium.ts
+@@ -0,0 +1,124 @@
++// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off - agent and terminal environments are built synchronously at spawn, outside Effect
++// Plutonium: run T3 Code as the web shell of a Chromium/Exo desktop, where
++// native Wayland apps that agents start show up as page elements.
++//
++// The frontend-neutral parts live in Plutonium's helper (plutoniumd, in the
++// plutonium repo under helper/): the thread environment (Exo display, thread
++// tag, a per-thread X display), pid → thread resolution, and the agent bridge
++// (an MCP server). This server only asks the helper what to add to a thread's
++// agents and terminals. The web app talks to the helper directly.
++//
++// Only active when the server is started with PLUTONIUM_HELPER (the helper's
++// Unix socket) or PLUTONIUM_WAYLAND_DISPLAY (Exo's socket name, from which the
++// helper's default socket path follows).
++import * as NodeChildProcess from "node:child_process";
++import * as NodePath from "node:path";
++
++export interface PlutoniumThreadSetup {
++  /** Variables for the thread's agents' processes. */
++  readonly env: Readonly<Record<string, string>>;
++  /** Variables for its terminals: what the user starts there is shown (older helpers: missing). */
++  readonly terminalEnv?: Readonly<Record<string, string>>;
++  /** The agent bridge as a stdio MCP server. */
++  readonly mcpServer: { readonly command: string; readonly args: readonly string[] };
++}
++
++/** The helper's Unix socket, when this server runs in a Plutonium session. */
++export function plutoniumHelperSocket(): string | undefined {
++  if (process.env.PLUTONIUM_HELPER) return process.env.PLUTONIUM_HELPER;
++  const display = process.env.PLUTONIUM_WAYLAND_DISPLAY;
++  if (!display) return undefined;
++  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`;
++  return NodePath.join(runtime, "plutonium", `${display}.sock`);
++}
++
++// Environments are built synchronously at spawn, so the request runs in a
++// short-lived child (about 50 ms).
++const REQUEST_SCRIPT = `
++const [socketPath, path] = process.argv.slice(1);
++require("node:http").get({ socketPath, path }, (res) => {
++  let body = "";
++  res.setEncoding("utf8");
++  res.on("data", (chunk) => (body += chunk));
++  res.on("end", () => {
++    process.stdout.write(body);
++    process.exit(res.statusCode === 200 ? 0 : 1);
++  });
++}).on("error", (error) => {
++  process.stderr.write(error.message);
++  process.exit(1);
++});
++`;
++
++let warned = false;
++// A session start asks for the environment and the MCP server separately.
++const CACHE_MS = 10_000;
++const cache = new Map<string, { readonly at: number; readonly setup: PlutoniumThreadSetup }>();
++
++/**
++ * A T3 thread's Plutonium tag: what its processes carry as
++ * PLUTONIUM_THREAD_ID, and what the windows and tabs it opens are tagged
++ * with. Namespaced, so other shells' threads can't collide with it.
++ */
++export function plutoniumThreadTag(threadId: string): string {
++  return `t3:thread/${threadId}`;
++}
++
++/** What the helper adds to `threadId`'s processes; undefined if Plutonium is off or unreachable. */
++export function plutoniumThreadSetup(
++  threadId: string | undefined,
++): PlutoniumThreadSetup | undefined {
++  const socket = plutoniumHelperSocket();
++  if (!socket || !threadId) return undefined;
++  const tag = plutoniumThreadTag(threadId);
++  const cached = cache.get(threadId);
++  if (cached && Date.now() - cached.at < CACHE_MS) return cached.setup;
++  const result = NodeChildProcess.spawnSync(
++    process.execPath,
++    ["-e", REQUEST_SCRIPT, socket, `/v1/thread-setup?thread=${encodeURIComponent(tag)}`],
++    { encoding: "utf8", timeout: 5_000 },
++  );
++  if (result.status !== 0) {
++    if (!warned) {
++      warned = true;
++      console.warn(
++        `Plutonium: the helper at ${socket} did not answer (${(result.stderr || result.stdout || "").trim()}); ` +
++          "thread processes won't be tagged until it does.",
++      );
++    }
++    return undefined;
++  }
++  warned = false;
++  const setup = JSON.parse(result.stdout) as PlutoniumThreadSetup;
++  cache.set(threadId, { at: Date.now(), setup });
++  return setup;
++}
++
++/** Variables that send a thread's GUI apps to Exo and tag them with the thread. */
++export function plutoniumAgentEnvironment(
++  threadId: string | undefined,
++): Readonly<Record<string, string>> {
++  return plutoniumThreadSetup(threadId)?.env ?? {};
++}
++
++/**
++ * As plutoniumAgentEnvironment(), for a terminal. With `userStarted`, the user
++ * types in it, so the windows and links its commands open are shown.
++ */
++export function plutoniumTerminalEnvironment(
++  threadId: string | undefined,
++  { userStarted }: { readonly userStarted: boolean },
++): Readonly<Record<string, string>> {
++  const setup = plutoniumThreadSetup(threadId);
++  return (userStarted ? setup?.terminalEnv : undefined) ?? setup?.env ?? {};
++}
++
++/** `env` with the Plutonium variables for `threadId` (`env` itself when off). */
++export function withPlutoniumAgentEnvironment(
++  env: NodeJS.ProcessEnv | undefined,
++  threadId: string | undefined,
++): NodeJS.ProcessEnv | undefined {
++  const plutonium = plutoniumAgentEnvironment(threadId);
++  if (Object.keys(plutonium).length === 0) return env;
++  return { ...(env ?? process.env), ...plutonium };
++}
+diff --git a/packages/shared/src/plutoniumWindowTabs.ts b/packages/shared/src/plutoniumWindowTabs.ts
+new file mode 100644
+index 0000000000..ab076bbbf5
+--- /dev/null
++++ b/packages/shared/src/plutoniumWindowTabs.ts
+@@ -0,0 +1,25 @@
++// Plutonium: native windows as preview tabs. The server lists each window of
++// a thread as one of its server tabs, so every T3 client (the mobile app, a
++// browser elsewhere) lists and streams it as it does a page. Its tab id names
++// the window, and the process that drew it, so a client holding the id of a
++// window that has gone can't land on another that reused its number.
++
++const WINDOW_TAB_PATTERN = /^plutonium-window-(\d+)-(\d+)$/;
++
++/** The preview tab id of native window `windowId`, of process `pid`. */
++export function plutoniumWindowTabId(windowId: number, pid: number): string {
++  return `plutonium-window-${windowId}-${pid}`;
++}
++
++/** The native window a preview tab id names, or null for any other tab. */
++export function plutoniumWindowOfTab(
++  tabId: string,
++): { readonly windowId: number; readonly pid: number } | null {
++  const match = WINDOW_TAB_PATTERN.exec(tabId);
++  return match ? { windowId: Number(match[1]), pid: Number(match[2]) } : null;
++}
++
++/** Whether a preview tab is a native window (the Plutonium shell shows those itself). */
++export function isPlutoniumWindowTab(tabId: string): boolean {
++  return WINDOW_TAB_PATTERN.test(tabId);
++}

@@ -1,0 +1,2195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:48 +1300
+Subject: [PATCH 04/10] Plutonium: the dock
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Folded from:
+- the dock: Super+1…9 slots for the terminal, apps and sites
+- the dock in the sidebar, above the settings row
+- the dock's slot editor, and sites' own icons
+- dock sites kept per project or everywhere
+- the dock's key hides what it shows in a thread just switched to
+- the app is Hydra
+- a dock slot holds one window or tab
+- dock sites' icons from the helper
+- the dock's rows are always full: three rows of three, or one row of nine
+---
+ .../src/components/sidebar/SidebarChrome.tsx  |    8 +-
+ apps/web/src/plutonium/PlutoniumDock.test.ts  |   20 +
+ apps/web/src/plutonium/PlutoniumDock.tsx      |  734 +++++++++++
+ apps/web/src/plutonium/dock.test.ts           |  227 ++++
+ apps/web/src/plutonium/dock.ts                | 1114 +++++++++++++++++
+ 5 files changed, 2100 insertions(+), 3 deletions(-)
+ create mode 100644 apps/web/src/plutonium/PlutoniumDock.test.ts
+ create mode 100644 apps/web/src/plutonium/PlutoniumDock.tsx
+ create mode 100644 apps/web/src/plutonium/dock.test.ts
+ create mode 100644 apps/web/src/plutonium/dock.ts
+
+diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
+index dd41ddd2a0..3efe88db64 100644
+--- a/apps/web/src/components/sidebar/SidebarChrome.tsx
++++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
+@@ -14,7 +14,7 @@ import {
+ import { primaryServerKeybindingsAtom } from "../../state/server";
+ import { cn } from "../../lib/utils";
+ import { usePullRequestsSupported } from "../../state/environments";
+-import { T3Wordmark } from "../T3Wordmark";
++import { HydraMark } from "../HydraMark";
+ import {
+   resolveEnvironmentIdentificationPillLabel,
+   resolveSidebarStageBackdropVariant,
+@@ -39,6 +39,7 @@ import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
+ import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
+ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+ import { observeResize } from "~/lib/observeResize";
++import { PlutoniumDock } from "~/plutonium/PlutoniumDock";
+ 
+ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
+   isElectron,
+@@ -180,14 +181,14 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+   return (
+     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
+-      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
++      <HydraMark aria-hidden className="h-[1cap] w-auto shrink-0" />
+       <span
+         className={cn(
+           "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+           onBackdrop ? "text-white/70" : "text-muted-foreground",
+         )}
+       >
+-        Code
++        Hydra
+       </span>
+     </span>
+   );
+@@ -296,6 +297,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
+     <SidebarFooter>
+       <SidebarProviderUpdatePill />
+       <SidebarUpdateArchitectureWarning />
++      <PlutoniumDock />
+       <SidebarUtilityMenu />
+     </SidebarFooter>
+   );
+diff --git a/apps/web/src/plutonium/PlutoniumDock.test.ts b/apps/web/src/plutonium/PlutoniumDock.test.ts
+new file mode 100644
+index 0000000000..c41024bd83
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumDock.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { normalizeSiteUrl } from "./PlutoniumDock";
++
++describe("the dock editor's address", () => {
++  it("adds https to a bare address", () => {
++    expect(normalizeSiteUrl("github.com/org/repo")).toBe("https://github.com/org/repo");
++    expect(normalizeSiteUrl(" localhost:5173 ")).toBe("https://localhost:5173/");
++  });
++
++  it("keeps a web address as it is", () => {
++    expect(normalizeSiteUrl("http://127.0.0.1:3000/x")).toBe("http://127.0.0.1:3000/x");
++  });
++
++  it("refuses what isn't a web address", () => {
++    expect(normalizeSiteUrl("")).toBeNull();
++    expect(normalizeSiteUrl("file:///etc/passwd")).toBeNull();
++    expect(normalizeSiteUrl("not a url")).toBeNull();
++  });
++});
+diff --git a/apps/web/src/plutonium/PlutoniumDock.tsx b/apps/web/src/plutonium/PlutoniumDock.tsx
+new file mode 100644
+index 0000000000..d7e471ca5f
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumDock.tsx
+@@ -0,0 +1,734 @@
++// Plutonium: the dock in the sidebar, above the settings row. One button per
++// slot (Super+1…9), wrapping to the sidebar's width. A click runs the slot as
++// its key does; a right click (or a click on an empty slot) opens its editor:
++// what it is, where it's kept, how it's laid out (dock.ts).
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import { AppWindowIcon, GlobeIcon, SquareTerminalIcon } from "lucide-react";
++import { memo, useEffect, useId, useMemo, useState } from "react";
++
++import { useFaviconForThreadUrl } from "~/browserFaviconStore";
++import { FaviconImage } from "~/components/preview/PreviewFaviconIcon";
++import { Button } from "~/components/ui/button";
++import { Input } from "~/components/ui/input";
++import { Label } from "~/components/ui/label";
++import { Popover, PopoverPopup, PopoverTitle } from "~/components/ui/popover";
++import { Toggle, ToggleGroup } from "~/components/ui/toggle-group";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
++import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
++import { cn } from "~/lib/utils";
++import { useTheme } from "~/hooks/useTheme";
++import { useThreadPreviewState } from "~/previewStateStore";
++
++import {
++  type ActiveDock,
++  activeDockableSurface,
++  assignActiveDockSlot,
++  clearDockSlot,
++  clickDockSlot,
++  DOCK_SLOT_NUMBERS,
++  type DockLayout,
++  type DockScope,
++  type DockSlot,
++  type DockSlotNumber,
++  type DockSlotState,
++  type DockTarget,
++  dockSlotLabel,
++  dockSlotState,
++  dockSlotTabHere,
++  saveDockSlot,
++  setActiveDockSlotScope,
++  useActiveDockStore,
++  useDockStore,
++  useDockWorld,
++} from "./dock";
++import { type DesktopApp, isPlutoniumShell, plutoniumShell } from "./windowStore";
++
++type SiteTarget = Extract<DockTarget, { kind: "site" }>;
++type Kind = DockTarget["kind"];
++
++const SCOPES: readonly { value: DockScope; label: string }[] = [
++  { value: "thread", label: "This thread" },
++  { value: "project", label: "This project" },
++  { value: "global", label: "Everywhere" },
++];
++
++const SCOPE_TEXT: Record<DockScope, string> = {
++  thread: "this thread's",
++  project: "this project's",
++  global: "everywhere",
++};
++
++const STATE_TEXT: Record<DockSlotState, string> = {
++  empty: "Click to set it up",
++  idle: "Click to start",
++  running: "Click to show",
++  showing: "Click to go back",
++};
++
++// --- Icons -------------------------------------------------------------------
++
++const appIcons = new Map<string, Promise<string | null>>();
++
++/** An app's icon from the helper, fetched once per app. */
++function useAppIcon(desktopId: string | null): string | null {
++  const [url, setUrl] = useState<string | null>(null);
++  useEffect(() => {
++    if (!desktopId) return;
++    let live = true;
++    let icon = appIcons.get(desktopId);
++    if (!icon) {
++      icon = plutoniumShell()
++        .then((shell) => shell?.appIcon(desktopId) ?? null)
++        .catch(() => null);
++      appIcons.set(desktopId, icon);
++    }
++    void icon.then((value) => live && setUrl(value));
++    return () => {
++      live = false;
++    };
++  }, [desktopId]);
++  return desktopId ? url : null;
++}
++
++function AppIcon({ desktopId, className }: { desktopId: string | null; className: string }) {
++  const url = useAppIcon(desktopId);
++  return url ? (
++    <img alt="" className={cn(className, "object-contain")} src={url} />
++  ) : (
++    <AppWindowIcon className={className} />
++  );
++}
++
++const siteIcons = new Map<string, Promise<string | null>>();
++
++/**
++ * A site's own icon, fetched by the helper (undefined until it answers, null
++ * if it has none or the shell library is older). The page can't always load
++ * it itself: some sites forbid other origins their /favicon.ico (claude.ai),
++ * many name theirs elsewhere.
++ */
++function useHelperSiteIcon(pageUrl: string): string | null | undefined {
++  const origin = siteOrigin(pageUrl);
++  const [icon, setIcon] = useState<{ origin: string; url: string | null } | null>(null);
++  useEffect(() => {
++    if (!origin) return;
++    let live = true;
++    let found = siteIcons.get(origin);
++    if (!found) {
++      found = plutoniumShell()
++        .then((shell) => shell?.siteIcon?.(origin) ?? null)
++        .catch(() => null);
++      siteIcons.set(origin, found);
++    }
++    void found.then((url) => live && setIcon({ origin, url }));
++    return () => {
++      live = false;
++    };
++  }, [origin]);
++  if (!origin) return null;
++  return icon?.origin === origin ? icon.url : undefined;
++}
++
++function siteOrigin(pageUrl: string): string | null {
++  try {
++    const url = new URL(pageUrl);
++    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * A site's icon: an open tab's, else the one T3 remembers for it, else the
++ * site's own (fetched by the helper; the page's own request to /favicon.ico
++ * when there's no helper to ask).
++ */
++function SiteIcon(props: {
++  target: SiteTarget;
++  threadRef: ScopedThreadRef | null;
++  live: string | null;
++  className: string;
++}) {
++  return props.threadRef ? (
++    <SiteIconInThread {...props} threadRef={props.threadRef} />
++  ) : (
++    <SiteIconImage {...props} remembered={null} />
++  );
++}
++
++function SiteIconInThread(props: {
++  target: SiteTarget;
++  threadRef: ScopedThreadRef;
++  live: string | null;
++  className: string;
++}) {
++  const remembered = useFaviconForThreadUrl(props.threadRef, props.target.url);
++  return <SiteIconImage {...props} remembered={remembered} />;
++}
++
++function SiteIconImage(props: {
++  target: SiteTarget;
++  live: string | null;
++  remembered: string | null;
++  className: string;
++}) {
++  // The site's own icon, or one drawn for the theme where its own is
++  // illegible (GitHub's black mark on a dark sidebar): that one comes first.
++  const { resolvedTheme } = useTheme();
++  const own = toolActivityFaviconUrl({ pageUrl: props.target.url }, resolvedTheme);
++  const themed = own && !own.endsWith("/favicon.ico") ? own : null;
++  const fetched = useHelperSiteIcon(props.target.url);
++  return (
++    <FaviconImage
++      sources={[
++        themed,
++        props.live,
++        props.remembered,
++        props.target.icon,
++        fetched,
++        fetched === null ? own : null,
++      ]}
++      fallback={<GlobeIcon className={props.className} />}
++      className={cn(props.className, "rounded-sm object-contain")}
++    />
++  );
++}
++
++function SlotIcon(props: {
++  slot: DockSlot;
++  active: ActiveDock | null;
++  live?: string | null;
++  className?: string;
++}) {
++  const className = props.className ?? "size-4";
++  const target = props.slot.target;
++  if (target.kind === "terminal") return <SquareTerminalIcon className={className} />;
++  if (target.kind === "app") return <AppIcon desktopId={target.desktopId} className={className} />;
++  return (
++    <SiteIcon
++      target={target}
++      threadRef={props.active?.threadRef ?? null}
++      live={props.live ?? null}
++      className={className}
++    />
++  );
++}
++
++// --- The editor --------------------------------------------------------------
++
++let appsList: Promise<DesktopApp[]> | null = null;
++
++/** The desktop apps the helper can start, sorted by name (fetched once). */
++function useDesktopApps(): DesktopApp[] | null {
++  const [apps, setApps] = useState<DesktopApp[] | null>(null);
++  useEffect(() => {
++    let live = true;
++    appsList ??= plutoniumShell()
++      .then((shell) => (shell ? shell.apps() : []))
++      .then((list) => list.toSorted((a, b) => a.name.localeCompare(b.name)))
++      .catch(() => {
++        appsList = null;
++        return [];
++      });
++    void appsList.then((list) => live && setApps(list));
++    return () => {
++      live = false;
++    };
++  }, []);
++  return apps;
++}
++
++function AppPicker(props: { onPick: (app: DesktopApp) => void }) {
++  const apps = useDesktopApps();
++  const [query, setQuery] = useState("");
++  const shown = useMemo(() => {
++    if (!apps) return [];
++    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
++    return apps.filter((app) => {
++      const text = [app.name, app.genericName, app.id, ...app.keywords].join(" ").toLowerCase();
++      return words.every((word) => text.includes(word));
++    });
++  }, [apps, query]);
++  return (
++    <div className="flex flex-col gap-1.5">
++      <Input
++        size="sm"
++        type="search"
++        autoFocus
++        placeholder="Find an app"
++        value={query}
++        onChange={(event) => setQuery(event.target.value)}
++        onKeyDown={(event) => {
++          if (event.key === "Enter" && shown[0]) {
++            event.preventDefault();
++            props.onPick(shown[0]);
++          }
++        }}
++      />
++      <div className="max-h-48 overflow-y-auto rounded-md border border-border">
++        {apps === null ? (
++          <div className="px-2 py-3 text-center text-muted-foreground text-xs">Loading apps…</div>
++        ) : shown.length === 0 ? (
++          <div className="px-2 py-3 text-center text-muted-foreground text-xs">No app matches</div>
++        ) : (
++          shown.map((app) => (
++            <button
++              key={app.id}
++              type="button"
++              data-dock-app={app.id}
++              onClick={() => props.onPick(app)}
++              className="flex w-full items-center gap-2 px-2 py-1 text-left text-sm hover:bg-accent"
++            >
++              <AppIcon desktopId={app.id} className="size-4 shrink-0" />
++              <span className="min-w-0 truncate">{app.name}</span>
++              {app.genericName ? (
++                <span className="ml-auto min-w-0 shrink truncate text-muted-foreground text-xs">
++                  {app.genericName}
++                </span>
++              ) : null}
++            </button>
++          ))
++        )}
++      </div>
++    </div>
++  );
++}
++
++/** "github.com/x" → "https://github.com/x"; null if it isn't a web address. */
++export function normalizeSiteUrl(input: string): string | null {
++  const text = input.trim();
++  if (!text) return null;
++  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`;
++  try {
++    const url = new URL(withScheme);
++    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
++  } catch {
++    return null;
++  }
++}
++
++function hostOf(url: string): string {
++  try {
++    return new URL(url).host;
++  } catch {
++    return url;
++  }
++}
++
++function SiteFields(props: { target: SiteTarget | null; onChange: (target: SiteTarget) => void }) {
++  const id = useId();
++  const { target } = props;
++  const [address, setAddress] = useState(target?.url ?? "");
++  const [error, setError] = useState<string | null>(null);
++  const commitAddress = () => {
++    const url = normalizeSiteUrl(address);
++    if (!url) {
++      setError(address.trim() ? "Not a web address" : null);
++      return;
++    }
++    setError(null);
++    setAddress(url);
++    if (url === target?.url) return;
++    const sameSite = target ? hostOf(target.url) === hostOf(url) : false;
++    props.onChange({
++      kind: "site",
++      url,
++      // Another site gets its host as its name, and not the old one's icon.
++      name: sameSite && target ? target.name : hostOf(url),
++      ...(target?.icon && sameSite ? { icon: target.icon } : {}),
++    });
++  };
++  return (
++    <div className="flex flex-col gap-1.5">
++      <Label htmlFor={`${id}-url`}>Address</Label>
++      <Input
++        id={`${id}-url`}
++        size="sm"
++        autoFocus={!target}
++        placeholder="github.com/org/repo"
++        value={address}
++        onChange={(event) => setAddress(event.target.value)}
++        onBlur={commitAddress}
++        onKeyDown={(event) => event.key === "Enter" && commitAddress()}
++      />
++      {error ? <span className="text-destructive-foreground text-xs">{error}</span> : null}
++      <span className="text-muted-foreground text-xs">
++        Where a new tab for it opens. The slot keeps that tab, wherever you browse in it.
++      </span>
++    </div>
++  );
++}
++
++function NameField(props: { name: string; onRename: (name: string) => void }) {
++  const id = useId();
++  const [name, setName] = useState(props.name);
++  const commit = () => {
++    const value = name.trim();
++    if (value && value !== props.name) props.onRename(value);
++    else setName(props.name);
++  };
++  return (
++    <div className="flex flex-col gap-1.5">
++      <Label htmlFor={`${id}-name`}>Name</Label>
++      <Input
++        id={`${id}-name`}
++        size="sm"
++        value={name}
++        onChange={(event) => setName(event.target.value)}
++        onBlur={commit}
++        onKeyDown={(event) => event.key === "Enter" && commit()}
++      />
++    </div>
++  );
++}
++
++function Section(props: { title: string; children: React.ReactNode; hint?: string | null }) {
++  return (
++    <div className="flex flex-col gap-1.5">
++      <Label render={<span />}>{props.title}</Label>
++      {props.children}
++      {props.hint ? <span className="text-muted-foreground text-xs">{props.hint}</span> : null}
++    </div>
++  );
++}
++
++function scopeHintOf(kind: Kind | null, scope: DockScope): string {
++  if (kind === "terminal") return "The terminal is always the thread's own.";
++  if (kind === "site") {
++    if (scope === "global") return "One tab, which moves to whichever thread you press it in.";
++    if (scope === "project") return "One tab per project, which moves between its threads.";
++    return "Each thread opens its own tab.";
++  }
++  if (scope === "global") return "One copy, shown in whichever thread you press it in.";
++  if (scope === "project") return "One copy per project, shared by its threads.";
++  return "Each thread starts its own.";
++}
++
++function DockSlotEditor({ number }: { number: DockSlotNumber }) {
++  const slot = useDockStore((state) => state.slots[number]);
++  const active = useActiveDockStore((state) => state.active);
++  const threadLayout = useDockStore((state) =>
++    active ? state.layouts[active.threadKey]?.[number] : undefined,
++  );
++  const [kind, setKind] = useState<Kind | null>(slot?.target.kind ?? null);
++  const [picking, setPicking] = useState(slot === undefined);
++  const layout = slot?.layout ?? "split";
++  const scope = slot?.scope ?? "thread";
++  const dockable = activeDockableSurface();
++
++  const save = (target: DockTarget, next: Partial<Pick<DockSlot, "scope" | "layout">> = {}) =>
++    saveDockSlot(number, {
++      target,
++      scope: target.kind === "terminal" ? "thread" : (next.scope ?? scope),
++      layout: next.layout ?? layout,
++    });
++
++  const chooseKind = (next: Kind) => {
++    setKind(next);
++    if (next === "terminal") save({ kind: "terminal" });
++    setPicking(next !== "terminal" && slot?.target.kind !== next);
++  };
++
++  return (
++    <div className="flex flex-col gap-4">
++      <div className="flex items-center gap-2.5">
++        <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-accent">
++          {slot ? <SlotIcon slot={slot} active={active} className="size-5" /> : null}
++        </span>
++        <div className="flex min-w-0 flex-col">
++          <PopoverTitle>
++            <span className="block truncate">{slot ? dockSlotLabel(slot) : "Empty slot"}</span>
++          </PopoverTitle>
++          <span className="text-muted-foreground text-xs">
++            Super+{number} · other layout Super+Ctrl+{number}
++          </span>
++        </div>
++      </div>
++
++      <Section title="Opens">
++        <ToggleGroup
++          aria-label="Opens"
++          className="w-full *:flex-1"
++          value={kind ? [kind] : []}
++          onValueChange={(next) => {
++            const value = next[0];
++            if (value === "terminal" || value === "app" || value === "site") chooseKind(value);
++          }}
++        >
++          <Toggle value="terminal">Terminal</Toggle>
++          <Toggle value="app">App</Toggle>
++          <Toggle value="site">Site</Toggle>
++        </ToggleGroup>
++        <Button
++          size="xs"
++          variant="outline"
++          disabled={dockable === null}
++          onClick={() => {
++            assignActiveDockSlot(number, false);
++            setKind(dockable?.kind === "app" ? "app" : "site");
++            setPicking(false);
++          }}
++        >
++          Use the panel's tab
++        </Button>
++      </Section>
++
++      {kind === "app" ? (
++        <Section title="App">
++          {slot?.target.kind === "app" && !picking ? (
++            <div className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5">
++              <AppIcon desktopId={slot.target.desktopId} className="size-4 shrink-0" />
++              <span className="min-w-0 flex-1 truncate text-sm">
++                {slot.target.desktopId ?? slot.target.windowAppId ?? slot.target.name}
++              </span>
++              <Button size="xs" variant="ghost" onClick={() => setPicking(true)}>
++                Change
++              </Button>
++            </div>
++          ) : (
++            <AppPicker
++              onPick={(app) => {
++                save({ kind: "app", desktopId: app.id, windowAppId: null, name: app.name });
++                setPicking(false);
++              }}
++            />
++          )}
++        </Section>
++      ) : null}
++
++      {kind === "site" ? (
++        <SiteFields
++          key={slot?.target.kind === "site" ? slot.target.url : "new"}
++          target={slot?.target.kind === "site" ? slot.target : null}
++          onChange={(target) => save(target)}
++        />
++      ) : null}
++
++      {slot && slot.target.kind !== "terminal" && slot.target.kind === kind ? (
++        <NameField
++          key={slot.target.name}
++          name={slot.target.name}
++          onRename={(name) =>
++            slot.target.kind !== "terminal" && save({ ...slot.target, name } as DockTarget)
++          }
++        />
++      ) : null}
++
++      <Section title="Kept" hint={scopeHintOf(kind, scope)}>
++        <ToggleGroup
++          aria-label="Kept"
++          className="w-full *:flex-1"
++          disabled={!slot || slot.target.kind === "terminal"}
++          value={[slot && slot.target.kind !== "terminal" ? scope : "thread"]}
++          onValueChange={(next) => {
++            const value = next[0] as DockScope | undefined;
++            if (!value || !slot || value === scope) return;
++            if (active) setActiveDockSlotScope(number, value);
++            else save(slot.target, { scope: value });
++          }}
++        >
++          {SCOPES.map((option) => (
++            <Toggle
++              key={option.value}
++              value={option.value}
++              disabled={option.value === "project" && active !== null && !active.projectId}
++            >
++              {option.label}
++            </Toggle>
++          ))}
++        </ToggleGroup>
++      </Section>
++
++      <Section
++        title="Layout"
++        hint={
++          threadLayout && threadLayout !== layout
++            ? `This thread uses ${threadLayout === "fold" ? "the chat folded" : "beside the chat"} (Super+Up).`
++            : null
++        }
++      >
++        <ToggleGroup
++          aria-label="Layout"
++          className="w-full *:flex-1"
++          disabled={!slot}
++          value={[layout]}
++          onValueChange={(next) => {
++            const value = next[0] as DockLayout | undefined;
++            if (value && slot) save(slot.target, { layout: value });
++          }}
++        >
++          <Toggle value="split">Beside the chat</Toggle>
++          <Toggle value="fold">Chat folded</Toggle>
++        </ToggleGroup>
++        {threadLayout && threadLayout !== layout && active ? (
++          <Button
++            size="xs"
++            variant="ghost"
++            className="self-start"
++            onClick={() => useDockStore.getState().clearThreadLayout(active.threadKey, number)}
++          >
++            Use the slot's layout in this thread too
++          </Button>
++        ) : null}
++      </Section>
++
++      <div className="flex items-center justify-between gap-2 border-border border-t pt-3">
++        <span className="text-muted-foreground text-xs">
++          Super+Shift+{number} puts what has the keyboard here
++        </span>
++        <Button
++          size="xs"
++          variant="ghost-destructive"
++          disabled={!slot}
++          onClick={() => {
++            clearDockSlot(number);
++            setKind(null);
++            setPicking(true);
++          }}
++        >
++          Clear
++        </Button>
++      </div>
++    </div>
++  );
++}
++
++// --- The dock ----------------------------------------------------------------
++
++const DockButton = memo(function DockButton(props: {
++  number: DockSlotNumber;
++  slot: DockSlot | undefined;
++  state: DockSlotState;
++  active: ActiveDock | null;
++  liveIcon: string | null;
++  onEdit: (number: DockSlotNumber, anchor: HTMLElement) => void;
++}) {
++  const { number, slot, state } = props;
++  const name = dockSlotLabel(slot);
++  const detail = slot
++    ? slot.target.kind === "terminal"
++      ? "the thread's terminal"
++      : `${SCOPE_TEXT[slot.scope]} ${name}`
++    : null;
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <button
++            type="button"
++            aria-label={`Super+${number}: ${name}`}
++            data-dock-slot={number}
++            data-dock-state={state}
++            // The click mustn't take the keyboard from what has it.
++            onMouseDown={(event) => event.preventDefault()}
++            onClick={(event) =>
++              slot ? clickDockSlot(number) : props.onEdit(number, event.currentTarget)
++            }
++            onContextMenu={(event) => {
++              event.preventDefault();
++              props.onEdit(number, event.currentTarget);
++            }}
++            className={cn(
++              "relative flex h-7 min-w-0 items-center justify-center rounded-md text-sidebar-muted-foreground transition-colors",
++              "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
++              state === "empty" && "opacity-35",
++              state === "idle" && "opacity-60",
++              state === "running" && "text-sidebar-foreground",
++              state === "showing" &&
++                "bg-sidebar-row-hover text-sidebar-foreground ring-1 ring-sidebar-border",
++            )}
++          >
++            {slot ? (
++              <SlotIcon slot={slot} active={props.active} live={props.liveIcon} />
++            ) : (
++              <span className="size-1 rounded-full bg-current" />
++            )}
++            <span className="pointer-events-none absolute top-0 right-0.5 text-4xs leading-none tabular-nums opacity-70">
++              {number}
++            </span>
++            {state === "running" || state === "showing" ? (
++              <span className="pointer-events-none absolute bottom-0.5 left-1/2 size-0.5 -translate-x-1/2 rounded-full bg-current" />
++            ) : null}
++          </button>
++        }
++      />
++      <TooltipPopup side="top">
++        <div className="font-medium">
++          Super+{number}
++          {slot ? `: ${name}` : ""}
++        </div>
++        {detail ? <div className="text-muted-foreground">{detail}</div> : null}
++        <div className="text-muted-foreground">
++          {STATE_TEXT[state]}
++          {slot ? "; right-click to change it" : ""}
++        </div>
++      </TooltipPopup>
++    </Tooltip>
++  );
++});
++
++/** The dock, above the sidebar's settings row. Nothing outside the Plutonium shell. */
++export const PlutoniumDock = memo(function PlutoniumDock() {
++  if (!isPlutoniumShell()) return null;
++  return <Dock />;
++});
++
++function Dock() {
++  const slots = useDockStore((state) => state.slots);
++  // The windows and the browser's tabs, which hold the slots' tags.
++  const world = useDockWorld();
++  const active = useActiveDockStore((state) => state.active);
++  const preview = useThreadPreviewState(active?.threadRef ?? null);
++  const [editing, setEditing] = useState<{
++    number: DockSlotNumber;
++    anchor: HTMLElement;
++  } | null>(null);
++  // A site slot's icon, from its tab when that shows here.
++  const liveIcons: Partial<Record<DockSlotNumber, string>> = {};
++  for (const number of DOCK_SLOT_NUMBERS) {
++    const tabId = dockSlotTabHere(slots[number], active, world);
++    const favicon = tabId ? preview.desktopByTabId[tabId]?.favicon : undefined;
++    if (favicon?.dataUrl) liveIcons[number] = favicon.dataUrl;
++  }
++  return (
++    <>
++      {/* Every row full: three rows of three, then one row of nine once each
++          slot has 1.375rem (9 × 1.375rem + 8 gaps of 0.125rem = 13.375rem). */}
++      <div className="@container/dock px-1">
++        <div
++          role="toolbar"
++          aria-label="Dock"
++          data-plutonium-dock
++          className="grid grid-cols-3 gap-0.5 @[13.375rem]/dock:grid-cols-9"
++        >
++          {DOCK_SLOT_NUMBERS.map((number) => (
++            <DockButton
++              key={number}
++              number={number}
++              slot={slots[number]}
++              state={dockSlotState(slots[number], active, world)}
++              active={active}
++              liveIcon={liveIcons[number] ?? null}
++              onEdit={(slot, anchor) => setEditing({ number: slot, anchor })}
++            />
++          ))}
++        </div>
++      </div>
++      <Popover open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
++        <PopoverPopup
++          anchor={editing?.anchor ?? null}
++          side="top"
++          align="start"
++          sideOffset={6}
++          // A field the editor focuses itself (finding an app, a new address);
++          // otherwise nothing, so no option looks chosen.
++          initialFocus={false}
++          width="md"
++          data-dock-editor
++        >
++          {editing ? <DockSlotEditor key={editing.number} number={editing.number} /> : null}
++        </PopoverPopup>
++      </Popover>
++    </>
++  );
++}
+diff --git a/apps/web/src/plutonium/dock.test.ts b/apps/web/src/plutonium/dock.test.ts
+new file mode 100644
+index 0000000000..7988f13d64
+--- /dev/null
++++ b/apps/web/src/plutonium/dock.test.ts
+@@ -0,0 +1,227 @@
++import { describe, expect, it, vi } from "vite-plus/test";
++
++vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
++
++import {
++  type ActiveDock,
++  type DockSlot,
++  type DockWorld,
++  dockSlotOfSurface,
++  dockSlotState,
++  findDockThing,
++  migrateDockSlots,
++  type PreviewPlace,
++  sameApp,
++  scopeOfTags,
++  scopeOfWindow,
++} from "./dock";
++import type { BrokerTab } from "./previewBridge";
++import { dockSlotTag, isDockScopeTag, isDockSlotTag } from "./threadTag";
++import type { NativeWindowEntry } from "./windowStore";
++
++const window = (tags: string[], id = 1, appId = "foot"): NativeWindowEntry => ({
++  id,
++  appId,
++  title: appId,
++  width: 800,
++  height: 600,
++  deviceScaleFactor: 1,
++  embedded: false,
++  focused: false,
++  pid: 1,
++  threadId: tags[0] ?? null,
++  tags,
++});
++
++const tab = (id: number, url: string, tags: string[], opener?: number): BrokerTab =>
++  ({
++    id,
++    url,
++    tag: tags[0] ?? "",
++    tags,
++    openerId: opener ?? 0,
++    openedBy: opener ? "page" : "shell",
++  }) as unknown as BrokerTab;
++
++/** Thread `a` of project `p`, with `surface` showing in its panel. */
++const activeIn = (surface: string | null = null): ActiveDock =>
++  ({
++    threadKey: "e:a",
++    threadRef: { environmentId: "e", threadId: "a" },
++    projectId: "p",
++    activeSurfaceId: surface,
++    panelOpen: surface !== null,
++    terminalOpen: false,
++  }) as unknown as ActiveDock;
++
++/** Windows, tabs, and which thread's preview tab shows a tab (by broker tab id). */
++const worldOf = (
++  windows: NativeWindowEntry[],
++  tabs: BrokerTab[],
++  shown: Record<number, [thread: string, serverTabId: string]> = {},
++): DockWorld => ({
++  windows: Object.fromEntries(windows.map((entry) => [entry.id, entry])),
++  tabs,
++  previewOf: (tabId): PreviewPlace | null => {
++    const place = shown[tabId];
++    return place ? { environmentId: "e", threadId: place[0], tabId: place[1] } : null;
++  },
++});
++
++const SLOT = "s1";
++const TAG = dockSlotTag(SLOT);
++const site = (scope: DockSlot["scope"]): DockSlot => ({
++  id: SLOT,
++  target: { kind: "site", url: "https://github.com/a/b", name: "b" },
++  scope,
++  layout: "split",
++});
++const app = (scope: DockSlot["scope"]): DockSlot => ({
++  id: SLOT,
++  target: { kind: "app", desktopId: "foot", windowAppId: "foot", name: "Foot" },
++  scope,
++  layout: "split",
++});
++
++describe("the dock", () => {
++  it("matches a desktop entry to its windows' app id", () => {
++    expect(sameApp("foot.desktop", "foot")).toBe(true);
++    expect(sameApp("org.gnome.Nautilus", "org.gnome.Nautilus")).toBe(true);
++    expect(sameApp("nautilus", "org.gnome.Nautilus")).toBe(true);
++    expect(sameApp("firefox", "foot")).toBe(false);
++  });
++
++  it("puts a window in the last scope T3 added", () => {
++    expect(scopeOfWindow(window(["t3:thread/a"]))).toBe("thread");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p"]))).toBe("project");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:project/p", "t3:global"]))).toBe("global");
++    expect(scopeOfWindow(window(["niri:desktop"]))).toBe("thread");
++    expect(scopeOfWindow(window(["t3:thread/a", "t3:global", TAG]))).toBe("global");
++  });
++
++  it("keeps a tab in the last dock scope tag it has", () => {
++    expect(scopeOfTags(["t3:thread/a"])).toBe("thread");
++    expect(scopeOfTags(["t3:thread/a", "t3:global"])).toBe("global");
++    expect(scopeOfTags(["t3:global", "t3:thread/b", "t3:project/p"])).toBe("project");
++    expect(isDockScopeTag("t3:global")).toBe(true);
++    expect(isDockScopeTag("t3:project/p")).toBe(true);
++    expect(isDockScopeTag("t3:thread/a")).toBe(false);
++    expect(isDockScopeTag(TAG)).toBe(false);
++    expect(isDockSlotTag(TAG)).toBe(true);
++    expect(isDockSlotTag("t3:thread/a")).toBe(false);
++  });
++
++  it("gives stored slots an id, and drops a site's prefix", () => {
++    const slots = migrateDockSlots({
++      1: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++      2: {
++        target: {
++          kind: "site",
++          url: "https://github.com/a",
++          match: "https://github.com/a",
++          name: "a",
++        },
++        scope: "global",
++        layout: "fold",
++      },
++      3: { id: "kept", target: { kind: "terminal" }, scope: "thread", layout: "split" },
++      12: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++    });
++    expect(Object.keys(slots)).toEqual(["1", "2", "3"]);
++    expect(slots[1]!.id).toMatch(/^[0-9a-f]{12}$/);
++    expect(slots[2]!.id).not.toBe(slots[1]!.id);
++    expect(slots[2]!.target).toEqual({ kind: "site", url: "https://github.com/a", name: "a" });
++    expect(slots[2]!.layout).toBe("fold");
++    expect(slots[3]!.id).toBe("kept");
++  });
++
++  it("holds the one tab put in it, not others of the site", () => {
++    const docked = tab(1, "https://elsewhere.example/now", ["t3:thread/a", TAG]);
++    const other = tab(2, "https://github.com/a/b", ["t3:thread/a"]);
++    const world = worldOf([], [docked, other], { 1: ["a", "s-1"], 2: ["a", "s-2"] });
++    const slot = site("thread");
++    // It navigated off the site: still the slot's.
++    expect(findDockThing(slot, activeIn(), world)).toMatchObject({ kind: "tab", tab: docked });
++    expect(dockSlotState(slot, activeIn("browser:s-1"), world)).toBe("showing");
++    // Another tab on the site isn't the slot's.
++    expect(dockSlotState(slot, activeIn("browser:s-2"), world)).toBe("running");
++    const surface = (id: `browser:${string}`) =>
++      ({ id, kind: "preview", resourceId: id.slice(8) }) as const;
++    expect(dockSlotOfSurface({ 4: slot }, surface("browser:s-1"), activeIn(), world)).toBe(4);
++    expect(dockSlotOfSurface({ 4: slot }, surface("browser:s-2"), activeIn(), world)).toBeNull();
++    // Nothing of it in this thread (another thread's own): the key opens one.
++    const elsewhere = worldOf([], [tab(3, "https://github.com/a/b", ["t3:thread/b", TAG])], {
++      3: ["b", "s-3"],
++    });
++    expect(findDockThing(slot, activeIn(), elsewhere)).toBeNull();
++    expect(dockSlotState(slot, activeIn(), elsewhere)).toBe("idle");
++  });
++
++  it("doesn't hold the tabs its tab opens", () => {
++    const docked = tab(1, "https://github.com/a/b", ["t3:thread/a", TAG]);
++    // A page's new tab starts with its opener's tags.
++    const popup = tab(2, "https://github.com/login", ["t3:thread/a", TAG], 1);
++    const world = worldOf([], [docked, popup], { 1: ["a", "s-1"], 2: ["a", "s-2"] });
++    expect(findDockThing(site("thread"), activeIn(), world)).toMatchObject({ tab: docked });
++    expect(dockSlotState(site("thread"), activeIn("browser:s-2"), world)).toBe("running");
++    // Put in the slot itself (its opener left it), it is the slot's.
++    const moved = worldOf([], [tab(1, "https://github.com/a/b", ["t3:thread/a"]), popup], {
++      1: ["a", "s-1"],
++      2: ["a", "s-2"],
++    });
++    expect(findDockThing(site("thread"), activeIn(), moved)).toMatchObject({ tab: popup });
++  });
++
++  it("finds a site kept everywhere or per project by its scope's tab, in any thread", () => {
++    expect(dockSlotState(site("global"), activeIn(), worldOf([], []))).toBe("idle");
++    // A tab of the scope that isn't the slot's.
++    expect(
++      dockSlotState(
++        site("global"),
++        activeIn(),
++        worldOf([], [tab(1, "https://github.com/x", ["t3:global", "t3:thread/b"])]),
++      ),
++    ).toBe("idle");
++    const global = worldOf(
++      [],
++      [tab(1, "https://github.com/x", ["t3:global", "t3:thread/b", TAG])],
++      {
++        1: ["b", "s-1"],
++      },
++    );
++    expect(dockSlotState(site("global"), activeIn(), global)).toBe("running");
++    expect(findDockThing(site("global"), activeIn(), global)).toMatchObject({
++      place: { threadId: "b", tabId: "s-1" },
++    });
++    expect(
++      dockSlotState(
++        site("project"),
++        activeIn(),
++        worldOf([], [tab(1, "https://github.com/x", ["t3:project/q", TAG])]),
++      ),
++    ).toBe("idle");
++    const here = worldOf(
++      [],
++      [tab(1, "https://github.com/x", ["t3:project/p", TAG, "t3:thread/a"])],
++      {
++        1: ["a", "s-1"],
++      },
++    );
++    expect(dockSlotState(site("project"), activeIn("browser:s-1"), here)).toBe("showing");
++  });
++
++  it("holds the one window put in it, in its scope", () => {
++    const docked = window(["t3:global", TAG], 7);
++    const other = window(["t3:global"], 8);
++    const world = worldOf([docked, other], []);
++    expect(findDockThing(app("global"), activeIn(), world)).toMatchObject({ entry: docked });
++    expect(dockSlotState(app("global"), activeIn("app:7"), world)).toBe("showing");
++    expect(dockSlotState(app("global"), activeIn("app:8"), world)).toBe("running");
++    // Per thread: the one in this thread.
++    const threads = worldOf([window(["t3:thread/b", TAG], 9), window(["t3:thread/a"], 10)], []);
++    expect(findDockThing(app("thread"), activeIn(), threads)).toBeNull();
++    expect(
++      findDockThing(app("thread"), activeIn(), worldOf([window(["t3:thread/a", TAG], 11)], [])),
++    ).toMatchObject({ entry: { id: 11 } });
++  });
++});
+diff --git a/apps/web/src/plutonium/dock.ts b/apps/web/src/plutonium/dock.ts
+new file mode 100644
+index 0000000000..a6be2de39b
+--- /dev/null
++++ b/apps/web/src/plutonium/dock.ts
+@@ -0,0 +1,1114 @@
++// Plutonium: the dock. Nine slots on Super+1…9, each T3's terminal drawer, an
++// app or a site, kept per thread, per project or everywhere. A slot's key
++// starts what it names, shows it, gives it the keyboard, and goes back to
++// where you were when pressed again (plutonium-desktop
++// docs/features/HYDRA_DOCK.md).
++//
++// A slot holds one window or tab, not every one that looks like it: the one
++// put in it carries the slot's tag (t3:dock/<slot id>). A scope is a tag too:
++// the slot's thing in a thread is the one with the slot's tag and the scope's
++// (the thread's, the project's or t3:global), so a slot kept per thread has
++// one in each thread. With none, the key starts the app or opens the site,
++// and tags what that made. An app started for a slot runs with its scope's
++// tag as PLUTONIUM_THREAD_ID, so its windows carry it. A site's tab kept per
++// project or everywhere moves to the thread whose key asks for it
++// (previewBridge.ts).
++import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import { useSyncExternalStore } from "react";
++import { create } from "zustand";
++import { createJSONStorage, persist } from "zustand/middleware";
++
++import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
++import { toastManager } from "~/components/ui/toast";
++import { randomUUID } from "~/lib/utils";
++import { resolveStorage } from "~/lib/storage";
++import { readThreadPreviewState } from "~/previewStateStore";
++import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
++
++import { focusRightPanelSurface } from "./panelKeys";
++import { type BrokerTab, plutoniumPreview, tabTags } from "./previewBridge";
++import { dockSlotTag, GLOBAL_TAG, isDockScopeTag, isDockSlotTag, projectTag } from "./threadTag";
++import {
++  type NativeWindowEntry,
++  plutoniumShell,
++  threadTag,
++  usePlutoniumWindowStore,
++  windowTags,
++} from "./windowStore";
++
++export const DOCK_SLOT_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
++export type DockSlotNumber = (typeof DOCK_SLOT_NUMBERS)[number];
++
++export type DockScope = "thread" | "project" | "global";
++export type DockLayout = "split" | "fold";
++
++export type DockTarget =
++  /** T3's terminal drawer, below the chat. */
++  | { readonly kind: "terminal" }
++  | {
++      readonly kind: "app";
++      /** The desktop entry that starts it; null if none was found (it can't be started). */
++      readonly desktopId: string | null;
++      /** Its windows' app id, once seen. */
++      readonly windowAppId: string | null;
++      readonly name: string;
++    }
++  | {
++      readonly kind: "site";
++      /** Where a new tab for it opens. */
++      readonly url: string;
++      readonly name: string;
++      /** The site's icon (a data URL) as a tab showed it, for when none is open. */
++      readonly icon?: string;
++    };
++
++export interface DockSlot {
++  /** What the slot's things are tagged with (dockSlotTag); new when it names something else. */
++  readonly id: string;
++  readonly target: DockTarget;
++  readonly scope: DockScope;
++  readonly layout: DockLayout;
++}
++
++export type DockSlots = Partial<Record<DockSlotNumber, DockSlot>>;
++
++/** A new slot id. */
++export function newDockSlotId(): string {
++  return randomUUID().replaceAll("-", "").slice(0, 12);
++}
++
++const DEFAULT_SLOTS: DockSlots = {
++  1: { id: newDockSlotId(), target: { kind: "terminal" }, scope: "thread", layout: "split" },
++};
++
++/**
++ * Slots as stored before slots held one thing each (version 1): they get an
++ * id, and a site loses the prefix its tabs started with. Nothing carries the
++ * new id yet: the slot's thing is the next one put in it, or the next one its
++ * key opens.
++ */
++export function migrateDockSlots(slots: unknown): DockSlots {
++  if (!slots || typeof slots !== "object") return DEFAULT_SLOTS;
++  const migrated: DockSlots = {};
++  for (const [key, value] of Object.entries(slots as Record<string, unknown>)) {
++    const number = Number(key);
++    if (!DOCK_SLOT_NUMBERS.includes(number as DockSlotNumber)) continue;
++    if (!value || typeof value !== "object") continue;
++    const slot = value as DockSlot & { target: DockTarget & { match?: string } };
++    if (!slot.target || typeof slot.target !== "object") continue;
++    const { match: _match, ...target } = slot.target;
++    migrated[number as DockSlotNumber] = {
++      ...slot,
++      id: typeof slot.id === "string" && slot.id ? slot.id : newDockSlotId(),
++      target: target as DockTarget,
++    };
++  }
++  return migrated;
++}
++
++/** Where a slot's key came from, to go back to on the next press. */
++interface ReturnPoint {
++  readonly slot: DockSlotNumber;
++  readonly panelOpen: boolean;
++  readonly activeSurfaceId: string | null;
++  readonly maximized: boolean;
++  readonly terminalOpen: boolean;
++  readonly terminalFolded: boolean;
++}
++
++interface DockState {
++  readonly slots: DockSlots;
++  /** A thread's own layout for a slot (Super+Up), by thread key, then slot. */
++  readonly layouts: Readonly<Record<string, Partial<Record<DockSlotNumber, DockLayout>>>>;
++  /** Threads whose terminal drawer has the chat column to itself, by thread key. */
++  readonly terminalFolded: Readonly<Record<string, true>>;
++  /** The slot last raised in each thread and what was showing before, by thread key. */
++  readonly returnTo: Readonly<Record<string, ReturnPoint>>;
++  setSlot(slot: DockSlotNumber, value: DockSlot | null): void;
++  setThreadLayout(threadKey: string, slot: DockSlotNumber, layout: DockLayout): void;
++  /** The thread goes back to the slot's own layout. */
++  clearThreadLayout(threadKey: string, slot: DockSlotNumber): void;
++  setTerminalFolded(threadKey: string, folded: boolean): void;
++  setReturnTo(threadKey: string, point: ReturnPoint | null): void;
++}
++
++export const useDockStore = create<DockState>()(
++  persist(
++    (set) => ({
++      slots: DEFAULT_SLOTS,
++      layouts: {},
++      terminalFolded: {},
++      returnTo: {},
++      setSlot: (slot, value) =>
++        set((state) => {
++          const slots = { ...state.slots };
++          if (value) slots[slot] = value;
++          else delete slots[slot];
++          return { slots };
++        }),
++      setThreadLayout: (threadKey, slot, layout) =>
++        set((state) => ({
++          layouts: {
++            ...state.layouts,
++            [threadKey]: { ...state.layouts[threadKey], [slot]: layout },
++          },
++        })),
++      clearThreadLayout: (threadKey, slot) =>
++        set((state) => {
++          const own = state.layouts[threadKey];
++          if (!own || own[slot] === undefined) return state;
++          const next = { ...own };
++          delete next[slot];
++          return { layouts: { ...state.layouts, [threadKey]: next } };
++        }),
++      setTerminalFolded: (threadKey, folded) =>
++        set((state) => {
++          if (Boolean(state.terminalFolded[threadKey]) === folded) return state;
++          const terminalFolded = { ...state.terminalFolded };
++          if (folded) terminalFolded[threadKey] = true;
++          else delete terminalFolded[threadKey];
++          return { terminalFolded };
++        }),
++      setReturnTo: (threadKey, point) =>
++        set((state) => {
++          const returnTo = { ...state.returnTo };
++          if (point) returnTo[threadKey] = point;
++          else delete returnTo[threadKey];
++          return { returnTo };
++        }),
++    }),
++    {
++      name: "t3code:plutonium-dock:v1",
++      version: 2,
++      migrate: (persisted, version) => {
++        const state = (persisted ?? {}) as Record<string, unknown>;
++        return version < 2 ? { ...state, slots: migrateDockSlots(state.slots) } : state;
++      },
++      storage: createJSONStorage(() =>
++        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
++      ),
++      // Where to go back to only holds while the page lives.
++      partialize: (state) => ({
++        slots: state.slots,
++        layouts: state.layouts,
++        terminalFolded: state.terminalFolded,
++      }),
++    },
++  ),
++);
++
++/** Whether `threadRef`'s terminal drawer has the chat column to itself. */
++export function useTerminalFolded(threadRef: ScopedThreadRef | null): boolean {
++  const key = threadRef ? scopedThreadKey(threadRef) : null;
++  return useDockStore((state) => (key ? state.terminalFolded[key] === true : false));
++}
++
++/** What ChatView lends the dock: the active thread and its panel and terminal. */
++export interface DockContext {
++  readonly threadRef: ScopedThreadRef;
++  readonly projectId: string | null;
++  readonly surfaces: readonly RightPanelSurface[];
++  readonly activeSurfaceId: string | null;
++  readonly panelOpen: boolean;
++  readonly maximized: boolean;
++  readonly terminalOpen: boolean;
++  /** Opens the terminal drawer (starting a terminal if there is none) and focuses it. */
++  readonly openTerminal: () => void;
++  readonly closeTerminal: () => void;
++  readonly focusTerminal: () => void;
++  readonly focusComposer: () => void;
++  readonly activate: (surface: RightPanelSurface) => void;
++  /** Opens a browser tab at `url` in the thread's panel. */
++  readonly openSite: (url: string) => Promise<void>;
++  /** Shows browser tab `tab` as a new tab of the thread's panel; its server tab id, or null. */
++  readonly showTab: (tab: BrokerTab) => Promise<string | null>;
++  /** Closes another thread's preview tab `tabId` (its browser tab has moved here). */
++  readonly closePreview: (threadRef: ScopedThreadRef, tabId: string) => Promise<void>;
++}
++
++/** The tag a slot's things carry in `context`'s thread, or null (a project slot with no project). */
++export function scopeTagOf(
++  scope: DockScope,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++): string | null {
++  if (scope === "global") return GLOBAL_TAG;
++  if (scope === "project") return context.projectId ? projectTag(context.projectId) : null;
++  return threadTag(context.threadRef.threadId);
++}
++
++/** The scope a window was put in: the last scope tag T3 added, else its origin's. */
++export function scopeOfWindow(entry: NativeWindowEntry): DockScope {
++  return scopeOfTags(windowTags(entry));
++}
++
++/** The scope of what carries `tags`: the last scope tag among them. */
++export function scopeOfTags(tags: readonly string[]): DockScope {
++  for (let index = tags.length - 1; index >= 0; index -= 1) {
++    const tag = tags[index]!;
++    if (tag === GLOBAL_TAG) return "global";
++    if (tag.startsWith("t3:project/")) return "project";
++    if (tag.startsWith("t3:thread/")) return "thread";
++  }
++  return "thread";
++}
++
++const normalizeAppId = (id: string) => id.toLowerCase().replace(/\.desktop$/, "");
++
++/** Whether window app id `windowAppId` is desktop entry `desktopId`'s (org.gnome.Nautilus ~ nautilus). */
++export function sameApp(desktopId: string, windowAppId: string): boolean {
++  const a = normalizeAppId(desktopId);
++  const b = normalizeAppId(windowAppId);
++  return a === b || a.split(".").at(-1) === b.split(".").at(-1);
++}
++
++/** Whether `entry` is a window of the slot's app (to find the one its start opened). */
++function isAppWindow(target: Extract<DockTarget, { kind: "app" }>, entry: NativeWindowEntry) {
++  if (target.windowAppId) return entry.appId === target.windowAppId;
++  return target.desktopId !== null && sameApp(target.desktopId, entry.appId);
++}
++
++/** Where a preview tab shows a browser tab: its thread and server tab id. */
++export interface PreviewPlace {
++  readonly environmentId: string;
++  readonly threadId: string;
++  readonly tabId: string;
++}
++
++/** What the dock finds slots' things in. */
++export interface DockWorld {
++  readonly windows: Readonly<Record<number, NativeWindowEntry>>;
++  /** The browser's tabs, oldest first. */
++  readonly tabs: readonly BrokerTab[];
++  /** The preview tab showing browser tab `tabId`, if one does. */
++  readonly previewOf: (tabId: number) => PreviewPlace | null;
++}
++
++const noPreview = () => null;
++
++/** The world as it is now. */
++function currentWorld(): DockWorld {
++  const preview = plutoniumPreview();
++  return {
++    windows: usePlutoniumWindowStore.getState().windows,
++    tabs: preview?.tabList() ?? [],
++    previewOf: preview ? (tabId) => preview.previewOf(tabId) : noPreview,
++  };
++}
++
++const NO_TABS: readonly BrokerTab[] = [];
++const subscribeTabs = (listener: () => void) => plutoniumPreview()?.onTabs(listener) ?? (() => {});
++const readTabs = () => plutoniumPreview()?.tabList() ?? NO_TABS;
++
++/** The world, re-rendering when a window or a tab changes. */
++export function useDockWorld(): DockWorld {
++  const windows = usePlutoniumWindowStore((state) => state.windows);
++  const tabs = useSyncExternalStore(subscribeTabs, readTabs);
++  const preview = plutoniumPreview();
++  return {
++    windows,
++    tabs,
++    previewOf: preview ? (tabId) => preview.previewOf(tabId) : noPreview,
++  };
++}
++
++/**
++ * Whether `tab` carries slot tag `tag` as its own: a page's new tab starts
++ * with its opener's tags, and isn't the slot's for that (previewBridge.ts
++ * takes the tag off it).
++ */
++function tabHolds(tab: BrokerTab, tag: string, tabs: readonly BrokerTab[]): boolean {
++  if (!tabTags(tab).includes(tag)) return false;
++  if (tab.openedBy !== "page") return true;
++  const opener = tabs.find((other) => other.id === tab.openerId);
++  return !opener || !tabTags(opener).includes(tag);
++}
++
++/** A slot's thing in a scope: its window, or its tab and where that shows. */
++export type DockThing =
++  | { readonly kind: "window"; readonly entry: NativeWindowEntry }
++  | { readonly kind: "tab"; readonly tab: BrokerTab; readonly place: PreviewPlace | null };
++
++const isHere = (place: PreviewPlace | null, threadRef: ScopedThreadRef) =>
++  place !== null &&
++  place.environmentId === threadRef.environmentId &&
++  place.threadId === threadRef.threadId;
++
++/**
++ * Slot `slot`'s thing in `context`'s thread: what carries the slot's tag and
++ * its scope's. A tab that shows in this thread first, else the newest.
++ */
++export function findDockThing(
++  slot: DockSlot,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  world: DockWorld,
++): DockThing | null {
++  if (slot.target.kind === "terminal") return null;
++  const scopeTag = scopeTagOf(slot.scope, context);
++  if (!scopeTag) return null;
++  const tag = dockSlotTag(slot.id);
++  if (slot.target.kind === "app") {
++    const entry = Object.values(world.windows)
++      .filter((window) => {
++        const tags = windowTags(window);
++        return tags.includes(tag) && tags.includes(scopeTag);
++      })
++      .toSorted((a, b) => a.id - b.id)
++      .at(-1);
++    return entry ? { kind: "window", entry } : null;
++  }
++  let found: DockThing | null = null;
++  for (const tab of world.tabs) {
++    if (!tabTags(tab).includes(scopeTag) || !tabHolds(tab, tag, world.tabs)) continue;
++    const place = world.previewOf(tab.id);
++    found = { kind: "tab", tab, place };
++    if (isHere(place, context.threadRef)) break;
++  }
++  return found;
++}
++
++/** The panel surface of `thing` in `threadRef`'s panel, if it shows there (a window always can). */
++function surfaceOfThing(thing: DockThing, threadRef: ScopedThreadRef): RightPanelSurface | null {
++  if (thing.kind === "window") return appSurface(thing.entry);
++  return thing.place && isHere(thing.place, threadRef) ? browserSurface(thing.place.tabId) : null;
++}
++
++/** The broker tab behind `surface` in `threadRef`'s panel, if it has one yet. */
++function tabOfSurface(surface: RightPanelSurface, threadRef: ScopedThreadRef): BrokerTab | null {
++  if (surface.kind !== "preview" || !surface.resourceId) return null;
++  const { serverEpoch } = readThreadPreviewState(threadRef);
++  return (
++    plutoniumPreview()?.tab(previewRuntimeTabId(threadRef, serverEpoch, surface.resourceId)) ?? null
++  );
++}
++
++/** A window or tab, to tag. */
++interface Taggable {
++  readonly kind: "window" | "tab";
++  readonly id: number;
++}
++
++const taggableOf = (thing: DockThing): Taggable =>
++  thing.kind === "window"
++    ? { kind: "window", id: thing.entry.id }
++    : { kind: "tab", id: thing.tab.id };
++
++const sameItem = (a: Taggable, b: Taggable | null) =>
++  b !== null && a.kind === b.kind && a.id === b.id;
++
++function tagsOfItem(item: Taggable, world: DockWorld): readonly string[] {
++  if (item.kind === "window") {
++    const entry = world.windows[item.id];
++    return entry ? windowTags(entry) : [];
++  }
++  const tab = world.tabs.find((other) => other.id === item.id);
++  return tab ? tabTags(tab) : [];
++}
++
++/** Adds `add` to and takes `remove` off `item`'s tags (not its origin tag). */
++async function retag(
++  item: Taggable,
++  add: readonly string[],
++  remove: readonly string[] = [],
++): Promise<void> {
++  if (item.kind === "window") {
++    const shell = await plutoniumShell();
++    await shell?.tagWindow?.(item.id, add, remove);
++  } else {
++    await plutoniumPreview()?.broker.updateTabTags?.(item.id, add, remove);
++  }
++}
++
++/** Takes slot `slot`'s tag off everything that carries it, in every scope. */
++function releaseDockSlot(slot: DockSlot): void {
++  if (slot.target.kind === "terminal") return;
++  const tag = dockSlotTag(slot.id);
++  const world = currentWorld();
++  for (const window of Object.values(world.windows)) {
++    if (windowTags(window).includes(tag)) {
++      void retag({ kind: "window", id: window.id }, [], [tag]).catch(() => undefined);
++    }
++  }
++  for (const tab of world.tabs) {
++    if (tabTags(tab).includes(tag)) {
++      void retag({ kind: "tab", id: tab.id }, [], [tag]).catch(() => undefined);
++    }
++  }
++}
++
++function hostOf(url: string): string {
++  try {
++    return new URL(url).host;
++  } catch {
++    return url;
++  }
++}
++
++/**
++ * Whether `next` names the same app or site as `previous`, so the slot keeps
++ * its id: what it holds elsewhere (another thread's, kept per thread) stays.
++ */
++function namesSameThing(previous: DockTarget, next: DockTarget): boolean {
++  if (previous.kind === "terminal" || next.kind === "terminal") return previous.kind === next.kind;
++  if (previous.kind === "app" && next.kind === "app") {
++    return (
++      (previous.desktopId !== null && previous.desktopId === next.desktopId) ||
++      (previous.windowAppId !== null && previous.windowAppId === next.windowAppId)
++    );
++  }
++  if (previous.kind === "site" && next.kind === "site") {
++    return hostOf(previous.url) === hostOf(next.url);
++  }
++  return false;
++}
++
++/**
++ * Slot `number` set to `next` (from the editor): it keeps its id while it
++ * names the same app or site; naming another, what it held leaves it.
++ */
++export function saveDockSlot(number: DockSlotNumber, next: Omit<DockSlot, "id">): void {
++  const state = useDockStore.getState();
++  const previous = state.slots[number];
++  const keep = previous && namesSameThing(previous.target, next.target);
++  if (previous && !keep) releaseDockSlot(previous);
++  state.setSlot(number, { ...next, id: keep ? previous.id : newDockSlotId() });
++}
++
++/** Empties slot `number`; what it held leaves it. */
++export function clearDockSlot(number: DockSlotNumber): void {
++  const state = useDockStore.getState();
++  const previous = state.slots[number];
++  if (previous) releaseDockSlot(previous);
++  state.setSlot(number, null);
++}
++
++const appSurface = (entry: NativeWindowEntry): RightPanelSurface => ({
++  id: `app:${entry.id}`,
++  kind: "app",
++  windowId: entry.id,
++  appId: entry.appId,
++});
++
++const browserSurface = (tabId: string): RightPanelSurface => ({
++  id: `browser:${tabId}`,
++  kind: "preview",
++  resourceId: tabId,
++});
++
++function terminalHasKeyboard(): boolean {
++  return (
++    document.activeElement?.closest(
++      '[data-thread-terminal-drawer][data-terminal-owner="drawer"]',
++    ) != null
++  );
++}
++
++function surfaceHasKeyboard(surface: RightPanelSurface): boolean {
++  if (surface.kind === "app") {
++    return usePlutoniumWindowStore.getState().windows[surface.windowId]?.focused === true;
++  }
++  if (surface.kind === "preview" && surface.resourceId) {
++    const active = document.activeElement;
++    return active instanceof HTMLElement && active.dataset.previewServerTab === surface.resourceId;
++  }
++  return false;
++}
++
++/** Slot `slot`'s layout in `threadKey`: the thread's own choice, else the slot's. */
++function layoutOf(state: DockState, threadKey: string, slot: DockSlotNumber): DockLayout {
++  return state.layouts[threadKey]?.[slot] ?? state.slots[slot]?.layout ?? "split";
++}
++
++const otherLayout = (layout: DockLayout): DockLayout => (layout === "fold" ? "split" : "fold");
++
++/**
++ * Goes back to what showed before `point.slot`'s key was pressed. `own` are
++ * the slot's surfaces: going back never shows one of them again (it was
++ * showing already when the key was pressed), it puts the slot away.
++ */
++function goBack(context: DockContext, point: ReturnPoint, own: readonly string[] = []): void {
++  const key = scopedThreadKey(context.threadRef);
++  const dock = useDockStore.getState();
++  const panel = useRightPanelStore.getState();
++  dock.setReturnTo(key, null);
++  dock.setTerminalFolded(key, point.terminalFolded);
++  if (!point.terminalOpen && context.terminalOpen) context.closeTerminal();
++  panel.setMaximized(context.threadRef, point.maximized);
++  const before =
++    point.activeSurfaceId && !own.includes(point.activeSurfaceId)
++      ? context.surfaces.find((surface) => surface.id === point.activeSurfaceId)
++      : undefined;
++  if (before) context.activate(before);
++  // Nothing of the panel's to go back to: the slot's thing was all it showed.
++  if (!point.panelOpen || !before) panel.close(context.threadRef);
++  context.focusComposer();
++}
++
++/** Remembers what shows now, unless this slot already did (it was pressed before going back). */
++function rememberReturn(context: DockContext, slot: DockSlotNumber): void {
++  const key = scopedThreadKey(context.threadRef);
++  const dock = useDockStore.getState();
++  if (dock.returnTo[key]?.slot === slot) return;
++  dock.setReturnTo(key, {
++    slot,
++    panelOpen: context.panelOpen,
++    activeSurfaceId: context.activeSurfaceId,
++    maximized: context.maximized,
++    terminalOpen: context.terminalOpen,
++    terminalFolded: dock.terminalFolded[key] === true,
++  });
++}
++
++/** Shows `surface` in the panel, laid out as `layout`, with the keyboard. */
++function raiseSurface(context: DockContext, surface: RightPanelSurface, layout: DockLayout): void {
++  const panel = useRightPanelStore.getState();
++  if (context.surfaces.some((entry) => entry.id === surface.id)) {
++    context.activate(surface);
++  } else if (surface.kind === "app") {
++    panel.openApp(context.threadRef, { windowId: surface.windowId, appId: surface.appId });
++  } else if (surface.kind === "preview" && surface.resourceId) {
++    panel.openBrowser(context.threadRef, surface.resourceId);
++  }
++  panel.show(context.threadRef);
++  panel.setMaximized(context.threadRef, layout === "fold");
++  void focusRightPanelSurface(surface);
++}
++
++/**
++ * Brings site slot `slot`'s `tab` (its tab in scope `scopeTag`, shown in
++ * another thread or none) to this thread, or opens a new one there.
++ */
++async function bringSiteTab(
++  context: DockContext,
++  slot: DockSlot,
++  scopeTag: string,
++  tab: BrokerTab | null,
++  layout: DockLayout,
++): Promise<void> {
++  const target = slot.target as Extract<DockTarget, { kind: "site" }>;
++  const preview = plutoniumPreview();
++  if (!preview?.broker.updateTabTags) {
++    // No tags to hold it by: a tab of the site, which the slot won't find again.
++    await context.openSite(target.url);
++    useRightPanelStore.getState().setMaximized(context.threadRef, layout === "fold");
++    return;
++  }
++  try {
++    if (!tab) {
++      tab = await preview.createDockTab(target.url, scopeTag, dockSlotTag(slot.id));
++    } else {
++      const from = preview.previewOf(tab.id);
++      if (from) {
++        const fromRef = {
++          environmentId: from.environmentId as EnvironmentId,
++          threadId: from.threadId as ThreadId,
++        };
++        if (scopedThreadKey(fromRef) === scopedThreadKey(context.threadRef)) {
++          raiseSurface(context, browserSurface(from.tabId), layout);
++          return;
++        }
++        preview.releaseTab(from.runtimeTabId);
++        useRightPanelStore.getState().closeSurface(fromRef, `browser:${from.tabId}`);
++        await context.closePreview(fromRef, from.tabId);
++      }
++    }
++  } catch (error) {
++    toastManager.add({
++      type: "error",
++      title: `Could not open ${target.name}`,
++      description: error instanceof Error ? error.message : String(error),
++    });
++    return;
++  }
++  const tabId = await context.showTab(tab);
++  if (tabId) raiseSurface(context, browserSurface(tabId), layout);
++}
++
++const WINDOW_WAIT_MS = 60_000;
++
++/**
++ * Starts slot `slot`'s app in scope `scopeTag`, and puts the window it opens
++ * in the slot and shows it: a new window of the process started, or of the
++ * app in the scope (a launcher that hands over to another process).
++ */
++async function launchSlotApp(
++  context: DockContext,
++  slotNumber: DockSlotNumber,
++  slot: DockSlot,
++  scopeTag: string,
++  layout: DockLayout,
++): Promise<void> {
++  const target = slot.target as Extract<DockTarget, { kind: "app" }>;
++  const shell = await plutoniumShell();
++  if (!shell) return;
++  if (!target.desktopId) {
++    toastManager.add({
++      type: "error",
++      title: `${target.name} isn't running`,
++      description:
++        "No installed app was found to start it. Start it yourself, then Super+Shift+" +
++        `${slotNumber} puts it in the slot again.`,
++    });
++    return;
++  }
++  const known = new Set(Object.keys(usePlutoniumWindowStore.getState().windows).map(Number));
++  let pid: number | null = null;
++  let opened = false;
++  const open = () => {
++    if (opened) return;
++    const entry = Object.values(usePlutoniumWindowStore.getState().windows)
++      .filter(
++        (window) =>
++          !known.has(window.id) &&
++          ((pid !== null && window.pid === pid) ||
++            (windowTags(window).includes(scopeTag) && isAppWindow(target, window))),
++      )
++      .toSorted((a, b) => a.id - b.id)[0];
++    if (!entry) return;
++    opened = true;
++    stop();
++    void retag({ kind: "window", id: entry.id }, [scopeTag, dockSlotTag(slot.id)]).catch(
++      () => undefined,
++    );
++    // Remember its app id: the next start finds its window by it too.
++    const current = useDockStore.getState().slots[slotNumber];
++    if (current?.id === slot.id && current.target.kind === "app" && !current.target.windowAppId) {
++      useDockStore.getState().setSlot(slotNumber, {
++        ...current,
++        target: { ...current.target, windowAppId: entry.appId },
++      });
++    }
++    raiseSurface(context, appSurface(entry), layout);
++  };
++  const unsubscribe = usePlutoniumWindowStore.subscribe(open);
++  const timer = setTimeout(() => stop(), WINDOW_WAIT_MS);
++  function stop() {
++    unsubscribe();
++    clearTimeout(timer);
++  }
++  toastManager.add({ type: "info", title: `Starting ${target.name}…`, timeout: 2500 });
++  try {
++    pid = (await shell.launchApp(scopeTag, target.desktopId)).pid || null;
++    open();
++  } catch (error) {
++    stop();
++    toastManager.add({
++      type: "error",
++      title: `Could not start ${target.name}`,
++      description: error instanceof Error ? error.message : String(error),
++    });
++  }
++}
++
++/**
++ * Super+N: starts, shows, focuses or puts away slot `slotNumber`'s thing.
++ * `other` lays it out the other way this time (Super+Ctrl+N).
++ */
++export function runDockSlot(
++  context: DockContext,
++  slotNumber: DockSlotNumber,
++  options: {
++    readonly other?: boolean;
++    /** From the dock's button: what shows counts as focused (the click took the keyboard). */
++    readonly click?: boolean;
++  } = {},
++): void {
++  const state = useDockStore.getState();
++  const slot = state.slots[slotNumber];
++  if (!slot) {
++    toastManager.add({
++      type: "info",
++      title: `Super+${slotNumber} is empty`,
++      description: `Super+Shift+${slotNumber} puts what has the keyboard there.`,
++      timeout: 3000,
++    });
++    return;
++  }
++  const key = scopedThreadKey(context.threadRef);
++  const own = layoutOf(state, key, slotNumber);
++  const layout = options.other ? otherLayout(own) : own;
++  const back = state.returnTo[key];
++  const target = slot.target;
++  // Just arrived in this thread: what the slot shows here counts as focused,
++  // so the key hides it (the switch gave the composer the keyboard).
++  const arrived = arrival?.threadKey === key && !arrival.acted;
++  if (arrival) arrival.acted = true;
++
++  if (target.kind === "terminal") {
++    if (
++      context.terminalOpen &&
++      (options.click || arrived || terminalHasKeyboard()) &&
++      !options.other
++    ) {
++      if (back?.slot === slotNumber) goBack(context, back);
++      else {
++        // Nowhere remembered to go back to: put it away.
++        state.setTerminalFolded(key, false);
++        context.closeTerminal();
++        context.focusComposer();
++      }
++      return;
++    }
++    rememberReturn(context, slotNumber);
++    state.setTerminalFolded(key, layout === "fold");
++    if (context.terminalOpen) context.focusTerminal();
++    else context.openTerminal();
++    return;
++  }
++
++  const scopeTag = scopeTagOf(slot.scope, context);
++  if (!scopeTag) {
++    toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++    return;
++  }
++  const thing = findDockThing(slot, context, currentWorld());
++  const surface = thing ? surfaceOfThing(thing, context.threadRef) : null;
++  if (!surface) {
++    // Nothing of it in its scope: start it. A site's tab elsewhere: bring it here.
++    rememberReturn(context, slotNumber);
++    if (target.kind === "app") void launchSlotApp(context, slotNumber, slot, scopeTag, layout);
++    else {
++      const tab = thing?.kind === "tab" ? thing.tab : null;
++      void bringSiteTab(context, slot, scopeTag, tab, layout);
++    }
++    return;
++  }
++
++  const showing = context.panelOpen && context.activeSurfaceId === surface.id;
++  if (showing && (options.click || arrived || surfaceHasKeyboard(surface)) && !options.other) {
++    // Shown and focused: back to where you were.
++    if (back?.slot === slotNumber) goBack(context, back, [surface.id]);
++    else {
++      // Nowhere remembered to go back to: put it away.
++      const panel = useRightPanelStore.getState();
++      panel.setMaximized(context.threadRef, false);
++      panel.close(context.threadRef);
++      context.focusComposer();
++    }
++    return;
++  }
++  rememberReturn(context, slotNumber);
++  // Shown or not: show it and give it the keyboard.
++  raiseSurface(context, surface, layout);
++}
++
++/**
++ * Super+Up: the slot showing in this thread goes split ↔ fold, and the
++ * thread keeps that for it. With no slot showing, the panel's maximize.
++ */
++export function toggleDockLayout(context: DockContext): void {
++  const key = scopedThreadKey(context.threadRef);
++  const state = useDockStore.getState();
++  const slotNumber = state.returnTo[key]?.slot;
++  const slot = slotNumber ? state.slots[slotNumber] : undefined;
++  if (slotNumber && slot?.target.kind === "terminal" && context.terminalOpen) {
++    const folded = state.terminalFolded[key] === true;
++    state.setTerminalFolded(key, !folded);
++    state.setThreadLayout(key, slotNumber, folded ? "split" : "fold");
++    context.focusTerminal();
++    return;
++  }
++  const panel = useRightPanelStore.getState();
++  if (!context.panelOpen) return;
++  panel.setMaximized(context.threadRef, !context.maximized);
++  if (slotNumber && slot && slot.target.kind !== "terminal") {
++    state.setThreadLayout(key, slotNumber, context.maximized ? "split" : "fold");
++  }
++}
++
++/** What `surface` would be as a slot's target, the scope it's in now, and the thing to tag. */
++async function targetOf(
++  surface: RightPanelSurface,
++  threadRef: ScopedThreadRef,
++): Promise<{ target: DockTarget; scope: DockScope; item: Taggable | null } | null> {
++  if (surface.kind === "app") {
++    const entry = usePlutoniumWindowStore.getState().windows[surface.windowId];
++    if (!entry) return null;
++    const shell = await plutoniumShell();
++    const apps = shell ? await shell.apps().catch(() => []) : [];
++    const app = apps.find((candidate) => sameApp(candidate.id, entry.appId));
++    return {
++      target: {
++        kind: "app",
++        desktopId: app?.id ?? null,
++        windowAppId: entry.appId,
++        name: app?.name ?? (entry.title || entry.appId),
++      },
++      scope: scopeOfWindow(entry),
++      item: { kind: "window", id: entry.id },
++    };
++  }
++  if (surface.kind === "preview" && surface.resourceId) {
++    const state = readThreadPreviewState(threadRef);
++    const session = state.sessions[surface.resourceId];
++    const status = session?.navStatus as { url?: string; title?: string } | undefined;
++    if (!status?.url) return null;
++    let name = status.title || status.url;
++    try {
++      name = status.title || new URL(status.url).host;
++    } catch {
++      // Keep the address.
++    }
++    const favicon = state.desktopByTabId[session?.tabId ?? surface.resourceId]?.favicon;
++    // A dock slot's tab from elsewhere stays in its scope.
++    const tab = tabOfSurface(surface, threadRef);
++    return {
++      target: {
++        kind: "site",
++        url: status.url,
++        name,
++        ...(favicon?.dataUrl ? { icon: favicon.dataUrl } : {}),
++      },
++      scope: tab ? scopeOfTags(tabTags(tab)) : "thread",
++      item: tab ? { kind: "tab", id: tab.id } : null,
++    };
++  }
++  return null;
++}
++
++/** A short name for slot `slot`'s target. */
++export function dockSlotLabel(slot: DockSlot | undefined): string {
++  if (!slot) return "empty";
++  return slot.target.kind === "terminal" ? "Terminal" : slot.target.name;
++}
++
++const SCOPE_LABEL: Record<DockScope, string> = {
++  thread: "this thread",
++  project: "this project",
++  global: "everywhere",
++};
++
++/**
++ * Puts `surface` (null: the terminal drawer) in slot `slotNumber`: that
++ * window or tab is the slot's in its scope, instead of what was (and it
++ * leaves any other slot it was in).
++ */
++export async function assignDockSlot(
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  slotNumber: DockSlotNumber,
++  surface: RightPanelSurface | null,
++): Promise<void> {
++  const state = useDockStore.getState();
++  const previous = state.slots[slotNumber];
++  let next: DockSlot;
++  if (surface === null) {
++    if (previous && previous.target.kind !== "terminal") releaseDockSlot(previous);
++    next = {
++      id: previous?.target.kind === "terminal" ? previous.id : newDockSlotId(),
++      target: { kind: "terminal" },
++      scope: "thread",
++      layout: previous?.layout ?? "split",
++    };
++  } else {
++    const found = await targetOf(surface, context.threadRef);
++    if (!found) {
++      toastManager.add({
++        type: "info",
++        title: "Only apps, browser tabs and the terminal go in the dock",
++        timeout: 3000,
++      });
++      return;
++    }
++    const keep = previous !== undefined && namesSameThing(previous.target, found.target);
++    next = {
++      id: keep ? previous.id : newDockSlotId(),
++      target: found.target,
++      scope: found.scope,
++      layout: previous?.layout ?? "split",
++    };
++    const tag = dockSlotTag(next.id);
++    const world = currentWorld();
++    if (previous && !keep) releaseDockSlot(previous);
++    else if (previous) {
++      // What the slot held here (in this thread, project or everywhere) leaves it.
++      const old = findDockThing(previous, context, world);
++      if (old && !sameItem(taggableOf(old), found.item)) {
++        await retag(taggableOf(old), [], [tag]).catch(() => undefined);
++      }
++    }
++    if (found.item) {
++      // It leaves the other slots it was in.
++      const others = tagsOfItem(found.item, world).filter(
++        (other) => isDockSlotTag(other) && other !== tag,
++      );
++      await retag(found.item, [tag], others).catch(() => undefined);
++    }
++  }
++  state.setSlot(slotNumber, next);
++  toastManager.add({
++    type: "success",
++    title: `Super+${slotNumber}: ${dockSlotLabel(next)}`,
++    description: `Kept ${SCOPE_LABEL[next.scope]}.`,
++    timeout: 3000,
++  });
++}
++
++/**
++ * Keeps slot `slotNumber` in `scope`. What it holds in this thread's old
++ * scope gets the new scope's tag (and loses a project's or t3:global); what
++ * it holds elsewhere stays as it is.
++ */
++export async function setDockSlotScope(
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  slotNumber: DockSlotNumber,
++  scope: DockScope,
++): Promise<void> {
++  const state = useDockStore.getState();
++  const slot = state.slots[slotNumber];
++  if (!slot || slot.target.kind === "terminal") return;
++  const to = scopeTagOf(scope, context);
++  if (!to) {
++    toastManager.add({ type: "info", title: "This thread has no project", timeout: 3000 });
++    return;
++  }
++  const from = scopeTagOf(slot.scope, context);
++  const thing = findDockThing(slot, context, currentWorld());
++  state.setSlot(slotNumber, { ...slot, scope });
++  if (!thing) return;
++  // A thread's tag stays: the thread shows it, and its agent reaches it.
++  const remove = from && from !== to && isDockScopeTag(from) ? [from] : [];
++  await retag(taggableOf(thing), [to], remove).catch(() => undefined);
++}
++
++/** The slot `surface` holds in `context`'s thread, if any. */
++export function dockSlotOfSurface(
++  slots: DockSlots,
++  surface: RightPanelSurface,
++  context: Pick<DockContext, "threadRef" | "projectId">,
++  world: DockWorld = currentWorld(),
++): DockSlotNumber | null {
++  for (const number of DOCK_SLOT_NUMBERS) {
++    const slot = slots[number];
++    if (!slot || slot.target.kind === "terminal") continue;
++    const thing = findDockThing(slot, context, world);
++    if (thing && surfaceOfThing(thing, context.threadRef)?.id === surface.id) return number;
++  }
++  return null;
++}
++
++let activeContext: DockContext | null = null;
++
++/**
++ * The thread last switched to, and whether the user has typed or clicked in
++ * the page (or run a slot) since: until then, a slot's key hides what it
++ * shows there.
++ */
++let arrival: { readonly threadKey: string; acted: boolean } | null = null;
++
++if (typeof window !== "undefined") {
++  const acted = (event: Event) => {
++    // Super+… are the dock's own keys (and the shell's).
++    if (event instanceof KeyboardEvent && (event.metaKey || event.key === "Meta")) return;
++    if (arrival) arrival.acted = true;
++  };
++  window.addEventListener("keydown", acted, true);
++  window.addEventListener("pointerdown", acted, true);
++}
++
++/** The active thread's context, as ChatView last published it (for the sidebar's dock). */
++export function publishDockContext(context: DockContext | null): void {
++  activeContext = context;
++  const threadKey = context ? scopedThreadKey(context.threadRef) : null;
++  if (threadKey && arrival?.threadKey !== threadKey) arrival = { threadKey, acted: false };
++  const next: ActiveDock | null = context
++    ? {
++        threadKey: scopedThreadKey(context.threadRef),
++        threadRef: context.threadRef,
++        projectId: context.projectId,
++        activeSurfaceId: context.activeSurfaceId,
++        panelOpen: context.panelOpen,
++        terminalOpen: context.terminalOpen,
++      }
++    : null;
++  const previous = useActiveDockStore.getState().active;
++  const same =
++    previous === next ||
++    (previous !== null &&
++      next !== null &&
++      previous.threadKey === next.threadKey &&
++      previous.projectId === next.projectId &&
++      previous.activeSurfaceId === next.activeSurfaceId &&
++      previous.panelOpen === next.panelOpen &&
++      previous.terminalOpen === next.terminalOpen);
++  if (!same) useActiveDockStore.setState({ active: next });
++}
++
++/** The dock's button for slot `slotNumber` was clicked. */
++export function clickDockSlot(slotNumber: DockSlotNumber): void {
++  if (!activeContext) {
++    toastManager.add({ type: "info", title: "Open a thread first", timeout: 2500 });
++    return;
++  }
++  runDockSlot(activeContext, slotNumber, { click: true });
++}
++
++/** What the sidebar's dock shows about the active thread. */
++export interface ActiveDock {
++  readonly threadKey: string;
++  readonly threadRef: ScopedThreadRef;
++  readonly projectId: string | null;
++  readonly activeSurfaceId: string | null;
++  readonly panelOpen: boolean;
++  readonly terminalOpen: boolean;
++}
++
++export const useActiveDockStore = create<{ readonly active: ActiveDock | null }>(() => ({
++  active: null,
++}));
++
++export type DockSlotState = "empty" | "idle" | "running" | "showing";
++
++/**
++ * Slot `slot`'s state in the active thread: nothing set, set but nothing of it
++ * in its scope, running (somewhere in its scope), or showing here now.
++ */
++export function dockSlotState(
++  slot: DockSlot | undefined,
++  active: ActiveDock | null,
++  world: DockWorld,
++): DockSlotState {
++  if (!slot) return "empty";
++  if (!active) return "idle";
++  if (slot.target.kind === "terminal") return active.terminalOpen ? "showing" : "idle";
++  const thing = findDockThing(slot, active, world);
++  if (!thing) return "idle";
++  const surface = surfaceOfThing(thing, active.threadRef);
++  return active.panelOpen && surface && active.activeSurfaceId === surface.id
++    ? "showing"
++    : "running";
++}
++
++/** Slot `slot`'s tab's server tab id in the active thread, if it shows there. */
++export function dockSlotTabHere(
++  slot: DockSlot | undefined,
++  active: ActiveDock | null,
++  world: DockWorld,
++): string | null {
++  if (!slot || !active || slot.target.kind !== "site") return null;
++  const thing = findDockThing(slot, active, world);
++  return thing?.kind === "tab" && isHere(thing.place, active.threadRef) ? thing.place!.tabId : null;
++}
++
++/** The active thread's tab showing in the panel, if it can go in the dock. */
++export function activeDockableSurface(): RightPanelSurface | null {
++  const context = activeContext;
++  if (!context?.panelOpen) return null;
++  const surface = context.surfaces.find((entry) => entry.id === context.activeSurfaceId);
++  if (!surface) return null;
++  return surface.kind === "app" || (surface.kind === "preview" && surface.resourceId)
++    ? surface
++    : null;
++}
++
++/** Puts the panel's tab (or, with `terminal`, the terminal drawer) in slot `slotNumber`. */
++export function assignActiveDockSlot(slotNumber: DockSlotNumber, terminal: boolean): void {
++  if (!activeContext) return;
++  const surface = terminal ? null : activeDockableSurface();
++  if (!terminal && !surface) return;
++  void assignDockSlot(activeContext, slotNumber, surface);
++}
++
++/** Keeps slot `slotNumber` in `scope`, from the active thread. */
++export function setActiveDockSlotScope(slotNumber: DockSlotNumber, scope: DockScope): void {
++  if (activeContext) void setDockSlotScope(activeContext, slotNumber, scope);
++}

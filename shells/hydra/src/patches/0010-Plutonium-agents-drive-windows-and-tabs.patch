@@ -1,0 +1,2765 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:51 +1300
+Subject: [PATCH 10/10] Plutonium: agents drive windows and tabs
+
+Folded from:
+- agents drive windows and tabs
+- windows held at an agent's size, Take control; read_window and act_window
+- find_apps, the installed apps and the argv launch_app takes
+- recordings encode in a hidden page of Plutonium's browser; visible counts desktop-shown tabs
+- a request that times out no longer drops the server's own browser host; recording starts get the install allowance
+- read_window on big tables and apps that don't answer; launch_app waits for windows to settle
+- Preview tools: drag along a path; snapshot images in click coordinates; cursor follows a scaled tab
+- Preview tools: the floating preview draws the agent's cursor; resize answers with the new size; snapshots don't flash on screen
+- Preview tools: a stuck action no longer wedges its tab
+- act_window's select clicks when the app won't select; set_text leaves the keyboard where it was
+- agent tool fixes: popups in window snapshots, results that say what happened, private tabs marked
+- agents get the helper's tab tools on T3's tabs
+- usage-limit warnings in orchestrator_capabilities
+- start_recording and stop_recording for an agent's windows
+- remote clients see native windows
+- native windows are their threads' server tabs
+---
+ apps/server/src/mcp/McpHttpServer.ts          |  38 +-
+ apps/server/src/mcp/OrchestratorMcpService.ts |   5 +
+ .../server/src/mcp/PreviewAutomationBroker.ts |   9 +-
+ .../src/mcp/providerUsageWarning.test.ts      |  70 ++
+ apps/server/src/mcp/providerUsageWarning.ts   |  52 ++
+ .../src/mcp/toolkits/orchestrator/tools.ts    |   2 +-
+ .../src/mcp/toolkits/preview/handlers.ts      |  32 +
+ apps/server/src/mcp/toolkits/preview/tools.ts |  14 +-
+ .../server/src/plutonium/windowStream.test.ts |  32 +
+ apps/server/src/plutonium/windowStream.ts     | 304 +++++++
+ apps/server/src/plutonium/windowTabs.test.ts  | 343 ++++++++
+ apps/server/src/plutonium/windowTabs.ts       | 575 +++++++++++++
+ apps/server/src/plutonium/windowTools.test.ts | 275 +++++++
+ apps/server/src/plutonium/windowTools.ts      | 762 ++++++++++++++++++
+ 14 files changed, 2506 insertions(+), 7 deletions(-)
+ create mode 100644 apps/server/src/mcp/providerUsageWarning.test.ts
+ create mode 100644 apps/server/src/mcp/providerUsageWarning.ts
+ create mode 100644 apps/server/src/plutonium/windowStream.test.ts
+ create mode 100644 apps/server/src/plutonium/windowStream.ts
+ create mode 100644 apps/server/src/plutonium/windowTabs.test.ts
+ create mode 100644 apps/server/src/plutonium/windowTabs.ts
+ create mode 100644 apps/server/src/plutonium/windowTools.test.ts
+ create mode 100644 apps/server/src/plutonium/windowTools.ts
+
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index 9bc3b9da43..de3bcb77c7 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -77,6 +77,7 @@ import {
+   DeviceStandardToolkit,
+ } from "./toolkits/device/tools.ts";
+ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
++import * as PlutoniumWindowTools from "../plutonium/windowTools.ts";
+ import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+ import { requestUrl } from "../requestUrl.ts";
+ 
+@@ -552,6 +553,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
+                   readonly data: string;
+                   readonly width: number;
+                   readonly height: number;
++                  readonly viewport?: { readonly width: number; readonly height: number };
+                 };
+               };
+               const { screenshot, ...page } = snapshot;
+@@ -577,6 +579,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
+                   mimeType: screenshot.mimeType,
+                   width: screenshot.width,
+                   height: screenshot.height,
++                  ...(screenshot.viewport ? { viewport: screenshot.viewport } : {}),
+                 },
+                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
+               };
+@@ -1182,6 +1185,38 @@ export const layerInProcessMcpServer = McpServer.middleware<{
+   { global: true },
+ ).pipe(Layer.provideMerge(McpServer.McpServer.layer));
+ 
++const registerWindowSnapshot = Effect.fn("McpHttpServer.registerWindowSnapshot")(function* () {
++  const threads = yield* ThreadManagementService.ThreadManagementService;
++  const built = yield* PlutoniumWindowTools.WindowSnapshotToolkit;
++  yield* registerImageTool(
++    PlutoniumWindowTools.SnapshotWindowTool,
++    (payload) =>
++      built
++        .handle("snapshot_window", payload)
++        .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
++    (effect) =>
++      effect.pipe(Effect.provideService(ThreadManagementService.ThreadManagementService, threads)),
++    "screenshot",
++    (error) => error.message,
++  );
++});
++
++/** Plutonium: the native window tools, in a Plutonium session only. */
++export const layerPlutoniumWindowToolkit = Layer.unwrap(
++  Effect.sync(() =>
++    PlutoniumWindowTools.available()
++      ? Layer.mergeAll(
++          toolkitRegistration(
++            PlutoniumWindowTools.WindowStandardToolkit,
++            PlutoniumWindowTools.layerStandard,
++          ),
++          imageToolRegistration(registerWindowSnapshot(), PlutoniumWindowTools.layerSnapshot),
++          toolkitRegistration(PlutoniumWindowTools.TabToolkit, PlutoniumWindowTools.layerTabs),
++        )
++      : Layer.empty,
++  ),
++);
++
+ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE, RR>) =>
+   McpServer.layerHttp({
+     name: "T3 Code",
+@@ -1207,4 +1242,5 @@ export const layerTools = Layer.mergeAll(
+   layerHtmlToolkit,
+ );
+ 
+-export const layer = layerMcpTransport(layerTools);
++// Plutonium: native window tools (only in a Plutonium session), outside the budgeted set.
++export const layer = layerMcpTransport(Layer.mergeAll(layerTools, layerPlutoniumWindowToolkit));
+diff --git a/apps/server/src/mcp/OrchestratorMcpService.ts b/apps/server/src/mcp/OrchestratorMcpService.ts
+index e84212cab0..8d708b3917 100644
+--- a/apps/server/src/mcp/OrchestratorMcpService.ts
++++ b/apps/server/src/mcp/OrchestratorMcpService.ts
+@@ -105,6 +105,7 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
+ import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
+ import * as ProjectService from "../project/ProjectService.ts";
+ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
++import { providerUsageWarning } from "./providerUsageWarning.ts";
+ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+ import * as ServerSettings from "../serverSettings.ts";
+ import {
+@@ -2256,6 +2257,7 @@ const make = Effect.gen(function* () {
+       const { parent, limits } = yield* loadCaller(scope);
+       const providers = yield* loadProviders;
+       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
++      const nowMs = yield* Clock.currentTimeMillis;
+       const settings = yield* serverSettings.getSettings.pipe(
+         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+       );
+@@ -2300,6 +2302,8 @@ const make = Effect.gen(function* () {
+                   favorite.provider === provider.instanceId && favorite.model === model.slug,
+               ),
+           });
++          // Plutonium: an instance near or at a subscription usage limit says so.
++          const usageWarning = providerUsageWarning(provider.usageLimits, nowMs);
+           return {
+             providerInstanceId: provider.instanceId,
+             driverKind: provider.driver,
+@@ -2322,6 +2326,7 @@ const make = Effect.gen(function* () {
+             canRunChildTask: constraints.length === 0,
+             canRunCrossProviderChildTask: constraints.length === 0,
+             constraints: [...constraints],
++            ...(usageWarning === undefined ? {} : { usageWarning }),
+           };
+         }),
+         features: {
+diff --git a/apps/server/src/mcp/PreviewAutomationBroker.ts b/apps/server/src/mcp/PreviewAutomationBroker.ts
+index 85646d3871..08d3137f57 100644
+--- a/apps/server/src/mcp/PreviewAutomationBroker.ts
++++ b/apps/server/src/mcp/PreviewAutomationBroker.ts
+@@ -566,7 +566,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
+       }
+       // First open may install Chromium for ten minutes; keep it alive without replaying effects.
+       const timeoutMs =
+-        input.timeoutMs ?? (input.operation === "open" && connection.preferred ? 660_000 : 15_000);
++        input.timeoutMs ??
++        ((input.operation === "open" || input.operation === "recordingStart") &&
++        connection.preferred
++          ? 660_000
++          : 15_000);
+       const canReuseAssignedTab =
+         assigned !== undefined &&
+         assigned.connectionId === connection.connectionId &&
+@@ -662,7 +666,8 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
+         // The enclosing operation owns the span for this inline handler.
+         onNone: Effect.fnUntraced(function* () {
+           // Never replay possibly applied actions; slow metadata reads must not evict the host.
+-          if (input.updateCurrentTab !== false) {
++          // Plutonium: the server's own host is in-process and cannot become unreachable.
++          if (input.updateCurrentTab !== false && !connection.preferred) {
+             yield* disconnect(connection.clientId, connection.queue, true);
+           }
+           return yield* new PreviewAutomationTimeoutError(requestContext);
+diff --git a/apps/server/src/mcp/providerUsageWarning.test.ts b/apps/server/src/mcp/providerUsageWarning.test.ts
+new file mode 100644
+index 0000000000..710d54ef28
+--- /dev/null
++++ b/apps/server/src/mcp/providerUsageWarning.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from "@effect/vitest";
++import type { ServerProviderUsageLimits } from "@t3tools/contracts";
++
++import { providerUsageWarning } from "./providerUsageWarning.ts";
++
++const now = Date.parse("2026-10-27T12:00:00.000Z");
++const limits = (
++  windows: ReadonlyArray<{ label: string; usedPercent: number; resetsAt?: string }>,
++): ServerProviderUsageLimits =>
++  ({
++    checkedAt: "2026-10-27T12:00:00.000Z",
++    windows: windows.map((window, index) => ({ id: `w${index}`, kind: "other", ...window })),
++  }) as unknown as ServerProviderUsageLimits;
++
++describe("providerUsageWarning", () => {
++  it("says nothing below the threshold, or without usage", () => {
++    expect(providerUsageWarning(undefined, now)).toBeUndefined();
++    expect(
++      providerUsageWarning(limits([{ label: "Session", usedPercent: 79 }]), now),
++    ).toBeUndefined();
++    expect(
++      providerUsageWarning(
++        {
++          ...limits([{ label: "Session", usedPercent: 100 }]),
++          unavailable: { reason: "probeFailed" },
++        },
++        now,
++      ),
++    ).toBeUndefined();
++  });
++
++  it("warns near a limit with the most used window and its reset", () => {
++    expect(
++      providerUsageWarning(
++        limits([
++          { label: "Session", usedPercent: 81, resetsAt: "2026-10-27T14:00:00.000Z" },
++          { label: "Weekly", usedPercent: 92.4, resetsAt: "2026-10-30T00:00:00.000Z" },
++        ]),
++        now,
++      ),
++    ).toEqual({
++      level: "near_limit",
++      window: "Weekly",
++      usedPercent: 92,
++      resetsAt: "2026-10-30T00:00:00.000Z",
++      message: "Weekly limit 92% used; it resets at 2026-10-30T00:00:00.000Z.",
++    });
++  });
++
++  it("at a limit, names the window that frees last; a window past its reset has reset", () => {
++    const warning = providerUsageWarning(
++      limits([
++        { label: "Session", usedPercent: 100, resetsAt: "2026-10-27T14:00:00.000Z" },
++        { label: "Weekly", usedPercent: 100, resetsAt: "2026-10-30T00:00:00.000Z" },
++        { label: "Weekly · Opus", usedPercent: 100, resetsAt: "2026-10-27T11:00:00.000Z" },
++      ]),
++      now,
++    );
++    expect(warning).toMatchObject({ level: "at_limit", window: "Weekly", usedPercent: 100 });
++    expect(warning?.message).toBe(
++      "Weekly limit reached: this instance can't run turns until 2026-10-30T00:00:00.000Z.",
++    );
++    expect(
++      providerUsageWarning(
++        limits([{ label: "Session", usedPercent: 100, resetsAt: "2026-10-27T11:00:00.000Z" }]),
++        now,
++      ),
++    ).toBeUndefined();
++  });
++});
+diff --git a/apps/server/src/mcp/providerUsageWarning.ts b/apps/server/src/mcp/providerUsageWarning.ts
+new file mode 100644
+index 0000000000..cdc1394589
+--- /dev/null
++++ b/apps/server/src/mcp/providerUsageWarning.ts
+@@ -0,0 +1,52 @@
++/**
++ * Plutonium: the usage warning `orchestrator_capabilities` gives each provider
++ * instance, so an agent choosing one for a new thread or child task can avoid
++ * one at or near its subscription limits. Only the window that matters, not
++ * the usage data the UI draws (claudeUsageLimits.ts for Claude).
++ */
++import type { OrchestratorMcpUsageWarning, ServerProviderUsageLimits } from "@t3tools/contracts";
++
++/** From this much of a window used, the instance is near its limit. */
++export const NEAR_LIMIT_PERCENT = 80;
++/** Rounding: a window the provider reports at 99.6% is used up. */
++const AT_LIMIT_PERCENT = 99.5;
++
++/**
++ * The window closest to its limit, when one is near or at it; undefined when
++ * none is, or the instance reports no windows. A window whose reset time has
++ * passed has reset already, whatever it said.
++ */
++export function providerUsageWarning(
++  limits: ServerProviderUsageLimits | undefined,
++  nowMs: number,
++): OrchestratorMcpUsageWarning | undefined {
++  if (limits === undefined || limits.unavailable !== undefined) return undefined;
++  const current = limits.windows.filter(
++    (window) =>
++      window.usedPercent >= NEAR_LIMIT_PERCENT &&
++      (window.resetsAt === undefined || Date.parse(window.resetsAt) > nowMs),
++  );
++  // The most used; of those at the limit, the one that frees last.
++  const worst = current.toSorted((left, right) => {
++    const leftAt = left.usedPercent >= AT_LIMIT_PERCENT;
++    const rightAt = right.usedPercent >= AT_LIMIT_PERCENT;
++    if (leftAt && rightAt) {
++      return Date.parse(right.resetsAt ?? "") - Date.parse(left.resetsAt ?? "") || 0;
++    }
++    return right.usedPercent - left.usedPercent;
++  })[0];
++  if (worst === undefined) return undefined;
++  const level = worst.usedPercent >= AT_LIMIT_PERCENT ? "at_limit" : "near_limit";
++  const used = Math.round(worst.usedPercent);
++  const resets = worst.resetsAt === undefined ? "" : ` until ${worst.resetsAt}`;
++  return {
++    level,
++    window: worst.label,
++    usedPercent: used,
++    ...(worst.resetsAt === undefined ? {} : { resetsAt: worst.resetsAt }),
++    message:
++      level === "at_limit"
++        ? `${worst.label} limit reached: this instance can't run turns${resets}.`
++        : `${worst.label} limit ${used}% used${worst.resetsAt === undefined ? "" : `; it resets at ${worst.resetsAt}`}.`,
++  };
++}
+diff --git a/apps/server/src/mcp/toolkits/orchestrator/tools.ts b/apps/server/src/mcp/toolkits/orchestrator/tools.ts
+index 7c05f5c8d8..e983874252 100644
+--- a/apps/server/src/mcp/toolkits/orchestrator/tools.ts
++++ b/apps/server/src/mcp/toolkits/orchestrator/tools.ts
+@@ -71,7 +71,7 @@ const threadMetadataDependencies = [
+ 
+ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
+   description:
+-    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
++    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works. `usageWarning` marks an instance near or at a usage limit: prefer another for new work.",
+   parameters: OrchestratorMcpCapabilitiesInput,
+   success: OrchestratorMcpCapabilitiesResult,
+   failure: OrchestratorMcpFailure,
+diff --git a/apps/server/src/mcp/toolkits/preview/handlers.ts b/apps/server/src/mcp/toolkits/preview/handlers.ts
+index 94df4a13fe..a96e81455c 100644
+--- a/apps/server/src/mcp/toolkits/preview/handlers.ts
++++ b/apps/server/src/mcp/toolkits/preview/handlers.ts
+@@ -20,6 +20,8 @@ import {
+   type PreviewAutomationSnapshot,
+   type PreviewAutomationStatus,
+   type PreviewTabId,
++  type PreviewAutomationDragInput,
++  type PreviewAutomationPressInput,
+ } from "@t3tools/contracts";
+ 
+ import {
+@@ -95,6 +97,21 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
+   };
+ });
+ 
++/** Plutonium: what a drag did, for its result. */
++const describeDrag = (input: {
++  readonly path?: ReadonlyArray<{ readonly x: number; readonly y: number }> | undefined;
++  readonly source?: string | undefined;
++  readonly target?: string | undefined;
++}) => {
++  const path = input.path;
++  if (path && path.length > 0) {
++    const first = path[0]!;
++    const last = path[path.length - 1]!;
++    return `Dragged through ${path.length} points, from ${first.x},${first.y} to ${last.x},${last.y}.`;
++  }
++  return `Dragged ${input.source} onto ${input.target}.`;
++};
++
+ const invokeTargeted = <A extends object>(
+   operation: PreviewAutomationOperation,
+   input: {
+@@ -234,6 +251,21 @@ const handlers = {
+           action,
+           decoded,
+           "timeoutMs" in decoded ? decoded.timeoutMs : undefined,
++        ).pipe(
++          // Plutonium: a drag and a key press say what they did.
++          Effect.map((result) =>
++            action === "drag"
++              ? { done: describeDrag(decoded as PreviewAutomationDragInput), ...result }
++              : action === "press"
++                ? {
++                    done: `Pressed ${[
++                      ...((decoded as PreviewAutomationPressInput).modifiers ?? []),
++                      (decoded as PreviewAutomationPressInput).key,
++                    ].join("+")}.`,
++                    ...result,
++                  }
++                : result,
++          ),
+         ),
+       ),
+     ),
+diff --git a/apps/server/src/mcp/toolkits/preview/tools.ts b/apps/server/src/mcp/toolkits/preview/tools.ts
+index 33c3443a1c..a90bbcd421 100644
+--- a/apps/server/src/mcp/toolkits/preview/tools.ts
++++ b/apps/server/src/mcp/toolkits/preview/tools.ts
+@@ -41,6 +41,13 @@ const presentationFields = { toolIcon: Schema.optional(ToolActivityIcon) };
+ 
+ const PreviewActionResult = Schema.Struct(presentationFields);
+ 
++/** Plutonium: an action whose result says what it did. */
++const PreviewDoneResult = Schema.Struct({
++  done: Schema.String.annotate({ description: "What the action did." }),
++  ...presentationFields,
++}).annotate({ description: "The preview action completed successfully." });
++
++/** Drives the real browser and can destroy page state. */
+ const browserTool = <T extends Tool.Any>(tool: T): T =>
+   tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+ 
+@@ -52,7 +59,7 @@ const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
+ 
+ const PreviewStatusTool = Tool.make("preview_status", {
+   description:
+-    "Report preview tab state: owner, pending dialog, URL, title, loading, viewport, and size. `tabs` lists this thread's tabs. `profiles` lists logins for `preview_open`. Read any listed tab. Act only on your tab, or an unclaimed tab with no human in control.",
++    "Report preview tab state: owner, pending dialog, URL, title, loading, viewport, and size. `tabs` lists this thread's tabs. `profiles` lists logins for `preview_open`. Read any listed tab. Act only on your tab, or an unclaimed tab with no human in control. `busy` names an action running on the tab; `busy.stuck` lists ones that timed out and were abandoned.",
+   parameters: PreviewAutomationTabTargetInput,
+   success: PreviewAutomationStatus,
+   failure: PreviewToolFailure,
+@@ -137,7 +144,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
+ export const PreviewSnapshotTool = safeBrowserTool(
+   Tool.make("preview_snapshot", {
+     description:
+-      "Use it only when the current request asks for browser work, including checking an edit in the browser. Never use it unasked to verify your own edit, or to repeat a snapshot from an earlier turn. Works on a tab the user is driving. Returns page state, elements, diagnostics, and screenshot size. Target one element with `locator='aria-ref=<ref>'` from `accessibilityTree`, even in frames. Refs die on navigation, a new snapshot, or handoff. Text caps near 20 KB; on your own or an unclaimed tab, `preview_evaluate` reads more. To show a screenshot when asked: `save=true`, then embed ![alt](screenshotPath).",
++      "Use it only when the current request asks for browser work, including checking an edit in the browser. Never use it unasked to verify your own edit, or to repeat a snapshot from an earlier turn. Works on a tab the user is driving. Returns page state, elements, diagnostics, and screenshot size. Target one element with `locator='aria-ref=<ref>'` from `accessibilityTree`, even in frames. Refs die on navigation, a new snapshot, or handoff. Text caps near 20 KB; on your own or an unclaimed tab, `preview_evaluate` reads more. To show a screenshot when asked: `save=true`, then embed ![alt](screenshotPath). `[focused]` marks keyboard focus, not a chosen option. The image is one pixel per viewport pixel (scaled down past 1280 wide; `screenshot.viewport` gives the size), so a point read off it is the `x`/`y` `preview_act` takes.",
+     parameters: Schema.Struct({
+       ...PreviewAutomationTabTargetInput.fields,
+       includeImage: Schema.optional(
+@@ -160,10 +167,11 @@ export const PreviewSnapshotTool = safeBrowserTool(
+ const PreviewActTool = browserTool(
+   Tool.make("preview_act", {
+     description:
+-      "Act on the chosen tab. Target with `locator='aria-ref=<ref>'` from `preview_snapshot`; `x` and `y` go together. `timeoutMs` defaults to 15000. click: `button`, `clickCount` 1 to 3. type: literal `text`, `clear=true` replaces it. hover: shows menus or tooltips. select: `values` in one native <select>, by value or label; for a custom dropdown, click it open, then click the option. drag: `source` onto `target`. upload: absolute `paths` answer the file picker `preview_status` reports, [] cancels it, or a `locator` sets an <input type=file>. press: one `key`, such as 'Enter', with `modifiers`, to the focused element; click a field first to focus it. scroll: the tab, or one container with a locator; positive `deltaY` scrolls down, positive `deltaX` right.",
++      "Act on the chosen tab. Target with `locator='aria-ref=<ref>'` from `preview_snapshot`; `x` and `y` go together. `timeoutMs` defaults to 15000. click: `button`, `clickCount` 1 to 3. type: literal `text`, `clear=true` replaces it. hover: shows menus or tooltips. select: `values` in one native <select>, by value or label; for a custom dropdown, click it open, then click the option. drag: `source` onto `target`, or the button held along `path`, a list of {x,y} points (a stroke, shape, or selection box), with `button` and `modifiers`. upload: absolute `paths` answer the file picker `preview_status` reports, [] cancels it, or a `locator` sets an <input type=file>. press: one `key`, such as 'Enter', with `modifiers`, to the focused element; click a field first to focus it. scroll: the tab, or one container with a locator; positive `deltaY` scrolls down, positive `deltaX` right.",
+     parameters: PreviewAutomationActInput,
+     success: Schema.Union([
+       Schema.Struct({ ...PreviewAutomationSelectResult.fields, ...presentationFields }),
++      PreviewDoneResult,
+       PreviewActionResult,
+     ]),
+     failure: PreviewToolFailure,
+diff --git a/apps/server/src/plutonium/windowStream.test.ts b/apps/server/src/plutonium/windowStream.test.ts
+new file mode 100644
+index 0000000000..86369e6640
+--- /dev/null
++++ b/apps/server/src/plutonium/windowStream.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { FrameReader, inputRequest } from "./windowStream.ts";
++
++const frame = (jpeg: string, width: number, height: number) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(jpeg.length, 0);
++  header.writeUInt16BE(width, 4);
++  header.writeUInt16BE(height, 6);
++  return Buffer.concat([header, Buffer.from(jpeg)]);
++};
++
++describe("window stream", () => {
++  it("splits the helper's frames however they arrive", () => {
++    const bytes = Buffer.concat([frame("first", 640, 480), frame("2", 1, 1)]);
++    for (let cut = 0; cut <= bytes.length; cut++) {
++      const reader = new FrameReader();
++      const got = [...reader.push(bytes.subarray(0, cut)), ...reader.push(bytes.subarray(cut))];
++      expect(got.map(String)).toEqual(["first", "2"]);
++    }
++  });
++
++  it("forwards only mouse and key input", () => {
++    const event = { type: "mousePressed", x: 1, y: 2, button: "left", clickCount: 1 };
++    expect(inputRequest({ type: "mouse", event })).toEqual({ path: "mouse", body: event });
++    const events = [{ type: "keyDown", code: "KeyA" }];
++    expect(inputRequest({ type: "keys", events })).toEqual({ path: "keys", body: { events } });
++    expect(inputRequest({ type: "keys", events: "KeyA" })).toBeNull();
++    expect(inputRequest({ type: "close" })).toBeNull();
++    expect(inputRequest(null)).toBeNull();
++  });
++});
+diff --git a/apps/server/src/plutonium/windowStream.ts b/apps/server/src/plutonium/windowStream.ts
+new file mode 100644
+index 0000000000..20ce4022c8
+--- /dev/null
++++ b/apps/server/src/plutonium/windowStream.ts
+@@ -0,0 +1,304 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - the Plutonium helper is a Unix socket, polled from Node callbacks
++/**
++ * Plutonium: native windows for clients away from the desktop.
++ *
++ * The Plutonium shell shows a thread's windows with <native-window> elements,
++ * which only exist in the session's own browser. Another machine's browser
++ * gets them from here, through the helper (its Unix socket):
++ *
++ *   /api/window-stream/ws               {type:"windows", windows} whenever
++ *                                       the window list changes.
++ *   /api/window-stream/ws?windowId=N    the window's frames, as binary JPEG
++ *                                       messages; `maxWidth`, `maxHeight`,
++ *                                       `quality`. The client sends
++ *                                       {type:"mouse", event} and
++ *                                       {type:"keys", events} (the helper's
++ *                                       WindowMouseEvent, WindowKeyEvent).
++ *
++ * Watching needs orchestration:read; input needs preview:operate, as driving
++ * a preview does. A closed window closes the socket with WINDOW_GONE_CODE;
++ * no helper (or one without these routes), with WINDOWS_UNAVAILABLE_CODE.
++ */
++import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
++import { AuthOrchestrationReadScope, AuthPreviewOperateScope } from "@t3tools/contracts";
++import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Queue from "effect/Queue";
++import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
++import * as Socket from "effect/socket/Socket";
++import * as NodeHttp from "node:http";
++
++import { authenticateMediaRequest } from "../auth/http.ts";
++
++export const WINDOW_STREAM_ROUTE_PREFIX = "/api/window-stream";
++/** Matches the client's. */
++export const WINDOW_GONE_CODE = 4404;
++export const WINDOWS_UNAVAILABLE_CODE = 4503;
++
++const LIST_INTERVAL_MS = 1000;
++const REQUEST_TIMEOUT_MS = 10_000;
++const MAX_SOCKET_BUFFER_BYTES = 4 * 1024 * 1024;
++const FRAME_HEADER_BYTES = 8;
++const textDecoder = new TextDecoder();
++
++/** Splits the helper's frame stream (helper/src/windowStream.ts) into JPEGs. */
++export class FrameReader {
++  private pending: Buffer = Buffer.alloc(0);
++
++  push(chunk: Buffer): Buffer[] {
++    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk;
++    const frames: Buffer[] = [];
++    while (this.pending.length >= FRAME_HEADER_BYTES) {
++      const length = this.pending.readUInt32BE(0);
++      if (this.pending.length < FRAME_HEADER_BYTES + length) break;
++      frames.push(this.pending.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length));
++      this.pending = this.pending.subarray(FRAME_HEADER_BYTES + length);
++    }
++    return frames;
++  }
++}
++
++/** A client message as the helper's input request, or null if it isn't one. */
++export const inputRequest = (
++  message: unknown,
++): { readonly path: "mouse" | "keys"; readonly body: unknown } | null => {
++  if (typeof message !== "object" || message === null || !("type" in message)) return null;
++  if (message.type === "mouse" && "event" in message && typeof message.event === "object") {
++    return { path: "mouse", body: message.event };
++  }
++  if (message.type === "keys" && "events" in message && Array.isArray(message.events)) {
++    return { path: "keys", body: { events: message.events } };
++  }
++  return null;
++};
++
++const intParam = (params: URLSearchParams, name: string, fallback: number, max: number) => {
++  const value = Number(params.get(name));
++  return Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), max) : fallback;
++};
++
++const parseMessage = (chunk: Uint8Array | string): unknown => {
++  try {
++    return JSON.parse(typeof chunk === "string" ? chunk : textDecoder.decode(chunk));
++  } catch {
++    return null;
++  }
++};
++
++/** A request to the helper: its status and body. */
++const helperRequest = (
++  socketPath: string,
++  method: "GET" | "POST",
++  path: string,
++  body?: unknown,
++): Promise<{ readonly status: number; readonly text: string }> =>
++  new Promise((resolve, reject) => {
++    const request = NodeHttp.request(
++      {
++        socketPath,
++        method,
++        path,
++        timeout: REQUEST_TIMEOUT_MS,
++        headers: body === undefined ? {} : { "Content-Type": "application/json" },
++      },
++      (response) => {
++        let text = "";
++        response.setEncoding("utf8");
++        response.on("data", (chunk: string) => (text += chunk));
++        response.on("end", () => resolve({ status: response.statusCode ?? 500, text }));
++      },
++    );
++    request.on("timeout", () => request.destroy());
++    request.on("error", reject);
++    request.end(body === undefined ? undefined : JSON.stringify(body));
++  });
++
++type Output =
++  | { readonly _tag: "frame"; readonly data: Uint8Array }
++  | { readonly _tag: "text"; readonly text: string }
++  | { readonly _tag: "close"; readonly code: number; readonly reason: string };
++
++/** Sends the window list on `output` whenever it changes; returns a stop function. */
++const watchWindows = (socketPath: string, output: Queue.Queue<Output>): (() => void) => {
++  let last = "";
++  let stopped = false;
++  const poll = () => {
++    helperRequest(socketPath, "GET", "/v1/windows").then(
++      ({ status, text }) => {
++        if (stopped) return;
++        if (status !== 200) {
++          Queue.offerUnsafe(output, {
++            _tag: "close",
++            code: WINDOWS_UNAVAILABLE_CODE,
++            reason: `helper said ${status}`,
++          });
++          return;
++        }
++        if (text !== last) {
++          last = text;
++          Queue.offerUnsafe(output, { _tag: "text", text: `{"type":"windows","windows":${text}}` });
++        }
++        timer = setTimeout(poll, LIST_INTERVAL_MS);
++      },
++      () => {
++        if (!stopped)
++          Queue.offerUnsafe(output, {
++            _tag: "close",
++            code: WINDOWS_UNAVAILABLE_CODE,
++            reason: "no helper",
++          });
++      },
++    );
++  };
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  poll();
++  return () => {
++    stopped = true;
++    clearTimeout(timer);
++  };
++};
++
++/** Sends window `windowId`'s frames on `output`; returns a stop function. */
++const watchFrames = (
++  socketPath: string,
++  windowId: number,
++  query: URLSearchParams,
++  output: Queue.Queue<Output>,
++  congested: () => boolean,
++): (() => void) => {
++  const reader = new FrameReader();
++  const request = NodeHttp.request(
++    { socketPath, method: "GET", path: `/v1/windows/${windowId}/stream?${query.toString()}` },
++    (response) => {
++      if (response.statusCode !== 200) {
++        response.resume();
++        Queue.offerUnsafe(
++          output,
++          response.statusCode === 404
++            ? { _tag: "close", code: WINDOW_GONE_CODE, reason: "no such window" }
++            : {
++                _tag: "close",
++                code: WINDOWS_UNAVAILABLE_CODE,
++                reason: `helper said ${response.statusCode}`,
++              },
++        );
++        return;
++      }
++      response.on("data", (chunk: Buffer) => {
++        for (const frame of reader.push(chunk)) {
++          // A slow viewer loses frames rather than falling behind.
++          if (!congested()) Queue.offerUnsafe(output, { _tag: "frame", data: frame });
++        }
++      });
++      response.on("end", () =>
++        Queue.offerUnsafe(output, {
++          _tag: "close",
++          code: WINDOW_GONE_CODE,
++          reason: "window closed",
++        }),
++      );
++    },
++  );
++  request.on("error", () =>
++    Queue.offerUnsafe(output, {
++      _tag: "close",
++      code: WINDOWS_UNAVAILABLE_CODE,
++      reason: "no helper",
++    }),
++  );
++  request.end();
++  return () => request.destroy();
++};
++
++const handler = Effect.gen(function* () {
++  const request = yield* HttpServerRequest.HttpServerRequest;
++  const url = HttpServerRequest.toURL(request);
++  if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
++  if (
++    url.value.pathname !== `${WINDOW_STREAM_ROUTE_PREFIX}/ws` ||
++    request.headers.upgrade?.toLowerCase() !== "websocket"
++  ) {
++    return HttpServerResponse.text("Not Found", { status: 404 });
++  }
++  const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
++  const canOperate = session.scopes.includes(AuthPreviewOperateScope);
++  const params = url.value.searchParams;
++  const windowId = Number(params.get("windowId") ?? NaN);
++  const socketPath = plutoniumHelperSocket();
++  return yield* Effect.scoped(
++    Effect.gen(function* () {
++      const incoming = NodeHttpServerRequest.toIncomingMessage(request);
++      // JPEGs are already compressed.
++      delete incoming.headers["sec-websocket-extensions"];
++      const transport = incoming.socket;
++      const socket = yield* request.upgrade;
++      const reader = yield* socket.reader;
++      const writer = yield* socket.writer;
++      if (socketPath === undefined) {
++        yield* writer.write(new Socket.CloseEvent(WINDOWS_UNAVAILABLE_CODE, "no helper"));
++        return HttpServerResponse.empty();
++      }
++      const output = yield* Queue.unbounded<Output>();
++      const stop = Number.isInteger(windowId)
++        ? watchFrames(
++            socketPath,
++            windowId,
++            new URLSearchParams({
++              maxWidth: String(intParam(params, "maxWidth", 1920, 7680)),
++              maxHeight: String(intParam(params, "maxHeight", 1200, 4320)),
++              quality: String(intParam(params, "quality", 70, 100)),
++            }),
++            output,
++            () => transport.writableLength > MAX_SOCKET_BUFFER_BYTES,
++          )
++        : watchWindows(socketPath, output);
++      yield* Effect.addFinalizer(() => Effect.sync(stop));
++
++      const send = Queue.take(output).pipe(
++        Effect.flatMap((item) => {
++          switch (item._tag) {
++            case "frame":
++              return writer.write(item.data);
++            case "text":
++              return writer.write(item.text);
++            case "close":
++              return writer
++                .write(new Socket.CloseEvent(item.code, item.reason))
++                .pipe(Effect.andThen(Effect.interrupt));
++          }
++        }),
++      );
++      // Input goes to the helper in order, one request at a time.
++      let inputs: Promise<unknown> = Promise.resolve();
++      const receive = (chunk: Uint8Array | string) =>
++        Effect.sync(() => {
++          const input =
++            canOperate && Number.isInteger(windowId) ? inputRequest(parseMessage(chunk)) : null;
++          if (!input) return;
++          inputs = inputs
++            .then(() =>
++              helperRequest(
++                socketPath,
++                "POST",
++                `/v1/windows/${windowId}/${input.path}`,
++                input.body,
++              ),
++            )
++            .catch(() => {});
++        });
++      const receiveInput = reader.pull.pipe(
++        Effect.flatMap((chunks) => Effect.forEach(chunks, receive, { discard: true })),
++      );
++      return yield* Effect.raceFirst(Effect.forever(send), Effect.forever(receiveInput));
++    }),
++  ).pipe(
++    // A dropped socket is a normal end of viewing.
++    Effect.orElseSucceed(() => HttpServerResponse.empty()),
++  );
++});
++
++export const routeLayer = process.env.PLUTONIUM_T3
++  ? HttpRouter.add("GET", `${WINDOW_STREAM_ROUTE_PREFIX}/*`, handler)
++  : Layer.empty;
+diff --git a/apps/server/src/plutonium/windowTabs.test.ts b/apps/server/src/plutonium/windowTabs.test.ts
+new file mode 100644
+index 0000000000..e361a54274
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTabs.test.ts
+@@ -0,0 +1,343 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - a stand-in for the helper on a Unix socket
++import * as Effect from "effect/Effect";
++import * as Queue from "effect/Queue";
++import * as NodeFs from "node:fs";
++import * as NodeHttp from "node:http";
++import * as NodeOs from "node:os";
++import * as NodePath from "node:path";
++import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
++
++import type { ServerBrowserViewerOutput } from "../preview/ServerBrowser.ts";
++import {
++  attachWindowViewer,
++  closeWindow,
++  FrameReader,
++  type HelperWindow,
++  WindowInputTranslator,
++  windowTabs,
++} from "./windowTabs.ts";
++
++const frame = (jpeg: string, width: number, height: number) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(jpeg.length, 0);
++  header.writeUInt16BE(width, 4);
++  header.writeUInt16BE(height, 6);
++  return Buffer.concat([header, Buffer.from(jpeg)]);
++};
++
++const kwrite: HelperWindow = {
++  id: 5,
++  appId: "org.kde.kwrite",
++  title: "Untitled",
++  width: 800,
++  height: 600,
++  pid: 4242,
++  tags: ["t3:dock/1", "t3:thread/thread-a"],
++};
++
++describe("window tabs", () => {
++  it("lists a thread's windows as its tabs", () => {
++    expect(
++      windowTabs([
++        kwrite,
++        { ...kwrite, id: 6, title: " ", appId: "", tags: ["t3:thread/thread-b"] },
++        // No thread: no tab.
++        { ...kwrite, id: 7, tags: ["t3:global"] },
++        { id: 8, appId: "x", title: "x", width: 1, height: 1, pid: 1 },
++      ]),
++    ).toEqual([
++      {
++        threadId: "thread-a",
++        tabId: "plutonium-window-5-4242",
++        url: "app://org.kde.kwrite",
++        title: "Untitled",
++      },
++      {
++        threadId: "thread-b",
++        tabId: "plutonium-window-6-4242",
++        url: "app://window",
++        title: "window",
++      },
++    ]);
++  });
++
++  it("splits the helper's frames, with their size, however they arrive", () => {
++    const bytes = Buffer.concat([frame("first", 640, 480), frame("2", 1, 1)]);
++    for (let cut = 0; cut <= bytes.length; cut++) {
++      const reader = new FrameReader();
++      const got = [...reader.push(bytes.subarray(0, cut)), ...reader.push(bytes.subarray(cut))];
++      expect(got.map(({ data, width, height }) => [String(data), width, height])).toEqual([
++        ["first", 640, 480],
++        ["2", 1, 1],
++      ]);
++    }
++  });
++
++  it("turns a viewer's mouse, keys and text into the helper's input", () => {
++    const translator = new WindowInputTranslator();
++    const at = { x: 10, y: 20, modifiers: 2 };
++    expect(
++      translator.translate({
++        type: "mouse",
++        action: "down",
++        ...at,
++        button: "left",
++        buttons: 1,
++        clickCount: 2,
++      }),
++    ).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: 2 },
++      },
++    ]);
++    expect(
++      translator.translate({ type: "key", action: "down", key: "a", code: "KeyA", modifiers: 8 }),
++    ).toEqual([
++      { path: "keys", body: { events: [{ type: "keyDown", code: "KeyA", modifiers: 8 }] } },
++    ]);
++    // A soft keyboard's keys: named keys by name, others as their text.
++    expect(
++      translator.translate({ type: "key", action: "down", key: "Backspace", code: "" }),
++    ).toEqual([
++      { path: "keys", body: { events: [{ type: "keyDown", code: "Backspace", modifiers: 0 }] } },
++    ]);
++    expect(
++      translator.translate({ type: "key", action: "down", key: "é", code: "", text: "é" }),
++    ).toEqual([{ path: "text", body: { text: "é" } }]);
++    expect(translator.translate({ type: "key", action: "up", key: "é", code: "" })).toEqual([]);
++    expect(translator.translate({ type: "text", text: "hello" })).toEqual([
++      { path: "text", body: { text: "hello" } },
++    ]);
++    // Only for pages.
++    expect(translator.translate({ type: "navigate", url: "https://example.com" })).toEqual([]);
++    expect(translator.translate({ type: "mouse", action: "down", x: "1", y: 2 })).toEqual([]);
++    // Losing control lets go of what is held.
++    expect(translator.release()).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseReleased", x: 10, y: 20, button: "left", buttons: 0, clickCount: 1 },
++      },
++      {
++        path: "keys",
++        body: {
++          events: [
++            { type: "keyUp", code: "KeyA" },
++            { type: "keyUp", code: "Backspace" },
++          ],
++        },
++      },
++    ]);
++    expect(translator.release()).toEqual([]);
++  });
++
++  it("scrolls by whole notches, keeping what a pan has not yet made one", () => {
++    const translator = new WindowInputTranslator();
++    const wheel = (deltaY: number) =>
++      translator.translate({ type: "wheel", x: 1, y: 2, deltaX: 0, deltaY, modifiers: 0 });
++    expect(wheel(60)).toEqual([]);
++    expect(wheel(60)).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseWheel", x: 1, y: 2, deltaX: 0, deltaY: 1, modifiers: 0 },
++      },
++    ]);
++    expect(wheel(-250)).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseWheel", x: 1, y: 2, deltaX: 0, deltaY: -2, modifiers: 0 },
++      },
++    ]);
++  });
++});
++
++describe("a window's viewer", () => {
++  let directory: string;
++  let helper: NodeHttp.Server;
++  let windows: HelperWindow[];
++  let posts: Array<{ path: string; body: unknown }>;
++  let stream: NodeHttp.ServerResponse | null;
++  const previousSocket = process.env.PLUTONIUM_HELPER;
++
++  beforeEach(async () => {
++    directory = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-window-tabs-"));
++    windows = [kwrite];
++    posts = [];
++    stream = null;
++    helper = NodeHttp.createServer((request, response) => {
++      let body = "";
++      request.on("data", (chunk) => (body += chunk));
++      request.on("end", () => {
++        const path = request.url ?? "";
++        if (path === "/v1/windows") {
++          response.writeHead(200, { "Content-Type": "application/json" });
++          return response.end(JSON.stringify(windows));
++        }
++        if (path.startsWith("/v1/windows/5/stream?")) {
++          response.writeHead(200);
++          response.flushHeaders();
++          stream = response;
++          return;
++        }
++        posts.push({ path, body: body ? JSON.parse(body) : undefined });
++        response.writeHead(204).end();
++      });
++    });
++    const socketPath = NodePath.join(directory, "helper.sock");
++    await new Promise<void>((resolve) => helper.listen(socketPath, resolve));
++    process.env.PLUTONIUM_HELPER = socketPath;
++  });
++
++  afterEach(async () => {
++    stream?.destroy();
++    await new Promise((resolve) => helper.close(resolve));
++    NodeFs.rmSync(directory, { recursive: true, force: true });
++    if (previousSocket === undefined) delete process.env.PLUTONIUM_HELPER;
++    else process.env.PLUTONIUM_HELPER = previousSocket;
++  });
++
++  const attach = (threadId = "thread-a", canOperate = true) =>
++    attachWindowViewer({
++      threadId,
++      tabId: "plutonium-window-5-4242",
++      windowId: 5,
++      pid: 4242,
++      maxWidth: 1280,
++      maxHeight: 800,
++      quality: 70,
++      canOperate,
++    });
++  const next = (output: Queue.Dequeue<ServerBrowserViewerOutput>) => Queue.take(output);
++  const waitFor = async (check: () => boolean) => {
++    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
++    expect(check()).toBe(true);
++  };
++
++  it("streams the window's frames, paced by acks, and sends its input", () =>
++    Effect.runPromise(
++      Effect.scoped(
++        Effect.gen(function* () {
++          const viewer = yield* attach();
++          expect(yield* next(viewer.output)).toEqual({ _tag: "viewport", width: 800, height: 600 });
++          expect(yield* next(viewer.output)).toMatchObject({
++            _tag: "control",
++            canOperate: true,
++            controller: "you",
++          });
++
++          yield* Effect.promise(() => waitFor(() => stream !== null));
++          for (const name of ["1", "2", "3", "4"]) stream!.write(frame(name, 1600, 1200));
++          const first = yield* next(viewer.output);
++          const second = yield* next(viewer.output);
++          expect([first, second].map((each) => each._tag === "frame" && String(each.data))).toEqual(
++            ["1", "2"],
++          );
++          // Two wait for their acks; of those behind them, only the newest is kept.
++          yield* Effect.promise(() => new Promise((r) => setTimeout(r, 30)));
++          expect(yield* Queue.size(viewer.output)).toBe(0);
++          if (first._tag === "frame") yield* first.ack;
++          const third = yield* next(viewer.output);
++          expect(third._tag === "frame" && String(third.data)).toBe("4");
++
++          yield* viewer.input({
++            type: "mouse",
++            action: "move",
++            x: 3,
++            y: 4,
++            button: "none",
++            buttons: 0,
++            clickCount: 0,
++            modifiers: 0,
++          });
++          yield* viewer.input({ type: "text", text: "hi" });
++          expect(posts).toEqual([
++            {
++              path: "/v1/windows/5/mouse",
++              body: {
++                type: "mouseMoved",
++                x: 3,
++                y: 4,
++                button: "none",
++                buttons: 0,
++                clickCount: 0,
++                modifiers: 0,
++              },
++            },
++            { path: "/v1/windows/5/text", body: { text: "hi" } },
++          ]);
++          // A touch viewer may raise its keyboard anywhere.
++          yield* viewer.input({ type: "probe", x: 3, y: 4 });
++          expect(yield* next(viewer.output)).toEqual({ _tag: "probe", x: 3, y: 4, editable: true });
++
++          // Resized: its new size, once its frames change shape.
++          windows = [{ ...kwrite, width: 1000, height: 700 }];
++          stream!.write(frame("5", 1280, 896));
++          yield* Effect.promise(() => new Promise((r) => setTimeout(r, 30)));
++          const outputs = yield* Queue.takeAll(viewer.output);
++          expect(outputs.filter((each) => each._tag === "viewport")).toEqual([
++            { _tag: "viewport", width: 1000, height: 700 },
++          ]);
++
++          stream!.end();
++          let output = yield* next(viewer.output);
++          while (output._tag === "frame") output = yield* next(viewer.output);
++          expect(output).toEqual({ _tag: "gone" });
++        }),
++      ),
++    ));
++
++  it("gives control to one viewer at a time, which lets go of what it held", () =>
++    Effect.runPromise(
++      Effect.scoped(
++        Effect.gen(function* () {
++          const first = yield* attach();
++          const second = yield* attach();
++          const control = (output: Queue.Dequeue<ServerBrowserViewerOutput>) =>
++            Queue.takeAll(output).pipe(
++              Effect.map((all) => all.filter((each) => each._tag === "control").at(-1)),
++            );
++          expect(yield* control(first.output)).toMatchObject({
++            controller: "you",
++          });
++          expect(yield* control(second.output)).toMatchObject({
++            controller: "another-viewer",
++          });
++          // Without control, input goes nowhere.
++          yield* second.input({ type: "text", text: "no" });
++          yield* first.input({ type: "key", action: "down", key: "a", code: "KeyA", modifiers: 0 });
++          yield* second.input({ type: "takeControl" });
++          yield* Effect.promise(() => waitFor(() => posts.length === 2));
++          expect(posts).toEqual([
++            {
++              path: "/v1/windows/5/keys",
++              body: { events: [{ type: "keyDown", code: "KeyA", modifiers: 0 }] },
++            },
++            { path: "/v1/windows/5/keys", body: { events: [{ type: "keyUp", code: "KeyA" }] } },
++          ]);
++          expect(yield* control(first.output)).toMatchObject({
++            controller: "another-viewer",
++          });
++          expect(yield* control(second.output)).toMatchObject({
++            controller: "you",
++          });
++        }),
++      ),
++    ));
++
++  it("closes the tab's window, and not another that reused its number", async () => {
++    await Effect.runPromise(closeWindow({ windowId: 5, pid: 1 }));
++    expect(posts).toEqual([]);
++    await Effect.runPromise(closeWindow({ windowId: 5, pid: 4242 }));
++    expect(posts.map((post) => post.path)).toEqual(["/v1/windows/5/close"]);
++  });
++
++  it("finds no window that isn't the thread's, or has gone", async () => {
++    await expect(Effect.runPromise(Effect.scoped(attach("thread-b")))).rejects.toMatchObject({
++      _tag: "PlutoniumWindowGoneError",
++    });
++    windows = [{ ...kwrite, pid: 1 }];
++    await expect(Effect.runPromise(Effect.scoped(attach()))).rejects.toMatchObject({
++      _tag: "PlutoniumWindowGoneError",
++    });
++  });
++});
+diff --git a/apps/server/src/plutonium/windowTabs.ts b/apps/server/src/plutonium/windowTabs.ts
+new file mode 100644
+index 0000000000..8fbb3d3431
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTabs.ts
+@@ -0,0 +1,575 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - the Plutonium helper is a Unix socket, read from Node callbacks
++/**
++ * Plutonium: native windows as server tabs, for every T3 client.
++ *
++ * Each window the helper lists under a thread (its first `t3:thread/` tag)
++ * is one of that thread's preview tabs, `runtime: "server"`, so any client
++ * that lists and streams server tabs (the mobile app, the desktop app, a
++ * browser elsewhere) gets it as it gets a page:
++ *
++ * - The list: `PreviewManager.syncPlutoniumWindows`, from the helper's
++ *   `GET /v1/windows` each second. The tab's address is `app://<app id>`, its
++ *   title the window's. Agents' preview tools and the server's browser don't
++ *   see these tabs (`PreviewManager.list` leaves them out).
++ * - The stream: `/api/preview-stream/ws` with the window's tab id comes here
++ *   (`attachWindowViewer`): the helper's frames (`GET /v1/windows/:id/stream`)
++ *   as the viewer's frames, the window's size in DIPs as its viewport, and the
++ *   viewer's input as the helper's (`POST /v1/windows/:id/{mouse,keys,text}`).
++ *   One viewer at a time has control, as with a page.
++ * - Closing the tab asks the app to close the window (`closeWindow`).
++ */
++import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++import { plutoniumWindowTabId } from "@t3tools/shared/plutoniumWindowTabs";
++import { ThreadId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Queue from "effect/Queue";
++import * as Schedule from "effect/Schedule";
++import * as Schema from "effect/Schema";
++import * as NodeCrypto from "node:crypto";
++import * as NodeHttp from "node:http";
++
++import * as PreviewManager from "../preview/Manager.ts";
++import type { ServerBrowserViewer, ServerBrowserViewerOutput } from "../preview/ServerBrowser.ts";
++import { forkParked } from "../serverActivation.ts";
++
++const LIST_INTERVAL = "1 second";
++const REQUEST_TIMEOUT_MS = 10_000;
++const FRAME_HEADER_BYTES = 8;
++/** Frames sent and not yet acknowledged; a newer frame replaces one waiting behind them. */
++const MAX_FRAMES_IN_FLIGHT = 2;
++const VIEWER_OUTPUT_LIMIT = 64;
++/** Pixels of a viewer's wheel or touch pan that make one wheel notch. */
++const WHEEL_PX_PER_NOTCH = 100;
++const THREAD_TAG_PREFIX = "t3:thread/";
++
++/** A window as the helper lists it (helper/src/relay.ts, NativeWindowEntry). */
++export interface HelperWindow {
++  readonly id: number;
++  readonly appId: string;
++  readonly title: string;
++  /** DIPs. */
++  readonly width: number;
++  readonly height: number;
++  readonly pid: number;
++  readonly tags?: ReadonlyArray<string>;
++}
++
++export class PlutoniumWindowGoneError extends Schema.TaggedError<PlutoniumWindowGoneError>()(
++  "PlutoniumWindowGoneError",
++  { windowId: Schema.Number },
++) {}
++
++/** The thread a window belongs to: its first T3 thread tag's. */
++export const windowThread = (window: HelperWindow): string | null => {
++  const tag = (window.tags ?? []).find((each) => each.startsWith(THREAD_TAG_PREFIX));
++  return tag ? tag.slice(THREAD_TAG_PREFIX.length) || null : null;
++};
++
++/** The helper's window list as the threads' window tabs. */
++export const windowTabs = (
++  windows: ReadonlyArray<HelperWindow>,
++): Array<PreviewManager.PlutoniumWindowTabInput> =>
++  windows.flatMap((window) => {
++    const threadId = windowThread(window);
++    if (threadId === null) return [];
++    const app = window.appId.trim() || "window";
++    return [
++      {
++        threadId: ThreadId.make(threadId),
++        tabId: plutoniumWindowTabId(window.id, window.pid),
++        url: `app://${app}`.slice(0, 2048),
++        title: (window.title.trim() || app).slice(0, 512),
++      },
++    ];
++  });
++
++/** Splits the helper's frame stream (helper/src/windowStream.ts) into JPEGs and their size. */
++export class FrameReader {
++  private pending: Buffer = Buffer.alloc(0);
++
++  push(chunk: Buffer): Array<{ data: Buffer; width: number; height: number }> {
++    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk;
++    const frames = [];
++    while (this.pending.length >= FRAME_HEADER_BYTES) {
++      const length = this.pending.readUInt32BE(0);
++      if (this.pending.length < FRAME_HEADER_BYTES + length) break;
++      frames.push({
++        width: this.pending.readUInt16BE(4),
++        height: this.pending.readUInt16BE(6),
++        data: this.pending.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length),
++      });
++      this.pending = this.pending.subarray(FRAME_HEADER_BYTES + length);
++    }
++    return frames;
++  }
++}
++
++/** A request to the helper: its status and body. */
++const helperRequest = (
++  socketPath: string,
++  method: "GET" | "POST",
++  path: string,
++  body?: unknown,
++): Promise<{ readonly status: number; readonly text: string }> =>
++  new Promise((resolve, reject) => {
++    const request = NodeHttp.request(
++      {
++        socketPath,
++        method,
++        path,
++        timeout: REQUEST_TIMEOUT_MS,
++        headers: body === undefined ? {} : { "Content-Type": "application/json" },
++      },
++      (response) => {
++        let text = "";
++        response.setEncoding("utf8");
++        response.on("data", (chunk: string) => (text += chunk));
++        response.on("end", () => resolve({ status: response.statusCode ?? 500, text }));
++      },
++    );
++    request.on("timeout", () => request.destroy(new Error("timed out")));
++    request.on("error", reject);
++    request.end(body === undefined ? undefined : JSON.stringify(body));
++  });
++
++const listWindows = async (socketPath: string): Promise<Array<HelperWindow>> => {
++  const { status, text } = await helperRequest(socketPath, "GET", "/v1/windows");
++  if (status !== 200) throw new Error(`The helper said ${status}.`);
++  const windows: unknown = JSON.parse(text);
++  return Array.isArray(windows) ? (windows as Array<HelperWindow>) : [];
++};
++
++// --- Input ------------------------------------------------------------------
++
++/** The helper's input for one viewer message. */
++export type WindowInput =
++  | { readonly path: "mouse"; readonly body: Record<string, unknown> }
++  | { readonly path: "keys"; readonly body: { readonly events: ReadonlyArray<unknown> } }
++  | { readonly path: "text"; readonly body: { readonly text: string } };
++
++const MOUSE_TYPES = { move: "mouseMoved", down: "mousePressed", up: "mouseReleased" } as const;
++const MOUSE_BUTTONS = new Set(["none", "left", "middle", "right", "back", "forward"]);
++/** Keys a soft keyboard sends without a `code`, whose `key` names the physical key. */
++const NAMED_KEYS = new Set([
++  "Backspace",
++  "Delete",
++  "Enter",
++  "Tab",
++  "Escape",
++  "ArrowLeft",
++  "ArrowRight",
++  "ArrowUp",
++  "ArrowDown",
++  "Home",
++  "End",
++  "PageUp",
++  "PageDown",
++  "Insert",
++]);
++
++const finite = (value: unknown): value is number =>
++  typeof value === "number" && Number.isFinite(value);
++const int = (value: unknown) => (finite(value) ? Math.round(value) : 0);
++
++/**
++ * Turns a viewer's input into the helper's, keeping what it needs between
++ * messages (wheel remainders, keys and buttons held). Messages for pages
++ * only (navigation, resizing, dialogs) are none.
++ */
++export class WindowInputTranslator {
++  private wheelX = 0;
++  private wheelY = 0;
++  /** Codes held down, so losing control releases them. */
++  readonly heldKeys = new Set<string>();
++  /** Buttons held, and where, so losing control releases them. */
++  readonly heldButtons = new Map<string, { x: number; y: number }>();
++
++  translate(message: Record<string, unknown>): Array<WindowInput> {
++    switch (message.type) {
++      case "mouse": {
++        const type = MOUSE_TYPES[message.action as keyof typeof MOUSE_TYPES];
++        if (!type || !finite(message.x) || !finite(message.y)) return [];
++        const button =
++          typeof message.button === "string" && MOUSE_BUTTONS.has(message.button)
++            ? message.button
++            : "none";
++        if (type === "mousePressed" && button !== "none")
++          this.heldButtons.set(button, { x: message.x, y: message.y });
++        if (type === "mouseReleased") this.heldButtons.delete(button);
++        return [
++          {
++            path: "mouse",
++            body: {
++              type,
++              x: message.x,
++              y: message.y,
++              button,
++              buttons: int(message.buttons),
++              clickCount: int(message.clickCount),
++              modifiers: int(message.modifiers),
++            },
++          },
++        ];
++      }
++      case "wheel": {
++        if (!finite(message.x) || !finite(message.y)) return [];
++        // Touch pans come as many small deltas; the helper takes whole notches.
++        this.wheelX += finite(message.deltaX) ? message.deltaX : 0;
++        this.wheelY += finite(message.deltaY) ? message.deltaY : 0;
++        const deltaX = Math.trunc(this.wheelX / WHEEL_PX_PER_NOTCH);
++        const deltaY = Math.trunc(this.wheelY / WHEEL_PX_PER_NOTCH);
++        if (deltaX === 0 && deltaY === 0) return [];
++        this.wheelX -= deltaX * WHEEL_PX_PER_NOTCH;
++        this.wheelY -= deltaY * WHEEL_PX_PER_NOTCH;
++        return [
++          {
++            path: "mouse",
++            body: {
++              type: "mouseWheel",
++              x: message.x,
++              y: message.y,
++              deltaX,
++              deltaY,
++              modifiers: int(message.modifiers),
++            },
++          },
++        ];
++      }
++      case "key": {
++        const down = message.action === "down";
++        if (!down && message.action !== "up") return [];
++        const key = typeof message.key === "string" ? message.key : "";
++        const code =
++          typeof message.code === "string" && message.code.length > 0
++            ? message.code
++            : NAMED_KEYS.has(key)
++              ? key
++              : key === " "
++                ? "Space"
++                : "";
++        if (code === "") {
++          // A soft keyboard's key with no physical key: its text, typed.
++          const text = typeof message.text === "string" ? message.text : "";
++          return down && text.length > 0 ? [{ path: "text", body: { text } }] : [];
++        }
++        if (down) this.heldKeys.add(code);
++        else this.heldKeys.delete(code);
++        return [
++          {
++            path: "keys",
++            body: {
++              events: [
++                { type: down ? "keyDown" : "keyUp", code, modifiers: int(message.modifiers) },
++              ],
++            },
++          },
++        ];
++      }
++      case "text":
++        return typeof message.text === "string" && message.text.length > 0
++          ? [{ path: "text", body: { text: message.text } }]
++          : [];
++      default:
++        return [];
++    }
++  }
++
++  /** Releases what is held: the viewer lost control, or left. */
++  release(): Array<WindowInput> {
++    const inputs: Array<WindowInput> = [];
++    for (const [button, at] of this.heldButtons) {
++      inputs.push({
++        path: "mouse",
++        body: { type: "mouseReleased", ...at, button, buttons: 0, clickCount: 1 },
++      });
++    }
++    if (this.heldKeys.size > 0) {
++      inputs.push({
++        path: "keys",
++        body: { events: [...this.heldKeys].map((code) => ({ type: "keyUp", code })) },
++      });
++    }
++    this.heldButtons.clear();
++    this.heldKeys.clear();
++    this.wheelX = this.wheelY = 0;
++    return inputs;
++  }
++}
++
++// --- Control ----------------------------------------------------------------
++
++interface WindowViewerState {
++  readonly id: string;
++  readonly canOperate: boolean;
++  readonly push: (output: ServerBrowserViewerOutput) => void;
++  /** Releases what the viewer holds, when it loses control. */
++  readonly release: () => void;
++}
++
++interface WindowControl {
++  controller: string | null;
++  generation: number;
++  readonly viewers: Map<string, WindowViewerState>;
++}
++
++/** Who controls each window's tab, by tab id. */
++const controls = new Map<string, WindowControl>();
++
++const broadcastControl = (control: WindowControl) => {
++  for (const viewer of control.viewers.values()) {
++    viewer.push({
++      _tag: "control",
++      canOperate: viewer.canOperate,
++      controller:
++        control.controller === viewer.id
++          ? "you"
++          : control.controller !== null
++            ? "another-viewer"
++            : "unclaimed",
++      generation: control.generation,
++      dialog: null,
++    });
++  }
++};
++
++const setController = (control: WindowControl, controller: string | null) => {
++  if (control.controller === controller) return;
++  const previous =
++    control.controller === null ? undefined : control.viewers.get(control.controller);
++  previous?.release();
++  control.controller = controller;
++  control.generation += 1;
++  broadcastControl(control);
++};
++
++// --- Viewing ----------------------------------------------------------------
++
++/**
++ * A viewer of native window `windowId` (drawn by `pid`) in thread
++ * `threadId`'s tab, in the protocol of `ServerBrowser.attachViewer`.
++ */
++export const attachWindowViewer = Effect.fn("PlutoniumWindowTabs.attachWindowViewer")(
++  function* (input: {
++    readonly threadId: string;
++    readonly tabId: string;
++    readonly windowId: number;
++    readonly pid: number;
++    readonly maxWidth: number;
++    readonly maxHeight: number;
++    readonly quality: number;
++    readonly canOperate: boolean;
++  }) {
++    const runSync = Effect.runSyncWith(yield* Effect.context<never>());
++    const gone = new PlutoniumWindowGoneError({ windowId: input.windowId });
++    const socketPath = plutoniumHelperSocket();
++    if (socketPath === undefined) return yield* gone;
++    const findWindow = () =>
++      listWindows(socketPath).then((windows) =>
++        windows.find(
++          (window) =>
++            window.id === input.windowId &&
++            window.pid === input.pid &&
++            windowThread(window) === input.threadId,
++        ),
++      );
++    const found = yield* Effect.promise(() => findWindow().catch(() => undefined));
++    if (found === undefined) return yield* gone;
++
++    const output = yield* Queue.make<ServerBrowserViewerOutput>({
++      capacity: VIEWER_OUTPUT_LIMIT,
++      strategy: "dropping",
++    });
++    const push = (next: ServerBrowserViewerOutput) => {
++      if (Queue.offerUnsafe(output, next)) return true;
++      // A stalled viewer must not miss who controls it, or that the window went.
++      if (next._tag === "control" || next._tag === "gone") {
++        // Dropped frames count as seen, or pacing would wait for them.
++        for (const item of runSync(Queue.clear(output)))
++          if (item._tag === "frame") runSync(item.ack);
++        return Queue.offerUnsafe(output, next);
++      }
++      return false;
++    };
++
++    // Input goes to the helper in order, one request at a time.
++    let inputs: Promise<unknown> = Promise.resolve();
++    const send = (each: WindowInput) => {
++      inputs = inputs
++        .then(() =>
++          helperRequest(
++            socketPath,
++            "POST",
++            `/v1/windows/${input.windowId}/${each.path}`,
++            each.body,
++          ),
++        )
++        .catch(() => {});
++      return inputs;
++    };
++    const translator = new WindowInputTranslator();
++
++    let control = controls.get(input.tabId);
++    if (!control) {
++      control = { controller: null, generation: 0, viewers: new Map() };
++      controls.set(input.tabId, control);
++    }
++    const windowControl = control;
++    const viewer: WindowViewerState = {
++      id: NodeCrypto.randomUUID(),
++      canOperate: input.canOperate,
++      push: (next) => void push(next),
++      release: () => {
++        for (const each of translator.release()) void send(each);
++      },
++    };
++    yield* Effect.acquireRelease(
++      Effect.sync(() => windowControl.viewers.set(viewer.id, viewer)),
++      () =>
++        Effect.sync(() => {
++          if (windowControl.controller === viewer.id) setController(windowControl, null);
++          windowControl.viewers.delete(viewer.id);
++          if (windowControl.viewers.size === 0) controls.delete(input.tabId);
++        }),
++    );
++
++    // The window's size in DIPs maps the viewer's points to the window's.
++    let viewport = { width: found.width, height: found.height };
++    push({ _tag: "viewport", ...viewport });
++    const remeasure = () =>
++      void findWindow()
++        .then((window) => {
++          if (!window || (window.width === viewport.width && window.height === viewport.height))
++            return;
++          viewport = { width: window.width, height: window.height };
++          push({ _tag: "viewport", ...viewport });
++        })
++        .catch(() => {});
++
++    if (input.canOperate && windowControl.controller === null)
++      setController(windowControl, viewer.id);
++    else broadcastControl(windowControl);
++
++    // Frames, paced by the viewer's acks: a newer frame replaces one still waiting.
++    let inFlight = 0;
++    let waiting: Buffer | null = null;
++    let shape = "";
++    const deliver = (data: Buffer) => {
++      inFlight += 1;
++      if (!push({ _tag: "frame", data, ack: Effect.sync(acknowledged) })) inFlight -= 1;
++    };
++    const acknowledged = () => {
++      inFlight = Math.max(0, inFlight - 1);
++      if (waiting !== null && inFlight < MAX_FRAMES_IN_FLIGHT) {
++        const next = waiting;
++        waiting = null;
++        deliver(next);
++      }
++    };
++    const reader = new FrameReader();
++    const query = new URLSearchParams({
++      maxWidth: String(input.maxWidth),
++      maxHeight: String(input.maxHeight),
++      quality: String(input.quality),
++    });
++    yield* Effect.acquireRelease(
++      Effect.sync(() => {
++        const request = NodeHttp.request(
++          {
++            socketPath,
++            method: "GET",
++            path: `/v1/windows/${input.windowId}/stream?${query.toString()}`,
++          },
++          (response) => {
++            if (response.statusCode !== 200) {
++              response.resume();
++              push({ _tag: "gone" });
++              return;
++            }
++            response.on("data", (chunk: Buffer) => {
++              for (const frame of reader.push(chunk)) {
++                // A resized window: its new size, for mapping input.
++                const next = `${frame.width}x${frame.height}`;
++                if (next !== shape) {
++                  if (shape !== "") remeasure();
++                  shape = next;
++                }
++                if (inFlight < MAX_FRAMES_IN_FLIGHT) deliver(frame.data);
++                else waiting = frame.data;
++              }
++            });
++            response.on("end", () => push({ _tag: "gone" }));
++          },
++        );
++        request.on("error", () => push({ _tag: "gone" }));
++        request.end();
++        return request;
++      }),
++      (request) => Effect.sync(() => request.destroy()),
++    );
++
++    return {
++      output,
++      input: (raw: unknown) =>
++        Effect.promise(async () => {
++          if (!viewer.canOperate || typeof raw !== "object" || raw === null) return;
++          const message = raw as Record<string, unknown>;
++          if (message.type === "takeControl") return setController(windowControl, viewer.id);
++          if (message.type === "releaseControl") {
++            if (windowControl.controller === viewer.id) setController(windowControl, null);
++            return;
++          }
++          if (windowControl.controller !== viewer.id) return;
++          if (message.type === "probe") {
++            // Whether a point takes text isn't known for a native window: any
++            // may, so a touch viewer raises its keyboard.
++            if (finite(message.x) && finite(message.y))
++              push({ _tag: "probe", x: message.x, y: message.y, editable: true });
++            return;
++          }
++          for (const each of translator.translate(message)) await send(each);
++        }),
++    } satisfies ServerBrowserViewer;
++  },
++);
++
++/** Asks the app to close the window, as its close button does, if it's still that process's. */
++export const closeWindow = (window: { readonly windowId: number; readonly pid: number }) =>
++  Effect.promise(async () => {
++    const socketPath = plutoniumHelperSocket();
++    if (socketPath === undefined) return;
++    try {
++      const windows = await listWindows(socketPath);
++      if (!windows.some((each) => each.id === window.windowId && each.pid === window.pid)) return;
++      await helperRequest(socketPath, "POST", `/v1/windows/${window.windowId}/close`);
++    } catch {
++      // No helper: nothing to close.
++    }
++  });
++
++// --- The list ---------------------------------------------------------------
++
++/** Keeps the threads' window tabs in step with the helper's windows, while Plutonium runs. */
++export const layer = process.env.PLUTONIUM_T3
++  ? Layer.effectDiscard(
++      Effect.gen(function* () {
++        const socketPath = plutoniumHelperSocket();
++        if (socketPath === undefined) return;
++        const manager = yield* PreviewManager.PreviewManager;
++        let last = "";
++        const sync = Effect.promise(() =>
++          listWindows(socketPath).then(windowTabs, () => null),
++        ).pipe(
++          Effect.flatMap((tabs) => {
++            // No helper: the tabs stay as they were until it answers again.
++            if (tabs === null) return Effect.void;
++            const key = JSON.stringify(tabs);
++            if (key === last) return Effect.void;
++            last = key;
++            return manager.syncPlutoniumWindows(tabs);
++          }),
++        );
++        yield* forkParked(sync.pipe(Effect.repeat(Schedule.spaced(LIST_INTERVAL))));
++      }),
++    )
++  : Layer.empty;
+diff --git a/apps/server/src/plutonium/windowTools.test.ts b/apps/server/src/plutonium/windowTools.test.ts
+new file mode 100644
+index 0000000000..d4aebb10cb
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTools.test.ts
+@@ -0,0 +1,275 @@
++// @effect-diagnostics nodeBuiltinImport:off - a fake Plutonium helper on a Unix socket
++import { expect, it } from "@effect/vitest";
++import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import { McpSchema, McpServer } from "effect/ai";
++import * as NodeFS from "node:fs";
++import * as NodeHttp from "node:http";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++
++import * as McpHttpServer from "../mcp/McpHttpServer.ts";
++import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
++import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
++import * as ServerBrowser from "../preview/ServerBrowser.ts";
++
++const threadId = ThreadId.make("thread-windows-test");
++const invocation = (thread: boolean) => ({
++  environmentId: EnvironmentId.make("environment-windows-test"),
++  requestNamespace: "provider-session-windows-test",
++  thread: thread
++    ? {
++        threadId,
++        providerSessionId: "provider-session-windows-test",
++        providerInstanceId: ProviderInstanceId.make("codex"),
++      }
++    : undefined,
++  client: thread
++    ? undefined
++    : { sessionId: "client", label: "client", access: "read-only" as const },
++  capabilities: new Set<McpInvocationContext.McpCapability>(),
++  issuedAt: 1,
++});
++const client = McpSchema.McpServerClient.of({
++  clientId: 1,
++  clientCapabilities: {},
++  clientInfo: { name: "mcp-test", version: "1.0.0" },
++  protocolVersion: "2025-06-18",
++  initializePayload: {
++    protocolVersion: "2025-06-18",
++    capabilities: {},
++    clientInfo: { name: "mcp-test", version: "1.0.0" },
++  },
++  getClient: Effect.die("unused"),
++});
++
++/** A 2x3 PNG's first bytes: enough for its size. */
++const PNG = Buffer.concat([
++  Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
++  Buffer.from([0, 0, 0, 2, 0, 0, 0, 3]),
++]).toString("base64");
++
++/** A helper that answers each call with what a real one would, and records it. */
++const fakeHelper = Effect.acquireRelease(
++  Effect.promise(async () => {
++    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-plutonium-windows-"));
++    const socketPath = NodePath.join(dir, "helper.sock");
++    const calls: Array<{ readonly path: string; readonly body: unknown }> = [];
++    const server = NodeHttp.createServer((request, response) => {
++      let body = "";
++      request.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
++      request.on("end", () => {
++        calls.push({ path: request.url ?? "", body: JSON.parse(body) });
++        const { name } = JSON.parse(body) as { name: string };
++        response.setHeader("Content-Type", "application/json");
++        response.end(
++          JSON.stringify(
++            name === "snapshot_window"
++              ? { content: [{ type: "image", data: PNG, mimeType: "image/png" }] }
++              : name === "type_window"
++                ? { content: [{ type: "text", text: "Can't type 'é'." }], isError: true }
++                : name === "list_tabs"
++                  ? {
++                      content: [
++                        {
++                          type: "text",
++                          text: JSON.stringify([
++                            { id: 41, url: "https://b.test/" },
++                            {
++                              id: 42,
++                              url: "https://a.test/",
++                              pending: { permission: { origin: "https://a.test" } },
++                              state: { inUse: { camera: true } },
++                            },
++                          ]),
++                        },
++                      ],
++                    }
++                  : { content: [{ type: "text", text: '[{"id":3}]' }] },
++          ),
++        );
++      });
++    });
++    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
++    return { dir, server, socketPath, calls };
++  }),
++  ({ dir, server }) =>
++    Effect.promise(
++      () =>
++        new Promise<void>((resolve) =>
++          server.close(() => {
++            NodeFS.rmSync(dir, { recursive: true, force: true });
++            resolve();
++          }),
++        ),
++    ),
++);
++
++const withEnv = (name: string, value: string | undefined) =>
++  Effect.acquireRelease(
++    Effect.sync(() => {
++      const previous = process.env[name];
++      if (value === undefined) delete process.env[name];
++      else process.env[name] = value;
++      return previous;
++    }),
++    (previous) =>
++      Effect.sync(() => {
++        if (previous === undefined) delete process.env[name];
++        else process.env[name] = previous;
++      }),
++  );
++
++const buildServer = Effect.provide(
++  McpServer.McpServer,
++  McpHttpServer.layerPlutoniumWindowToolkit.pipe(
++    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
++    Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
++  ),
++);
++
++it.effect("offers the window tools and runs them on the helper for the calling thread", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const helper = yield* fakeHelper;
++      yield* withEnv("PLUTONIUM_HELPER", helper.socketPath);
++      const server = yield* buildServer;
++      const names = server.tools.map(({ tool }) => tool.name);
++      expect(names).toContain("list_windows");
++      expect(names).toContain("snapshot_window");
++      expect(names).toContain("click_window");
++      expect(names).toContain("find_apps");
++      const launch = server.tools.find(({ tool }) => tool.name === "launch_app")!.tool;
++      expect(JSON.stringify(launch.inputSchema)).toContain("use find_apps to get an app's argv");
++      for (const { tool } of server.tools) {
++        expect(tool.inputSchema.type, `inputSchema.type of ${tool.name}`).toBe("object");
++      }
++
++      const call = (name: string, args: Record<string, unknown>, thread = true) =>
++        server
++          .callTool({ name, arguments: args })
++          .pipe(
++            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(thread)),
++            Effect.provideService(McpSchema.McpServerClient, client),
++          );
++
++      const listed = yield* call("list_windows", {});
++      expect(listed.isError).toBe(false);
++      expect(listed.structuredContent).toEqual({ result: [{ id: 3 }] });
++
++      const shot = yield* call("snapshot_window", { window_id: 3 });
++      expect(shot.isError).toBe(false);
++      expect(shot.content.map((entry) => entry.type)).toEqual(["text", "image"]);
++      expect(shot.structuredContent).toMatchObject({ screenshot: { width: 2, height: 3 } });
++
++      const typed = yield* call("type_window", { window_id: 3, text: "é" });
++      expect(typed.isError).toBe(true);
++      expect(JSON.stringify(typed.content)).toContain("Can't type");
++
++      expect(helper.calls.map((entry) => entry.path)).toEqual(
++        Array(3).fill(`/v1/threads/${encodeURIComponent(`t3:thread/${threadId}`)}/mcp/call`),
++      );
++      expect(helper.calls[1]!.body).toEqual({
++        name: "snapshot_window",
++        arguments: { window_id: 3 },
++      });
++
++      const refused = yield* call("list_windows", {}, false);
++      expect(refused.isError).toBe(true);
++      expect(helper.calls).toHaveLength(3);
++
++      const found = yield* call("find_apps", { filter: "spreadsheet" });
++      expect(found.isError).toBe(false);
++      expect(helper.calls[3]!.body).toEqual({
++        name: "find_apps",
++        arguments: { filter: "spreadsheet" },
++      });
++    }),
++  ),
++);
++
++it.effect("runs the helper's tab tools on the browser's id for T3's tab", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const helper = yield* fakeHelper;
++      yield* withEnv("PLUTONIUM_HELPER", helper.socketPath);
++      const asked: Array<{ readonly tabId?: string | undefined }> = [];
++      const browser = {
++        plutoniumTabId: (input: { readonly tabId?: string | undefined }) =>
++          Effect.sync(() => {
++            asked.push(input);
++            return input.tabId === undefined || input.tabId === "tab-1" ? 42 : null;
++          }),
++      } as unknown as ServerBrowser.ServerBrowser["Service"];
++      const server = yield* buildServer.pipe(
++        Effect.provideService(ServerBrowser.ServerBrowser, browser),
++      );
++      const names = server.tools.map(({ tool }) => tool.name);
++      for (const name of [
++        "tab_requests",
++        "find_in_tab",
++        "answer_permission",
++        "request_permission",
++        "choose_files",
++        "print_tab",
++        "cancel_print",
++        "list_printers",
++        "list_downloads",
++        "download_action",
++      ]) {
++        expect(names).toContain(name);
++      }
++      const call = (name: string, args: Record<string, unknown>) =>
++        server
++          .callTool({ name, arguments: args })
++          .pipe(
++            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(true)),
++            Effect.provideService(McpSchema.McpServerClient, client),
++          );
++
++      const found = yield* call("find_in_tab", { tabId: "tab-1", text: "hello" });
++      expect(found.isError).toBe(false);
++      expect(helper.calls.at(-1)!.body).toEqual({
++        name: "find_in_tab",
++        arguments: { text: "hello", tab_id: 42 },
++      });
++      expect(asked.at(-1)).toMatchObject({ threadId, tabId: "tab-1" });
++
++      const printed = yield* call("print_tab", { save_to: "~/a.pdf" });
++      expect(printed.isError).toBe(false);
++      expect(helper.calls.at(-1)!.body).toEqual({
++        name: "print_tab",
++        arguments: { save_to: "~/a.pdf", tab_id: 42 },
++      });
++
++      const requests = yield* call("tab_requests", {});
++      expect(requests.structuredContent).toEqual({
++        result: {
++          pending: { permission: { origin: "https://a.test" } },
++          state: { inUse: { camera: true } },
++        },
++      });
++
++      const before = helper.calls.length;
++      const missing = yield* call("answer_permission", { tabId: "tab-9" });
++      expect(missing.isError).toBe(true);
++      expect(JSON.stringify(missing.content)).toContain("No preview tab tab-9");
++      expect(helper.calls).toHaveLength(before);
++
++      yield* call("list_downloads", {});
++      expect(helper.calls.at(-1)!.body).toEqual({ name: "list_downloads", arguments: {} });
++    }),
++  ),
++);
++
++it.effect("offers nothing outside a Plutonium session", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      yield* withEnv("PLUTONIUM_HELPER", undefined);
++      yield* withEnv("PLUTONIUM_WAYLAND_DISPLAY", undefined);
++      const server = yield* buildServer;
++      expect(server.tools).toEqual([]);
++    }),
++  ),
++);
+diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
+new file mode 100644
+index 0000000000..a6d9d6b311
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTools.ts
+@@ -0,0 +1,762 @@
++// @effect-diagnostics nodeBuiltinImport:off - requests go to the Plutonium helper's Unix socket
++/**
++ * Plutonium: the native window tools (find_apps, launch_app, snapshot_window,
++ * click_window, type_window, ...) on T3 Code's own MCP server, so every
++ * provider's agents can use the apps of their thread. Tabs are T3's preview
++ * tools' already; of the helper's tab tools, those preview tools have no
++ * counterpart for (find, permissions, file pickers, printing, downloads) are
++ * here too, on T3's tab ids: the server finds the browser's id for the tab
++ * (ServerBrowser.plutoniumTabId) and the helper runs the tool on it.
++ *
++ * T3 declares the tools and who may call them, as for its other toolkits:
++ * each acts as the calling thread (`McpToolAccess`). The helper runs them for
++ * that thread (POST /v1/threads/:tag/mcp/call), as its own MCP server does.
++ * McpHttpServer registers them only in a Plutonium session.
++ */
++import { OrchestratorMcpFailure } from "@t3tools/contracts";
++import { plutoniumHelperSocket, plutoniumThreadTag } from "@t3tools/shared/plutonium";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++import { Tool, Toolkit } from "effect/ai";
++import * as NodeHttp from "node:http";
++
++import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
++import * as ServerBrowser from "../preview/ServerBrowser.ts";
++import * as McpToolAccess from "../mcp/McpToolAccess.ts";
++import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
++
++/** Whether this server runs in a Plutonium session, with a helper to run the tools. */
++export const available = () => plutoniumHelperSocket() !== undefined;
++
++export class PlutoniumWindowToolError extends Schema.TaggedError<PlutoniumWindowToolError>()(
++  "PlutoniumWindowToolError",
++  { message: Schema.String },
++) {}
++
++const dependencies = [
++  McpInvocationContext.McpInvocationContext,
++  ThreadManagementService.ThreadManagementService,
++];
++
++const WindowToolFailure = Schema.Union([PlutoniumWindowToolError, OrchestratorMcpFailure]);
++
++const WindowToolResult = Schema.Struct({
++  result: Schema.Unknown.annotate({ description: "What the Plutonium helper answered." }),
++});
++
++const windowId = Schema.Int.annotate({
++  description: "A window id from list_windows or launch_app.",
++});
++const coordinate = (axis: string) =>
++  Schema.Number.annotate({
++    description: `${axis} in the window's snapshot_window image, in pixels.`,
++  });
++const point = Schema.Tuple([Schema.Number, Schema.Number]).annotate({ description: "[x, y]" });
++const button = Schema.optional(
++  Schema.Literals(["left", "right", "middle"]).annotate({ description: "Default left." }),
++);
++
++const windowTool = <const Name extends string, P extends Schema.Struct.Fields>(
++  name: Name,
++  description: string,
++  parameters: P,
++  hints: { readonly title: string; readonly destructive?: boolean },
++) =>
++  Tool.make(name, {
++    description,
++    parameters: Schema.Struct(parameters),
++    success: WindowToolResult,
++    failure: WindowToolFailure,
++    dependencies,
++  })
++    .annotate(Tool.Title, hints.title)
++    .annotate(Tool.Readonly, false)
++    .annotate(Tool.Destructive, hints.destructive === true)
++    .annotate(Tool.Idempotent, false)
++    .annotate(Tool.OpenWorld, true);
++
++const ListWindowsTool = Tool.make("list_windows", {
++  description:
++    "List the native desktop app windows that belong to this thread (apps you launched with launch_app or started from this thread's terminals). Each has an id, title, app id, size, whether the user is looking at it, and whether it has keyboard focus; agentSize when it's held at the size you gave it, userControl when the user took control of its size.",
++  // No `parameters`: an empty Schema.Struct serializes to `anyOf: [object, array]`,
++  // which clients reject (see the worktree toolkit).
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "List app windows")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const FindAppsTool = Tool.make("find_apps", {
++  description:
++    "Find the installed desktop apps (what the user's app launcher shows, Flatpaks included) and how to start them with launch_app. Each has its name, generic name (e.g. \"Spreadsheet\"), desktop id, the argv to pass to launch_app, and where it's installed from (flatpak, nix profile, system or user) with its desktop file, so two installs of one app can be told apart. Every install is listed: one the launcher doesn't show, since another file has its desktop id, names that file (launcherShows). With a filter, also the matching programs on PATH (onPath, mostly command-line ones).",
++  parameters: Schema.Struct({
++    filter: Schema.optional(
++      Schema.String.annotate({
++        description:
++          'A case-insensitive regular expression matched against each app\'s name, generic name, keywords, desktop id and command, e.g. "spreadsheet" or "office" (default: all apps).',
++      }),
++    ),
++  }),
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "Find apps")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const LaunchAppTool = windowTool(
++  "launch_app",
++  "Start a native desktop (GUI) app, such as LibreOffice, GIMP, Inkscape, a terminal or a file manager, as part of this thread, and wait for its window. find_apps gives an installed app's argv. Drive it with snapshot_window, click_window, type_window and press_window, even while the user is doing something else. The app runs detached from your shell. Its windows wait in the thread for the user unless focus is true. They keep the size you give (width and height) or the one the app picks: the user sees them scaled to fit, and that you're working in them, until they take control. Returns the new windows open once they've stopped changing (a splash screen or a dialog that closes doesn't end the wait; empty if none was open when the wait ran out).",
++  {
++    argv: Schema.Array(Schema.String).annotate({
++      description:
++        "Program and arguments: use find_apps to get an app's argv. argv[0] is looked up on PATH, and installed apps' programs often aren't there under their app names (Flatpaks, for one). No shell is involved.",
++    }),
++    cwd: Schema.optional(
++      Schema.String.annotate({ description: "Working directory (default: your home directory)." }),
++    ),
++    wait_seconds: Schema.optional(
++      Schema.Number.annotate({
++        description:
++          "How long to wait at most for the app's windows to appear and settle (default 10, 0 to not wait).",
++      }),
++    ),
++    width: Schema.optional(
++      Schema.Int.annotate({
++        description: "Window width (with height; default: the app's own), in list_windows' sizes.",
++      }),
++    ),
++    height: Schema.optional(Schema.Int.annotate({ description: "Window height (with width)." })),
++    focus: Schema.optional(
++      Schema.Boolean.annotate({
++        description:
++          "Bring the app's windows to the front (default false). Only when the user asked to see the app, since it takes them away from what they're doing.",
++      }),
++    ),
++  },
++  { title: "Launch app" },
++);
++
++export const SnapshotWindowTool = Tool.make("snapshot_window", {
++  description:
++    "Take a screenshot of one of this thread's app windows, even if the user isn't looking at it: a PNG of the window's contents only. Points for click_window and the other window tools are in this image's pixels. Open menus and other popups are drawn in it where they are (the image grows right and down to hold one that goes past the window) and listed in popups; the window tools reach them.",
++  parameters: Schema.Struct({ window_id: windowId }),
++  success: Schema.Struct({
++    window_id: Schema.Int,
++    screenshot: Schema.Struct({
++      mimeType: Schema.Literal("image/png"),
++      data: Schema.String,
++      width: Schema.Int,
++      height: Schema.Int,
++    }),
++    popups: Schema.optional(
++      Schema.Array(
++        Schema.Struct({ x: Schema.Int, y: Schema.Int, width: Schema.Int, height: Schema.Int }),
++      ).annotate({
++        description: "The window's open menus and other popups, in the image's pixels.",
++      }),
++    ),
++  }),
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "Screenshot app window")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const ClickWindowTool = windowTool(
++  "click_window",
++  "Click in one of this thread's app windows at a point of its snapshot_window image. The app gets the click even if the user isn't looking at it, and the user's own pointer and keyboard stay where they are. A click on an open menu goes to the menu; one outside it closes the menu, as for a user, and goes no further. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window's open popups. Take a new snapshot to see what happened.",
++  {
++    window_id: windowId,
++    x: coordinate("x"),
++    y: coordinate("y"),
++    button,
++    count: Schema.optional(
++      Schema.Literals([1, 2, 3]).annotate({ description: "2 for a double click (default 1)." }),
++    ),
++  },
++  { title: "Click in app window" },
++);
++
++const HoverWindowTool = windowTool(
++  "hover_window",
++  "Move the pointer to a point in one of this thread's app windows (for tooltips and hover menus).",
++  { window_id: windowId, x: coordinate("x"), y: coordinate("y") },
++  { title: "Hover in app window" },
++);
++
++const DragWindowTool = windowTool(
++  "drag_window",
++  "Press at one point of one of this thread's app windows, move to another and release there: to draw, select, or move things.",
++  { window_id: windowId, from: point, to: point, button },
++  { title: "Drag in app window" },
++);
++
++const ScrollWindowTool = windowTool(
++  "scroll_window",
++  "Turn the mouse wheel over a point in one of this thread's app windows.",
++  {
++    window_id: windowId,
++    x: coordinate("x"),
++    y: coordinate("y"),
++    dy: Schema.optional(
++      Schema.Number.annotate({ description: "Wheel notches down (negative: up)." }),
++    ),
++    dx: Schema.optional(
++      Schema.Number.annotate({ description: "Wheel notches right (negative: left)." }),
++    ),
++  },
++  { title: "Scroll in app window" },
++);
++
++const TypeWindowTool = windowTool(
++  "type_window",
++  "Type text into one of this thread's app windows, as from a keyboard, into whatever in the window has the keyboard (click a field first). The window gets the keys even if the user is typing elsewhere. Keys are a US keyboard's: other characters are refused. A newline presses Enter; after an Enter that should move the focus (a toolbar box, a dialog field), click where the next text goes.",
++  { window_id: windowId, text: Schema.String },
++  { title: "Type in app window" },
++);
++
++const PressWindowTool = windowTool(
++  "press_window",
++  'Press keys in one of this thread\'s app windows: "Enter", "Escape", "ctrl+s", "ctrl+shift+t", "alt+F4", "Down", "ctrl+]", or a list of them pressed in turn. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window\'s open popups (menus).',
++  {
++    window_id: windowId,
++    keys: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({
++      description: "A key combination, or a list of them.",
++    }),
++  },
++  { title: "Press keys in app window" },
++);
++
++const ResizeWindowTool = windowTool(
++  "resize_window",
++  "Ask the app to resize one of this thread's windows (in the sizes list_windows gives). It keeps that size while the user looks at it (scaled to fit), unless they took control of its size. Returns the size the app took.",
++  { window_id: windowId, width: Schema.Int, height: Schema.Int },
++  { title: "Resize app window" },
++);
++
++const ReadWindowTool = Tool.make("read_window", {
++  description:
++    "Read one of this thread's app windows as an accessibility tree, when the app has one (GTK, Qt, LibreOffice and most desktop apps; not terminals or games): each element's role, name, states, text, its center in snapshot_window's pixels (@x,y) and a ref for act_window. Better than a snapshot for reading text and finding controls. Hidden elements are left out unless all is true; ref reads one element and what's in it. A big table (a spreadsheet's sheet) gives its size and its visible cells that have text or focus: scroll the window to read others. When the app doesn't answer, it says so and whether the app is still running.",
++  parameters: Schema.Struct({
++    window_id: windowId,
++    ref: Schema.optional(
++      Schema.String.annotate({
++        description: 'An element\'s ref from read_window (e.g. "a12"), to read only that part.',
++      }),
++    ),
++    all: Schema.optional(
++      Schema.Boolean.annotate({ description: "Include hidden elements (default false)." }),
++    ),
++  }),
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "Read app window")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const ActWindowTool = windowTool(
++  "act_window",
++  'Act on an element of one of this thread\'s app windows by its ref from read_window, through the app\'s accessibility: "click" (its default action: press, activate, toggle; or a click at its center), "focus", "set_text" (replace an editable text\'s contents with text; the keyboard stays where it was, so to commit a field that acts on Enter, focus it and press Enter), "set_value" (a slider\'s or spin button\'s value), "select" (pick it in its list, table or tabs; a click at its center if the app won\'t select it), "scroll_into_view", or one of the actions read_window lists for it. Returns the windows that opened (newWindows: a dialog, or one that came after your last action) or closed, and the window\'s open popups (menus). Read again to see the result.',
++  {
++    window_id: windowId,
++    ref: Schema.String.annotate({
++      description: 'The element\'s ref from read_window (e.g. "a12").',
++    }),
++    action: Schema.String.annotate({
++      description:
++        "click, focus, set_text, set_value, select, scroll_into_view, or one of its actions.",
++    }),
++    text: Schema.optional(Schema.String.annotate({ description: "For set_text." })),
++    value: Schema.optional(Schema.Number.annotate({ description: "For set_value." })),
++  },
++  { title: "Act in app window" },
++);
++
++const FocusWindowTool = windowTool(
++  "focus_window",
++  "Show one of this thread's app windows to the user (the desktop opens or raises it). Only when they asked to see it.",
++  { window_id: windowId },
++  { title: "Show app window" },
++);
++
++const CloseWindowTool = windowTool(
++  "close_window",
++  "Ask one of this thread's app windows to close, as its close button would. The app may refuse or ask the user first; the result says whether the window went away.",
++  { window_id: windowId },
++  { title: "Close app window", destructive: true },
++);
++
++const StartRecordingTool = windowTool(
++  "start_recording",
++  "Record one of this thread's app windows to a video file (WebM), even if the user isn't looking at it, until stop_recording. The user sees the recording in their shell and can stop it; it fails if they switched recording off. For preview tabs, use preview_recording_start. Returns its recording_id and the file's path.",
++  {
++    window_id: windowId,
++    path: Schema.optional(
++      Schema.String.annotate({
++        description: "An absolute path for the .webm file (default: one in the temp folder).",
++      }),
++    ),
++  },
++  { title: "Start window recording" },
++);
++
++const StopRecordingTool = windowTool(
++  "stop_recording",
++  "Stop a recording start_recording began (default: this thread's newest) and finish its file. Returns the path, its length in seconds and size, and `ended` if it had already stopped (the user stopped it, or the window closed).",
++  {
++    recording_id: Schema.optional(
++      Schema.Int.annotate({ description: "A recording_id from start_recording." }),
++    ),
++  },
++  { title: "Stop window recording" },
++);
++
++export const WindowStandardToolkit = Toolkit.make(
++  ListWindowsTool,
++  FindAppsTool,
++  LaunchAppTool,
++  ClickWindowTool,
++  HoverWindowTool,
++  DragWindowTool,
++  ScrollWindowTool,
++  TypeWindowTool,
++  PressWindowTool,
++  ResizeWindowTool,
++  ReadWindowTool,
++  ActWindowTool,
++  FocusWindowTool,
++  CloseWindowTool,
++  StartRecordingTool,
++  StopRecordingTool,
++);
++
++export const WindowSnapshotToolkit = Toolkit.make(SnapshotWindowTool);
++
++// The helper's tab tools, on T3's tabs.
++
++const tabId = Schema.optional(
++  Schema.String.annotate({
++    description:
++      "A tabId from preview_open or preview_status (default: the tab preview tools act on without one).",
++  }),
++);
++
++const tabTool = <const Name extends string, P extends Schema.Struct.Fields>(
++  name: Name,
++  description: string,
++  parameters: P,
++  hints: { readonly title: string; readonly readonly?: boolean },
++) =>
++  Tool.make(name, {
++    description,
++    parameters: Schema.Struct({ tabId, ...parameters }),
++    success: WindowToolResult,
++    failure: WindowToolFailure,
++    dependencies,
++  })
++    .annotate(Tool.Title, hints.title)
++    .annotate(Tool.Readonly, hints.readonly === true)
++    .annotate(Tool.Destructive, false)
++    .annotate(Tool.Idempotent, hints.readonly === true)
++    .annotate(Tool.OpenWorld, true);
++
++const TabRequestsTool = tabTool(
++  "tab_requests",
++  "What one of this thread's preview tabs is waiting on in Plutonium's browser: a permission request (pending.permission: the site, the permissions, the scopes), a print (pending.print) or a file picker the browser shows (pending.fileChooser), and its state: permissions it was refused (blocked) and camera, microphone or screen in use (inUse).",
++  {},
++  { title: "Tab requests", readonly: true },
++);
++
++const FindInTabTool = tabTool(
++  "find_in_tab",
++  "Find text in one of this thread's preview tabs, as Ctrl+F does: every match is highlighted and the page scrolls to the next one (call again with the same text for the one after). Returns the number of matches and which one is active. Use it to show the user a place in the page; to read the page, use preview_snapshot. An empty text clears the highlights.",
++  {
++    text: Schema.String,
++    match_case: Schema.optional(
++      Schema.Boolean.annotate({ description: "Match upper and lower case (default false)." }),
++    ),
++    backwards: Schema.optional(
++      Schema.Boolean.annotate({
++        description: "Go to the previous match instead (default false).",
++      }),
++    ),
++  },
++  { title: "Find in tab" },
++);
++
++const AnswerPermissionTool = tabTool(
++  "answer_permission",
++  "Answer the permission request (camera, notifications, location, ...) a preview tab's page is waiting on (tab_requests shows it as pending.permission). An agent may only deny or dismiss it: to allow one, ask the user with request_permission.",
++  {
++    answer: Schema.optional(
++      Schema.Literals(["deny", "dismiss"]).annotate({
++        description:
++          "dismiss (the default) stores nothing, so the page may ask again; deny refuses it.",
++      }),
++    ),
++    scope: Schema.optional(
++      Schema.Literals(["once", "thread", "everywhere"]).annotate({
++        description:
++          "For deny: once (the default) stores nothing; thread blocks it in this thread; everywhere blocks it in the user's browser settings.",
++      }),
++    ),
++  },
++  { title: "Answer permission request" },
++);
++
++const RequestPermissionTool = tabTool(
++  "request_permission",
++  "Ask the user to allow permissions (camera, microphone, geolocation, notifications, clipboard-read, midi-sysex, storage-access, local-fonts, window-management, idle-detection, sensors, ...) for a site in one of this thread's preview tabs. The user sees a prompt marked as yours and chooses this thread or everywhere, or refuses; this waits for the answer ({answer, scope}).",
++  {
++    permissions: Schema.Array(Schema.String).annotate({ description: "At least one." }),
++    origin: Schema.optional(
++      Schema.String.annotate({
++        description: "The site, such as https://meet.example.com (default: the tab's page).",
++      }),
++    ),
++  },
++  { title: "Ask for permissions" },
++);
++
++const ChooseFilesTool = tabTool(
++  "choose_files",
++  "Answer a file picker the browser shows for a preview tab's page (tab_requests shows it as pending.fileChooser, with its mode: open, open-multiple, folder or save). A picker preview_status shows as fileChooser is preview_upload's instead. Give absolute paths on this machine: one for open, folder and save (the file to write), one or more for open-multiple. Pass no paths to cancel the picker.",
++  {
++    paths: Schema.Array(Schema.String).annotate({
++      description: "Absolute paths; empty to cancel.",
++    }),
++  },
++  { title: "Choose files" },
++);
++
++const PrintTabTool = tabTool(
++  "print_tab",
++  "Print one of this thread's preview tabs on a printer (the default one unless you name one), or save it as a PDF file with save_to. A print the page is waiting on (tab_requests shows pending.print, from window.print() or Ctrl+P) is finished by this; cancel_print dismisses it instead.",
++  {
++    printer: Schema.optional(
++      Schema.String.annotate({
++        description: "A printer name from list_printers; the default one if left out.",
++      }),
++    ),
++    save_to: Schema.optional(
++      Schema.String.annotate({
++        description:
++          "Save a PDF to this absolute path (or ~/...) instead of printing. An existing file isn't overwritten: the name gets (1), (2), ...",
++      }),
++    ),
++    copies: Schema.optional(Schema.Int.annotate({ description: "1 to 999." })),
++    duplex: Schema.optional(
++      Schema.Literals(["none", "long-edge", "short-edge"]).annotate({
++        description: "Two-sided printing.",
++      }),
++    ),
++    color: Schema.optional(Schema.Boolean.annotate({ description: "false for black and white." })),
++    paper: Schema.optional(Schema.Literals(["letter", "legal", "tabloid", "a3", "a4", "a5"])),
++    landscape: Schema.optional(Schema.Boolean),
++    scale: Schema.optional(Schema.Number.annotate({ description: "0.1 to 2; 1 is 100%." })),
++    margins: Schema.optional(Schema.Literals(["default", "none", "minimum"])),
++    background: Schema.optional(
++      Schema.Boolean.annotate({ description: "Print background colours and images." }),
++    ),
++    header_footer: Schema.optional(
++      Schema.Boolean.annotate({
++        description: "Print the date, title, URL and page numbers.",
++      }),
++    ),
++    page_ranges: Schema.optional(
++      Schema.String.annotate({
++        description: 'Pages to print, such as "1-3, 5"; all if left out.',
++      }),
++    ),
++  },
++  { title: "Print tab" },
++);
++
++const CancelPrintTool = tabTool(
++  "cancel_print",
++  "Dismiss the print a preview tab's page is waiting on (pending.print in tab_requests), without printing.",
++  {},
++  { title: "Cancel print" },
++);
++
++const ListPrintersTool = Tool.make("list_printers", {
++  description: "List the printers of this machine (CUPS), with the default one, for print_tab.",
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "List printers")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const ListDownloadsTool = Tool.make("list_downloads", {
++  description:
++    "List this thread's downloads in Plutonium's browser (files its tabs downloaded): id, filename, path, url, state (in-progress, paused, complete, cancelled, interrupted), bytes, and danger when a dangerous file waits for the user to keep or discard it. Files go where the user's downloads for this thread go.",
++  success: WindowToolResult,
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "List downloads")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
++const DownloadActionTool = windowTool(
++  "download_action",
++  "Act on one of this thread's downloads: pause, resume, cancel, open (the file, with its default app), show (its folder), discard (a dangerous file) or remove (from the list; the file stays). Keeping a dangerous file is the user's decision.",
++  {
++    download_id: Schema.Int.annotate({ description: "A download id from list_downloads." }),
++    action: Schema.Literals(["pause", "resume", "cancel", "open", "show", "discard", "remove"]),
++  },
++  { title: "Act on download" },
++);
++
++export const TabToolkit = Toolkit.make(
++  TabRequestsTool,
++  FindInTabTool,
++  AnswerPermissionTool,
++  RequestPermissionTool,
++  ChooseFilesTool,
++  PrintTabTool,
++  CancelPrintTool,
++  ListPrintersTool,
++  ListDownloadsTool,
++  DownloadActionTool,
++);
++
++// The helper runs them.
++
++type HelperContent =
++  | { readonly type: "text"; readonly text: string }
++  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
++
++const decodeAnswer = Schema.decodeUnknownEffect(
++  Schema.fromJsonString(
++    Schema.Struct({
++      content: Schema.optional(Schema.Array(Schema.Unknown)),
++      isError: Schema.optional(Schema.Boolean),
++      error: Schema.optional(Schema.String),
++    }),
++  ),
++);
++const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
++
++const REQUEST_TIMEOUT_MS = 120_000;
++
++const failure = (message: string) => new PlutoniumWindowToolError({ message });
++
++const texts = (content: readonly HelperContent[]) =>
++  content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
++
++/** Runs one of the helper's tools for the calling thread: its content, or why it failed. */
++const callHelper = Effect.fn("PlutoniumWindowTools.callHelper")(function* (
++  name: string,
++  args: unknown,
++) {
++  const socketPath = plutoniumHelperSocket();
++  if (socketPath === undefined) {
++    return yield* failure("This T3 Code server doesn't run in a Plutonium session.");
++  }
++  const scope = yield* McpInvocationContext.McpInvocationContext;
++  const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "This tool");
++  const tag = encodeURIComponent(plutoniumThreadTag(thread.threadId));
++  const { status, text } = yield* Effect.tryPromise({
++    try: () =>
++      new Promise<{ readonly status: number; readonly text: string }>((resolve, reject) => {
++        const request = NodeHttp.request(
++          {
++            socketPath,
++            method: "POST",
++            path: `/v1/threads/${tag}/mcp/call`,
++            timeout: REQUEST_TIMEOUT_MS,
++            headers: { "Content-Type": "application/json" },
++          },
++          (response) => {
++            let body = "";
++            response.setEncoding("utf8");
++            response.on("data", (chunk: string) => (body += chunk));
++            response.on("end", () => resolve({ status: response.statusCode ?? 500, text: body }));
++          },
++        );
++        request.on("timeout", () => request.destroy());
++        request.on("error", reject);
++        request.end(JSON.stringify({ name, arguments: args ?? {} }));
++      }),
++    catch: () => failure("The Plutonium helper didn't answer."),
++  });
++  const answer = yield* decodeAnswer(text).pipe(
++    Effect.mapError(() => failure(`The Plutonium helper said ${status}.`)),
++  );
++  const content = (answer.content ?? []) as readonly HelperContent[];
++  if (status === 404 && content.length === 0) {
++    // A helper older than these tools has no route for them.
++    return yield* failure(
++      "The Plutonium helper running this session doesn't have the window tools (it predates them). Window control is unavailable until the session's helper is updated and restarted; tell the user.",
++    );
++  }
++  if (status >= 400 || answer.isError === true) {
++    return yield* failure(texts(content) || answer.error || `The Plutonium helper said ${status}.`);
++  }
++  return content;
++});
++
++/** The helper's text, as JSON when it is. */
++const forward = (name: string) => (args: unknown) =>
++  callHelper(name, args).pipe(
++    Effect.map((content) => {
++      const text = texts(content);
++      return { result: Option.getOrElse(decodeJson(text), () => text) };
++    }),
++  );
++
++/** A PNG's size, from its header. */
++const pngSize = (data: string) => {
++  const header = Buffer.from(data.slice(0, 32), "base64");
++  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
++};
++
++export const layerStandard = McpToolAccess.toLayer(WindowStandardToolkit, {
++  list_windows: McpToolAccess.readsAsCaller(forward("list_windows")),
++  find_apps: McpToolAccess.readsAsCaller(forward("find_apps")),
++  launch_app: McpToolAccess.actsAsCaller(forward("launch_app")),
++  click_window: McpToolAccess.actsAsCaller(forward("click_window")),
++  hover_window: McpToolAccess.actsAsCaller(forward("hover_window")),
++  drag_window: McpToolAccess.actsAsCaller(forward("drag_window")),
++  scroll_window: McpToolAccess.actsAsCaller(forward("scroll_window")),
++  type_window: McpToolAccess.actsAsCaller(forward("type_window")),
++  press_window: McpToolAccess.actsAsCaller(forward("press_window")),
++  resize_window: McpToolAccess.actsAsCaller(forward("resize_window")),
++  read_window: McpToolAccess.readsAsCaller(forward("read_window")),
++  act_window: McpToolAccess.actsAsCaller(forward("act_window")),
++  focus_window: McpToolAccess.actsAsCaller(forward("focus_window")),
++  close_window: McpToolAccess.actsAsCaller(forward("close_window")),
++  start_recording: McpToolAccess.actsAsCaller(forward("start_recording")),
++  stop_recording: McpToolAccess.actsAsCaller(forward("stop_recording")),
++});
++
++/**
++ * The browser's id for the caller's tab `tabId` (default: the one preview
++ * tools act on without a tabId, as PreviewAutomationBroker names the caller).
++ */
++const browserTab = Effect.fn("PlutoniumWindowTools.browserTab")(function* (
++  browser: Option.Option<ServerBrowser.ServerBrowser["Service"]>,
++  tabId: string | undefined,
++) {
++  if (Option.isNone(browser)) {
++    return yield* failure("This T3 Code server has no browser for preview tabs.");
++  }
++  const scope = yield* McpInvocationContext.McpInvocationContext;
++  const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "This tool");
++  const id = yield* browser.value.plutoniumTabId({
++    threadId: thread.threadId,
++    tabId,
++    agentSessionId: `${scope.environmentId}\u0000${thread.providerSessionId}`,
++  });
++  if (id !== null) return id;
++  return yield* failure(
++    tabId === undefined
++      ? "No preview tab is open for this thread in Plutonium's browser. Call preview_open first."
++      : `No preview tab ${tabId} is open for this thread in Plutonium's browser.`,
++  );
++});
++
++/** Runs the helper's tool `name` on the browser's tab for `tabId`. */
++const forwardTab =
++  (browser: Option.Option<ServerBrowser.ServerBrowser["Service"]>, name: string) =>
++  ({ tabId, ...args }: { readonly tabId?: string | undefined }) =>
++    browserTab(browser, tabId).pipe(Effect.flatMap((id) => forward(name)({ ...args, tab_id: id })));
++
++export const layerTabs = McpToolAccess.toLayer(
++  TabToolkit,
++  Effect.gen(function* () {
++    // Optional, so the toolkit builds without one (tests of other toolkits).
++    const browser = yield* Effect.serviceOption(ServerBrowser.ServerBrowser);
++    return {
++      tab_requests: McpToolAccess.readsAsCaller(
++        ({ tabId }: { readonly tabId?: string | undefined }) =>
++          browserTab(browser, tabId).pipe(
++            Effect.flatMap((id) =>
++              forward("list_tabs")({}).pipe(
++                Effect.map(({ result }) => {
++                  const tab = Array.isArray(result)
++                    ? (result as ReadonlyArray<{ readonly id?: unknown }>).find(
++                        (entry) => entry.id === id,
++                      )
++                    : undefined;
++                  const { pending, state } = (tab ?? {}) as {
++                    readonly pending?: unknown;
++                    readonly state?: unknown;
++                  };
++                  return { result: { pending: pending ?? {}, ...(state ? { state } : {}) } };
++                }),
++              ),
++            ),
++          ),
++      ),
++      find_in_tab: McpToolAccess.actsAsCaller(forwardTab(browser, "find_in_tab")),
++      answer_permission: McpToolAccess.actsAsCaller(forwardTab(browser, "answer_permission")),
++      request_permission: McpToolAccess.actsAsCaller(forwardTab(browser, "request_permission")),
++      choose_files: McpToolAccess.actsAsCaller(forwardTab(browser, "choose_files")),
++      print_tab: McpToolAccess.actsAsCaller(forwardTab(browser, "print_tab")),
++      cancel_print: McpToolAccess.actsAsCaller(forwardTab(browser, "cancel_print")),
++      list_printers: McpToolAccess.readsAsCaller(forward("list_printers")),
++      list_downloads: McpToolAccess.readsAsCaller(forward("list_downloads")),
++      download_action: McpToolAccess.actsAsCaller(forward("download_action")),
++    };
++  }),
++);
++
++export const layerSnapshot = McpToolAccess.toLayer(WindowSnapshotToolkit, {
++  snapshot_window: McpToolAccess.readsAsCaller((input) =>
++    callHelper("snapshot_window", input).pipe(
++      Effect.flatMap((content) => {
++        const image = content.find((part) => part.type === "image");
++        const popups = Option.flatMap(decodeJson(texts(content)), (value) =>
++          typeof value === "object" &&
++          value !== null &&
++          "popups" in value &&
++          Array.isArray(value.popups)
++            ? Option.some(
++                value.popups as ReadonlyArray<{
++                  x: number;
++                  y: number;
++                  width: number;
++                  height: number;
++                }>,
++              )
++            : Option.none(),
++        );
++        return image?.mimeType === "image/png"
++          ? Effect.succeed({
++              window_id: input.window_id,
++              screenshot: {
++                mimeType: "image/png" as const,
++                data: image.data,
++                ...pngSize(image.data),
++              },
++              ...(Option.isSome(popups) ? { popups: popups.value } : {}),
++            })
++          : Effect.fail(failure(texts(content) || "The window gave no image."));
++      }),
++    ),
++  ),
++});

@@ -8,8 +8,8 @@ Hydra is optional, and all of it is in this folder: Plutonium knows it only thro
 
 - **`shell.json`**: a server shell, whose server is `bin/hydra serve`, and whose own command (`cli`) is `bin/hydra`: `plutonium hydra help`.
 - **`bin/hydra`**: serving and pairing (the helper runs them), T3 Code's own CLI, and from a checkout `fetch`, `build`, `export`, `live` and `bundle`. **`bin/supervise`** keeps the server on the host the shell's Network access setting picks. **`lib/env.sh`**: its settings (`T3CODE_DIR`, `T3_HOME`, `T3_PORT`, …), which `plutonium.env` can set.
-- **`src/BASE`**: the upstream T3 Code commit the patches apply to: v0.1.0 (`81493efb71`, 2026-10-15).
-- **`src/patches/`**: the series (`git am`), mostly in `apps/web/src/plutonium/` and `packages/shared/src/plutonium.ts`.
+- **`src/BASE`**: the upstream T3 Code commit the patches apply to, a stable release's: v0.1.7 (`322f6544df`, 2026-11-03).
+- **`src/patches/`**: the series (`git am`), one patch per part of Hydra, and no two touch the same file ("The patches" below). Most of it is in `apps/web/src/plutonium/`, `apps/server/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 - **`src/runtime.ts`**: the native packages a release's build carries (`hydra bundle`).
 
 An install copies `shell.json`, `bin/` and `lib/` into `~/.pluto/shells/hydra` (`exclude` leaves out `src/`, `build/` and this file). A release has the server built beside it, in `shells/hydra/build`; a checkout runs it from its T3 Code checkout's source.
@@ -17,6 +17,7 @@ An install copies `shell.json`, `bin/` and `lib/` into `~/.pluto/shells/hydra` (
 ```
 plutonium hydra fetch     # clone into shells/hydra/src/checkout (T3CODE_DIR), branch plutonium
 plutonium hydra build     # pnpm install, build the web app
+plutonium hydra update    # move the patches to the newest stable T3 Code ("Updating T3 Code")
 plutonium run hydra niri  # Hydra as the desktop, Styx behind it (Super+Tab)
 ```
 
@@ -37,6 +38,25 @@ The server runs on the host's own T3 Code data, as the T3 Code app and CLI do: `
   - **Settings, Connections, Network access** in the shell (T3 patch 0016): the switch T3's desktop app has. The launcher runs the server under `shells/hydra/bin/supervise`, which binds it to 0.0.0.0 or 127.0.0.1 from `$T3_HOME/plutonium-network-access`. Switching saves the choice there and restarts the server (running agents stop, as in the desktop app), and the shell stays signed in. Then Authorized clients makes pairing links and QR codes for the LAN address, for phones, browsers and other T3 Code apps (Add environment). `T3_HOST` pins the host, and the switch is then disabled. The machine's firewall must let `T3_PORT` (3773, as for T3's desktop app) in.
 
 The log is `~/.pluto/logs/hydra.log`. The server needs Node 24.13+ and pnpm. If pnpm isn't installed, `corepack` provides the version T3 pins.
+
+## The patches
+
+One patch per part of Hydra, in this order. Each file T3 Code's source has belongs to one patch only, so a patch is the change to its files, and updating T3 Code meets each conflict once, in one place. A change goes into the patch whose files it touches ("Changing it").
+
+| # | Part | Its files |
+|---|---|---|
+| 0001 | The shared module (`@t3tools/shared/plutonium`: the helper's socket, thread tags, the agent and terminal environment) and what the contracts add: the desktop browser channel's Plutonium commands, preview tools' drag paths and `busy`, keybindings (the dock, the launcher, panel keys), usage warnings | `packages/` |
+| 0002 | The app is Hydra: its name, mark and icons where the text means this app; the welcome wizard keeps the computer serving it selected | `apps/web`: branding, settings and onboarding text, `public/` |
+| 0003 | The page's start: the helper's origin, pairing with the launcher's token, the boot error reloading by itself; Settings, Connections: network access and pairing over the server's addresses | `apps/web/src/main.tsx`, `ConnectionsSettings.tsx`, `lib/bootError.ts`, `plutonium/{helperOrigin,pairing,directEndpoints,networkAccess}.ts` |
+| 0004 | The dock (Super+1…9, the sidebar's buttons, the slot editor, site icons) | `plutonium/{dock,PlutoniumDock}.ts(x)`, `SidebarChrome.tsx` |
+| 0005 | The status cluster and quick settings | `plutonium/{PlutoniumStatus,systemServices}`, the headers, `index.css` |
+| 0006 | The browser panel on Plutonium's browser tabs: the preview bridge, the floating preview's cursor and private badge | `plutonium/{PlutoniumBrowserHost,previewBridge}`, `components/preview/`, `browser/` |
+| 0007 | A thread's right panel: native windows and the Apps tab, terminals tagged with their thread, panel keys and the app launcher, tags and Elsewhere, what opens comes to the front, hidden tabs' background tabs; `plutonium/useThreadPlutonium.ts` is everything ChatView adds | the rest of `apps/web` |
+| 0008 | The server's thread environment (agents' and terminals' processes tagged with their thread), `auth session issue --runtime-mode-ceiling`, network access, forgetting archived threads' permissions | `apps/server/src/{server,ws}.ts`, `terminal/`, `orchestration-v2/`, `auth/`, `cli/` |
+| 0009 | The server's browser tabs through Plutonium's helper: the helper opens and closes them, recordings are captures, stuck actions are abandoned, snapshots in click coordinates, native windows' tabs | `apps/server/src/preview/`, `apps/desktop/` |
+| 0010 | Agents drive windows and tabs: the helper's window and tab tools in T3's MCP server, usage-limit warnings, native windows as every client's server tabs | `apps/server/src/mcp/`, `apps/server/src/plutonium/` |
+
+Until v0.1.7 the series was 56 patches, one per change, which older docs and commit messages cite as "T3 patch 00NN". That series is the branch `plutonium-v0.1.0` of the T3 Code checkout; the table below says what each of them added. 0053 (websocket tickets at `/api/auth/websocket-ticket/<use>`) is upstream since 0.1.x and was dropped. In 0.1.7 T3 Code intercepts a desktop tab's file picker itself while an agent acts on the tab, so 0051's picker is the desktop's only otherwise.
 
 ## What the patches do
 
@@ -87,4 +107,25 @@ Details and test records are in [docs/history/T3_SHELL_TEST.md](../../docs/histo
 
 ## Changing it
 
-Commit on the `plutonium` branch of the checkout, then `plutonium hydra export` rewrites `src/patches/`. To try a T3 Code worktree's web app in a running session without restarting its server: `plutonium hydra live apply --from <worktree>` (`plutonium hydra live --help`).
+Work on the `plutonium` branch of the checkout (`T3CODE_DIR`), or a branch off it. Commit each change as a fixup of the patch whose files it changes (`git commit --fixup=<that patch's commit>`, then `git rebase -i --autosquash $(cat src/BASE)`), so the series stays one patch per part. A new file goes to the part it belongs to (`apps/web/src/plutonium/` and `apps/server/src/plutonium/` files to the patch that uses them); a new part is a new patch at the end, with this table updated. Then `plutonium hydra export` rewrites `src/patches/`. To try a T3 Code worktree's web app in a running session without restarting its server: `plutonium hydra live apply --from <worktree>` (`plutonium hydra live --help`).
+
+Keep upstream files' changes small: a hook or a few lines that call into `plutonium/` (as ChatView calls `useThreadPlutonium`) cost little at the next update; logic inside upstream's files is what conflicts.
+
+## Updating T3 Code
+
+Hydra follows T3 Code's stable releases (`vX.Y.Z` tags; nightlies aren't followed). Plutonium's history gets one commit per update, `src/BASE` and the rewritten patches; T3 Code's commits stay in the T3 Code checkout.
+
+```
+plutonium hydra update              # the newest vX.Y.Z (or: plutonium hydra update v0.1.8)
+# conflicts: resolve them in ~/.local/share/plutonium/hydra-update, git add, then
+plutonium hydra update --continue   # or --abort
+```
+
+It applies `src/patches` to `src/BASE` in a worktree of the checkout, on a branch `plutonium-<tag>`, and rebases it onto the tag, with rerere on, so a conflict resolved once isn't asked again. When the rebase is done it rewrites `src/BASE` and `src/patches`, commits them here (`Hydra: T3 Code <tag> (from <old tag>), N patches`, on the current branch: make one first), and moves the checkout's `plutonium` branch to the new series; the old one stays as `plutonium-<old tag>`. Then, in the checkout:
+
+1. `plutonium hydra build`.
+2. Typecheck: `npx tsc-rs --noEmit` in `packages/contracts`, `packages/shared`, `apps/server` and `apps/web`. Run it with `env -u PLUTONIUM_T3 -u PLUTONIUM_HELPER` from inside a Plutonium session, whose variables the agent's shell inherits.
+3. Test the Plutonium parts: `node_modules/.bin/vp test run src/plutonium src/preview src/mcp src/auth` in `apps/server` (the same `env -u`), `../../node_modules/.bin/vp test run src/plutonium src/rightPanelStore.test.ts src/lib/bootError.test.ts` in `apps/web`.
+4. Try it in a session (`plutonium run hydra`), then merge the commit.
+
+Resolving a conflict: keep the patch to its files and to what it adds. When upstream rewrote a file, take upstream's version and add the patch's lines again where the code now is; when upstream now does what a patch did, drop that part of the patch. The release's own changelog (`git log <old>..<new> -- <file>`) says why a file changed.

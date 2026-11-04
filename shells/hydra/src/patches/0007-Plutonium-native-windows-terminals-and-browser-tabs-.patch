@@ -1,0 +1,3935 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:50 +1300
+Subject: [PATCH 07/10] Plutonium: native windows, terminals and browser tabs
+ in a thread's right panel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Folded from:
+- list agent-launched native windows under their thread
+- apps in the right panel, terminal tagging, pop out
+- use the Plutonium helper and its agent bridge
+- panel tab keys, new browser tab, app launcher
+- thread tags, groups and the Elsewhere list
+- import browser tabs from other shells into a thread
+- links and Ctrl+click open in the thread's browser panel
+- panel apps cross-fade on resize, and their maximize button maximizes the panel
+- the server drives the browser panel's tabs through Plutonium's helper
+- what the user starts comes to the front; a toast for the rest
+- windows held at an agent's size, Take control; read_window and act_window
+- several displays: a placeholder for a window another display took, To display N
+- agent tool fixes: popups in window snapshots, results that say what happened, private tabs marked
+- the dock: Super+1…9 slots for the terminal, apps and sites
+- the dock in the sidebar, above the settings row
+- dock sites kept per project or everywhere
+- remote clients see native windows
+- a link opened in a new tab shows in the browser panel
+- the status cluster: clock, battery and quick settings in the title bar
+- a dock slot holds one window or tab
+- dock sites' icons from the helper
+- an agent's hidden tabs get a panel tab, added in the background
+---
+ apps/web/src/components/AppSidebarLayout.tsx  |   4 +
+ apps/web/src/components/ChatView.logic.ts     |   3 +
+ apps/web/src/components/ChatView.tsx          |  32 +-
+ .../src/components/CommandPalette.logic.ts    |   3 +-
+ apps/web/src/components/CommandPalette.tsx    |  14 +-
+ .../components/PersistentThreadTerminals.tsx  |   7 +-
+ apps/web/src/components/RightPanelTabs.tsx    | 161 ++++-
+ .../src/components/ThreadTerminalDrawer.tsx   |  21 +-
+ .../components/chat/ChatTerminalDrawers.tsx   |   3 +
+ .../chat/QueuedRunsControl.browser.test.tsx   |   2 +-
+ .../src/components/chat/QueuedRunsControl.tsx |   2 +-
+ .../chat/RightPanelSurfaceContent.tsx         |  25 +
+ .../components/chat/TimelineAssistantRows.tsx |   2 +-
+ .../chat/TimelineToolActivityIcon.tsx         |   4 +-
+ .../chat/TimelineUserMessageRow.tsx           |   2 +-
+ .../src/components/chat/guestMessageStyle.tsx |   2 +-
+ .../pullRequest/PullRequestsPage.tsx          |   2 +
+ .../web/src/components/ui/standalone-page.tsx |   6 +-
+ apps/web/src/keybindings.ts                   |   4 +
+ apps/web/src/plutonium/AppLauncher.tsx        | 237 ++++++++
+ apps/web/src/plutonium/PlutoniumWindows.tsx   | 555 ++++++++++++++++++
+ apps/web/src/plutonium/RemoteWindowView.tsx   | 218 +++++++
+ apps/web/src/plutonium/importTab.ts           |  67 +++
+ apps/web/src/plutonium/openedItems.test.ts    | 176 ++++++
+ apps/web/src/plutonium/openedItems.ts         | 255 ++++++++
+ apps/web/src/plutonium/panelKeys.ts           | 277 +++++++++
+ apps/web/src/plutonium/remoteWindows.test.ts  |  64 ++
+ apps/web/src/plutonium/remoteWindows.ts       | 187 ++++++
+ apps/web/src/plutonium/threadTag.ts           |  41 ++
+ apps/web/src/plutonium/useThreadPlutonium.ts  | 188 ++++++
+ apps/web/src/plutonium/windowStore.ts         | 364 ++++++++++++
+ apps/web/src/reopenClosedView.ts              |   3 +
+ apps/web/src/rightPanelStore.test.ts          |  26 +-
+ apps/web/src/rightPanelStore.ts               |  79 ++-
+ .../src/shortcuts/commandPaletteCommands.ts   |   4 +-
+ 35 files changed, 3000 insertions(+), 40 deletions(-)
+ create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
+ create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
+ create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
+ create mode 100644 apps/web/src/plutonium/importTab.ts
+ create mode 100644 apps/web/src/plutonium/openedItems.test.ts
+ create mode 100644 apps/web/src/plutonium/openedItems.ts
+ create mode 100644 apps/web/src/plutonium/panelKeys.ts
+ create mode 100644 apps/web/src/plutonium/remoteWindows.test.ts
+ create mode 100644 apps/web/src/plutonium/remoteWindows.ts
+ create mode 100644 apps/web/src/plutonium/threadTag.ts
+ create mode 100644 apps/web/src/plutonium/useThreadPlutonium.ts
+ create mode 100644 apps/web/src/plutonium/windowStore.ts
+
+diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
+index 91df5616f7..95ed48bcf4 100644
+--- a/apps/web/src/components/AppSidebarLayout.tsx
++++ b/apps/web/src/components/AppSidebarLayout.tsx
+@@ -39,6 +39,8 @@ import {
+ } from "../panelAnimations";
+ import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
+ import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
++import { PlutoniumWindowsStarter } from "../plutonium/PlutoniumWindows";
++import { PlutoniumStatus } from "../plutonium/PlutoniumStatus";
+ import ThreadSidebar from "./Sidebar";
+ import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
+ import { isAppModalPage } from "./sidebar/mainAppLocation";
+@@ -476,6 +478,8 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+         <BackgroundThreadAnnouncer />
+         <SidebarControl />
+         {isElectron ? <HistorySwipeNavigation /> : null}
++        <PlutoniumWindowsStarter />
++        <PlutoniumStatus />
+       </SidebarProvider>
+     </PanelAnimationSuppressionProvider>
+   );
+diff --git a/apps/web/src/components/ChatView.logic.ts b/apps/web/src/components/ChatView.logic.ts
+index 4e17fdebf7..308b50c62f 100644
+--- a/apps/web/src/components/ChatView.logic.ts
++++ b/apps/web/src/components/ChatView.logic.ts
+@@ -1159,6 +1159,9 @@ export function shouldRefocusComposerOnWindowFocus(
+     activeElement.tagName === "SELECT" ||
+     activeElement.tagName === "IFRAME" ||
+     activeElement.tagName === "WEBVIEW" ||
++    // Plutonium: a browser tab's page and an app's window in the panel.
++    activeElement.tagName === "EMBED" ||
++    activeElement.tagName === "NATIVE-WINDOW" ||
+     activeElement.isContentEditable === true ||
+     activeElement.getAttribute("role") === "textbox"
+   ) {
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index d1225065ae..c4794f6a4f 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -40,6 +40,7 @@ import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnviron
+ import { useStableCallback } from "../hooks/useStableCallback";
+ import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
+ import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
++import { useThreadPlutonium } from "../plutonium/useThreadPlutonium";
+ import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
+ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+ import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+@@ -1887,6 +1888,7 @@ export default function ChatView(props: ChatViewProps) {
+     runShellCommandStable,
+     splitPanelTerminalStable,
+     splitPanelTerminalVerticalStable,
++    setTerminalOpenStable,
+     toggleTerminalVisibilityStable,
+     shortcuts: terminalShortcuts,
+   } = useChatTerminalActions({
+@@ -2385,6 +2387,24 @@ export default function ChatView(props: ChatViewProps) {
+     closeRightPanelSurface,
+   });
+   const pullRequestSurfaceAvailable = supportsPullRequests && pullRequestPanelTarget !== null;
++  const plutonium = useThreadPlutonium({
++    threadRef: activeThreadRef,
++    projectId: activeProject?.id ?? null,
++    keybindings,
++    canOperatePreview,
++    surfaces: renderedRightPanelSurfaces,
++    activeSurfaceId: renderedRightPanelSurface?.id ?? null,
++    panelOpen: rightPanelOpen,
++    maximized: rightPanelMaximized,
++    canMaximize: canMaximizeRightPanel,
++    terminalOpen: Boolean(terminalUiState.terminalOpen),
++    previewState: activePreviewState,
++    toggleTerminal: toggleTerminalVisibilityStable,
++    setTerminalOpen: setTerminalOpenStable,
++    focusComposer: focusComposerStable,
++    activate: activateRightPanelSurfaceStable,
++    newBrowserTab: createBrowserSurfaceStable,
++  });
+   const {
+     acknowledgeActiveThreadWoke,
+     activeBranchMismatchKey,
+@@ -3202,6 +3222,7 @@ export default function ChatView(props: ChatViewProps) {
+       onSendAnnotation={sendPreviewAnnotationStable}
+       onCloseSurface={closeRightPanelSurface}
+       sideChatParentPanel={sideChatParentPanel}
++      onImportBrowserTab={plutonium.importTab}
+       terminal={{
+         launchContext: activeTerminalLaunchContext ?? null,
+         keybindings,
+@@ -3343,7 +3364,12 @@ export default function ChatView(props: ChatViewProps) {
+           </header>
+         )}
+ 
+-        <div className="relative flex min-h-0 min-w-0 flex-1">
++        <div
++          className={cn(
++            "relative flex min-h-0 min-w-0 flex-1",
++            plutonium.terminalFoldedAway && "hidden",
++          )}
++        >
+           <ThreadFindCanvas
+             findOptions={{
+               skills: timelineSkills,
+@@ -3934,6 +3960,7 @@ export default function ChatView(props: ChatViewProps) {
+             closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
+             keybindings={keybindings}
+             onAddTerminalContext={addTerminalContextToDraftStable}
++            fillActive={plutonium.terminalFoldedAway}
+           />
+         )}
+       </div>
+@@ -3945,6 +3972,7 @@ export default function ChatView(props: ChatViewProps) {
+           widthStorageKey={`t3code:preview-panel-width:${activeThreadKey}`}
+           sheetAnimationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
+           onCloseSheet={closePreviewPanelStable}
++          dock={plutonium.dock}
+           open={rightPanelOpen}
+           keybindings={keybindings}
+           getShortcutContext={getShortcutContextStable}
+@@ -3987,6 +4015,7 @@ export default function ChatView(props: ChatViewProps) {
+           onAddPullRequest={addPullRequestSurfaceStable}
+           onAddPullRequests={addPullRequestsSurfaceStable}
+           onAddDevice={addDeviceSurfaceStable}
++          onAddApps={plutonium.addApps}
+           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
+           browserAvailable={canOperatePreview && browserAvailable}
+           terminalAvailable={activeProject !== null && canOperateTerminal}
+@@ -3995,6 +4024,7 @@ export default function ChatView(props: ChatViewProps) {
+           pullRequestAvailable={pullRequestSurfaceAvailable}
+           pullRequestsAvailable={pullRequestsSurfaceAvailable}
+           deviceAvailable={activeThreadRef !== null}
++          appsAvailable={plutonium.appsAvailable}
+           sideChatAvailable={sideChat.available}
+           sideChatDisabledReason={sideChatDisabledReason}
+         >
+diff --git a/apps/web/src/components/CommandPalette.logic.ts b/apps/web/src/components/CommandPalette.logic.ts
+index cc8fd9091d..4cacaed387 100644
+--- a/apps/web/src/components/CommandPalette.logic.ts
++++ b/apps/web/src/components/CommandPalette.logic.ts
+@@ -69,7 +69,7 @@ export function browseInputEndPaddingClass(input: {
+   return "*:data-[slot=autocomplete-input]:pe-24!";
+ }
+ 
+-export type SearchOverlayMode = "command" | "files" | "content";
++export type SearchOverlayMode = "command" | "files" | "content" | "apps";
+ 
+ export type CommandPaletteOpenIntent =
+   | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
+@@ -866,6 +866,7 @@ const OVERLAY_MODE_BY_COMMAND = {
+   "commandPalette.toggle": "command",
+   "filePicker.toggle": "files",
+   "projectSearch.toggle": "content",
++  "appLauncher.toggle": "apps",
+ } as const satisfies Partial<Record<string, SearchOverlayMode>>;
+ 
+ export function overlayModeForCommand(command: string | null): SearchOverlayMode | null {
+diff --git a/apps/web/src/components/CommandPalette.tsx b/apps/web/src/components/CommandPalette.tsx
+index f14a483d53..a6fd8d0056 100644
+--- a/apps/web/src/components/CommandPalette.tsx
++++ b/apps/web/src/components/CommandPalette.tsx
+@@ -249,6 +249,7 @@ import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog"
+ import { settingsForThisPlatform, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
+ import { primaryServerKeybindingsAtom } from "../state/server";
+ import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
++import { PlutoniumAppLauncher } from "../plutonium/AppLauncher";
+ import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
+ import { Button } from "./ui/button";
+ import { stackedThreadToast, toastManager } from "./ui/toast";
+@@ -306,7 +307,12 @@ export function CommandPalette({ children }: { children: ReactNode }) {
+       <CommandDialog
+         open={state.open}
+         onOpenChange={(open, eventDetails) => {
+-          if (!open && eventDetails.reason === "escape-key" && state.mode !== "command") {
++          if (
++            !open &&
++            eventDetails.reason === "escape-key" &&
++            state.mode !== "command" &&
++            state.mode !== "apps"
++          ) {
+             eventDetails.cancel();
+             dispatchCommandPalette({ _tag: "BackToCommand" });
+             return;
+@@ -350,7 +356,9 @@ function CommandPaletteDialog(props: {
+           ? "File picker"
+           : props.mode === "content"
+             ? "Search project contents"
+-            : "Command palette"
++            : props.mode === "apps"
++              ? "App launcher"
++              : "Command palette"
+       }
+       className={cn("overflow-hidden", props.mode === "content" && "h-105")}
+       data-command-palette="true"
+@@ -374,6 +382,8 @@ function CommandPaletteDialog(props: {
+         <ProjectFilePicker setOpen={props.setOpen} />
+       ) : props.mode === "content" ? (
+         <ProjectContentSearchDialog onOpenChange={props.setOpen} />
++      ) : props.mode === "apps" ? (
++        <PlutoniumAppLauncher setOpen={props.setOpen} />
+       ) : (
+         <OpenCommandPaletteDialog
+           key={props.session}
+diff --git a/apps/web/src/components/PersistentThreadTerminals.tsx b/apps/web/src/components/PersistentThreadTerminals.tsx
+index a387349b4c..eea544162d 100644
+--- a/apps/web/src/components/PersistentThreadTerminals.tsx
++++ b/apps/web/src/components/PersistentThreadTerminals.tsx
+@@ -85,12 +85,15 @@ interface PersistentThreadTerminalDrawerProps {
+   closeShortcutLabel: string | undefined;
+   keybindings: ResolvedKeybindingsConfig;
+   onAddTerminalContext: (selection: TerminalContextSelection) => void;
++  /** Plutonium's dock folded the chat away: the drawer takes the column. */
++  fill?: boolean;
+ }
+ 
+ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDrawer({
+   threadRef,
+   threadId,
+   active,
++  fill = false,
+   composerHeight,
+   launchContext,
+   splitShortcutLabel,
+@@ -241,7 +244,8 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+   return (
+     <div
+       className={cn(
+-        "grid shrink-0 overflow-clip",
++        "grid overflow-clip",
++        fill && active && visible ? "min-h-0 flex-1" : "shrink-0",
+         active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
+         active &&
+           "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
+@@ -256,6 +260,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+           worktreePath={effectiveWorktreePath}
+           runtimeEnv={runtimeEnv}
+           visible={visible}
++          fill={fill && active && visible}
+           height={terminalUiState.terminalHeight}
+           composerHeight={composerHeight}
+           // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index 596bdee96a..c310a8b0d8 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -23,6 +23,7 @@ import type {
+   ResolvedKeybindingsConfig,
+   ThreadId,
+ } from "@t3tools/contracts";
++import { INCOGNITO_BROWSER_PROFILE_ID } from "@t3tools/contracts";
+ import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
+ import {
+   closestCenter,
+@@ -36,6 +37,8 @@ import { restrictToFirstScrollableAncestor, restrictToHorizontalAxis } from "@dn
+ import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
+ import { CSS } from "@dnd-kit/utilities";
+ import {
++  AppWindow,
++  LayoutGrid,
+   Smartphone,
+   ChevronDown,
+   ChevronLeft,
+@@ -46,6 +49,7 @@ import {
+   MessagesSquare,
+   Plus,
+   TerminalSquare,
++  VenetianMask,
+ } from "lucide-react";
+ import { Volume2, VolumeOff } from "lucide";
+ import {
+@@ -103,10 +107,27 @@ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
+ import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
+ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+ import { observeResize } from "~/lib/observeResize";
++import { windowLabel } from "~/plutonium/PlutoniumWindows";
++import { type NativeWindowEntry, usePlutoniumWindowStore } from "~/plutonium/windowStore";
++import {
++  assignDockSlot,
++  clearDockSlot,
++  DOCK_SLOT_NUMBERS,
++  type DockContext,
++  type DockScope,
++  type DockSlotNumber,
++  dockSlotLabel,
++  dockSlotOfSurface,
++  setDockSlotScope,
++  useDockStore,
++  useDockWorld,
++} from "~/plutonium/dock";
+ import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
+ 
+ export interface RightPanelTabsProps {
+   mode: PreviewPanelMode;
++  /** Plutonium: the thread, for the tab menu's Dock entries (none: no entries). */
++  dock?: Pick<DockContext, "threadRef" | "projectId"> | null;
+   maximized?: boolean;
+   open?: boolean;
+   keybindings: ResolvedKeybindingsConfig;
+@@ -141,6 +162,7 @@ export interface RightPanelTabsProps {
+   onAddPullRequest: () => void;
+   onAddPullRequests: () => void;
+   onAddDevice: () => void;
++  onAddApps: () => void;
+   /** Absent where side chats are not offered. */
+   onAddSideChat?: (() => void) | undefined;
+   browserAvailable: boolean;
+@@ -150,6 +172,7 @@ export interface RightPanelTabsProps {
+   pullRequestAvailable: boolean;
+   pullRequestsAvailable: boolean;
+   deviceAvailable: boolean;
++  appsAvailable: boolean;
+   sideChatAvailable?: boolean;
+   /** Overrides the default reason while side chats are available but cannot start. */
+   sideChatDisabledReason?: string | null;
+@@ -179,6 +202,7 @@ const SURFACE_DISABLED_REASONS = {
+   pullRequest: "This thread's branch has no pull request yet.",
+   pullRequests: "No linked pull requests are available for this thread.",
+   device: "Devices are only available from a thread.",
++  apps: "Apps are only available in the Plutonium shell.",
+   sideChat: "Side chats start after the first message.",
+ } as const;
+ 
+@@ -204,10 +228,14 @@ const SURFACE_UNAVAILABLE_HINTS = {
+   pullRequest: "No pull request on this branch yet.",
+   pullRequests: "No linked pull requests available.",
+   device: "Available from a thread.",
++  apps: "Only available in the Plutonium shell.",
+   sideChat: "Available after the first message.",
+ } as const;
+ 
+ type TabContextMenuAction =
++  | `dock-assign-${DockSlotNumber}`
++  | `dock-scope-${DockScope}`
++  | "dock-remove"
+   | "rename"
+   | "copy-path"
+   | "toggle-mute"
+@@ -322,6 +350,7 @@ function RightPanelEmptyState(props: {
+   onAddPullRequest: () => void;
+   onAddPullRequests: () => void;
+   onAddDevice: () => void;
++  onAddApps: () => void;
+   /** Absent where side chats are not offered. */
+   onAddSideChat?: (() => void) | undefined;
+   browserAvailable: boolean;
+@@ -331,6 +360,7 @@ function RightPanelEmptyState(props: {
+   pullRequestAvailable: boolean;
+   pullRequestsAvailable: boolean;
+   deviceAvailable: boolean;
++  appsAvailable: boolean;
+   sideChatAvailable: boolean;
+   sideChatDisabledReason: string | null;
+ }) {
+@@ -394,6 +424,15 @@ function RightPanelEmptyState(props: {
+       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
+       onClick: props.onAddDevice,
+     },
++    {
++      label: "Apps",
++      description: "Show the windows this thread's apps opened.",
++      icon: LayoutGrid,
++      shortcut: "W",
++      available: props.appsAvailable,
++      disabledReason: SURFACE_UNAVAILABLE_HINTS.apps,
++      onClick: props.onAddApps,
++    },
+     ...(props.onAddSideChat
+       ? [
+           {
+@@ -571,6 +610,7 @@ function surfaceTitle(
+   surface: RightPanelSurface,
+   sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
+   terminalLabelsById: ReadonlyMap<string, string>,
++  nativeWindows: Readonly<Record<number, NativeWindowEntry>>,
+ ): string {
+   switch (surface.kind) {
+     case "diff":
+@@ -594,6 +634,12 @@ function surfaceTitle(
+       return surface.title ?? surface.target?.name ?? "Device";
+     case "side-chat":
+       return "Side chat";
++    case "apps":
++      return "Apps";
++    case "app": {
++      const entry = nativeWindows[surface.windowId];
++      return entry ? windowLabel(entry) : surface.appId || "App";
++    }
+     case "preview": {
+       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
+       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
+@@ -630,19 +676,20 @@ function previewFaviconOf(
+   surface: RightPanelSurface,
+   sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
+   desktopByTabId: Readonly<Record<string, DesktopPreviewOverlay>>,
+-): { url: string | null; capturedUrl: string | null } {
++): { url: string | null; capturedUrl: string | null; incognito: boolean } {
+   const snapshot =
+     surface.kind === "preview" && surface.resourceId ? sessions[surface.resourceId] : null;
+   const url = !snapshot || snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
+   const favicon = snapshot ? (desktopByTabId[snapshot.tabId]?.favicon ?? null) : null;
+   const capturedUrl = favicon && url && sameOrigin(favicon.pageUrl, url) ? favicon.dataUrl : null;
+-  return { url, capturedUrl };
++  return { url, capturedUrl, incognito: snapshot?.profileId === INCOGNITO_BROWSER_PROFILE_ID };
+ }
+ 
+ function SurfaceIcon({
+   surface,
+   previewUrl,
+   previewCapturedUrl,
++  previewIncognito,
+   theme,
+   environmentId,
+   pullRequestStatusSeed,
+@@ -650,12 +697,21 @@ function SurfaceIcon({
+   surface: RightPanelSurface;
+   previewUrl: string | null;
+   previewCapturedUrl: string | null;
++  previewIncognito: boolean;
+   theme: "light" | "dark";
+   environmentId: EnvironmentId | null;
+   pullRequestStatusSeed: PullRequestTabStatusSeed | undefined;
+ }) {
+   switch (surface.kind) {
+     case "preview":
++      // A private tab shows it is one, in place of its site's icon.
++      if (previewIncognito) {
++        return (
++          <span role="img" aria-label="Private tab" title="Private tab" className="flex shrink-0">
++            <VenetianMask className="size-3 shrink-0" />
++          </span>
++        );
++      }
+       return <PreviewFavicon capturedUrl={previewCapturedUrl} url={previewUrl} />;
+     case "diff":
+       return <FileDiff className="size-3 shrink-0" />;
+@@ -682,6 +738,10 @@ function SurfaceIcon({
+       );
+     case "pull-requests":
+       return <PullRequestGlyph.link className="size-3 shrink-0" />;
++    case "apps":
++      return <LayoutGrid className="size-3 shrink-0" />;
++    case "app":
++      return <AppWindow className="size-3 shrink-0" />;
+     case "side-chat":
+       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
+     case "device":
+@@ -877,6 +937,9 @@ function RightPanelTab(
+     audioRuntimeTabId: string | null;
+     previewUrl: string | null;
+     previewCapturedUrl: string | null;
++    previewIncognito: boolean;
++    /** Plutonium: the dock slot that holds this tab, shown as its key. */
++    dockSlot: DockSlotNumber | null;
+     theme: "light" | "dark";
+     environmentId: EnvironmentId | null;
+     pullRequestStatusSeed: PullRequestTabStatusSeed | undefined;
+@@ -914,6 +977,7 @@ function RightPanelTab(
+           surface={surface}
+           previewUrl={props.previewUrl}
+           previewCapturedUrl={props.previewCapturedUrl}
++          previewIncognito={props.previewIncognito}
+           theme={props.theme}
+           environmentId={props.environmentId}
+           pullRequestStatusSeed={props.pullRequestStatusSeed}
+@@ -980,6 +1044,14 @@ function RightPanelTab(
+                 onClick={() => onActivate(surface)}
+               >
+                 <span className="truncate">{title}</span>
++                {props.dockSlot ? (
++                  <span
++                    className="ml-1 shrink-0 rounded-sm px-0.5 text-3xs leading-tight text-muted-foreground tabular-nums ring-1 ring-border"
++                    aria-label={`Super+${props.dockSlot}`}
++                  >
++                    {props.dockSlot}
++                  </span>
++                ) : null}
+               </button>
+             }
+           />
+@@ -1027,6 +1099,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
+   const browserProfiles = useBrowserDefaults().profiles;
+   const { resolvedTheme } = useTheme();
++  const nativeWindows = usePlutoniumWindowStore((state) => state.windows);
++  // Plutonium: a tab in the dock shows its key.
++  const dockSlots = useDockStore((state) => state.slots);
++  // The windows and tabs, whose tags say which slot holds them.
++  const dockWorld = useDockWorld();
+   const tabListRef = useRef<HTMLDivElement>(null);
+   const addSurfaceTriggerRef = useRef<HTMLButtonElement>(null);
+   const [renamingDevice, setRenamingDevice] = useState<string | null>(null);
+@@ -1147,6 +1224,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       disabledReason: SURFACE_DISABLED_REASONS.device,
+       onClick: props.onAddDevice,
+     },
++    {
++      label: "Apps",
++      icon: LayoutGrid,
++      shortcut: "W",
++      available: props.appsAvailable,
++      disabledReason: SURFACE_DISABLED_REASONS.apps,
++      onClick: props.onAddApps,
++    },
+     ...(props.onAddSideChat
+       ? [
+           {
+@@ -1198,8 +1283,44 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+         }),
+       });
+     }
++    // Plutonium: put an app or a site in the dock, and keep it per thread,
++    // per project or everywhere.
++    const dock = props.dock;
++    const currentDockSlots = useDockStore.getState().slots;
++    const inSlot = dock ? dockSlotOfSurface(currentDockSlots, surface, dock) : null;
++    if (dock && (surface.kind === "app" || (surface.kind === "preview" && surface.resourceId))) {
++      items.push({
++        id: "dock-assign-1",
++        label: inSlot ? `In the dock (Super+${inSlot})` : "Add to the dock",
++        children: DOCK_SLOT_NUMBERS.map((number) => ({
++          id: `dock-assign-${number}` as const,
++          label: `Super+${number}: ${dockSlotLabel(currentDockSlots[number])}`,
++          checked: number === inSlot,
++        })),
++      });
++      if (inSlot) {
++        const scope = currentDockSlots[inSlot]?.scope;
++        items.push({
++          id: "dock-scope-thread",
++          label: "Keep it",
++          children: (
++            [
++              ["thread", "In this thread"],
++              ["project", "In this project"],
++              ["global", "Everywhere"],
++            ] as const
++          ).map(([value, label]) => ({
++            id: `dock-scope-${value}` as const,
++            label,
++            checked: value === scope,
++            disabled: value === "project" && !dock.projectId,
++          })),
++        });
++      }
++      if (inSlot) items.push({ id: "dock-remove", label: "Remove from the dock" });
++    }
+     items.push(
+-      { id: "close", label: "Close" },
++      { id: "close", label: "Close", separatorBefore: inSlot !== null || items.length > 0 },
+       {
+         id: "close-others",
+         label: "Close others",
+@@ -1218,6 +1339,19 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+     );
+ 
+     const action = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
++    if (dock && action?.startsWith("dock-assign-")) {
++      const number = Number(action.slice("dock-assign-".length)) as DockSlotNumber;
++      void assignDockSlot(dock, number, surface);
++      return;
++    }
++    if (dock && inSlot && action?.startsWith("dock-scope-")) {
++      void setDockSlotScope(dock, inSlot, action.slice("dock-scope-".length) as DockScope);
++      return;
++    }
++    if (inSlot && action === "dock-remove") {
++      clearDockSlot(inSlot);
++      return;
++    }
+     switch (action) {
+       case "rename":
+         setRenamingDevice(surface.id);
+@@ -1321,7 +1455,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       workspaceFocusKey={`panel:${props.environmentId}:${props.activeSurfaceId ?? "empty"}`}
+       workspaceLabel={
+         focusedSurface
+-          ? `Workspace panel: ${surfaceTitle(focusedSurface, props.previewSessions, props.terminalLabelsById)}`
++          ? `Workspace panel: ${surfaceTitle(focusedSurface, props.previewSessions, props.terminalLabelsById, nativeWindows)}`
+           : "Workspace panel"
+       }
+       mode={props.mode}
+@@ -1334,7 +1468,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+       <div
+         className={cn(
+           "flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-1 pl-2",
+-          props.mode === "inline" && !props.layoutControls ? "pr-28" : "pr-3",
++          props.mode === "inline" && !props.layoutControls
++            ? "pr-(--right-panel-tabbar-toggles-end)"
++            : "pr-(--right-panel-tabbar-end)",
+           ownsDesktopTitleBar && "drag-region",
+           ownsDesktopTitleBar && "wco:pr-(--workspace-native-controls-inset)",
+           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+@@ -1365,7 +1501,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+                     dragDisabled={!props.onMoveSurface || renamingDevice === surface.id}
+                     active={surface.id === props.activeSurfaceId}
+                     pending={props.pendingSurfaceIds.has(surface.id)}
+-                    title={surfaceTitle(surface, props.previewSessions, props.terminalLabelsById)}
++                    title={surfaceTitle(
++                      surface,
++                      props.previewSessions,
++                      props.terminalLabelsById,
++                      nativeWindows,
++                    )}
+                     audio={tabAudioState(
+                       previewTabId ? (props.desktopByTabId[previewTabId] ?? null) : null,
+                     )}
+@@ -1374,6 +1515,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+                     }
+                     previewUrl={favicon.url}
+                     previewCapturedUrl={favicon.capturedUrl}
++                    previewIncognito={favicon.incognito}
++                    dockSlot={
++                      props.dock
++                        ? dockSlotOfSurface(dockSlots, surface, props.dock, dockWorld)
++                        : null
++                    }
+                     theme={resolvedTheme}
+                     environmentId={props.environmentId}
+                     pullRequestStatusSeed={props.pullRequestStatusSeeds?.[surface.id]}
+@@ -1533,6 +1680,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             onAddPullRequest={props.onAddPullRequest}
+             onAddPullRequests={props.onAddPullRequests}
+             onAddDevice={props.onAddDevice}
++            onAddApps={props.onAddApps}
+             onAddSideChat={props.onAddSideChat}
+             browserAvailable={props.browserAvailable}
+             terminalAvailable={props.terminalAvailable}
+@@ -1541,6 +1689,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+             pullRequestAvailable={props.pullRequestAvailable}
+             pullRequestsAvailable={props.pullRequestsAvailable}
+             deviceAvailable={props.deviceAvailable}
++            appsAvailable={props.appsAvailable}
+             sideChatAvailable={props.sideChatAvailable === true}
+             sideChatDisabledReason={props.sideChatDisabledReason ?? null}
+           />
+diff --git a/apps/web/src/components/ThreadTerminalDrawer.tsx b/apps/web/src/components/ThreadTerminalDrawer.tsx
+index 88a945becc..2e20e90167 100644
+--- a/apps/web/src/components/ThreadTerminalDrawer.tsx
++++ b/apps/web/src/components/ThreadTerminalDrawer.tsx
+@@ -1179,6 +1179,8 @@ interface ThreadTerminalDrawerProps {
+   worktreePath?: string | null;
+   runtimeEnv?: Record<string, string>;
+   visible?: boolean;
++  /** Plutonium: take the chat column's height (the dock folded the conversation away). */
++  fill?: boolean;
+   height: number;
+   /** Space the chat column keeps for the composer overlay; only read in drawer mode. */
+   composerHeight?: number;
+@@ -1436,6 +1438,7 @@ export default function ThreadTerminalDrawer({
+   worktreePath,
+   runtimeEnv,
+   visible = true,
++  fill = false,
+   height,
+   composerHeight = 0,
+   terminalIds,
+@@ -1748,11 +1751,15 @@ export default function ThreadTerminalDrawer({
+         data-terminal-owner={isPanel ? "right-panel" : "drawer"}
+         className={cn(
+           "relative flex min-w-0 flex-col overflow-hidden bg-background",
+-          isPanel ? "h-full flex-1" : "z-45 shrink-0 border-t border-border/80",
++          isPanel || fill ? "h-full flex-1" : "z-45 shrink-0 border-t border-border/80",
+         )}
+-        style={isPanel ? undefined : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }}
++        style={
++          isPanel || fill
++            ? undefined
++            : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }
++        }
+       >
+-        {!isPanel ? (
++        {!isPanel && !fill ? (
+           <div
+             className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+             onPointerDown={handleResizePointerDown}
+@@ -1785,11 +1792,13 @@ export default function ThreadTerminalDrawer({
+       data-terminal-owner={isPanel ? "right-panel" : "drawer"}
+       className={cn(
+         "relative flex min-w-0 flex-col overflow-hidden bg-background",
+-        isPanel ? "h-full flex-1" : "z-45 shrink-0 border-t border-border/80",
++        isPanel || fill ? "h-full flex-1" : "z-45 shrink-0 border-t border-border/80",
+       )}
+-      style={isPanel ? undefined : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }}
++      style={
++        isPanel || fill ? undefined : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }
++      }
+     >
+-      {!isPanel ? (
++      {!isPanel && !fill ? (
+         <div
+           className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+           onPointerDown={handleResizePointerDown}
+diff --git a/apps/web/src/components/chat/ChatTerminalDrawers.tsx b/apps/web/src/components/chat/ChatTerminalDrawers.tsx
+index c6e14b90ec..8cc800c1b2 100644
+--- a/apps/web/src/components/chat/ChatTerminalDrawers.tsx
++++ b/apps/web/src/components/chat/ChatTerminalDrawers.tsx
+@@ -31,6 +31,8 @@ interface ChatTerminalDrawersProps {
+   readonly closeShortcutLabel: string | undefined;
+   readonly keybindings: ResolvedKeybindingsConfig;
+   readonly onAddTerminalContext: (selection: TerminalContextSelection) => void;
++  /** Plutonium's dock folded the active thread's chat away for its drawer. */
++  readonly fillActive?: boolean;
+ }
+ 
+ /**
+@@ -102,6 +104,7 @@ export function ChatTerminalDrawers(props: ChatTerminalDrawersProps) {
+       closeShortcutLabel={props.closeShortcutLabel}
+       keybindings={props.keybindings}
+       onAddTerminalContext={props.onAddTerminalContext}
++      fill={mountedThreadKey === activeThreadKey && props.fillActive === true}
+     />
+   ));
+ }
+diff --git a/apps/web/src/components/chat/QueuedRunsControl.browser.test.tsx b/apps/web/src/components/chat/QueuedRunsControl.browser.test.tsx
+index 7e25e84135..ba3466a3cf 100644
+--- a/apps/web/src/components/chat/QueuedRunsControl.browser.test.tsx
++++ b/apps/web/src/components/chat/QueuedRunsControl.browser.test.tsx
+@@ -170,7 +170,7 @@ it("shows who sent a queued message and folds automation and agent prompts", asy
+   await page.getByRole("button", { name: "Open thread" }).click({ force: true });
+   expect(onOpenThread).toHaveBeenCalledExactlyOnceWith("thread:lead");
+ 
+-  await expect.element(page.getByText("Sent by T3 Code")).toBeVisible();
++  await expect.element(page.getByText("Sent by Hydra")).toBeVisible();
+   await expect.element(page.getByText("Continue where you left off.")).toBeVisible();
+ });
+ 
+diff --git a/apps/web/src/components/chat/QueuedRunsControl.tsx b/apps/web/src/components/chat/QueuedRunsControl.tsx
+index ca98e919ff..016ccf2d07 100644
+--- a/apps/web/src/components/chat/QueuedRunsControl.tsx
++++ b/apps/web/src/components/chat/QueuedRunsControl.tsx
+@@ -435,7 +435,7 @@ function QueuedMessage(props: {
+   return (
+     <>
+       {attribution === "t3code" ? (
+-        <p className="me-1 text-2xs text-muted-foreground/70">Sent by T3 Code</p>
++        <p className="me-1 text-2xs text-muted-foreground/70">Sent by Hydra</p>
+       ) : null}
+       {presentation?.guestName === undefined ? null : (
+         <GuestMessageName name={presentation.guestName} />
+diff --git a/apps/web/src/components/chat/RightPanelSurfaceContent.tsx b/apps/web/src/components/chat/RightPanelSurfaceContent.tsx
+index b703e5d05d..0b61cc7730 100644
+--- a/apps/web/src/components/chat/RightPanelSurfaceContent.tsx
++++ b/apps/web/src/components/chat/RightPanelSurfaceContent.tsx
+@@ -24,6 +24,8 @@ import { PullRequestDetailPanel } from "../pullRequest/PullRequestDetailPanel";
+ import { PullRequestDetailGhost } from "../pullRequest/PullRequestGhosts";
+ import { PullRequestsUnavailableState } from "../pullRequest/PullRequestsUnavailableState";
+ import { ThreadPullRequestsPanel } from "../pullRequest/ThreadPullRequestsPanel";
++import type { BrokerTab } from "../../plutonium/previewBridge";
++import { PlutoniumAppSurface, PlutoniumAppsPanel } from "../../plutonium/PlutoniumWindows";
+ 
+ const PreviewPanel = lazy(() =>
+   import("../preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
+@@ -78,6 +80,8 @@ export function RightPanelSurfaceContent(props: {
+   readonly pullRequest: RightPanelPullRequestProps;
+   readonly files: RightPanelFileProps;
+   readonly sideChatParentPanel: SideChatParentPanel;
++  /** Plutonium: the Apps tab imports another shell's browser tab into this thread. */
++  readonly onImportBrowserTab: (tab: BrokerTab) => void;
+ }) {
+   const { surface, threadRef, visible, onCloseSurface } = props;
+   if (surface === null) return null;
+@@ -168,6 +172,27 @@ export function RightPanelSurfaceContent(props: {
+     }
+     case "pull-requests":
+       return <ThreadPullRequestsPanel threadRef={threadRef} />;
++    case "apps":
++      return (
++        <PlutoniumAppsPanel
++          threadId={threadRef.threadId}
++          onOpen={(entry) =>
++            useRightPanelStore
++              .getState()
++              .openApp(threadRef, { windowId: entry.id, appId: entry.appId })
++          }
++          onOpenTab={props.onImportBrowserTab}
++        />
++      );
++    case "app":
++      return (
++        <PlutoniumAppSurface
++          key={surface.id}
++          windowId={surface.windowId}
++          appId={surface.appId}
++          onPopOut={() => onCloseSurface(surface)}
++        />
++      );
+     case "side-chat":
+       // Not lazy: revealing a suspended tiptap editor tears down its view and crashes the composer.
+       return (
+diff --git a/apps/web/src/components/chat/TimelineAssistantRows.tsx b/apps/web/src/components/chat/TimelineAssistantRows.tsx
+index 458d84b9e9..e9d5048723 100644
+--- a/apps/web/src/components/chat/TimelineAssistantRows.tsx
++++ b/apps/web/src/components/chat/TimelineAssistantRows.tsx
+@@ -37,7 +37,7 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
+   return (
+     <>
+       <div className="relative min-w-0 px-1 py-0.5">
+-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
++        <MessageAuthorHeading>Hydra</MessageAuthorHeading>
+         <div data-thread-find-text="true">
+           <AssistantCitationSource
+             messageId={row.message.id}
+diff --git a/apps/web/src/components/chat/TimelineToolActivityIcon.tsx b/apps/web/src/components/chat/TimelineToolActivityIcon.tsx
+index 26728be444..e10519fa8f 100644
+--- a/apps/web/src/components/chat/TimelineToolActivityIcon.tsx
++++ b/apps/web/src/components/chat/TimelineToolActivityIcon.tsx
+@@ -3,7 +3,7 @@ import { type ToolActivityIcon } from "@t3tools/contracts";
+ import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
+ import { getProjectFaviconCacheKey } from "@t3tools/shared/projectFavicon";
+ import { use, useState } from "react";
+-import { T3Wordmark } from "../T3Wordmark";
++import { HydraMark } from "../HydraMark";
+ import {
+   BotIcon,
+   BrainIcon,
+@@ -245,7 +245,7 @@ function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className
+     case "device":
+       return <SmartphoneIcon className={className} aria-hidden />;
+     case "t3-code":
+-      return <T3Wordmark className={className} aria-hidden />;
++      return <HydraMark className={className} aria-hidden />;
+     case "check":
+       return <CheckIcon className={className} aria-hidden />;
+     case "list-todo":
+diff --git a/apps/web/src/components/chat/TimelineUserMessageRow.tsx b/apps/web/src/components/chat/TimelineUserMessageRow.tsx
+index bf52aad538..7a592dc9eb 100644
+--- a/apps/web/src/components/chat/TimelineUserMessageRow.tsx
++++ b/apps/web/src/components/chat/TimelineUserMessageRow.tsx
+@@ -832,7 +832,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message"
+           className="me-1 text-2xs text-muted-foreground/70"
+           data-user-message-attribution="t3code"
+         >
+-          Sent by T3 Code
++          Sent by Hydra
+         </p>
+       ) : null}
+       {/* The row's heading already names the guest for screen readers. */}
+diff --git a/apps/web/src/components/chat/guestMessageStyle.tsx b/apps/web/src/components/chat/guestMessageStyle.tsx
+index 90e49994f8..7c7fbc178f 100644
+--- a/apps/web/src/components/chat/guestMessageStyle.tsx
++++ b/apps/web/src/components/chat/guestMessageStyle.tsx
+@@ -3,7 +3,7 @@ export function guestBubbleClassName(pending: boolean): string {
+   return pending ? "border border-dashed border-guest/50 bg-transparent" : "bg-guest-surface";
+ }
+ 
+-/** The guest's name above their message, where "Sent by T3 Code" sits for server messages. */
++/** The guest's name above their message, where "Sent by Hydra" sits for server messages. */
+ export function GuestMessageName({ name }: { readonly name: string }) {
+   return (
+     <p className="me-1 text-2xs text-guest-foreground">
+diff --git a/apps/web/src/components/pullRequest/PullRequestsPage.tsx b/apps/web/src/components/pullRequest/PullRequestsPage.tsx
+index 1b3d1bc74c..fdc95ed053 100644
+--- a/apps/web/src/components/pullRequest/PullRequestsPage.tsx
++++ b/apps/web/src/components/pullRequest/PullRequestsPage.tsx
+@@ -1496,6 +1496,8 @@ export function PullRequestsPage() {
+             onAddPullRequest={() => undefined}
+             onAddPullRequests={() => undefined}
+             onAddDevice={() => undefined}
++            onAddApps={() => undefined}
++            appsAvailable={false}
+             browserAvailable={false}
+             terminalAvailable={false}
+             diffAvailable={false}
+diff --git a/apps/web/src/components/ui/standalone-page.tsx b/apps/web/src/components/ui/standalone-page.tsx
+index 0881b84c52..da50c294c2 100644
+--- a/apps/web/src/components/ui/standalone-page.tsx
++++ b/apps/web/src/components/ui/standalone-page.tsx
+@@ -1,6 +1,6 @@
+ import type { ReactNode } from "react";
+ 
+-import { T3Wordmark } from "../T3Wordmark";
++import { HydraMark } from "../HydraMark";
+ 
+ export function StandalonePage({ children }: { readonly children: ReactNode }) {
+   return (
+@@ -23,8 +23,8 @@ export function StandalonePageHeader({
+   return (
+     <>
+       <div className="flex items-baseline justify-between gap-3 text-muted-foreground">
+-        <span className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
+-          <T3Wordmark className="h-3 w-auto shrink-0 text-foreground" aria-hidden />
++        <span className="flex items-baseline gap-1.5" role="img" aria-label="Hydra">
++          <HydraMark className="h-3 w-auto shrink-0 text-foreground" aria-hidden />
+           <span className="text-lg font-medium tracking-tight">Code</span>
+         </span>
+         {context ? <span className="text-sm">{context}</span> : null}
+diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
+index fc96aa1f85..4ec25fb911 100644
+--- a/apps/web/src/keybindings.ts
++++ b/apps/web/src/keybindings.ts
+@@ -58,6 +58,8 @@ function resolvePlatform(options: ShortcutMatchOptions | undefined): string {
+   return options?.platform ?? navigator.platform;
+ }
+ 
++const IS_PLUTONIUM_SHELL = typeof navigator !== "undefined" && "windowBroker" in navigator;
++
+ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatchContext {
+   return {
+     terminalFocus: false,
+@@ -67,6 +69,8 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
+     isWeb: !isElectron,
+     isDesktop: isElectron,
+     editableFocus: false,
++    // Plutonium: the page is the desktop's shell (the dock's keys).
++    plutoniumShell: IS_PLUTONIUM_SHELL,
+     ...options?.context,
+   };
+ }
+diff --git a/apps/web/src/plutonium/AppLauncher.tsx b/apps/web/src/plutonium/AppLauncher.tsx
+new file mode 100644
+index 0000000000..4de12eccd3
+--- /dev/null
++++ b/apps/web/src/plutonium/AppLauncher.tsx
+@@ -0,0 +1,237 @@
++// Plutonium: the app launcher, a command palette mode (Super+Space). Lists
++// the desktop apps the Plutonium helper knows (freedesktop.org desktop
++// entries), most recently launched first, and launches the chosen one into
++// the current thread. Its window opens as a tab in the right panel, with the
++// keyboard.
++import { useAtomValue } from "@effect/atom-react";
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import { useParams } from "@tanstack/react-router";
++import { AppWindowIcon } from "lucide-react";
++import { useEffect, useMemo, useState } from "react";
++
++import { CommandPaletteContent } from "~/components/CommandPaletteContent";
++import { type CommandPaletteActionItem } from "~/components/CommandPalette.logic";
++import { CommandPaletteResults } from "~/components/CommandPaletteResults";
++import { toastManager } from "~/components/ui/toast";
++import { normalizeSearchText } from "~/lib/utils";
++import { primaryServerKeybindingsAtom } from "~/state/server";
++import { resolveThreadRouteTarget } from "~/threadRoutes";
++
++import { openAndFocusApp } from "./panelKeys";
++import {
++  type DesktopApp,
++  isPlutoniumShell,
++  plutoniumShell,
++  usePlutoniumWindowStore,
++} from "./windowStore";
++import { threadTag } from "./threadTag";
++
++const RECENT_KEY = "plutonium:recent-apps";
++const RECENT_LIMIT = 8;
++// How long a launched app has to show its window before the launcher stops
++// waiting to open it.
++const WINDOW_WAIT_MS = 60_000;
++
++function readRecent(): string[] {
++  try {
++    const value = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
++    return Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
++  } catch {
++    return [];
++  }
++}
++
++function rememberLaunch(appId: string): void {
++  try {
++    const recent = [appId, ...readRecent().filter((id) => id !== appId)].slice(0, RECENT_LIMIT);
++    localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
++  } catch {
++    // No storage: no recents.
++  }
++}
++
++let appsRequest: Promise<DesktopApp[]> | null = null;
++
++/** The helper's apps, fetched once per page (and again after a failure). */
++function loadApps(): Promise<DesktopApp[]> {
++  appsRequest ??= plutoniumShell().then((shell) => {
++    if (!shell) return [];
++    return shell.apps();
++  });
++  appsRequest.catch(() => (appsRequest = null));
++  return appsRequest;
++}
++
++/** Higher is better; 0 is no match. */
++function matchScore(app: DesktopApp, query: string): number {
++  const name = normalizeSearchText(app.name);
++  if (name === query) return 100;
++  if (name.startsWith(query)) return 80;
++  if (name.split(/[\s\-_.]+/).some((word) => word.startsWith(query))) return 60;
++  if (name.includes(query)) return 40;
++  const rest = [app.genericName, ...app.keywords, app.id].map(normalizeSearchText);
++  if (rest.some((text) => text.split(/[\s\-_.;]+/).some((word) => word.startsWith(query))))
++    return 20;
++  if (normalizeSearchText(app.comment).includes(query)) return 10;
++  return 0;
++}
++
++function AppIcon({ app }: { app: DesktopApp }) {
++  const [url, setUrl] = useState<string | null>(null);
++  useEffect(() => {
++    if (!app.hasIcon) return;
++    let live = true;
++    void plutoniumShell()
++      .then((shell) => shell?.appIcon(app.id) ?? null)
++      .then((icon) => live && setUrl(icon));
++    return () => {
++      live = false;
++    };
++  }, [app]);
++  return url ? (
++    <img alt="" className="size-5 shrink-0 object-contain" src={url} />
++  ) : (
++    <AppWindowIcon className="size-5 shrink-0 text-icon-muted" />
++  );
++}
++
++/**
++ * Launches `app` into `threadRef`'s thread and opens its first new window there.
++ * Its windows are announced as shown (openedItems.ts opens them), except an
++ * X11 app's, which Plutonium sees as the thread's X server's: hence the wait.
++ */
++async function launchApp(app: DesktopApp, threadRef: ScopedThreadRef): Promise<void> {
++  const shell = await plutoniumShell();
++  if (!shell) return;
++  rememberLaunch(app.id);
++  const threadId = threadRef.threadId as string;
++  const known = new Set(Object.keys(usePlutoniumWindowStore.getState().windows).map(Number));
++  let opened = false;
++  const open = () => {
++    const window = Object.values(usePlutoniumWindowStore.getState().windows)
++      .filter((entry) => entry.threadId === threadTag(threadId) && !known.has(entry.id))
++      .toSorted((a, b) => a.id - b.id)[0];
++    if (!window || opened) return;
++    opened = true;
++    stop();
++    openAndFocusApp(threadRef, { windowId: window.id, appId: window.appId });
++  };
++  const unsubscribe = usePlutoniumWindowStore.subscribe(open);
++  const timer = setTimeout(() => stop(), WINDOW_WAIT_MS);
++  function stop() {
++    unsubscribe();
++    clearTimeout(timer);
++  }
++  toastManager.add({ type: "info", title: `Starting ${app.name}…`, timeout: 2500 });
++  try {
++    await shell.launchApp(threadTag(threadId), app.id);
++  } catch (error) {
++    stop();
++    toastManager.add({
++      type: "error",
++      title: `Could not start ${app.name}`,
++      description: error instanceof Error ? error.message : String(error),
++    });
++  }
++}
++
++export function PlutoniumAppLauncher({ setOpen }: { setOpen: (open: boolean) => void }) {
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
++  const routeTarget = useParams({
++    strict: false,
++    select: (params) => resolveThreadRouteTarget(params),
++  });
++  const threadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
++  const [apps, setApps] = useState<DesktopApp[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [query, setQuery] = useState("");
++  const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
++
++  useEffect(() => {
++    let live = true;
++    loadApps().then(
++      (list) => live && setApps(list),
++      (reason: unknown) =>
++        live && setError(reason instanceof Error ? reason.message : String(reason)),
++    );
++    return () => {
++      live = false;
++    };
++  }, []);
++
++  const groups = useMemo(() => {
++    if (!apps || !threadRef) return [];
++    const toItem = (app: DesktopApp): CommandPaletteActionItem => ({
++      kind: "action",
++      value: `app:${app.id}`,
++      searchTerms: [app.name, app.genericName, ...app.keywords],
++      title: app.name,
++      ...(app.genericName || app.comment ? { description: app.genericName || app.comment } : {}),
++      icon: <AppIcon app={app} />,
++      run: () => launchApp(app, threadRef),
++    });
++    const needle = normalizeSearchText(query.trim());
++    if (needle) {
++      const matches = apps
++        .map((app) => ({ app, score: matchScore(app, needle) }))
++        .filter((entry) => entry.score > 0)
++        .toSorted((a, b) => b.score - a.score || a.app.name.localeCompare(b.app.name));
++      return matches.length > 0
++        ? [{ value: "apps", label: "Apps", items: matches.map((entry) => toItem(entry.app)) }]
++        : [];
++    }
++    const byId = new Map(apps.map((app) => [app.id, app]));
++    const recent = readRecent().flatMap((id) => byId.get(id) ?? []);
++    const recentIds = new Set(recent.map((app) => app.id));
++    return [
++      ...(recent.length > 0
++        ? [{ value: "recent", label: "Recent", items: recent.map(toItem) }]
++        : []),
++      {
++        value: "apps",
++        label: "All apps",
++        items: apps.filter((app) => !recentIds.has(app.id)).map(toItem),
++      },
++    ];
++  }, [apps, query, threadRef]);
++
++  const emptyStateMessage = !isPlutoniumShell()
++    ? "Apps launch only in the Plutonium shell."
++    : !threadRef
++      ? "Open a thread to launch apps into it."
++      : (error ?? (apps === null ? "Loading apps…" : "No matching apps."));
++
++  return (
++    <CommandPaletteContent
++      aria-label="App launcher"
++      autoHighlight="always"
++      escapeLabel="Close"
++      footerActionLabel="Launch"
++      inputProps={{ placeholder: "Launch an app…" }}
++      mode="none"
++      onItemHighlighted={(value) => {
++        setHighlightedItemValue(typeof value === "string" ? value : null);
++      }}
++      onValueChange={(value) => {
++        setHighlightedItemValue(null);
++        setQuery(value);
++      }}
++      panelSize="tall-list"
++      testId="plutonium-app-launcher"
++      value={query}
++    >
++      <CommandPaletteResults
++        groups={groups}
++        highlightedItemValue={highlightedItemValue}
++        isActionsOnly={false}
++        keybindings={keybindings}
++        onExecuteItem={(item) => {
++          if (item.kind !== "action") return;
++          setOpen(false);
++          void item.run();
++        }}
++        emptyStateMessage={emptyStateMessage}
++      />
++    </CommandPaletteContent>
++  );
++}
+diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
+new file mode 100644
+index 0000000000..274ae1012e
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
+@@ -0,0 +1,555 @@
++// Plutonium: native windows in the right panel. The "Apps" surface lists the
++// windows of a thread (those it started, and those added to it), and each one
++// opens as its own tab, shown live as a <native-window> element. Below them,
++// "Elsewhere" lists windows and browser tabs in no T3 thread (another shell's,
++// or nobody's); opening one adds it to the thread.
++//
++// A window an agent works in keeps the size the agent gave it (launch_app,
++// resize_window): its tab shows it at that size, scaled down to fit and
++// locked, saying the agent is working in it, until the user takes control;
++// then the panel sizes it, as any other window.
++import { ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
++import { useParams, useRouter } from "@tanstack/react-router";
++import { AppWindowIcon, BotIcon, GlobeIcon, SquareArrowOutUpRightIcon } from "lucide-react";
++import {
++  createElement,
++  type RefObject,
++  useEffect,
++  useRef,
++  useState,
++  useSyncExternalStore,
++} from "react";
++
++import { Button } from "~/components/ui/button";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
++import { useRightPanelStore } from "~/rightPanelStore";
++import { useThreadShells } from "~/state/entities";
++import { usePrimaryEnvironmentId } from "~/state/environments";
++import { previewEnvironment } from "~/state/preview";
++import { useAtomCommand } from "~/state/use-atom-command";
++import { buildThreadRouteParams, resolveThreadRouteTarget } from "~/threadRoutes";
++
++import { importBrowserTab } from "./importTab";
++import { setOpenedItemContext, startOpenedItems } from "./openedItems";
++import { openAndFocusApp } from "./panelKeys";
++import { RemoteWindowView } from "./RemoteWindowView";
++import { startRemoteWindows } from "./remoteWindows";
++
++import { plutoniumPreview, tabTags, type BrokerTab } from "./previewBridge";
++import {
++  addWindowToThread,
++  describeThreads,
++  grantFor,
++  isPlutoniumShell,
++  labelOfTag,
++  releaseWindow,
++  setPlutoniumFocusHandler,
++  setPlutoniumTabHandlers,
++  showOnDesktop,
++  showOnDisplay,
++  startPlutoniumWindows,
++  threadIdOfTag,
++  type NativeWindowEntry,
++  usePlutoniumWindowStore,
++  useElsewhereWindows,
++  useThreadWindows,
++  windowTags,
++} from "./windowStore";
++
++/**
++ * Connects to the Plutonium helper for the whole app, shows a window or tab in
++ * its thread when someone asks to, and handles new ones. Renders nothing.
++ */
++export function PlutoniumWindowsStarter() {
++  const router = useRouter();
++  const environmentId = usePrimaryEnvironmentId();
++  const threads = useThreadShells();
++  useEffect(startPlutoniumWindows, []);
++  // Away from the desktop, the server streams the windows.
++  useEffect(
++    () =>
++      environmentId === null || isPlutoniumShell() ? undefined : startRemoteWindows(environmentId),
++    [environmentId],
++  );
++  // Other shells and the browser's overlay label T3's thread tags with these.
++  useEffect(() => {
++    describeThreads(
++      threads
++        .filter((thread) => thread.environmentId === environmentId)
++        .map((thread) => ({ id: thread.id, title: thread.title })),
++    );
++  }, [threads, environmentId]);
++  // Browser tabs: a link this page opened goes into the open thread, as a
++  // browser panel tab; a thread's tab someone asks to show (an agent, the
++  // overlay, xdg-open in the thread's terminal) opens in its thread. So does
++  // a window an agent or the overlay asks to show. New windows and tabs go by
++  // openedItems.ts.
++  const routeTarget = useParams({
++    strict: false,
++    select: (params) => resolveThreadRouteTarget(params),
++  });
++  const activeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
++  const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
++  useEffect(startOpenedItems, []);
++  useEffect(() => {
++    if (environmentId === null) return;
++    // Plutonium threads run on this machine: the primary environment. An
++    // item's thread is the first T3 thread it is in (started by, or added to).
++    const threadRefOf = (tags: readonly string[]): ScopedThreadRef | null => {
++      const threadId = tags.map(threadIdOfTag).find((id) => id !== null);
++      return threadId ? { environmentId, threadId: ThreadId.make(threadId) } : null;
++    };
++    const goTo = (ref: ScopedThreadRef) =>
++      void router.navigate({
++        to: "/$environmentId/$threadId",
++        params: buildThreadRouteParams(ref),
++      });
++    const showWindow = (ref: ScopedThreadRef, window: NativeWindowEntry) => {
++      openAndFocusApp(ref, { windowId: window.id, appId: window.appId });
++      goTo(ref);
++    };
++    const showTab = (ref: ScopedThreadRef, tab: BrokerTab) => {
++      const shown = plutoniumPreview()?.runtimeTabIdOf(tab.id) ?? null;
++      if (shown) useRightPanelStore.getState().openBrowser(ref, shown);
++      else void importBrowserTab({ threadRef: ref, tab, openPreview });
++      goTo(ref);
++    };
++    setPlutoniumFocusHandler((window) => {
++      const ref = threadRefOf(windowTags(window));
++      if (ref) showWindow(ref, window);
++      return ref !== null;
++    });
++    setPlutoniumTabHandlers({
++      onOpen: (tab) => {
++        if (activeThreadRef)
++          void importBrowserTab({ threadRef: activeThreadRef, tab, openPreview });
++      },
++      onFocus: (tab) => {
++        const ref = threadRefOf(tabTags(tab));
++        if (ref) showTab(ref, tab);
++        return ref !== null;
++      },
++    });
++    setOpenedItemContext({ environmentId, activeThreadRef, showWindow, showTab });
++    return () => {
++      setPlutoniumFocusHandler(null);
++      setPlutoniumTabHandlers(null);
++      setOpenedItemContext(null);
++    };
++  }, [activeThreadRef, environmentId, openPreview, router]);
++  return null;
++}
++
++export function windowLabel(entry: Pick<NativeWindowEntry, "id" | "title" | "appId">): string {
++  return entry.title || entry.appId || `Window ${entry.id}`;
++}
++
++function AppRow({
++  entry,
++  onOpen,
++  detail,
++}: {
++  entry: NativeWindowEntry;
++  onOpen: () => void;
++  detail?: string;
++}) {
++  return (
++    <button
++      type="button"
++      onClick={onOpen}
++      className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-2.5 text-left text-sm transition-colors hover:bg-accent/60"
++      data-plutonium-window={entry.id}
++    >
++      <AppWindowIcon className="size-4 shrink-0" />
++      <span className="min-w-0 flex-1 truncate">{windowLabel(entry)}</span>
++      <span className="shrink-0 text-muted-foreground text-xs">
++        {detail ?? (entry.embedded ? "In panel" : entry.appId)}
++      </span>
++    </button>
++  );
++}
++
++const noTabs: readonly BrokerTab[] = [];
++
++/** Browser tabs in no T3 thread, kept current. */
++function useElsewhereTabs(): readonly BrokerTab[] {
++  const preview = plutoniumPreview();
++  return useSyncExternalStore(
++    (onChange) => preview?.onTabs(onChange) ?? (() => undefined),
++    () => preview?.elsewhere() ?? noTabs,
++  );
++}
++
++function TabRow({ tab, detail, onOpen }: { tab: BrokerTab; detail: string; onOpen: () => void }) {
++  return (
++    <button
++      type="button"
++      onClick={onOpen}
++      className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-2.5 text-left text-sm transition-colors hover:bg-accent/60"
++      data-plutonium-tab={tab.id}
++    >
++      <GlobeIcon className="size-4 shrink-0" />
++      <span className="min-w-0 flex-1 truncate">{tab.title || tab.url}</span>
++      <span className="shrink-0 text-muted-foreground text-xs">{detail}</span>
++    </button>
++  );
++}
++
++/** The thread's windows, then windows and browser tabs in no T3 thread. */
++export function PlutoniumAppsPanel({
++  threadId,
++  onOpen,
++  onOpenTab,
++}: {
++  threadId: string | null;
++  onOpen: (entry: NativeWindowEntry) => void;
++  /** Brings a browser tab from elsewhere into the thread. */
++  onOpenTab?: (tab: BrokerTab) => void;
++}) {
++  const threadWindows = useThreadWindows(threadId);
++  const elsewhereWindows = useElsewhereWindows();
++  const elsewhereTabs = useElsewhereTabs().filter(
++    (tab) => onOpenTab !== undefined && tab.tags !== undefined,
++  );
++  const groups = usePlutoniumWindowStore((state) => state.groups);
++  const tagsAvailable = usePlutoniumWindowStore((state) =>
++    Object.values(state.windows).some((entry) => entry.tags !== undefined),
++  );
++  const openElsewhere = (entry: NativeWindowEntry) => {
++    // Bring it into this thread, then show it (its tab is the thread's now).
++    if (threadId !== null && tagsAvailable)
++      void addWindowToThread(entry.id, threadId).catch(() => {});
++    onOpen(entry);
++  };
++  return (
++    <div className="scrollbar-gutter-both flex min-h-0 flex-1 justify-center overflow-y-auto px-6">
++      <div className="w-full max-w-sm py-6">
++        <h3 className="mb-3 text-center font-medium text-foreground text-sm">Apps</h3>
++        {threadWindows.length === 0 ? (
++          <p className="px-2.5 py-1.5 text-center text-muted-foreground text-xs">
++            Apps that this thread's agent or terminals start show up here.
++          </p>
++        ) : (
++          <div className="flex flex-col gap-0.5">
++            {threadWindows.map((entry) => (
++              <AppRow key={entry.id} entry={entry} onOpen={() => onOpen(entry)} />
++            ))}
++          </div>
++        )}
++        {elsewhereWindows.length > 0 || elsewhereTabs.length > 0 ? (
++          <>
++            <h4 className="mt-5 mb-1.5 px-2.5 text-muted-foreground text-xs">
++              Elsewhere{tagsAvailable && threadId !== null ? " · opening one adds it here" : ""}
++            </h4>
++            <div className="flex flex-col gap-0.5">
++              {elsewhereWindows.map((entry) => {
++                const tags = windowTags(entry);
++                return (
++                  <AppRow
++                    key={entry.id}
++                    entry={entry}
++                    detail={tags[0] ? labelOfTag(groups, tags[0]) : "No thread"}
++                    onOpen={() => openElsewhere(entry)}
++                  />
++                );
++              })}
++              {elsewhereTabs.map((tab) => {
++                const tag = tabTags(tab)[0];
++                return (
++                  <TabRow
++                    key={`tab:${tab.id}`}
++                    tab={tab}
++                    detail={tag ? labelOfTag(groups, tag) : "No thread"}
++                    onOpen={() => onOpenTab?.(tab)}
++                  />
++                );
++              })}
++            </div>
++          </>
++        ) : null}
++      </div>
++    </div>
++  );
++}
++
++/** Bubbles from a panel app whose own maximize button was pressed; detail: { maximized }. */
++export const PANEL_MAXIMIZE_REQUEST_EVENT = "plutonium:panel-maximize-request";
++
++/** The size an agent holds `windowId` at, until the user takes control; else null. */
++function useAgentSize(windowId: number): { width: number; height: number } | null {
++  const width = usePlutoniumWindowStore((state) => state.agentWindows[windowId]?.width);
++  const height = usePlutoniumWindowStore((state) => state.agentWindows[windowId]?.height);
++  const userControl = usePlutoniumWindowStore(
++    (state) => state.agentWindows[windowId]?.userControl === true,
++  );
++  return width && height && !userControl ? { width, height } : null;
++}
++
++/** Whether an agent gave `windowId` input in the last few seconds. */
++function useAgentBusy(windowId: number): boolean {
++  return usePlutoniumWindowStore((state) => state.agentWindows[windowId]?.busy === true);
++}
++
++/** An element's content box, kept current. */
++function useBoxSize(ref: RefObject<HTMLElement | null>) {
++  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
++  useEffect(() => {
++    const element = ref.current;
++    if (!element) return;
++    const observer = new ResizeObserver(([entry]) => {
++      if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
++    });
++    observer.observe(element);
++    return () => observer.disconnect();
++  }, [ref]);
++  return size;
++}
++
++function AgentWorkingDot({ busy }: { busy: boolean }) {
++  return (
++    <span className="relative flex size-2 shrink-0">
++      {busy && (
++        <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-75" />
++      )}
++      <span className="relative inline-flex size-2 rounded-full bg-primary" />
++    </span>
++  );
++}
++
++/**
++ * Over a window an agent holds: the window is the agent's to drive (the
++ * user's clicks would land on a scaled copy), until the user takes control.
++ */
++function AgentLock({ windowId }: { windowId: number }) {
++  const busy = useAgentBusy(windowId);
++  const [releasing, setReleasing] = useState(false);
++  return (
++    <div className="absolute inset-0 flex items-end justify-center p-3" data-plutonium-agent-lock>
++      <div className="flex items-center gap-2.5 rounded-full border bg-popover/95 py-1 pr-1 pl-3 text-popover-foreground text-xs shadow-lg backdrop-blur-sm">
++        <AgentWorkingDot busy={busy} />
++        <span>{busy ? "Agent is working in this app" : "Agent is using this app"}</span>
++        <Button
++          size="xs"
++          variant="secondary"
++          className="rounded-full"
++          disabled={releasing}
++          onClick={() => {
++            setReleasing(true);
++            void releaseWindow(windowId)
++              .catch(() => {})
++              .finally(() => setReleasing(false));
++          }}
++        >
++          Take control
++        </Button>
++      </div>
++    </div>
++  );
++}
++
++function NativeWindowView({ windowId }: { windowId: number }) {
++  const ref = useRef<HTMLElement | null>(null);
++  const boxRef = useRef<HTMLDivElement | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [taken, setTaken] = useState(false);
++  const agentSize = useAgentSize(windowId);
++  const box = useBoxSize(boxRef);
++
++  useEffect(() => {
++    let cancelled = false;
++    setError(null);
++    grantFor(windowId).then(
++      (grant) => {
++        if (cancelled || !ref.current) return;
++        ref.current.setAttribute("window", String(windowId));
++        ref.current.setAttribute("grant", grant);
++      },
++      () => !cancelled && setError("No grant for this window."),
++    );
++    const element = ref.current;
++    const onError = () => setError("The browser refused to embed this window.");
++    // The app's own maximize button maximizes the panel (ChatView listens).
++    const onRequest = (event: Event) => {
++      const request = (event as Event & { request?: string }).request;
++      if (request !== "maximize" && request !== "unmaximize") return;
++      element?.dispatchEvent(
++        new CustomEvent(PANEL_MAXIMIZE_REQUEST_EVENT, {
++          bubbles: true,
++          detail: { maximized: request === "maximize" },
++        }),
++      );
++    };
++    // Another page (another display's shell) shows it now: a placeholder.
++    const onTaken = () =>
++      setTaken(
++        (element as (HTMLElement & { windowState?: string }) | null)?.windowState === "taken",
++      );
++    element?.addEventListener("windowerror", onError);
++    element?.addEventListener("windowrequest", onRequest);
++    element?.addEventListener("windowtaken", onTaken);
++    element?.addEventListener("windowchange", onTaken);
++    return () => {
++      cancelled = true;
++      element?.removeEventListener("windowerror", onError);
++      element?.removeEventListener("windowrequest", onRequest);
++      element?.removeEventListener("windowtaken", onTaken);
++      element?.removeEventListener("windowchange", onTaken);
++    };
++  }, [windowId]);
++
++  // The agent's size, scaled down (never up) to fit, and centered.
++  const scale =
++    agentSize && box ? Math.min(1, box.width / agentSize.width, box.height / agentSize.height) : 1;
++  const style = agentSize
++    ? {
++        display: "block",
++        position: "absolute",
++        left: box ? Math.max(0, (box.width - agentSize.width * scale) / 2) : 0,
++        top: box ? Math.max(0, (box.height - agentSize.height * scale) / 2) : 0,
++        width: agentSize.width,
++        height: agentSize.height,
++        transform: scale === 1 ? undefined : `scale(${scale})`,
++        transformOrigin: "0 0",
++      }
++    : { display: "block", width: "100%", height: "100%" };
++
++  return (
++    <div ref={boxRef} className="relative min-h-0 flex-1 overflow-hidden">
++      {createElement("native-window", {
++        ref,
++        key: windowId,
++        // When the panel is maximized or restored, the app fills it at once
++        // and its old frame fades into its new one (drags stay live; a newly
++        // shown app doesn't fade).
++        crossfade: "200",
++        style,
++      })}
++      {agentSize && !error && !taken && <AgentLock windowId={windowId} />}
++      {taken && !error && (
++        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background text-sm text-muted-foreground">
++          <p>Shown on another display.</p>
++          <Button
++            size="xs"
++            variant="secondary"
++            onClick={() => {
++              // Attaching again is a new claim: the window comes back here.
++              const element = ref.current;
++              const grant = element?.getAttribute("grant");
++              if (!element || !grant) return;
++              element.removeAttribute("grant");
++              element.setAttribute("grant", grant);
++            }}
++          >
++            Bring it back
++          </Button>
++        </div>
++      )}
++      {error && (
++        <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
++          {error}
++        </p>
++      )}
++    </div>
++  );
++}
++
++/** In a window tab's header: the agent's size while it holds one, or that it's working in it. */
++function AgentHeaderBadge({ windowId }: { windowId: number }) {
++  const agentSize = useAgentSize(windowId);
++  const busy = useAgentBusy(windowId);
++  if (agentSize) {
++    return (
++      <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
++        <BotIcon className="size-3.5" />
++        {agentSize.width}×{agentSize.height}
++      </span>
++    );
++  }
++  if (!busy) return null;
++  return (
++    <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
++      <AgentWorkingDot busy />
++      Agent working
++    </span>
++  );
++}
++
++/** Several displays: sends the window to another display's shell. */
++function ToDisplayButtons({ windowId }: { windowId: number }) {
++  const displays = usePlutoniumWindowStore((state) => state.displays);
++  if (displays.length < 2) return null;
++  return (
++    <span className="flex shrink-0 items-center gap-1">
++      {displays
++        .filter((display) => !display.current)
++        .map((display) => (
++          <Button
++            key={display.id}
++            size="xs"
++            variant="ghost-muted"
++            title={display.label ? `Show on ${display.label}` : undefined}
++            onClick={() => void showOnDisplay(windowId, display.index)}
++          >
++            To display {display.index}
++          </Button>
++        ))}
++    </span>
++  );
++}
++
++/** One window as a panel tab. Popping out closes the tab and raises the window on the desktop. */
++export function PlutoniumAppSurface({
++  windowId,
++  appId,
++  onPopOut,
++}: {
++  windowId: number;
++  appId: string;
++  onPopOut: () => void;
++}) {
++  const entry = usePlutoniumWindowStore((state) => state.windows[windowId]);
++  const remote = usePlutoniumWindowStore((state) => state.remote);
++  // A tab restored from storage may name a window id that a new Ash session
++  // gave to a different app.
++  if (!entry || entry.appId !== appId) {
++    return (
++      <p className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
++        This app is no longer running.
++      </p>
++    );
++  }
++  return (
++    <div className="flex min-h-0 flex-1 flex-col" data-plutonium-app-surface={windowId}>
++      <div className="flex h-8 shrink-0 items-center gap-2 border-b px-3 text-xs">
++        <span className="truncate font-medium text-foreground">{windowLabel(entry)}</span>
++        <span className="truncate text-muted-foreground">{entry.appId}</span>
++        <AgentHeaderBadge windowId={windowId} />
++        {remote ? null : (
++          <>
++            <Tooltip>
++              <TooltipTrigger
++                render={
++                  <Button
++                    aria-label="Pop out to desktop"
++                    className="ml-auto"
++                    size="icon-xs"
++                    variant="ghost-muted"
++                    onClick={() => {
++                      showOnDesktop(windowId);
++                      onPopOut();
++                    }}
++                  />
++                }
++              >
++                <SquareArrowOutUpRightIcon className="size-3.5" />
++              </TooltipTrigger>
++              <TooltipPopup>Pop out to desktop</TooltipPopup>
++            </Tooltip>
++            <ToDisplayButtons windowId={windowId} />
++          </>
++        )}
++      </div>
++      {remote ? <RemoteWindowView entry={entry} /> : <NativeWindowView windowId={windowId} />}
++    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/RemoteWindowView.tsx b/apps/web/src/plutonium/RemoteWindowView.tsx
+new file mode 100644
+index 0000000000..ce66d4b17f
+--- /dev/null
++++ b/apps/web/src/plutonium/RemoteWindowView.tsx
+@@ -0,0 +1,218 @@
++// Plutonium: a native window away from the desktop, drawn from the server's
++// stream of its frames (remoteWindows.ts). Pointer and keyboard input on the
++// canvas go back to the window. The window keeps its size: the frame is
++// scaled down to fit the panel.
++import { useEffect, useRef, useState } from "react";
++
++import { usePrimaryEnvironmentId } from "~/state/environments";
++
++import {
++  inputModifiers,
++  mouseButton,
++  readWindowStreamAccess,
++  WINDOW_GONE_CODE,
++  WINDOWS_UNAVAILABLE_CODE,
++  wheelNotches,
++  windowPoint,
++  windowStreamUrl,
++} from "./remoteWindows";
++import type { NativeWindowEntry } from "./windowStore";
++
++const RECONNECT_MS = 1000;
++
++export function RemoteWindowView({ entry }: { entry: NativeWindowEntry }) {
++  const environmentId = usePrimaryEnvironmentId();
++  const canvasRef = useRef<HTMLCanvasElement | null>(null);
++  const socketRef = useRef<WebSocket | null>(null);
++  // The latest size, for mapping input (the list updates it).
++  const sizeRef = useRef({ width: entry.width, height: entry.height });
++  sizeRef.current = { width: entry.width, height: entry.height };
++  const [status, setStatus] = useState<string | null>("Connecting…");
++  const windowId = entry.id;
++
++  // Frames in, drawn as they decode (a frame that arrives while one decodes
++  // replaces the waiting one).
++  useEffect(() => {
++    if (environmentId === null) return;
++    let stopped = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let decoding = false;
++    let waiting: Blob | null = null;
++    const draw = (blob: Blob) => {
++      if (decoding) {
++        waiting = blob;
++        return;
++      }
++      decoding = true;
++      void createImageBitmap(blob)
++        .then((bitmap) => {
++          const canvas = canvasRef.current;
++          if (!canvas || stopped) return bitmap.close();
++          if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
++          if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
++          canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
++          bitmap.close();
++          setStatus(null);
++        })
++        .catch(() => {})
++        .finally(() => {
++          decoding = false;
++          const next = waiting;
++          waiting = null;
++          if (next && !stopped) draw(next);
++        });
++    };
++    const connect = async (refresh: boolean) => {
++      const access = await readWindowStreamAccess(environmentId, refresh);
++      if (stopped) return;
++      if (!access) {
++        timer = setTimeout(() => void connect(true), RECONNECT_MS);
++        return;
++      }
++      const socket = new WebSocket(windowStreamUrl(access, { windowId: String(windowId) }));
++      socket.binaryType = "blob";
++      socketRef.current = socket;
++      socket.addEventListener("message", (event) => {
++        if (event.data instanceof Blob) draw(new Blob([event.data], { type: "image/jpeg" }));
++      });
++      socket.addEventListener("close", (event) => {
++        if (socketRef.current === socket) socketRef.current = null;
++        if (stopped) return;
++        if (event.code === WINDOW_GONE_CODE) return setStatus("This app is no longer running.");
++        if (event.code === WINDOWS_UNAVAILABLE_CODE)
++          return setStatus("The desktop can't stream this window.");
++        setStatus("Reconnecting…");
++        timer = setTimeout(() => void connect(true), RECONNECT_MS);
++      });
++    };
++    void connect(false);
++    return () => {
++      stopped = true;
++      clearTimeout(timer);
++      socketRef.current?.close();
++      socketRef.current = null;
++    };
++  }, [environmentId, windowId]);
++
++  // Input out.
++  useEffect(() => {
++    const canvas = canvasRef.current;
++    if (!canvas) return;
++    const send = (message: object) => {
++      const socket = socketRef.current;
++      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
++    };
++    const point = (event: MouseEvent) =>
++      windowPoint(event.clientX, event.clientY, canvas.getBoundingClientRect(), sizeRef.current);
++    // Moves go at most once a frame.
++    let move: MouseEvent | null = null;
++    let moveFrame = 0;
++    const sendMove = () => {
++      moveFrame = 0;
++      if (!move) return;
++      const event = move;
++      move = null;
++      send({
++        type: "mouse",
++        event: {
++          type: "mouseMoved",
++          ...point(event),
++          button: "none",
++          buttons: event.buttons,
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    const onMove = (event: MouseEvent) => {
++      move = event;
++      moveFrame ||= requestAnimationFrame(sendMove);
++    };
++    const onButton = (event: MouseEvent) => {
++      event.preventDefault();
++      if (event.type === "mousedown") canvas.focus();
++      sendMove();
++      send({
++        type: "mouse",
++        event: {
++          type: event.type === "mousedown" ? "mousePressed" : "mouseReleased",
++          ...point(event),
++          button: mouseButton(event.button),
++          buttons: event.buttons,
++          clickCount: Math.max(1, event.detail),
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    // Drags keep going outside the canvas.
++    const onPointerDown = (event: PointerEvent) => canvas.setPointerCapture(event.pointerId);
++    const onWheel = (event: WheelEvent) => {
++      event.preventDefault();
++      send({
++        type: "mouse",
++        event: {
++          type: "mouseWheel",
++          ...point(event),
++          deltaX: wheelNotches(event.deltaX, event.deltaMode),
++          deltaY: wheelNotches(event.deltaY, event.deltaMode),
++          modifiers: inputModifiers(event),
++        },
++      });
++    };
++    const onKey = (event: KeyboardEvent) => {
++      if (!event.code) return;
++      event.preventDefault();
++      event.stopPropagation();
++      send({
++        type: "keys",
++        events: [
++          {
++            type: event.type === "keydown" ? "keyDown" : "keyUp",
++            code: event.code,
++            modifiers: inputModifiers(event),
++          },
++        ],
++      });
++    };
++    const onContextMenu = (event: Event) => event.preventDefault();
++    canvas.addEventListener("pointerdown", onPointerDown);
++    canvas.addEventListener("mousedown", onButton);
++    canvas.addEventListener("mouseup", onButton);
++    canvas.addEventListener("mousemove", onMove);
++    canvas.addEventListener("wheel", onWheel, { passive: false });
++    canvas.addEventListener("keydown", onKey);
++    canvas.addEventListener("keyup", onKey);
++    canvas.addEventListener("contextmenu", onContextMenu);
++    return () => {
++      cancelAnimationFrame(moveFrame);
++      canvas.removeEventListener("pointerdown", onPointerDown);
++      canvas.removeEventListener("mousedown", onButton);
++      canvas.removeEventListener("mouseup", onButton);
++      canvas.removeEventListener("mousemove", onMove);
++      canvas.removeEventListener("wheel", onWheel);
++      canvas.removeEventListener("keydown", onKey);
++      canvas.removeEventListener("keyup", onKey);
++      canvas.removeEventListener("contextmenu", onContextMenu);
++    };
++  }, []);
++
++  return (
++    <div
++      className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/30"
++      data-plutonium-remote-window={windowId}
++    >
++      <canvas
++        ref={canvasRef}
++        tabIndex={0}
++        width={entry.width}
++        height={entry.height}
++        aria-label={entry.title || entry.appId}
++        className="max-h-full max-w-full outline-none"
++      />
++      {status && (
++        <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
++          {status}
++        </p>
++      )}
++    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/importTab.ts b/apps/web/src/plutonium/importTab.ts
+new file mode 100644
+index 0000000000..9fcd605a92
+--- /dev/null
++++ b/apps/web/src/plutonium/importTab.ts
+@@ -0,0 +1,67 @@
++// Plutonium: bringing a browser tab from elsewhere (another shell's, or
++// nobody's) into a thread, as a new browser panel tab that shows it.
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
++
++import type { BrowserSettingsReadError, OpenPreviewMutation } from "~/browser/openFileInPreview";
++import { openPreviewSession } from "~/components/preview/openPreviewSession";
++import { useRightPanelStore } from "~/rightPanelStore";
++
++import { isBlank, plutoniumPreview, type BrokerTab } from "./previewBridge";
++
++const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
++
++/** How long a tab may stay blank before it is brought in as it is. */
++const FIRST_URL_WAIT_MS = 5000;
++
++/**
++ * `tab` once it has a URL. A link this page opens in a new tab arrives blank,
++ * and the session has to start at the link: the server attaches only once the
++ * page has loaded, and a page loaded by then sends it nothing.
++ */
++function withFirstUrl(
++  preview: NonNullable<ReturnType<typeof plutoniumPreview>>,
++  tab: BrokerTab,
++): Promise<BrokerTab> {
++  if (!isBlank(tab.url)) return Promise.resolve(tab);
++  return new Promise((resolve) => {
++    const current = () => preview.tabList().find((entry) => entry.id === tab.id);
++    const done = (entry: BrokerTab) => {
++      window.clearTimeout(timer);
++      unsubscribe();
++      resolve(entry);
++    };
++    // This page may hear of the tab after the shell library does.
++    let seen = false;
++    const unsubscribe = preview.onTabs(() => {
++      const entry = current();
++      seen ||= entry !== undefined;
++      if (entry ? !isBlank(entry.url) : seen) done(entry ?? tab);
++    });
++    const timer = window.setTimeout(() => done(current() ?? tab), FIRST_URL_WAIT_MS);
++  });
++}
++
++export async function importBrowserTab<E>(input: {
++  readonly threadRef: ScopedThreadRef;
++  readonly tab: BrokerTab;
++  readonly openPreview: OpenPreviewMutation<E>;
++}): Promise<AtomCommandResult<unknown, E | BrowserSettingsReadError> | null> {
++  const preview = plutoniumPreview();
++  if (!preview) return null;
++  const { threadRef } = input;
++  const tab = await withFirstUrl(preview, input.tab);
++  await preview.importTab(threadRef.threadId, tab.id);
++  const result = await openPreviewSession({
++    openPreview: input.openPreview,
++    threadRef,
++    // The session starts at the tab's page, so it isn't shown as empty.
++    ...(isWebUrl(tab.url) ? { url: tab.url } : {}),
++  });
++  if (result._tag === "Failure") {
++    preview.cancelImport(threadRef.threadId, tab.id);
++    return result;
++  }
++  useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
++  return result;
++}
+diff --git a/apps/web/src/plutonium/openedItems.test.ts b/apps/web/src/plutonium/openedItems.test.ts
+new file mode 100644
+index 0000000000..7f02b7dc8b
+--- /dev/null
++++ b/apps/web/src/plutonium/openedItems.test.ts
+@@ -0,0 +1,176 @@
++import { EnvironmentId, ThreadId } from "@t3tools/contracts";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
++
++type FakeShell = EventTarget & { tabs: Map<number, unknown> };
++const newShell = () => Object.assign(new EventTarget(), { tabs: new Map() }) as FakeShell;
++
++const fake = vi.hoisted(() => {
++  return {
++    shell: null as unknown as FakeShell,
++    windows: {} as Record<number, unknown>,
++    shownTabs: new Set<number>(),
++    toast: { add: vi.fn(() => "toast-1"), update: vi.fn(), close: vi.fn() },
++    openApp: vi.fn(),
++    openAndFocusApp: vi.fn(),
++  };
++});
++
++vi.mock("~/components/ui/toast", () => ({
++  toastManager: fake.toast,
++  stackedThreadToast: (options: object) => options,
++}));
++vi.mock("~/rightPanelStore", () => ({
++  useRightPanelStore: { getState: () => ({ openApp: fake.openApp }) },
++}));
++vi.mock("./panelKeys", () => ({ openAndFocusApp: fake.openAndFocusApp }));
++vi.mock("./previewBridge", () => ({
++  isBlank: (url: string) => url === "" || url === "about:blank",
++  plutoniumPreview: () => ({
++    runtimeTabIdOf: (id: number) => (fake.shownTabs.has(id) ? `runtime-${id}` : null),
++  }),
++  tabTags: (tab: { tags: string[] }) => tab.tags,
++}));
++vi.mock("./windowStore", () => ({
++  plutoniumShell: () => Promise.resolve(fake.shell),
++  usePlutoniumWindowStore: {
++    getState: () => ({
++      windows: fake.windows,
++      groups: { "t3:thread/other": { tag: "t3:thread/other", label: "Other thread" } },
++    }),
++  },
++  windowTags: (entry: { tags: string[] }) => entry.tags,
++  labelOfTag: (groups: Record<string, { label: string }>, tag: string) => groups[tag]?.label ?? tag,
++}));
++
++const environmentId = EnvironmentId.make("env");
++const here = { environmentId, threadId: ThreadId.make("here") };
++const other = { environmentId, threadId: ThreadId.make("other") };
++
++function window(id: number, thread: string, title = `Window ${id}`) {
++  const entry = {
++    id,
++    appId: "app",
++    title,
++    embedded: false,
++    pid: 100 + id,
++    threadId: `t3:thread/${thread}`,
++    tags: [`t3:thread/${thread}`],
++  };
++  fake.windows[id] = entry;
++  return entry;
++}
++
++function openWindow(entry: ReturnType<typeof window>, show: boolean) {
++  fake.shell.dispatchEvent(new CustomEvent("windowopened", { detail: { window: entry, show } }));
++}
++
++function closeWindow(id: number) {
++  delete fake.windows[id];
++  fake.shell.dispatchEvent(new Event("change"));
++}
++
++type ToastOptions = {
++  title: string;
++  description?: string;
++  data: { threadRef?: unknown };
++  actionProps: { onClick: () => void };
++};
++const lastToast = (): ToastOptions => {
++  const calls = [...fake.toast.add.mock.calls, ...fake.toast.update.mock.calls] as unknown[][];
++  return calls.at(-1)?.at(-1) as ToastOptions;
++};
++
++type Context = import("./openedItems").OpenedItemContext;
++let showWindow: ReturnType<typeof vi.fn<Context["showWindow"]>>;
++let showTab: ReturnType<typeof vi.fn<Context["showTab"]>>;
++
++beforeEach(async () => {
++  vi.useFakeTimers();
++  vi.resetModules();
++  vi.clearAllMocks();
++  for (const id of Object.keys(fake.windows)) delete fake.windows[Number(id)];
++  // Earlier tests' copies of the module still listen on their shells.
++  fake.shell = newShell();
++  fake.shownTabs.clear();
++  const items = await import("./openedItems");
++  showWindow = vi.fn<Context["showWindow"]>();
++  showTab = vi.fn<Context["showTab"]>();
++  items.setOpenedItemContext({ environmentId, activeThreadRef: here, showWindow, showTab });
++  items.startOpenedItems();
++  await Promise.resolve();
++});
++
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe("opened windows", () => {
++  it("brings a window the user started in the open thread to the front", () => {
++    openWindow(window(1, "here"), true);
++    expect(fake.openAndFocusApp).toHaveBeenCalledWith(here, { windowId: 1, appId: "app" });
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++  });
++
++  it("keeps a window the user started in another thread there, and offers it", () => {
++    openWindow(window(1, "other"), true);
++    expect(fake.openAndFocusApp).not.toHaveBeenCalled();
++    expect(fake.openApp).toHaveBeenCalledWith(other, { windowId: 1, appId: "app" });
++    vi.advanceTimersByTime(1000);
++    expect(lastToast()).toMatchObject({ title: "Window 1 opened", description: "In Other thread" });
++    expect(lastToast().data.threadRef).toBeUndefined();
++    lastToast().actionProps.onClick();
++    expect(showWindow).toHaveBeenCalledWith(other, fake.windows[1]);
++  });
++
++  it("mentions an agent's window in the open thread after a moment, without showing it", () => {
++    openWindow(window(1, "here"), false);
++    expect(fake.openAndFocusApp).not.toHaveBeenCalled();
++    vi.advanceTimersByTime(999);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++    vi.advanceTimersByTime(1);
++    expect(lastToast().data.threadRef).toEqual(here);
++  });
++
++  it("says nothing about an agent's window in another thread", () => {
++    openWindow(window(1, "other"), false);
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++    expect(fake.openApp).not.toHaveBeenCalled();
++  });
++
++  it("says nothing about a window that closes at once", () => {
++    openWindow(window(1, "here"), false);
++    closeWindow(1);
++    vi.advanceTimersByTime(2000);
++    expect(fake.toast.add).not.toHaveBeenCalled();
++  });
++
++  it("collects a thread's windows in one toast, and lets them go as they close", () => {
++    openWindow(window(1, "here"), false);
++    openWindow(window(2, "here", "Second"), false);
++    vi.advanceTimersByTime(1000);
++    expect(fake.toast.add).toHaveBeenCalledTimes(1);
++    expect(lastToast()).toMatchObject({ title: "2 windows opened", description: "Newest: Second" });
++    lastToast().actionProps.onClick();
++    expect(showWindow).toHaveBeenCalledWith(here, fake.windows[2]);
++    expect(lastToast()).toMatchObject({ title: "Window 1 opened" });
++    closeWindow(1);
++    expect(fake.toast.close).toHaveBeenCalledWith("toast-1");
++  });
++});
++
++describe("opened tabs", () => {
++  it("mentions an agent's tab in the open thread until it is shown", () => {
++    const tab = { id: 7, url: "https://example.com/", title: "Example", embedded: false };
++    fake.shell.tabs.set(7, { ...tab, tags: ["t3:thread/here"] });
++    fake.shell.dispatchEvent(
++      new CustomEvent("tabopened", { detail: { tab: { ...tab, tags: ["t3:thread/here"] } } }),
++    );
++    vi.advanceTimersByTime(1000);
++    expect(lastToast()).toMatchObject({ title: "Example opened" });
++    fake.shownTabs.add(7);
++    fake.shell.dispatchEvent(new Event("change"));
++    expect(fake.toast.close).toHaveBeenCalledWith("toast-1");
++  });
++});
+diff --git a/apps/web/src/plutonium/openedItems.ts b/apps/web/src/plutonium/openedItems.ts
+new file mode 100644
+index 0000000000..720579de8a
+--- /dev/null
++++ b/apps/web/src/plutonium/openedItems.ts
+@@ -0,0 +1,255 @@
++// Plutonium: what happens when a window or browser tab opens.
++//
++// A window the user started (from a terminal, the app launcher: the shell
++// library's `show`) opens in its thread's panel with the keyboard when that
++// thread is open. In another thread, it waits in that thread's panel, and a
++// toast offers to show it. What an agent opens waits in its thread, and a
++// toast says so while that thread is open (in other threads, nothing).
++//
++// Toasts wait a moment, so windows and tabs that close at once (a test run, a
++// splash) never get one. One toast per thread collects what opened there, and
++// drops what closes or the user opens some other way.
++import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
++import { ThreadId } from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++
++import { stackedThreadToast, toastManager } from "~/components/ui/toast";
++import { useRightPanelStore } from "~/rightPanelStore";
++
++import { openAndFocusApp } from "./panelKeys";
++import { isBlank, plutoniumPreview, tabTags, type BrokerTab } from "./previewBridge";
++import { threadIdOfTag, threadTag } from "./threadTag";
++import {
++  labelOfTag,
++  plutoniumShell,
++  type NativeWindowEntry,
++  usePlutoniumWindowStore,
++  windowTags,
++} from "./windowStore";
++
++/** How long a new item has to stay (and stay unseen) before a toast mentions it. */
++const NOTICE_DELAY_MS = 1000;
++const NOTICE_TIMEOUT_MS = 8000;
++
++/** What the app is showing, and how to show an item there. Set by PlutoniumWindowsStarter. */
++export interface OpenedItemContext {
++  readonly environmentId: EnvironmentId;
++  readonly activeThreadRef: ScopedThreadRef | null;
++  /** Goes to `ref`'s thread and shows the window there, with the keyboard. */
++  readonly showWindow: (ref: ScopedThreadRef, window: NativeWindowEntry) => void;
++  /** Goes to `ref`'s thread and shows the tab in its browser panel. */
++  readonly showTab: (ref: ScopedThreadRef, tab: BrokerTab) => void;
++}
++
++type Item =
++  | { readonly kind: "window"; readonly id: number }
++  | { readonly kind: "tab"; readonly id: number };
++
++interface Notice {
++  readonly ref: ScopedThreadRef;
++  /** In the open thread when it started: the toast is shown only there. */
++  readonly scoped: boolean;
++  readonly items: Item[];
++  toastId: string | null;
++  rendered: string;
++}
++
++let context: OpenedItemContext | null = null;
++const notices = new Map<string, Notice>();
++
++export function setOpenedItemContext(next: OpenedItemContext | null): void {
++  context = next;
++}
++
++function threadOf(tags: readonly string[]): ThreadId | null {
++  const threadId = tags.map(threadIdOfTag).find((id) => id !== null);
++  return threadId ? ThreadId.make(threadId) : null;
++}
++
++function isActive(ref: ScopedThreadRef): boolean {
++  const active = context?.activeThreadRef;
++  return !!active && active.environmentId === ref.environmentId && active.threadId === ref.threadId;
++}
++
++function windowOf(id: number): NativeWindowEntry | undefined {
++  return usePlutoniumWindowStore.getState().windows[id];
++}
++
++let shellTabs: ReadonlyMap<number, BrokerTab> | null = null;
++
++function tabOf(id: number): BrokerTab | undefined {
++  return shellTabs?.get(id);
++}
++
++/** Still there, and not in front of the user (nor in a panel, for tabs). */
++function isWaiting(item: Item): boolean {
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    return window !== undefined && !window.embedded;
++  }
++  const tab = tabOf(item.id);
++  return (
++    tab !== undefined &&
++    !tab.embedded &&
++    !isBlank(tab.url) &&
++    (plutoniumPreview()?.runtimeTabIdOf(tab.id) ?? null) === null
++  );
++}
++
++function labelOf(item: Item): string {
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    return window?.title || window?.appId || "A window";
++  }
++  const tab = tabOf(item.id);
++  return tab?.title || tab?.url || "A tab";
++}
++
++function show(notice: Notice, item: Item): void {
++  if (!context) return;
++  if (item.kind === "window") {
++    const window = windowOf(item.id);
++    if (window) context.showWindow(notice.ref, window);
++  } else {
++    const tab = tabOf(item.id);
++    if (tab) context.showTab(notice.ref, tab);
++  }
++}
++
++function noticeKey(ref: ScopedThreadRef, scoped: boolean): string {
++  return `${scopedThreadKey(ref)}\u0000${scoped ? "here" : "elsewhere"}`;
++}
++
++function closeNotice(key: string): void {
++  const notice = notices.get(key);
++  notices.delete(key);
++  if (notice?.toastId) toastManager.close(notice.toastId);
++}
++
++/** Adds, updates or closes `key`'s toast to match what is still waiting. */
++function render(key: string): void {
++  const notice = notices.get(key);
++  if (!notice) return;
++  const waiting = notice.items.filter(isWaiting);
++  notice.items.splice(0, notice.items.length, ...waiting);
++  const newest = waiting.at(-1);
++  if (!newest) {
++    closeNotice(key);
++    return;
++  }
++  const kinds = new Set(waiting.map((item) => item.kind));
++  const noun = kinds.size > 1 ? "windows and tabs" : newest.kind === "window" ? "windows" : "tabs";
++  const title =
++    waiting.length === 1 ? `${labelOf(newest)} opened` : `${waiting.length} ${noun} opened`;
++  const thread = labelOfTag(
++    usePlutoniumWindowStore.getState().groups,
++    threadTag(notice.ref.threadId),
++  );
++  const description = notice.scoped
++    ? waiting.length === 1
++      ? "Opened in the background."
++      : `Newest: ${labelOf(newest)}`
++    : `In ${thread}`;
++  const rendered = JSON.stringify([title, description]);
++  if (notice.toastId && rendered === notice.rendered) return;
++  notice.rendered = rendered;
++  const options = {
++    ...stackedThreadToast({
++      type: "info",
++      title,
++      description,
++      timeout: notice.scoped ? 0 : NOTICE_TIMEOUT_MS,
++      actionProps: {
++        children: "Show",
++        onClick: () => {
++          const current = notices.get(key);
++          const item = current?.items.at(-1);
++          if (!current || !item) return;
++          current.items.pop();
++          show(current, item);
++          render(key);
++        },
++      },
++      data: {
++        hideCopyButton: true,
++        // Only counts while the thread is open, as the toast is only shown then.
++        ...(notice.scoped
++          ? { threadRef: notice.ref, dismissAfterVisibleMs: NOTICE_TIMEOUT_MS }
++          : {}),
++      },
++    }),
++    onClose: () => {
++      if (notices.get(key) === notice) notices.delete(key);
++    },
++  };
++  if (notice.toastId) toastManager.update(notice.toastId, options);
++  else notice.toastId = toastManager.add(options);
++}
++
++/** Tells the user about `item` in `ref`'s thread, unless it closes or they see it first. */
++function notify(ref: ScopedThreadRef, scoped: boolean, item: Item): void {
++  setTimeout(() => {
++    if (!isWaiting(item)) return;
++    const key = noticeKey(ref, scoped);
++    let notice = notices.get(key);
++    if (!notice) {
++      notice = { ref, scoped, items: [], toastId: null, rendered: "" };
++      notices.set(key, notice);
++    }
++    if (!notice.items.some((entry) => entry.kind === item.kind && entry.id === item.id)) {
++      notice.items.push(item);
++    }
++    render(key);
++  }, NOTICE_DELAY_MS);
++}
++
++function onWindowOpened(window: NativeWindowEntry, shown: boolean): void {
++  const threadId = threadOf(windowTags(window));
++  if (!context || !threadId) return;
++  const ref = { environmentId: context.environmentId, threadId };
++  const active = isActive(ref);
++  if (shown && active) {
++    openAndFocusApp(ref, { windowId: window.id, appId: window.appId });
++  } else if (shown) {
++    // It waits as a tab of its own thread; the toast goes there.
++    useRightPanelStore.getState().openApp(ref, { windowId: window.id, appId: window.appId });
++    notify(ref, false, { kind: "window", id: window.id });
++  } else if (active) {
++    notify(ref, true, { kind: "window", id: window.id });
++  }
++}
++
++function onTabOpened(tab: BrokerTab): void {
++  // Tabs the user asks for (links, xdg-open from a terminal) are shown as
++  // they open; this is for the rest, such as an agent's.
++  const threadId = threadOf(tabTags(tab));
++  if (!context || !threadId) return;
++  const ref = { environmentId: context.environmentId, threadId };
++  if (isActive(ref)) notify(ref, true, { kind: "tab", id: tab.id });
++}
++
++let started = false;
++
++/** Listens for new windows and tabs, once per document. */
++export function startOpenedItems(): void {
++  if (started) return;
++  started = true;
++  void plutoniumShell().then((shell) => {
++    if (!shell) return;
++    shellTabs = shell.tabs ?? null;
++    shell.addEventListener("windowopened", (event) => {
++      const { window, show: shown } = (
++        event as CustomEvent<{ window: NativeWindowEntry; show: boolean }>
++      ).detail;
++      onWindowOpened(window, shown);
++    });
++    shell.addEventListener("tabopened", (event) => {
++      onTabOpened((event as CustomEvent<{ tab: BrokerTab }>).detail.tab);
++    });
++    // What closed, or was opened some other way, leaves its toast.
++    const refresh = () => {
++      for (const key of notices.keys()) render(key);
++    };
++    shell.addEventListener("change", refresh);
++  });
++}
+diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
+new file mode 100644
+index 0000000000..cf87383e09
+--- /dev/null
++++ b/apps/web/src/plutonium/panelKeys.ts
+@@ -0,0 +1,277 @@
++// Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
++// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
++// dock.ts), and moving keyboard focus into a tab's content (an app's window,
++// a browser tab's page).
++//
++// In the Plutonium shell these shortcuts (and the app launcher's) are also
++// registered with the browser as shell shortcuts, so they reach this page
++// while an app or browser tab in the panel has the keyboard.
++import {
++  DOCK_ASSIGN_KEYBINDING_COMMANDS,
++  DOCK_SLOT_KEYBINDING_COMMANDS,
++  DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  type KeybindingCommand,
++  type KeybindingShortcut,
++  RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS,
++  type ResolvedKeybindingsConfig,
++  type ScopedThreadRef,
++} from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import { useEffect, useRef } from "react";
++
++import { isCommandPaletteOpen } from "~/commandPaletteBus";
++import { dispatchPreviewAction } from "~/components/preview/previewActionBus";
++import { resolveShortcutCommand } from "~/keybindings";
++import { isMacPlatform } from "~/lib/utils";
++import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
++
++import {
++  assignDockSlot,
++  type DockContext,
++  type DockSlotNumber,
++  runDockSlot,
++  toggleDockLayout,
++} from "./dock";
++import { plutoniumShell } from "./windowStore";
++
++const TAB_JUMP: readonly KeybindingCommand[] = RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS;
++const DOCK_SLOT: readonly KeybindingCommand[] = DOCK_SLOT_KEYBINDING_COMMANDS;
++const DOCK_SLOT_OTHER: readonly KeybindingCommand[] = DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS;
++const DOCK_ASSIGN: readonly KeybindingCommand[] = DOCK_ASSIGN_KEYBINDING_COMMANDS;
++
++/** Commands that must reach the page even while an app or tab has the keyboard. */
++const SHELL_COMMANDS = new Set<KeybindingCommand>([
++  ...TAB_JUMP,
++  "rightPanel.nextTab",
++  "rightPanel.previousTab",
++  "preview.newTab",
++  "appLauncher.toggle",
++  ...DOCK_SLOT,
++  ...DOCK_SLOT_OTHER,
++  ...DOCK_ASSIGN,
++  "dock.toggleLayout",
++]);
++
++const CODE_BY_KEY: Readonly<Record<string, string>> = {
++  " ": "Space",
++  tab: "Tab",
++  enter: "Enter",
++  escape: "Escape",
++  backspace: "Backspace",
++  delete: "Delete",
++  arrowup: "ArrowUp",
++  arrowdown: "ArrowDown",
++  arrowleft: "ArrowLeft",
++  arrowright: "ArrowRight",
++  home: "Home",
++  end: "End",
++  pageup: "PageUp",
++  pagedown: "PageDown",
++  "`": "Backquote",
++  "\\": "Backslash",
++  "[": "BracketLeft",
++  "]": "BracketRight",
++  ",": "Comma",
++  "=": "Equal",
++  "-": "Minus",
++  ".": "Period",
++  "'": "Quote",
++  ";": "Semicolon",
++  "/": "Slash",
++};
++
++/** A T3 shortcut as the browser's shell-shortcut syntax ("Ctrl+Shift+Tab"), or null. */
++export function toShellShortcut(
++  shortcut: KeybindingShortcut,
++  platform = navigator.platform,
++): string | null {
++  const key = shortcut.key;
++  const code = /^[a-z]$/.test(key)
++    ? `Key${key.toUpperCase()}`
++    : /^[0-9]$/.test(key)
++      ? `Digit${key}`
++      : /^f([1-9]|1[0-9]|2[0-4])$/.test(key)
++        ? key.toUpperCase()
++        : CODE_BY_KEY[key];
++  if (!code) return null;
++  const mac = isMacPlatform(platform);
++  const parts = [];
++  if (shortcut.ctrlKey || (shortcut.modKey && !mac)) parts.push("Ctrl");
++  if (shortcut.altKey) parts.push("Alt");
++  if (shortcut.shiftKey) parts.push("Shift");
++  if (shortcut.metaKey || (shortcut.modKey && mac)) parts.push("Super");
++  return [...parts, code].join("+");
++}
++
++/** Tells the browser which of `keybindings` the page handles itself. */
++function registerShellShortcuts(keybindings: ResolvedKeybindingsConfig): void {
++  const shortcuts = [
++    ...new Set(
++      keybindings
++        .filter((rule) => SHELL_COMMANDS.has(rule.command))
++        .flatMap((rule) => toShellShortcut(rule.shortcut) ?? []),
++    ),
++  ];
++  void plutoniumShell().then((shell) => shell?.setShellShortcuts?.(shortcuts));
++}
++
++const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
++
++let focusAttempt = 0;
++
++/**
++ * Moves keyboard focus into `surface`'s content once it is on screen: an
++ * app's window, a browser tab's page (or its address bar while it's blank).
++ * Other surfaces focus themselves when activated.
++ */
++export async function focusRightPanelSurface(surface: RightPanelSurface): Promise<void> {
++  const attempt = ++focusAttempt;
++  const deadline = performance.now() + 3000;
++  while (performance.now() < deadline) {
++    await nextFrame();
++    // A later request (another tab) takes over.
++    if (attempt !== focusAttempt) return;
++    if (surface.kind === "app") {
++      const element = document.querySelector<
++        HTMLElement & { windowState?: string; focusWindow?: () => void }
++      >(`[data-plutonium-app-surface="${surface.windowId}"] native-window`);
++      if (element?.windowState === "attached") {
++        element.focusWindow?.();
++        return;
++      }
++    } else if (surface.kind === "preview") {
++      if (!surface.resourceId) {
++        dispatchPreviewAction("focus-url");
++        return;
++      }
++      const embed = document.querySelector<HTMLElement>(
++        `embed[data-preview-server-tab="${CSS.escape(surface.resourceId)}"]`,
++      );
++      if (embed) {
++        embed.focus();
++        return;
++      }
++    } else {
++      return;
++    }
++  }
++}
++
++/** Once `threadRef`'s new browser tab is active, puts the keyboard in its address bar. */
++async function focusNewBrowserTab(
++  threadRef: ScopedThreadRef,
++  previous: string | null,
++): Promise<void> {
++  const key = scopedThreadKey(threadRef);
++  const deadline = performance.now() + 5000;
++  while (performance.now() < deadline) {
++    await nextFrame();
++    const active = useRightPanelStore.getState().byThreadKey[key]?.activeSurfaceId ?? null;
++    if (active !== previous && active?.startsWith("browser:")) {
++      // Its view subscribes to preview actions some time after it mounts:
++      // ask until the address bar has the keyboard.
++      dispatchPreviewAction("focus-url");
++      if (document.activeElement instanceof HTMLInputElement) return;
++    }
++  }
++}
++
++/** Opens app window `window` as a tab in `threadRef`'s panel and gives it the keyboard. */
++export function openAndFocusApp(
++  threadRef: ScopedThreadRef,
++  window: { windowId: number; appId: string },
++): void {
++  const store = useRightPanelStore.getState();
++  store.openApp(threadRef, window);
++  store.show(threadRef);
++  void focusRightPanelSurface({
++    id: `app:${window.windowId}`,
++    kind: "app",
++    windowId: window.windowId,
++    appId: window.appId,
++  });
++}
++
++/**
++ * Alt+1…9, Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+T for the active thread's right
++ * panel. `activate` is the panel's own tab activation.
++ */
++export function usePlutoniumPanelKeys(input: {
++  readonly threadRef: ScopedThreadRef | null;
++  readonly keybindings: ResolvedKeybindingsConfig;
++  readonly surfaces: readonly RightPanelSurface[];
++  readonly activeSurfaceId: string | null;
++  readonly activate: (surface: RightPanelSurface) => void;
++  readonly newBrowserTab: () => void;
++  /** The thread's panel and terminal, for the dock; null without a thread. */
++  readonly dock: DockContext | null;
++}): void {
++  const latest = useRef(input);
++  useEffect(() => {
++    latest.current = input;
++  });
++
++  useEffect(() => registerShellShortcuts(input.keybindings), [input.keybindings]);
++
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      const { threadRef, keybindings, surfaces, activeSurfaceId, activate, newBrowserTab } =
++        latest.current;
++      if (!threadRef || event.defaultPrevented || isCommandPaletteOpen()) return;
++      const command = resolveShortcutCommand(event, keybindings);
++      if (!command) return;
++      const show = (surface: RightPanelSurface | undefined) => {
++        event.preventDefault();
++        event.stopPropagation();
++        if (!surface || event.repeat) return;
++        activate(surface);
++        void focusRightPanelSurface(surface);
++      };
++      const dock = latest.current.dock;
++      const slot = DOCK_SLOT.indexOf(command);
++      const slotOther = DOCK_SLOT_OTHER.indexOf(command);
++      const assign = DOCK_ASSIGN.indexOf(command);
++      if (slot >= 0 || slotOther >= 0 || assign >= 0 || command === "dock.toggleLayout") {
++        event.preventDefault();
++        event.stopPropagation();
++        if (!dock || event.repeat) return;
++        if (command === "dock.toggleLayout") toggleDockLayout(dock);
++        else if (assign >= 0) {
++          // What has the keyboard: the terminal drawer, else the panel's tab.
++          const terminal =
++            document.activeElement?.closest(
++              '[data-thread-terminal-drawer][data-terminal-owner="drawer"]',
++            ) != null;
++          const surface = dock.panelOpen
++            ? (surfaces.find((entry) => entry.id === activeSurfaceId) ?? null)
++            : null;
++          if (!terminal && !surface) return;
++          void assignDockSlot(dock, (assign + 1) as DockSlotNumber, terminal ? null : surface);
++        } else if (slot >= 0) runDockSlot(dock, (slot + 1) as DockSlotNumber);
++        else runDockSlot(dock, (slotOther + 1) as DockSlotNumber, { other: true });
++        return;
++      }
++      const jump = TAB_JUMP.indexOf(command);
++      if (jump >= 0) {
++        show(surfaces[jump]);
++        return;
++      }
++      if (command === "rightPanel.nextTab" || command === "rightPanel.previousTab") {
++        if (surfaces.length === 0) return show(undefined);
++        const current = surfaces.findIndex((surface) => surface.id === activeSurfaceId);
++        const step = command === "rightPanel.nextTab" ? 1 : -1;
++        show(surfaces[(current + step + surfaces.length) % surfaces.length]);
++        return;
++      }
++      if (command === "preview.newTab") {
++        event.preventDefault();
++        event.stopPropagation();
++        if (event.repeat) return;
++        newBrowserTab();
++        void focusNewBrowserTab(threadRef, activeSurfaceId);
++      }
++    };
++    window.addEventListener("keydown", onKeyDown, true);
++    return () => window.removeEventListener("keydown", onKeyDown, true);
++  }, []);
++}
+diff --git a/apps/web/src/plutonium/remoteWindows.test.ts b/apps/web/src/plutonium/remoteWindows.test.ts
+new file mode 100644
+index 0000000000..0dc73b65d6
+--- /dev/null
++++ b/apps/web/src/plutonium/remoteWindows.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  inputModifiers,
++  mouseButton,
++  remoteWindowEntries,
++  wheelNotches,
++  windowPoint,
++  windowStreamUrl,
++} from "./remoteWindows";
++
++const window = {
++  id: 7,
++  appId: "org.gnome.TextEditor",
++  title: "Untitled",
++  width: 800,
++  height: 600,
++  deviceScaleFactor: 1,
++  embedded: false,
++  focused: false,
++  pid: 42,
++};
++
++describe("remote windows", () => {
++  it("files a window under the first T3 thread among its tags", () => {
++    const entries = remoteWindowEntries([
++      { ...window, tags: ["niri:workspace/1", "t3:thread/abc", "t3:thread/def"] },
++      { ...window, id: 8, tags: [] },
++    ]);
++    expect(entries[7]?.threadId).toBe("abc");
++    expect(entries[8]?.threadId).toBeNull();
++  });
++
++  it("maps a point on the scaled frame to the window's DIPs", () => {
++    const rect = { left: 100, top: 50, width: 400, height: 300 };
++    expect(windowPoint(300, 200, rect, window)).toEqual({ x: 400, y: 300 });
++    // Drags outside the frame stay on the window's edge.
++    expect(windowPoint(0, 1000, rect, window)).toEqual({ x: 0, y: 600 });
++  });
++
++  it("speaks the helper's input", () => {
++    expect(inputModifiers({ altKey: true, ctrlKey: true, metaKey: false, shiftKey: true })).toBe(
++      11,
++    );
++    expect([0, 1, 2, 9].map(mouseButton)).toEqual(["left", "middle", "right", "none"]);
++    expect(wheelNotches(0, 0)).toBe(0);
++    expect(wheelNotches(4, 0)).toBe(1);
++    expect(wheelNotches(-250, 0)).toBe(-3);
++    expect(wheelNotches(3, 1)).toBe(1);
++  });
++
++  it("puts the ticket on the socket's URL", () => {
++    const access = {
++      httpBase: "https://desk.example/api/window-stream",
++      wsBase: "wss://desk.example/api/window-stream",
++      query: { wsTicket: "t" },
++      credentials: false,
++    };
++    expect(windowStreamUrl(access, { windowId: "7" })).toBe(
++      "wss://desk.example/api/window-stream/ws?windowId=7&wsTicket=t",
++    );
++    expect(windowStreamUrl(access)).toBe("wss://desk.example/api/window-stream/ws?wsTicket=t");
++  });
++});
+diff --git a/apps/web/src/plutonium/remoteWindows.ts b/apps/web/src/plutonium/remoteWindows.ts
+new file mode 100644
+index 0000000000..ce62701cd9
+--- /dev/null
++++ b/apps/web/src/plutonium/remoteWindows.ts
+@@ -0,0 +1,187 @@
++// Plutonium: native windows for a client away from the desktop (another
++// machine's browser). The shell shows windows with <native-window>, which only
++// the session's own browser has; here the server streams them instead
++// (/api/window-stream on T3's server, through the helper): the window list
++// fills the same store, and a window's tab draws its frames on a canvas and
++// sends pointer and keyboard input back.
++import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
++import {
++  type DeviceHubAccess,
++  withDeviceHubQuery,
++} from "@t3tools/client-runtime/device/hub-access";
++import type { EnvironmentId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import { Atom, AtomRegistry } from "effect/reactivity";
++
++import { connectionAtomRuntime } from "~/connection/runtime";
++import { appAtomRegistry } from "~/rpc/atomRegistry";
++import { useRightPanelStore } from "~/rightPanelStore";
++import { environmentSession } from "~/state/session";
++
++import { threadIdOfTag } from "./threadTag";
++import { type NativeWindowEntry, usePlutoniumWindowStore } from "./windowStore";
++
++export const WINDOW_STREAM_BASE_PATH = "/api/window-stream";
++/** The server's close codes (apps/server/src/plutonium/windowStream.ts). */
++export const WINDOW_GONE_CODE = 4404;
++export const WINDOWS_UNAVAILABLE_CODE = 4503;
++const RECONNECT_MS = 2000;
++
++const windowStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
++  connectionAtomRuntime
++    .atom((get) => {
++      const prepared = Option.getOrNull(
++        get(environmentSession.preparedConnectionValueAtom(environmentId)),
++      );
++      if (prepared === null) return Effect.never;
++      return resolveDeviceHubAccess({ prepared, hubBasePath: WINDOW_STREAM_BASE_PATH });
++    })
++    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`window-stream-access:${environmentId}`)),
++);
++
++/** Access to the window stream (a fresh ticket with `refresh`); null if there is none. */
++export function readWindowStreamAccess(
++  environmentId: EnvironmentId,
++  refresh: boolean,
++): Promise<DeviceHubAccess | null> {
++  const atom = windowStreamAccessAtom(environmentId);
++  if (refresh) appAtomRegistry.refresh(atom);
++  return Effect.runPromise(
++    AtomRegistry.getResult(appAtomRegistry, atom, { suspendOnWaiting: true }).pipe(
++      Effect.timeout("10 seconds"),
++      Effect.orElseSucceed(() => null),
++    ),
++  );
++}
++
++/** A WebSocket URL on the window stream. */
++export function windowStreamUrl(
++  access: DeviceHubAccess,
++  query: Readonly<Record<string, string>> = {},
++): string {
++  const search = new URLSearchParams(query).toString();
++  return withDeviceHubQuery(`${access.wsBase}/ws${search ? `?${search}` : ""}`, access);
++}
++
++/** The helper's window list as store entries (the thread is the first T3 thread tag's). */
++export function remoteWindowEntries(
++  list: readonly Omit<NativeWindowEntry, "threadId">[],
++): Record<number, NativeWindowEntry> {
++  return Object.fromEntries(
++    list.map((window) => [
++      window.id,
++      {
++        ...window,
++        threadId: (window.tags ?? []).map(threadIdOfTag).find((id) => id !== null) ?? null,
++      },
++    ]),
++  );
++}
++
++/**
++ * Fills the window store from the server's list, kept current, unless this
++ * page is the shell. Returns a function that stops.
++ */
++export function startRemoteWindows(environmentId: EnvironmentId): () => void {
++  let socket: WebSocket | null = null;
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  let stopped = false;
++  let reconciled = false;
++  // Refused upgrades (a server without the route) close before opening.
++  let refusals = 0;
++  const connect = async (refresh: boolean) => {
++    const access = await readWindowStreamAccess(environmentId, refresh);
++    if (stopped) return;
++    if (!access) {
++      timer = setTimeout(() => void connect(true), RECONNECT_MS);
++      return;
++    }
++    socket = new WebSocket(windowStreamUrl(access));
++    let opened = false;
++    socket.addEventListener("open", () => {
++      opened = true;
++      refusals = 0;
++    });
++    socket.addEventListener("message", (event) => {
++      if (typeof event.data !== "string") return;
++      const message = JSON.parse(event.data) as {
++        type?: string;
++        windows?: Omit<NativeWindowEntry, "threadId">[];
++      };
++      if (message.type !== "windows" || !message.windows) return;
++      const windows = remoteWindowEntries(message.windows);
++      usePlutoniumWindowStore.setState({ available: true, remote: true, windows });
++      // As in the shell: a tab whose window is gone (or is another app now) closes.
++      useRightPanelStore
++        .getState()
++        .reconcileAppSurfaces((id, appId) =>
++          reconciled ? id in windows : windows[id]?.appId === appId,
++        );
++      reconciled = true;
++    });
++    socket.addEventListener("close", (event) => {
++      socket = null;
++      if (stopped) return;
++      if (!opened) refusals++;
++      if (event.code === WINDOWS_UNAVAILABLE_CODE || refusals >= 3) {
++        // No Plutonium session behind this server: no Apps panel.
++        usePlutoniumWindowStore.setState({ available: false, windows: {} });
++        useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++        return;
++      }
++      timer = setTimeout(() => void connect(true), RECONNECT_MS);
++    });
++  };
++  void connect(false);
++  return () => {
++    stopped = true;
++    clearTimeout(timer);
++    socket?.close();
++  };
++}
++
++/** Alt=1, Ctrl=2, Meta=4, Shift=8, as the helper's input takes them. */
++export function inputModifiers(
++  event: Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey">,
++): number {
++  return (
++    (event.altKey ? 1 : 0) |
++    (event.ctrlKey ? 2 : 0) |
++    (event.metaKey ? 4 : 0) |
++    (event.shiftKey ? 8 : 0)
++  );
++}
++
++const BUTTONS = ["left", "middle", "right", "back", "forward"] as const;
++
++/** A DOM mouse button as the helper names it. */
++export function mouseButton(button: number): (typeof BUTTONS)[number] | "none" {
++  return BUTTONS[button] ?? "none";
++}
++
++/** Wheel pixels (or lines) as notches, at least one in the direction scrolled. */
++export function wheelNotches(delta: number, deltaMode: number): number {
++  if (delta === 0) return 0;
++  const notches = deltaMode === 0 ? delta / 100 : deltaMode === 1 ? delta / 3 : delta * 10;
++  return Math.sign(notches) * Math.max(1, Math.round(Math.abs(notches)));
++}
++
++/**
++ * A point on the drawn frame (`rect`, CSS px) in the window's DIPs; the
++ * frame shows the whole window, scaled.
++ */
++export function windowPoint(
++  clientX: number,
++  clientY: number,
++  rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
++  window: Pick<NativeWindowEntry, "width" | "height">,
++): { x: number; y: number } {
++  const clamp = (value: number, max: number) => Math.min(Math.max(value, 0), max);
++  return {
++    x: Math.round(clamp(((clientX - rect.left) / (rect.width || 1)) * window.width, window.width)),
++    y: Math.round(
++      clamp(((clientY - rect.top) / (rect.height || 1)) * window.height, window.height),
++    ),
++  };
++}
+diff --git a/apps/web/src/plutonium/threadTag.ts b/apps/web/src/plutonium/threadTag.ts
+new file mode 100644
+index 0000000000..10b488e399
+--- /dev/null
++++ b/apps/web/src/plutonium/threadTag.ts
+@@ -0,0 +1,41 @@
++// Plutonium tags for T3 threads. A thread's tag is what its processes carry
++// as PLUTONIUM_THREAD_ID (the server sets it, apps/server/src/plutonium.ts)
++// and what the windows and tabs it opens are tagged with. Namespaced, so
++// other shells' threads can't collide with it.
++
++const THREAD_TAG_PREFIX = "t3:thread/";
++
++/** A T3 thread's Plutonium tag. */
++export function threadTag(threadId: string): string {
++  return `${THREAD_TAG_PREFIX}${threadId}`;
++}
++
++/** The T3 thread a tag names, or null. */
++export function threadIdOfTag(tag: string | null | undefined): string | null {
++  return tag?.startsWith(THREAD_TAG_PREFIX) ? tag.slice(THREAD_TAG_PREFIX.length) : null;
++}
++
++/** The tag of what a dock slot keeps per project: `projectId`'s windows. */
++export function projectTag(projectId: string): string {
++  return `t3:project/${projectId}`;
++}
++
++/** The tag of what a dock slot keeps everywhere. */
++export const GLOBAL_TAG = "t3:global";
++
++/** Whether `tag` is a dock scope's (a project's or everywhere), not a thread's. */
++export function isDockScopeTag(tag: string): boolean {
++  return tag === GLOBAL_TAG || tag.startsWith("t3:project/");
++}
++
++const DOCK_SLOT_TAG_PREFIX = "t3:dock/";
++
++/** The tag of the one window or tab a dock slot holds (in each of its scopes). */
++export function dockSlotTag(slotId: string): string {
++  return `${DOCK_SLOT_TAG_PREFIX}${slotId}`;
++}
++
++/** Whether `tag` marks something a dock slot holds. */
++export function isDockSlotTag(tag: string): boolean {
++  return tag.startsWith(DOCK_SLOT_TAG_PREFIX);
++}
+diff --git a/apps/web/src/plutonium/useThreadPlutonium.ts b/apps/web/src/plutonium/useThreadPlutonium.ts
+new file mode 100644
+index 0000000000..25676c6f32
+--- /dev/null
++++ b/apps/web/src/plutonium/useThreadPlutonium.ts
+@@ -0,0 +1,188 @@
++// Plutonium: what a thread's chat view adds in the Plutonium shell, kept out
++// of ChatView so a T3 Code upgrade only meets a few lines there: the Apps tab,
++// the dock's context (its sites, tabs and terminal), the panel's keys, an
++// app's own maximize button, and the floating preview following the tab the
++// agent drives.
++import {
++  isAtomCommandInterrupted,
++  squashAtomCommandFailure,
++} from "@t3tools/client-runtime/state/runtime";
++import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
++import { useEffect } from "react";
++
++import { useBrowserPointerStore } from "../browser/browserPointerStore";
++import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
++import { openPreviewSession } from "../components/preview/openPreviewSession";
++import { stackedThreadToast, toastManager } from "../components/ui/toast";
++import { useStableCallback } from "../hooks/useStableCallback";
++import { focusActiveDrawerTerminal } from "../lib/terminalFocus";
++import {
++  browserMiniPlayerSource,
++  selectThreadPreviewMiniPlayer,
++  usePreviewMiniPlayerStore,
++} from "../previewMiniPlayerStore";
++import { beginPreviewSessionClose, type ThreadPreviewState } from "../previewStateStore";
++import { type RightPanelSurface, useRightPanelStore } from "../rightPanelStore";
++import { previewEnvironment } from "../state/preview";
++import { useAtomCommand } from "../state/use-atom-command";
++import { type DockContext, publishDockContext, useTerminalFolded } from "./dock";
++import { importBrowserTab } from "./importTab";
++import { usePlutoniumPanelKeys } from "./panelKeys";
++import type { BrokerTab } from "./previewBridge";
++import { PANEL_MAXIMIZE_REQUEST_EVENT } from "./PlutoniumWindows";
++import { usePlutoniumWindowStore } from "./windowStore";
++
++export interface ThreadPlutoniumInput {
++  readonly threadRef: ScopedThreadRef | null;
++  readonly projectId: string | null;
++  readonly keybindings: ResolvedKeybindingsConfig;
++  readonly canOperatePreview: boolean;
++  readonly surfaces: readonly RightPanelSurface[];
++  readonly activeSurfaceId: string | null;
++  readonly panelOpen: boolean;
++  readonly maximized: boolean;
++  readonly canMaximize: boolean;
++  readonly terminalOpen: boolean;
++  readonly previewState: ThreadPreviewState;
++  readonly toggleTerminal: () => void;
++  readonly setTerminalOpen: (open: boolean) => void;
++  readonly focusComposer: () => void;
++  readonly activate: (surface: RightPanelSurface) => void;
++  readonly newBrowserTab: () => void;
++}
++
++export function useThreadPlutonium(input: ThreadPlutoniumInput) {
++  const { threadRef, canOperatePreview } = input;
++  const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
++  const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
++
++  // Native windows, only when this page is the shell.
++  const appsAvailable = usePlutoniumWindowStore((state) => state.available);
++  const addApps = useStableCallback(() => {
++    if (threadRef) useRightPanelStore.getState().open(threadRef, "apps");
++  });
++
++  // The dock folded the conversation away for the terminal drawer.
++  const terminalFolded = useTerminalFolded(threadRef);
++  const terminalFoldedAway = terminalFolded && input.terminalOpen;
++
++  const reportOpenFailure = (error: unknown) =>
++    toastManager.add(
++      stackedThreadToast({
++        type: "error",
++        title: "Unable to open browser",
++        description: error instanceof Error ? error.message : String(error),
++      }),
++    );
++  // A dock slot's site, opened as a new browser tab.
++  const openSite = useStableCallback(async (url: string) => {
++    if (!threadRef || !canOperatePreview) return;
++    const result = await openPreviewSession({ openPreview, threadRef, url });
++    if (result._tag === "Failure") {
++      if (!isAtomCommandInterrupted(result)) reportOpenFailure(squashAtomCommandFailure(result));
++      return;
++    }
++    useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
++    useRightPanelStore.getState().show(threadRef);
++  });
++  // A dock slot's tab kept per project or everywhere, moving here.
++  const showTab = useStableCallback(async (tab: BrokerTab): Promise<string | null> => {
++    if (!threadRef || !canOperatePreview) return null;
++    const result = await importBrowserTab({ threadRef, tab, openPreview });
++    if (!result || result._tag === "Failure") {
++      if (result && isAtomCommandInterrupted(result)) return null;
++      reportOpenFailure(result ? squashAtomCommandFailure(result) : "No Plutonium browser");
++      return null;
++    }
++    useRightPanelStore.getState().show(threadRef);
++    return (result.value as { tabId: string }).tabId;
++  });
++  const closeDockPreview = useStableCallback(async (ref: ScopedThreadRef, tabId: string) => {
++    beginPreviewSessionClose(ref, tabId);
++    await closePreview({
++      environmentId: ref.environmentId,
++      input: { threadId: ref.threadId, tabId },
++    });
++  });
++  // The Apps tab's "Elsewhere" list brings another shell's tab here.
++  const importTab = useStableCallback((tab: BrokerTab) => {
++    if (threadRef) void importBrowserTab({ threadRef, tab, openPreview });
++  });
++  const closeTerminal = useStableCallback(() => input.setTerminalOpen(false));
++  const focusTerminal = useStableCallback(() => {
++    if (threadRef) focusActiveDrawerTerminal(threadRef);
++  });
++
++  const dock: DockContext | null = threadRef
++    ? {
++        threadRef,
++        projectId: input.projectId,
++        surfaces: input.surfaces,
++        activeSurfaceId: input.activeSurfaceId,
++        panelOpen: input.panelOpen,
++        maximized: input.maximized,
++        terminalOpen: input.terminalOpen,
++        openTerminal: input.toggleTerminal,
++        closeTerminal,
++        focusTerminal,
++        focusComposer: input.focusComposer,
++        activate: input.activate,
++        openSite,
++        showTab,
++        closePreview: closeDockPreview,
++      }
++    : null;
++  // The sidebar's dock runs slots in this thread and shows their state.
++  useEffect(() => publishDockContext(dock));
++  useEffect(() => () => publishDockContext(null), []);
++  // Alt+1…9, Ctrl+Tab and Ctrl+T for the panel's tabs, and the dock.
++  usePlutoniumPanelKeys({
++    threadRef,
++    keybindings: input.keybindings,
++    surfaces: input.surfaces,
++    activeSurfaceId: input.activeSurfaceId,
++    activate: input.activate,
++    newBrowserTab: input.newBrowserTab,
++    dock,
++  });
++
++  // An app in the panel pressed its own maximize (or restore) button.
++  const { canMaximize } = input;
++  useEffect(() => {
++    const onRequest = (event: Event) => {
++      if (!canMaximize || !threadRef) return;
++      const { maximized } = (event as CustomEvent<{ maximized: boolean }>).detail;
++      useRightPanelStore.getState().setMaximized(threadRef, maximized);
++    };
++    document.addEventListener(PANEL_MAXIMIZE_REQUEST_EVENT, onRequest);
++    return () => document.removeEventListener(PANEL_MAXIMIZE_REQUEST_EVENT, onRequest);
++  }, [canMaximize, threadRef]);
++
++  // The floating preview follows the tab the agent drives: the agent's cursor
++  // in another of the thread's tabs brings that one up in it.
++  const { sessions, serverEpoch } = input.previewState;
++  useEffect(() => {
++    if (!threadRef) return;
++    return useBrowserPointerStore.subscribe((state, previous) => {
++      const source = selectThreadPreviewMiniPlayer(
++        usePreviewMiniPlayerStore.getState().byThreadKey,
++        threadRef,
++      )?.source;
++      if (source?.kind !== "browser") return;
++      for (const [runtimeTabId, event] of Object.entries(state.byTabId)) {
++        if (previous.byTabId[runtimeTabId] === event) continue;
++        const session = Object.values(sessions).find(
++          (candidate) =>
++            previewRuntimeTabId(threadRef, serverEpoch, candidate.tabId) === runtimeTabId,
++        );
++        if (!session || session.tabId === source.tabId) continue;
++        usePreviewMiniPlayerStore
++          .getState()
++          .open(threadRef, browserMiniPlayerSource(session.tabId));
++        return;
++      }
++    });
++  }, [serverEpoch, sessions, threadRef]);
++
++  return { dock, appsAvailable, addApps, importTab, terminalFoldedAway };
++}
+diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
+new file mode 100644
+index 0000000000..9a79ef095b
+--- /dev/null
++++ b/apps/web/src/plutonium/windowStore.ts
+@@ -0,0 +1,364 @@
++// Plutonium: native windows from the browser's window broker, grouped by the
++// thread whose agent or terminals started them (or that they were added to).
++//
++// Windows and tabs carry Plutonium tags. A T3 thread's tag is
++// "t3:thread/<thread id>" (threadTag()): its processes carry it, so the
++// windows they open start with it, and adding it to a window from elsewhere
++// (another shell, or no thread) brings the window into the thread. Other
++// shells' tags are shown by their labels (the browser's group table).
++//
++// Only active when this page is the Plutonium shell (Chromium exposes
++// `navigator.windowBroker` to the shell origin only). The window list, the
++// window → thread mapping and the agent bridge come from Plutonium's shell
++// library, loaded from its helper (helper/web/plutonium-shell.js in the
++// plutonium repo); this file mirrors its state into a store for React.
++import { create } from "zustand";
++
++import { useRightPanelStore } from "~/rightPanelStore";
++
++import { plutoniumHelperOrigin } from "./helperOrigin";
++import type { BrokerTab } from "./previewBridge";
++import { threadIdOfTag, threadTag } from "./threadTag";
++
++export { threadIdOfTag, threadTag };
++
++export interface NativeWindowEntry {
++  readonly id: number;
++  readonly appId: string;
++  readonly title: string;
++  readonly width: number;
++  readonly height: number;
++  readonly deviceScaleFactor: number;
++  readonly embedded: boolean;
++  readonly focused: boolean;
++  readonly pid: number;
++  /** The tag of the thread that started it; null if none did; undefined until known. */
++  readonly threadId: string | null | undefined;
++  /** The origin tag first, then the ones shells added (older browsers: missing). */
++  readonly tags?: readonly string[];
++}
++
++/**
++ * A window an agent works in (the shell library's agentWindows): the size it
++ * holds the window at, which a panel keeps, scaled to fit, until the user
++ * takes control; and whether it's working in it right now.
++ */
++export interface AgentWindow {
++  readonly id: number;
++  /** Absent once the user took control, or if the agent never held a size. */
++  readonly width?: number;
++  readonly height?: number;
++  readonly userControl: boolean;
++  readonly busy: boolean;
++}
++
++/** A tag a shell described: what to call it, and which shell owns it. */
++export interface PlutoniumGroup {
++  readonly tag: string;
++  readonly label: string;
++  readonly shellId: string;
++}
++
++/** A window's tags (before the browser had tags: just its thread's). */
++export function windowTags(entry: NativeWindowEntry): readonly string[] {
++  if (entry.tags && entry.tags.length > 0) return entry.tags;
++  return entry.threadId ? [entry.threadId] : [];
++}
++
++/** A display (several displays: each has its own shell pages, T3 among them). */
++export interface PlutoniumDisplay {
++  readonly id: string;
++  /** 1-based, left to right: "display 2". */
++  readonly index: number;
++  readonly label: string;
++  readonly focused: boolean;
++  /** This page is on it. */
++  readonly current: boolean;
++}
++
++/** A desktop app the helper can launch (a freedesktop.org desktop entry). */
++export interface DesktopApp {
++  readonly id: string;
++  readonly name: string;
++  readonly genericName: string;
++  readonly comment: string;
++  readonly keywords: readonly string[];
++  readonly categories: readonly string[];
++  readonly hasIcon: boolean;
++  readonly terminal: boolean;
++}
++
++/** The parts of the shell library's PlutoniumShell used here. */
++interface PlutoniumShell extends EventTarget {
++  readonly available: boolean;
++  readonly ready: Promise<void>;
++  readonly windows: ReadonlyMap<number, NativeWindowEntry>;
++  /** Browser tabs, by id (older libraries: missing). */
++  readonly tabs?: ReadonlyMap<number, BrokerTab>;
++  onFocus: ((window: NativeWindowEntry) => boolean | Promise<boolean>) | undefined;
++  grantFor(windowId: number): Promise<string>;
++  showOnDesktop(windowId: number): void;
++  apps(): Promise<DesktopApp[]>;
++  appIcon(appId: string): Promise<string | null>;
++  /** An object URL for a website's own icon, fetched by the helper (older libraries: missing). */
++  siteIcon?(pageUrl: string): Promise<string | null>;
++  launchApp(
++    threadId: string,
++    appId: string,
++    options?: { waitMs?: number },
++  ): Promise<{ pid: number; windows: { id: number; appId: string }[] }>;
++  setShellShortcuts?(shortcuts: readonly string[]): void;
++  readonly tagsAvailable?: boolean;
++  readonly groups?: ReadonlyMap<string, PlutoniumGroup>;
++  tagWindow?(windowId: number, add: readonly string[], remove?: readonly string[]): Promise<void>;
++  setGroups?(groups: readonly { tag: string; label: string }[]): void;
++  /**
++   * Lets the server drive browser tab `browserTabId`, shown here as its tab
++   * `serverTab`; resolves to the browser tab to show (another shell page's, if
++   * it shows the server's tab already). With `replace` (a tab brought from
++   * elsewhere), it wins over one the helper opened for the server itself.
++   */
++  showServerTab(
++    browserTabId: number,
++    serverTab: { readonly threadId: string; readonly tabId: string },
++    options?: { readonly replace?: boolean },
++  ): Promise<number>;
++  releaseServerTab(serverTab: { readonly threadId: string; readonly tabId: string }): Promise<void>;
++  /** Windows agents work in (older libraries: missing). */
++  readonly agentWindows?: ReadonlyMap<number, AgentWindow>;
++  releaseWindow?(windowId: number): Promise<void>;
++  /** The displays (older libraries: missing). */
++  readonly displays?: readonly PlutoniumDisplay[];
++  showOnDisplay?(windowId: number, display: number | string): Promise<boolean>;
++  /** Desktop services (DESKTOP_SERVICES.md; older libraries: missing). */
++  readonly system?: { get(name: string): SystemServiceHandle };
++}
++
++/** A desktop service in the shell library (`shell.system.<name>`): its state, kept current by "change" events. */
++export interface SystemServiceHandle extends EventTarget {
++  readonly state: unknown;
++  readonly error: string | null;
++  readonly ready: Promise<unknown>;
++  call(action: string, args?: Record<string, unknown>): Promise<unknown>;
++}
++
++interface PlutoniumWindowState {
++  readonly available: boolean;
++  /** The windows come from the server's stream (remoteWindows.ts), not this page's shell. */
++  readonly remote: boolean;
++  readonly windows: Readonly<Record<number, NativeWindowEntry>>;
++  /** Every shell's groups, by tag. */
++  readonly groups: Readonly<Record<string, PlutoniumGroup>>;
++  /** Windows agents work in, by id. */
++  readonly agentWindows: Readonly<Record<number, AgentWindow>>;
++  /** The displays, by index (empty with an older library). */
++  readonly displays: readonly PlutoniumDisplay[];
++}
++
++export const usePlutoniumWindowStore = create<PlutoniumWindowState>(() => ({
++  available: false,
++  remote: false,
++  windows: {},
++  groups: {},
++  agentWindows: {},
++  displays: [],
++}));
++
++let shell: PlutoniumShell | null = null;
++let focusHandler: ((window: NativeWindowEntry) => boolean) | null = null;
++
++/** How an agent's "show this window" (the bridge's focus) reaches the UI. */
++export function setPlutoniumFocusHandler(
++  handler: ((window: NativeWindowEntry) => boolean) | null,
++): void {
++  focusHandler = handler;
++}
++
++let tabHandlers: {
++  readonly onOpen: (tab: BrokerTab) => void;
++  readonly onFocus: (tab: BrokerTab) => boolean;
++} | null = null;
++
++/**
++ * Browser tabs that reach the UI: `onOpen` for a link this page opened in a
++ * new tab or window (window.open, target=_blank: what "open in the system
++ * browser" does here), which arrives untagged; `onFocus` for an agent's or
++ * the overlay's "show this tab".
++ */
++export function setPlutoniumTabHandlers(handlers: typeof tabHandlers): void {
++  tabHandlers = handlers;
++}
++
++/** A grant to embed `windowId` in this document (one per window, reused). */
++export function grantFor(windowId: number): Promise<string> {
++  return shell ? shell.grantFor(windowId) : Promise.reject(new Error("not the Plutonium shell"));
++}
++
++/** The user takes control of `windowId`'s size from the agent: the panel sizes it again. */
++export function releaseWindow(windowId: number): Promise<void> {
++  return shell?.releaseWindow
++    ? shell.releaseWindow(windowId)
++    : Promise.reject(new Error("this helper has no agent windows"));
++}
++
++/**
++ * Asks display `index`'s shell to show `windowId` (it takes the window from this page).
++ * Resolves to false if it didn't.
++ */
++export function showOnDisplay(windowId: number, index: number): Promise<boolean> {
++  return shell?.showOnDisplay ? shell.showOnDisplay(windowId, index) : Promise.resolve(false);
++}
++
++/** Raises `windowId` on the Ash desktop once no element shows it any more. */
++export function showOnDesktop(windowId: number): void {
++  shell?.showOnDesktop(windowId);
++}
++
++let shellReady: Promise<PlutoniumShell | null> | null = null;
++let resolveShell: ((shell: PlutoniumShell | null) => void) | null = null;
++
++/** The shell library once loaded; null outside the Plutonium shell. */
++export function plutoniumShell(): Promise<PlutoniumShell | null> {
++  shellReady ??= new Promise((resolve) => (resolveShell = resolve));
++  return shellReady;
++}
++
++/** Whether this page is the Plutonium shell (has the window broker). */
++export function isPlutoniumShell(): boolean {
++  return typeof navigator !== "undefined" && "windowBroker" in navigator;
++}
++
++function mirror(): void {
++  if (!shell) return;
++  const groups = shell.groups ? Object.fromEntries(shell.groups) : {};
++  const previous = usePlutoniumWindowStore.getState().groups;
++  usePlutoniumWindowStore.setState({
++    windows: Object.fromEntries(shell.windows),
++    // Unchanged groups keep their object, so selectors don't re-render.
++    groups: JSON.stringify(groups) === JSON.stringify(previous) ? previous : groups,
++  });
++}
++
++let describedGroups = "";
++let pendingGroups: { tag: string; label: string }[] | null = null;
++
++/** Tells the browser what T3's thread tags are called (other shells and the overlay show the labels). */
++export function describeThreads(threads: readonly { id: string; title: string }[]): void {
++  pendingGroups = threads.map((thread) => ({ tag: threadTag(thread.id), label: thread.title }));
++  flushGroups();
++}
++
++function flushGroups(): void {
++  if (!pendingGroups || !shell?.setGroups) return;
++  const key = JSON.stringify(pendingGroups);
++  if (key !== describedGroups) {
++    describedGroups = key;
++    shell.setGroups(pendingGroups);
++  }
++}
++
++/** Adds window `windowId` to `threadId` (it keeps the tags it had). */
++export function addWindowToThread(windowId: number, threadId: string): Promise<void> {
++  if (!shell?.tagWindow) return Promise.reject(new Error("this browser has no window tags"));
++  return shell.tagWindow(windowId, [threadTag(threadId)]);
++}
++
++/** Takes window `windowId` out of `threadId` (not the thread that started it). */
++export function removeWindowFromThread(windowId: number, threadId: string): Promise<void> {
++  if (!shell?.tagWindow) return Promise.reject(new Error("this browser has no window tags"));
++  return shell.tagWindow(windowId, [], [threadTag(threadId)]);
++}
++
++/** What to call `tag`: its group's label, else the tag. */
++export function labelOfTag(groups: Readonly<Record<string, PlutoniumGroup>>, tag: string): string {
++  return groups[tag]?.label || tag;
++}
++
++let started = false;
++
++/** Connect to the helper once per document. A no-op outside the shell. */
++export function startPlutoniumWindows(): void {
++  if (started) return;
++  started = true;
++  const dropAppTabs = () => useRightPanelStore.getState().reconcileAppSurfaces(() => false);
++  if (!("windowBroker" in navigator)) {
++    // Outside the shell the server streams the windows, if it can
++    // (startRemoteWindows); its list keeps or drops app tabs restored from storage.
++    void plutoniumShell();
++    resolveShell?.(null);
++    return;
++  }
++  const url = `${plutoniumHelperOrigin()}/v1/shell.js`;
++  import(/* @vite-ignore */ url).then(
++    (library: { connect(options: object): PlutoniumShell }) => {
++      shell = library.connect({
++        onFocus: (window: NativeWindowEntry) => focusHandler?.(window) ?? false,
++        // The handler tags the tab itself (importBrowserTab).
++        onOpenTab: (tab: BrokerTab) => {
++          tabHandlers?.onOpen(tab);
++          return undefined;
++        },
++        onFocusTab: (tab: BrokerTab) => tabHandlers?.onFocus(tab) ?? false,
++      });
++      usePlutoniumWindowStore.setState({ available: shell.available });
++      void shell.ready.then(flushGroups);
++      void plutoniumShell();
++      resolveShell?.(shell);
++      shell.addEventListener("change", mirror);
++      shell.addEventListener("displayschange", () => {
++        if (shell?.displays) usePlutoniumWindowStore.setState({ displays: [...shell.displays] });
++      });
++      shell.addEventListener("agentwindowschange", () => {
++        if (shell?.agentWindows)
++          usePlutoniumWindowStore.setState({
++            agentWindows: Object.fromEntries(shell.agentWindows),
++          });
++      });
++      // Window ids only hold within one Ash session: once the list is in,
++      // drop restored tabs whose window is gone or is now some other app.
++      void shell.ready.then(() => {
++        if (!shell) return;
++        const { windows } = shell;
++        mirror();
++        useRightPanelStore
++          .getState()
++          .reconcileAppSurfaces((id, appId) => windows.get(id)?.appId === appId);
++        // From then on, a closed window closes its tab.
++        shell.addEventListener("change", () =>
++          useRightPanelStore.getState().reconcileAppSurfaces((id) => windows.has(id)),
++        );
++      });
++    },
++    (error: unknown) => {
++      console.warn(`Plutonium: could not load the shell library from ${url}`, error);
++      dropAppTabs();
++      void plutoniumShell();
++      resolveShell?.(null);
++    },
++  );
++}
++
++/** Windows of `threadId` (started by its agent or terminals, or added to it), oldest first. */
++export function useThreadWindows(threadId: string | null): readonly NativeWindowEntry[] {
++  const windows = usePlutoniumWindowStore((state) => state.windows);
++  if (threadId === null) return [];
++  const tag = threadTag(threadId);
++  return Object.values(windows)
++    .filter((entry) => windowTags(entry).includes(tag))
++    .toSorted((a, b) => a.id - b.id);
++}
++
++/**
++ * Windows that are in no T3 thread (once their thread is known): another
++ * shell's, a workspace's, or nobody's. Oldest first.
++ */
++export function useElsewhereWindows(): readonly NativeWindowEntry[] {
++  const windows = usePlutoniumWindowStore((state) => state.windows);
++  return Object.values(windows)
++    .filter(
++      (entry) =>
++        entry.threadId !== undefined &&
++        !windowTags(entry).some((tag) => threadIdOfTag(tag) !== null),
++    )
++    .toSorted((a, b) => a.id - b.id);
++}
+diff --git a/apps/web/src/reopenClosedView.ts b/apps/web/src/reopenClosedView.ts
+index 005887ad81..ec28f3f55f 100644
+--- a/apps/web/src/reopenClosedView.ts
++++ b/apps/web/src/reopenClosedView.ts
+@@ -136,6 +136,9 @@ export async function reopenClosedView(
+     case "pull-request":
+       panels.openPullRequest(ref, surface);
+       break;
++    case "app":
++      panels.openApp(ref, surface);
++      break;
+     case "side-chat":
+       panels.openSideChat(ref, surface.threadId);
+       break;
+diff --git a/apps/web/src/rightPanelStore.test.ts b/apps/web/src/rightPanelStore.test.ts
+index ec0f4e87c1..686b5f130d 100644
+--- a/apps/web/src/rightPanelStore.test.ts
++++ b/apps/web/src/rightPanelStore.test.ts
+@@ -1173,15 +1173,19 @@ describe("rightPanelStore", () => {
+     });
+   });
+ 
+-  it("does not replace a stale surface with a hidden tab, but preserves explicit opens", () => {
++  it("gives hidden tabs a background tab, preferring shown surfaces when the active one goes", () => {
+     const store = useRightPanelStore.getState();
++    store.openTerminal(refA, "term-1");
+     store.openBrowser(refA, "stale-tab");
+     store.reconcileBrowserSurfaces(refA, ["hidden-tab"], new Set(["hidden-tab"]));
+     expect(
+       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+     ).toMatchObject({
+-      activeSurfaceId: null,
+-      surfaces: [],
++      activeSurfaceId: "terminal:term-1",
++      surfaces: [
++        { id: "terminal:term-1", kind: "terminal" },
++        { id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" },
++      ],
+     });
+ 
+     store.openBrowser(refA, "hidden-tab");
+@@ -1194,6 +1198,22 @@ describe("rightPanelStore", () => {
+       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+     ).toMatchObject({
+       isOpen: true,
++      activeSurfaceId: "browser:hidden-tab",
++      surfaces: [
++        { id: "terminal:term-1", kind: "terminal" },
++        { id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" },
++        { id: "browser:other-tab", kind: "preview", resourceId: "other-tab" },
++      ],
++    });
++  });
++
++  it("shows a hidden tab when it is all that is left", () => {
++    const store = useRightPanelStore.getState();
++    store.openBrowser(refA, "stale-tab");
++    store.reconcileBrowserSurfaces(refA, ["hidden-tab"], new Set(["hidden-tab"]));
++    expect(
++      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
++    ).toMatchObject({
+       activeSurfaceId: "browser:hidden-tab",
+       surfaces: [{ id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" }],
+     });
+diff --git a/apps/web/src/rightPanelStore.ts b/apps/web/src/rightPanelStore.ts
+index 1f736d4f11..ee2e4b1d53 100644
+--- a/apps/web/src/rightPanelStore.ts
++++ b/apps/web/src/rightPanelStore.ts
+@@ -22,6 +22,8 @@ const RIGHT_PANEL_KINDS = [
+   "pull-request",
+   "pull-requests",
+   "side-chat",
++  "apps",
++  "app",
+ ] as const;
+ export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
+ 
+@@ -76,7 +78,17 @@ export type RightPanelSurface =
+       detailTab?: PullRequestDetailTab;
+     }
+   | { id: "pull-requests"; kind: "pull-requests" }
+-  | { id: `side-chat:${string}`; kind: "side-chat"; threadId: ThreadId };
++  | { id: `side-chat:${string}`; kind: "side-chat"; threadId: ThreadId }
++  /** Plutonium: the native windows this thread started, and one tab per window shown. */
++  | { id: "apps"; kind: "apps" }
++  | {
++      id: `app:${number}`;
++      kind: "app";
++      /** The browser window broker's id; only valid for the Ash session it came from. */
++      windowId: number;
++      /** Checked against the live window on restore, so a reused id is not taken for this one. */
++      appId: string;
++    };
+ 
+ const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
+ const RIGHT_PANEL_STORAGE_VERSION = 14;
+@@ -123,7 +135,7 @@ interface RightPanelStoreState {
+   ) => boolean;
+   open: (
+     ref: ScopedThreadRef,
+-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat">,
++    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat" | "app">,
+   ) => void;
+   openSideChat: (ref: ScopedThreadRef, threadId: ThreadId) => void;
+   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
+@@ -157,6 +169,9 @@ interface RightPanelStoreState {
+     detailTab: PullRequestDetailTab,
+   ) => void;
+   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
++  openApp: (ref: ScopedThreadRef, window: { windowId: number; appId: string }) => void;
++  /** Drops app tabs whose window is gone, in every thread. */
++  reconcileAppSurfaces: (isLive: (windowId: number, appId: string) => boolean) => void;
+   splitTerminal: (
+     ref: ScopedThreadRef,
+     surfaceId: string,
+@@ -185,7 +200,7 @@ interface RightPanelStoreState {
+   toggleVisibility: (ref: ScopedThreadRef) => void;
+   toggle: (
+     ref: ScopedThreadRef,
+-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat">,
++    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "side-chat" | "app">,
+   ) => void;
+   setThreadPanelOpen: (
+     ref: ScopedThreadRef,
+@@ -208,7 +223,10 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
+ };
+ 
+ const singletonSurface = (
+-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request" | "side-chat">,
++  kind: Exclude<
++    RightPanelKind,
++    "file" | "preview" | "terminal" | "pull-request" | "side-chat" | "app"
++  >,
+ ): RightPanelSurface => {
+   switch (kind) {
+     case "diff":
+@@ -217,6 +235,8 @@ const singletonSurface = (
+       return { id: "files", kind };
+     case "pull-requests":
+       return { id: "pull-requests", kind };
++    case "apps":
++      return { id: "apps", kind };
+     case "device":
+       return { id: "device", kind };
+   }
+@@ -860,6 +880,39 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+             upsertSurface(current, terminalSurface(terminalId)),
+           ),
+         ),
++      openApp: (ref, { windowId, appId }) =>
++        set((state) =>
++          userAction(state, scopedThreadKey(ref), (current) =>
++            upsertSurface(current, { id: `app:${windowId}`, kind: "app", windowId, appId }),
++          ),
++        ),
++      reconcileAppSurfaces: (isLive) =>
++        set((state) => {
++          let byThreadKey = state.byThreadKey;
++          for (const threadKey of Object.keys(state.byThreadKey)) {
++            byThreadKey = updateThreadStateMap(byThreadKey, threadKey, (current) => {
++              const surfaces = current.surfaces.filter(
++                (surface) => surface.kind !== "app" || isLive(surface.windowId, surface.appId),
++              );
++              if (surfaces.length === current.surfaces.length) return current;
++              const index = current.surfaces.findIndex(
++                (surface) => surface.id === current.activeSurfaceId,
++              );
++              const activeStillExists = surfaces.some(
++                (surface) => surface.id === current.activeSurfaceId,
++              );
++              return {
++                ...current,
++                isOpen: surfaces.length > 0 && current.isOpen,
++                surfaces,
++                activeSurfaceId: activeStillExists
++                  ? current.activeSurfaceId
++                  : (surfaces[Math.min(Math.max(index, 0), surfaces.length - 1)]?.id ?? null),
++              };
++            });
++          }
++          return byThreadKey === state.byThreadKey ? state : { byThreadKey };
++        }),
+       splitTerminal: (ref, surfaceId, terminalId, direction = "horizontal") =>
+         set((state) =>
+           userAction(state, scopedThreadKey(ref), (current) => ({
+@@ -1019,14 +1072,24 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+                 (surface.id !== "browser:new" && validIds.has(surface.id)),
+             );
+             const knownIds = new Set(kept.map((surface) => surface.id));
++            // Plutonium: hidden tabs (an agent's background tabs and its popups)
++            // get a tab too, in the background: the floating preview that may
++            // show one isn't kept, so after a reload nothing else would.
+             const added = tabIds
+-              .filter((tabId) => !knownIds.has(`browser:${tabId}`) && !hiddenTabIds?.has(tabId))
++              .filter((tabId) => !knownIds.has(`browser:${tabId}`))
+               .map((tabId) => browserSurface(tabId));
+             const surfaces = [...kept, ...added];
+             const activeStillExists = surfaces.some(
+               (surface) => surface.id === current.activeSurfaceId,
+             );
+-            const fallbackBrowser = surfaces.find((surface) => surface.kind === "preview");
++            const shown = surfaces.filter(
++              (surface) =>
++                surface.kind !== "preview" ||
++                !surface.resourceId ||
++                !hiddenTabIds?.has(surface.resourceId),
++            );
++            const fallback =
++              shown.find((surface) => surface.kind === "preview") ?? shown[0] ?? surfaces[0];
+             // A closed session tab was the last surface: hide the panel rather than leave it on
+             // the empty picker, as a user close would. A dropped `browser:new` placeholder does not count.
+             const closedLastSessionTab =
+@@ -1036,9 +1099,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+               ...current,
+               isOpen: closedLastSessionTab ? false : current.isOpen,
+               surfaces,
+-              activeSurfaceId: activeStillExists
+-                ? current.activeSurfaceId
+-                : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null),
++              activeSurfaceId: activeStillExists ? current.activeSurfaceId : (fallback?.id ?? null),
+             };
+           }),
+         ),
+diff --git a/apps/web/src/shortcuts/commandPaletteCommands.ts b/apps/web/src/shortcuts/commandPaletteCommands.ts
+index 716717061e..9216f41d0a 100644
+--- a/apps/web/src/shortcuts/commandPaletteCommands.ts
++++ b/apps/web/src/shortcuts/commandPaletteCommands.ts
+@@ -52,7 +52,8 @@ export function installCommandPaletteCommands(
+       onKeyDown: (event) => {
+         if (event.isComposing || event.key !== "Escape") return false;
+         const { open, mode } = useCommandPaletteStore.getState();
+-        if (!open || mode === "command") return false;
++        // Plutonium: the app launcher has no palette to go back to; Escape closes it.
++        if (!open || mode === "command" || mode === "apps") return false;
+         consume(event);
+         dispatchCommandPalette({ _tag: "BackToCommand" });
+       },
+@@ -95,6 +96,7 @@ export function installCommandPaletteCommands(
+       "commandPalette.toggle": toggleOverlay("commandPalette.toggle"),
+       "filePicker.toggle": toggleOverlay("filePicker.toggle"),
+       "projectSearch.toggle": toggleOverlay("projectSearch.toggle"),
++      "appLauncher.toggle": toggleOverlay("appLauncher.toggle"),
+     },
+     {
+       ...options,

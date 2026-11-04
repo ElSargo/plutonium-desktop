@@ -1,0 +1,1459 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:49 +1300
+Subject: [PATCH 06/10] Plutonium: the browser panel on Plutonium's browser
+ tabs
+
+Folded from:
+- the browser panel on Plutonium's browser tabs
+- thread tags, groups and the Elsewhere list
+- import browser tabs from other shells into a thread
+- links and Ctrl+click open in the thread's browser panel
+- the server drives the browser panel's tabs through Plutonium's helper
+- a page's popup keeps its opener, so OAuth sign-in works
+- agents drive windows and tabs
+- Preview tools: drag along a path; snapshot images in click coordinates; cursor follows a scaled tab
+- Preview tools: the floating preview draws the agent's cursor; resize answers with the new size; snapshots don't flash on screen
+- incognito tabs on the desktop
+- agent tool fixes: popups in window snapshots, results that say what happened, private tabs marked
+- dock sites kept per project or everywhere
+- the preview bridge reports a desktop tab's page zoom
+- a dock slot holds one window or tab
+- native windows are their threads' server tabs
+---
+ apps/web/src/AppRoot.tsx                      |   2 +
+ apps/web/src/browser/desktopTabLifetime.ts    |   2 +
+ apps/web/src/browser/previewRuntime.ts        |   7 +-
+ .../preview/ThreadPreviewMiniPlayer.tsx       |  35 +-
+ .../components/preview/agentOpenedPreviews.ts |  17 +-
+ .../src/components/preview/previewBridge.ts   |   7 +-
+ .../components/preview/usePreviewSession.ts   |   8 +-
+ .../src/plutonium/PlutoniumBrowserHost.tsx    | 357 +++++++++
+ apps/web/src/plutonium/previewBridge.test.ts  |  19 +
+ apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
+ apps/web/src/previewStateStore.ts             |   3 +-
+ 11 files changed, 1203 insertions(+), 12 deletions(-)
+ create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+ create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
+ create mode 100644 apps/web/src/plutonium/previewBridge.ts
+
+diff --git a/apps/web/src/AppRoot.tsx b/apps/web/src/AppRoot.tsx
+index 2491e9a813..fea21da78d 100644
+--- a/apps/web/src/AppRoot.tsx
++++ b/apps/web/src/AppRoot.tsx
+@@ -2,6 +2,7 @@ import { RouterProvider } from "@tanstack/react-router";
+ 
+ import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
+ import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
++import { PlutoniumBrowserHost } from "./plutonium/PlutoniumBrowserHost";
+ import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
+ import type { AppRouter } from "./router";
+ 
+@@ -11,6 +12,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
+     <AppAtomRegistryProvider>
+       <RouterProvider router={router} />
+       <ElectronBrowserHost />
++      <PlutoniumBrowserHost />
+       <QuitHoldOverlay />
+     </AppAtomRegistryProvider>
+   );
+diff --git a/apps/web/src/browser/desktopTabLifetime.ts b/apps/web/src/browser/desktopTabLifetime.ts
+index 6c94951a0c..9c3ccc35db 100644
+--- a/apps/web/src/browser/desktopTabLifetime.ts
++++ b/apps/web/src/browser/desktopTabLifetime.ts
+@@ -44,6 +44,7 @@ export interface AcquiredDesktopTab {
+ export function acquireDesktopTab(
+   tabId: string,
+   serverTab?: { readonly threadId: string; readonly tabId: string },
++  options: { readonly incognito?: boolean } = {},
+ ): AcquiredDesktopTab {
+   const current =
+     leases.get(tabId) ??
+@@ -55,6 +56,7 @@ export function acquireDesktopTab(
+         previewBridge?.createTab(tabId, {
+           ...browserDefaultTabState(await resolveBrowserDefaults()),
+           ...(serverTab === undefined ? {} : { serverTab }),
++          ...(options.incognito ? { incognito: true } : {}),
+         }),
+       ),
+     } satisfies DesktopTabLease);
+diff --git a/apps/web/src/browser/previewRuntime.ts b/apps/web/src/browser/previewRuntime.ts
+index 7ca4a8a8f6..85b80b66ba 100644
+--- a/apps/web/src/browser/previewRuntime.ts
++++ b/apps/web/src/browser/previewRuntime.ts
+@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
+ import type { EnvironmentId, PreviewRuntime, PreviewSessionSnapshot } from "@t3tools/contracts";
+ 
+ import { isElectron } from "~/env";
++import { isPlutoniumShell } from "~/plutonium/windowStore";
+ import { isPreviewSupportedInRuntime } from "~/previewStateStore";
+ import { appAtomRegistry } from "~/rpc/atomRegistry";
+ import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+@@ -41,13 +42,17 @@ export function usePreviewAvailable(environmentId: EnvironmentId | null): boolea
+   return isPreviewSupportedInRuntime() || serverBrowser;
+ }
+ 
++/**
++ * Plutonium: so does the Plutonium shell, with the browser's own tabs (the
++ * server drives them through Plutonium's helper).
++ */
+ export function rendersServerTabNatively(
+   environmentId: EnvironmentId,
+   primaryEnvironmentId: EnvironmentId | null,
+   snapshot: Pick<PreviewSessionSnapshot, "runtime" | "headless"> | null | undefined,
+ ): boolean {
+   return (
+-    isElectron &&
++    (isElectron || isPlutoniumShell()) &&
+     snapshot?.runtime === "server" &&
+     !snapshot.headless &&
+     primaryEnvironmentId !== null &&
+diff --git a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx b/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
+index 50b5ae47c4..1e9aab29e3 100644
+--- a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
++++ b/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
+@@ -1,7 +1,11 @@
+-import { FILL_PREVIEW_VIEWPORT, type ScopedThreadRef } from "@t3tools/contracts";
++import {
++  FILL_PREVIEW_VIEWPORT,
++  INCOGNITO_BROWSER_PROFILE_ID,
++  type ScopedThreadRef,
++} from "@t3tools/contracts";
+ import { previewPdfAssetUrl } from "@t3tools/shared/preview";
+ import { useEnvironmentHttpBaseUrl } from "~/state/environments";
+-import { PanelRightIcon, PictureInPicture2, XIcon } from "lucide-react";
++import { PanelRightIcon, PictureInPicture2, VenetianMask, XIcon } from "lucide-react";
+ import {
+   type PointerEvent as ReactPointerEvent,
+   type ReactNode,
+@@ -49,6 +53,7 @@ import {
+ } from "~/previewMiniPlayerStore";
+ import { useRightPanelStore } from "~/rightPanelStore";
+ import { useDeviceState } from "~/state/device";
++import { AgentBrowserCursor } from "./AgentBrowserCursor";
+ 
+ import { DeviceStreamView } from "../device/DeviceStreamView";
+ import type { DeviceScreenSize } from "@t3tools/client-runtime/device/stream";
+@@ -274,6 +279,18 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly
+       sourceSize={sourceSize}
+       label="Floating browser preview"
+       recording={recording}
++      badge={
++        snapshot?.profileId === INCOGNITO_BROWSER_PROFILE_ID ? (
++          <div
++            role="note"
++            aria-label="Private tab"
++            className="pointer-events-none absolute left-1.5 top-1.5 z-[49] flex items-center gap-1 rounded-md bg-popover/92 px-1.5 py-0.5 text-[11px] font-medium text-foreground shadow-sm ring-1 ring-border/80 backdrop-blur-xl"
++          >
++            <VenetianMask className="size-3" />
++            Private
++          </div>
++        ) : undefined
++      }
+       onOpenInPanel={openInPanel}
+       pillActions={
+         canPopOut ? (
+@@ -342,6 +359,16 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly
+               layoutVersion={`${frame.x}:${frame.y}`}
+               className="absolute inset-0"
+             />
++            {desktopOverlay?.hasWebContents && !recording ? (
++              // Over the page, on the layout the tab publishes for this frame.
++              <div className="pointer-events-none absolute inset-0 z-[49] overflow-hidden rounded-[inherit]">
++                <AgentBrowserCursor
++                  tabId={runtimeTabId}
++                  zoomFactor={desktopOverlay.zoomFactor}
++                  controller={desktopOverlay.controller}
++                />
++              </div>
++            ) : null}
+             {!desktopOverlay?.hasWebContents ? (
+               <div className="pointer-events-none absolute inset-0 z-[49] flex items-center justify-center rounded-[inherit] bg-muted text-xs text-muted-foreground">
+                 Reconnecting preview…
+@@ -421,6 +448,7 @@ function MiniPlayerShell({
+   onOpenInPanel,
+   pillActions,
+   recording = false,
++  badge,
+   cornerRadius = frameCornerRadius,
+   children,
+ }: {
+@@ -431,6 +459,8 @@ function MiniPlayerShell({
+   readonly onOpenInPanel: () => void;
+   readonly pillActions?: ReactNode;
+   readonly recording?: boolean;
++  /** Drawn over the preview's top-left corner (a private tab's marker). */
++  readonly badge?: ReactNode;
+   readonly cornerRadius?: (frame: PreviewMiniPlayerSize) => number;
+   readonly children: (frame: PreviewMiniPlayerFrame) => ReactNode;
+ }) {
+@@ -613,6 +643,7 @@ function MiniPlayerShell({
+           <div className="absolute inset-0 z-[47] rounded-[inherit] bg-muted shadow-2xl/35" />
+           {children(frame)}
+           <div className="pointer-events-none absolute inset-0 z-[49] rounded-[inherit] ring-1 ring-inset ring-border/80" />
++          {badge}
+           {RESIZE_HANDLES.map(({ direction, className }) => (
+             <div
+               key={direction}
+diff --git a/apps/web/src/components/preview/agentOpenedPreviews.ts b/apps/web/src/components/preview/agentOpenedPreviews.ts
+index 8255cc48a5..ae93d071e7 100644
+--- a/apps/web/src/components/preview/agentOpenedPreviews.ts
++++ b/apps/web/src/components/preview/agentOpenedPreviews.ts
+@@ -43,14 +43,19 @@ export function revealServerTabs(
+   for (const session of sessions) {
+     const force = session.revealRequest?.force === true;
+     if (!options.autoShowFloatingPreview && !force) continue;
+-    const surface = useRightPanelStore
+-      .getState()
+-      .byThreadKey[scopedThreadKey(threadRef)]?.surfaces.find(
+-        (surface) => surface.kind === "preview" && surface.resourceId === session.tabId,
+-      );
++    const panel = useRightPanelStore.getState().byThreadKey[scopedThreadKey(threadRef)];
++    const surface = panel?.surfaces.find(
++      (surface) => surface.kind === "preview" && surface.resourceId === session.tabId,
++    );
+     if (surface && force) {
+       useRightPanelStore.getState().revealSurface(threadRef, surface.id);
+-    } else if (!surface) {
++    } else if (
++      // Plutonium: a hidden tab already has its background tab; it floats
++      // unless the open panel shows it.
++      !surface ||
++      !panel?.isOpen ||
++      panel.activeSurfaceId !== surface.id
++    ) {
+       usePreviewMiniPlayerStore.getState().open(threadRef, browserMiniPlayerSource(session.tabId));
+     }
+   }
+diff --git a/apps/web/src/components/preview/previewBridge.ts b/apps/web/src/components/preview/previewBridge.ts
+index 984271a310..80da8be04c 100644
+--- a/apps/web/src/components/preview/previewBridge.ts
++++ b/apps/web/src/components/preview/previewBridge.ts
+@@ -2,6 +2,8 @@ import { PreviewCaptureFailure, type PreviewCaptureFailureEncoded } from "@t3too
+ import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
+ 
++import { createPlutoniumPreviewBridge } from "~/plutonium/previewBridge";
++
+ const decodeCaptureFailure = Schema.decodeUnknownOption(PreviewCaptureFailure);
+ 
+ // Decode here because contextBridge strips custom properties from rejected Errors.
+@@ -11,8 +13,11 @@ function unwrapPreviewCaptureResult<A>(result: A | PreviewCaptureFailureEncoded)
+   return result as A;
+ }
+ 
++// Plutonium: the Plutonium shell's browser tabs implement the same bridge.
+ const nativePreviewBridge =
+-  typeof window === "undefined" ? null : (window.desktopBridge?.preview ?? null);
++  typeof window === "undefined"
++    ? null
++    : (window.desktopBridge?.preview ?? createPlutoniumPreviewBridge());
+ 
+ export const previewBridge = nativePreviewBridge
+   ? {
+diff --git a/apps/web/src/components/preview/usePreviewSession.ts b/apps/web/src/components/preview/usePreviewSession.ts
+index cdd63493f9..42ae9911bc 100644
+--- a/apps/web/src/components/preview/usePreviewSession.ts
++++ b/apps/web/src/components/preview/usePreviewSession.ts
+@@ -5,6 +5,7 @@ import {
+   scopedThreadKey,
+ } from "@t3tools/client-runtime/environment";
+ import { type EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
++import { isPlutoniumWindowTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import * as Schema from "effect/Schema";
+ import { AsyncResult, Atom } from "effect/reactivity";
+ 
+@@ -47,7 +48,11 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
+ 
+     const reconcileSessions = (result: Atom.Type<typeof sessionsAtom>) => {
+       if (result.waiting || !AsyncResult.isSuccess(result)) return;
+-      reconcilePreviewServerSessions(threadRef, result.value);
++      // Plutonium: native windows are app tabs here (PlutoniumWindows), not browser tabs.
++      reconcilePreviewServerSessions(threadRef, {
++        ...result.value,
++        sessions: result.value.sessions.filter((session) => !isPlutoniumWindowTab(session.tabId)),
++      });
+       if (!readThreadPreviewState(threadRef).listLoaded) {
+         // An event overtook the initial list; retry before using the partial index for surface cleanup.
+         queueMicrotask(() => {
+@@ -58,6 +63,7 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
+ 
+     const applyLatestEvent = (result: Atom.Type<typeof eventsAtom>) => {
+       if (!AsyncResult.isSuccess(result) || result.value.threadId !== threadRef.threadId) return;
++      if (isPlutoniumWindowTab(result.value.tabId)) return;
+       const currentEpoch = readThreadPreviewState(threadRef).serverEpoch;
+       if (currentEpoch !== null && currentEpoch !== result.value.serverEpoch) {
+         get.refresh(sessionsAtom);
+diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+new file mode 100644
+index 0000000000..d9c11d7c03
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+@@ -0,0 +1,357 @@
++"use client";
++
++// Plutonium: ElectronBrowserHost's counterpart in the Plutonium shell. Each
++// open preview session gets a browser tab (previewBridge.ts) shown where the
++// right panel's browser surface is, with an <embed> instead of a <webview>.
++// The tab belongs to the browser: removing the <embed> only hides it, and the
++// next one shows it again. As in the Electron build, this server's tabs
++// render here and the server drives them; other environments' stream.
++
++import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
++import {
++  FILL_PREVIEW_VIEWPORT,
++  INCOGNITO_BROWSER_PROFILE_ID,
++  type PreviewViewportSetting,
++  type ScopedThreadRef,
++} from "@t3tools/contracts";
++import { useAtomValue } from "@effect/atom-react";
++import { createElement, useEffect, useMemo, useState, useSyncExternalStore } from "react";
++import { useShallow } from "zustand/react/shallow";
++
++import {
++  resolveBrowserSurfacePanelRect,
++  useBrowserSurfaceStore,
++} from "~/browser/browserSurfaceStore";
++import { useBrowserPointerStore } from "~/browser/browserPointerStore";
++import { acquireDesktopTab } from "~/browser/desktopTabLifetime";
++import { openUrlInPreview } from "~/browser/openFileInPreview";
++import { rendersServerTabNatively } from "~/browser/previewRuntime";
++import {
++  browserViewportSettingKey,
++  resolveBrowserViewportLayout,
++  resolveFittedBrowserViewport,
++} from "~/browser/browserViewportLayout";
++import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
++import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
++import { useClientSettingsHydrated } from "~/hooks/useSettings";
++import { beginPreviewSessionClose, useActivePreviewSessions } from "~/previewStateStore";
++import { selectSelectedRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
++import { previewEnvironment } from "~/state/preview";
++import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
++import { useAtomCommand } from "~/state/use-atom-command";
++
++import { isBlank, plutoniumPreview, type BrokerTab } from "./previewBridge";
++
++export function PlutoniumBrowserHost() {
++  const previewByThreadKey = useActivePreviewSessions();
++  const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
++  const sessions = useMemo(
++    () =>
++      Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
++        const threadRef = parseScopedThreadKey(threadKey);
++        return threadRef
++          ? Object.values(previewState.sessions)
++              .filter(
++                (snapshot) =>
++                  snapshot.runtime !== "server" ||
++                  rendersServerTabNatively(threadRef.environmentId, primaryEnvironmentId, snapshot),
++              )
++              .map((snapshot) => ({
++                threadRef,
++                tabId: snapshot.tabId,
++                runtimeTabId: previewRuntimeTabId(
++                  threadRef,
++                  previewState.serverEpoch,
++                  snapshot.tabId,
++                ),
++                url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
++                viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
++                serverDriven: snapshot.runtime === "server",
++                profileId: snapshot.profileId,
++              }))
++          : [];
++      }),
++    [previewByThreadKey, primaryEnvironmentId],
++  );
++
++  // The agent's cursor in tabs the server drives.
++  useEffect(
++    () =>
++      plutoniumPreview()?.onPointerEvent((event) => {
++        useBrowserPointerStore.getState().apply(event);
++      }),
++    [],
++  );
++
++  // What a tab's page opens in a new tab or window opens as another tab of
++  // its thread, with the same profile.
++  const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: true });
++  useEffect(() => {
++    const byRuntimeTabId = new Map(sessions.map((session) => [session.runtimeTabId, session]));
++    return plutoniumPreview()?.onOpenLink(({ tabId, url, background }) => {
++      const source = byRuntimeTabId.get(tabId);
++      if (!source) return;
++      void openUrlInPreview({
++        threadRef: source.threadRef,
++        url,
++        openPreview,
++        profileId: source.profileId,
++        background,
++      });
++    });
++  }, [openPreview, sessions]);
++
++  // A tab a page opened closed itself (a sign-in popup that reported back):
++  // its preview tab closes too, and its opener's comes back to the front.
++  const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
++  useEffect(() => {
++    const byRuntimeTabId = new Map(sessions.map((session) => [session.runtimeTabId, session]));
++    return plutoniumPreview()?.onPopupClosed(({ tabId, openerTabId }) => {
++      const popup = byRuntimeTabId.get(tabId);
++      if (!popup) return;
++      const { threadRef } = popup;
++      const opener = openerTabId === null ? undefined : byRuntimeTabId.get(openerTabId);
++      const panel = useRightPanelStore.getState();
++      const showing =
++        selectSelectedRightPanelSurface(panel.byThreadKey, threadRef)?.id ===
++        `browser:${popup.tabId}`;
++      panel.closeSurface(threadRef, `browser:${popup.tabId}`);
++      if (showing && opener) panel.openBrowser(threadRef, opener.tabId);
++      beginPreviewSessionClose(threadRef, popup.tabId);
++      void closePreview({
++        environmentId: threadRef.environmentId,
++        input: { threadId: threadRef.threadId, tabId: popup.tabId },
++      });
++    });
++  }, [closePreview, sessions]);
++
++  if (!plutoniumPreview()) return null;
++  return (
++    <div className="contents" data-plutonium-browser-host>
++      {sessions.map((session) => (
++        <PlutoniumBrowserTab key={session.runtimeTabId} {...session} />
++      ))}
++    </div>
++  );
++}
++
++/** The broker tab behind `runtimeTabId`, kept current. */
++function useBrokerTab(runtimeTabId: string): BrokerTab | null {
++  const preview = plutoniumPreview();
++  return useSyncExternalStore(
++    (onChange) => preview?.onTabs(onChange) ?? (() => undefined),
++    () => preview?.tab(runtimeTabId) ?? null,
++  );
++}
++
++function PlutoniumBrowserTab(props: {
++  readonly threadRef: ScopedThreadRef;
++  readonly tabId: string;
++  readonly runtimeTabId: string;
++  readonly url: string | null;
++  readonly viewport: PreviewViewportSetting;
++  /** The server drives this tab (its own tabs); else it is this page's. */
++  readonly serverDriven: boolean;
++  readonly profileId?: string | undefined;
++}) {
++  const { threadRef, tabId, runtimeTabId, url, viewport, serverDriven } = props;
++  const clientSettingsHydrated = useClientSettingsHydrated();
++  const [initialUrl] = useState(url);
++  const presentation = useBrowserSurfaceStore(
++    useShallow((state) => ({
++      rect: resolveBrowserSurfacePanelRect(state.byTabId, runtimeTabId),
++      visible: state.byTabId[runtimeTabId]?.visible ?? false,
++      zIndex: state.byTabId[runtimeTabId]?.zIndex ?? 30,
++      cornerRadius: state.byTabId[runtimeTabId]?.cornerRadius ?? 0,
++      fitSourceContent: state.byTabId[runtimeTabId]?.fitSourceContent ?? false,
++      fittedSourceContent: state.byTabId[runtimeTabId]?.fittedSourceContent ?? null,
++    })),
++  );
++  // Automation of a tab nobody is looking at (e.g. an agent's background tab)
++  // still needs it attached and painting.
++  const backgroundActivity = useBrowserSurfaceStore(
++    (state) => (state.activityByTabId[runtimeTabId] ?? 0) > 0,
++  );
++  const tab = useBrokerTab(runtimeTabId);
++  usePreviewBridge({ threadRef, tabId, runtimeTabId, serverDriven });
++
++  // The tab lives while the session does; the first URL is the session's.
++  useEffect(() => {
++    if (!clientSettingsHydrated) return;
++    const lease = acquireDesktopTab(
++      runtimeTabId,
++      serverDriven ? { threadId: threadRef.threadId, tabId } : undefined,
++      { incognito: props.profileId === INCOGNITO_BROWSER_PROFILE_ID },
++    );
++    let disposed = false;
++    void lease.ready.then(
++      () => {
++        // An adopted tab (after a reload of this page) already shows its page.
++        const current = plutoniumPreview()?.tab(runtimeTabId)?.url ?? "";
++        if (!disposed && initialUrl && isBlank(current)) {
++          void plutoniumPreview()?.navigate(runtimeTabId, initialUrl);
++        }
++      },
++      (error: unknown) => console.warn(`Plutonium: can't open tab ${runtimeTabId}`, error),
++    );
++    return () => {
++      disposed = true;
++      lease.release();
++    };
++  }, [
++    clientSettingsHydrated,
++    initialUrl,
++    props.profileId,
++    runtimeTabId,
++    serverDriven,
++    tabId,
++    threadRef.threadId,
++  ]);
++
++  const active = presentation.visible && presentation.rect !== null;
++  if (!tab || (!active && !backgroundActivity)) return null;
++  // In the background: invisible, at the size it would be shown at.
++  const rect = active
++    ? presentation.rect!
++    : {
++        x: 0,
++        y: 0,
++        width: viewport._tag === "fill" ? 1280 : viewport.width,
++        height: viewport._tag === "fill" ? 800 : viewport.height,
++      };
++  // A fixed viewport (e.g. the 1280×800 agents open with) is laid out at its
++  // own size and scaled down to fit, as in the Electron build. So is a page
++  // the mini player shows: at the size it last had, not the player's.
++  const layout = resolveBrowserViewportLayout(
++    rect,
++    active && presentation.fitSourceContent
++      ? resolveFittedBrowserViewport(viewport, presentation.fittedSourceContent)
++      : viewport,
++  );
++  const cssWidth = Math.max(1, Math.round(layout.viewportWidth / layout.viewportScale));
++  const cssHeight = Math.max(1, Math.round(layout.viewportHeight / layout.viewportScale));
++  return (
++    <div
++      className={
++        layout.fillsPanel ? "fixed overflow-hidden bg-white" : "fixed overflow-hidden bg-muted/35"
++      }
++      style={{
++        left: rect.x,
++        top: rect.y,
++        width: rect.width,
++        height: rect.height,
++        zIndex: active ? presentation.zIndex : -1,
++        borderRadius: presentation.cornerRadius,
++        ...(active ? {} : { opacity: 0, pointerEvents: "none" as const }),
++      }}
++      aria-hidden={active ? undefined : true}
++      data-preview-viewport={runtimeTabId}
++      data-preview-rendering="active"
++    >
++      {createElement("embed", {
++        type: "application/x-chromium-surface-embed",
++        "data-content-id": tab.contentId,
++        "data-preview-tab": runtimeTabId,
++        "data-preview-server-tab": tabId,
++        "data-preview-viewport-mode": viewport._tag,
++        "data-preview-viewport-key": browserViewportSettingKey(viewport),
++        "data-preview-css-width": cssWidth,
++        "data-preview-css-height": cssHeight,
++        className: "absolute block border-0 bg-white",
++        style: {
++          left: layout.viewportX,
++          top: layout.viewportY,
++          width: cssWidth,
++          height: cssHeight,
++          transform: layout.viewportScale < 1 ? `scale(${layout.viewportScale})` : undefined,
++          transformOrigin: "top left",
++        },
++      })}
++      {tab.dialogType ? <PageDialog runtimeTabId={runtimeTabId} tab={tab} /> : null}
++      {active ? <PresentContent runtimeTabId={runtimeTabId} layout={layout} /> : null}
++    </div>
++  );
++}
++
++/**
++ * Where the page sits in the panel and how far it is scaled down, so the
++ * agent's cursor lands on the page at any viewport size.
++ */
++function PresentContent(props: {
++  readonly runtimeTabId: string;
++  readonly layout: ReturnType<typeof resolveBrowserViewportLayout>;
++}) {
++  const { runtimeTabId, layout } = props;
++  const { viewportX, viewportY, viewportWidth, viewportHeight, viewportScale } = layout;
++  useEffect(() => {
++    useBrowserSurfaceStore.getState().presentContent(runtimeTabId, {
++      x: viewportX,
++      y: viewportY,
++      width: viewportWidth,
++      height: viewportHeight,
++      scale: viewportScale,
++      scrollLeft: 0,
++      scrollTop: 0,
++    });
++  }, [runtimeTabId, viewportX, viewportY, viewportWidth, viewportHeight, viewportScale]);
++  return null;
++}
++
++/** The page's alert/confirm/prompt, drawn over it (the browser shows none). */
++function PageDialog({ runtimeTabId, tab }: { runtimeTabId: string; tab: BrokerTab }) {
++  const [text, setText] = useState(tab.dialogDefaultPrompt);
++  const answer = (accept: boolean) =>
++    plutoniumPreview()?.answerDialog(runtimeTabId, accept, tab.dialogType === "prompt" ? text : "");
++  let origin = "";
++  try {
++    origin = new URL(tab.url).host;
++  } catch {
++    // No origin to show.
++  }
++  return (
++    <div className="absolute inset-0 flex items-start justify-center bg-black/20 p-4 pt-6">
++      <form
++        className="grid w-full max-w-md gap-3 rounded-lg border bg-popover p-4 text-popover-foreground shadow-lg"
++        onSubmit={(event) => {
++          event.preventDefault();
++          answer(true);
++        }}
++      >
++        <div className="text-xs text-muted-foreground">
++          {tab.dialogType === "beforeunload"
++            ? "Leave this page? Changes you made may not be saved."
++            : `${origin || "This page"} says`}
++        </div>
++        {tab.dialogType === "beforeunload" ? null : (
++          <div className="whitespace-pre-wrap text-sm">{tab.dialogMessage}</div>
++        )}
++        {tab.dialogType === "prompt" ? (
++          <input
++            className="rounded-md border bg-background px-2 py-1 text-sm"
++            value={text}
++            onChange={(event) => setText(event.target.value)}
++            autoFocus
++          />
++        ) : null}
++        <div className="flex justify-end gap-2">
++          {tab.dialogType === "alert" ? null : (
++            <button
++              type="button"
++              className="rounded-md border px-3 py-1 text-sm"
++              onClick={() => answer(false)}
++            >
++              Cancel
++            </button>
++          )}
++          <button
++            type="submit"
++            className="rounded-md bg-primary px-3 py-1 text-sm text-primary-foreground"
++            autoFocus={tab.dialogType !== "prompt"}
++          >
++            {tab.dialogType === "beforeunload" ? "Leave" : "OK"}
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/previewBridge.test.ts b/apps/web/src/plutonium/previewBridge.test.ts
+new file mode 100644
+index 0000000000..9d17aeedc2
+--- /dev/null
++++ b/apps/web/src/plutonium/previewBridge.test.ts
+@@ -0,0 +1,19 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { type BrokerTab, zoomFactorOf } from "./previewBridge";
++
++const tab = (stateJson?: string) => ({ stateJson }) as unknown as BrokerTab;
++
++describe("zoomFactorOf", () => {
++  it("reads the tab's zoom state, in percent", () => {
++    expect(zoomFactorOf(tab('{"zoom":150,"zoomDefault":false}'))).toBe(1.5);
++    expect(zoomFactorOf(tab('{"zoom":90}'))).toBe(0.9);
++  });
++
++  it("is 1 without a zoom", () => {
++    expect(zoomFactorOf(null)).toBe(1);
++    expect(zoomFactorOf(tab())).toBe(1);
++    expect(zoomFactorOf(tab("{}"))).toBe(1);
++    expect(zoomFactorOf(tab("not json"))).toBe(1);
++  });
++});
+diff --git a/apps/web/src/plutonium/previewBridge.ts b/apps/web/src/plutonium/previewBridge.ts
+new file mode 100644
+index 0000000000..730a6e9a08
+--- /dev/null
++++ b/apps/web/src/plutonium/previewBridge.ts
+@@ -0,0 +1,758 @@
++// Plutonium: T3's browser on Plutonium's browser tabs.
++//
++// In the Electron build, `window.desktopBridge.preview` drives tabs owned by
++// the main process and shown with <webview>. In the Plutonium shell the
++// browser owns them instead: `navigator.windowBroker` creates and drives real
++// tabs (a WebContents each), and the page shows one with
++//   <embed type="application/x-chromium-surface-embed" data-content-id="…">
++// (PlutoniumBrowserHost). This file implements the DesktopPreviewBridge
++// contract on top of the broker, so the rest of the preview UI is unchanged.
++//
++// The server drives its tabs itself, as it drives the Electron build's: the
++// shell shows the tab, and Plutonium's helper hands the server that one tab's
++// DevTools (showServerTab). Agents reach it through the server's browser tools.
++//
++// Tabs are tagged with their thread's tag, which is how Plutonium's helper
++// lets that thread's agent reach them. A tab from elsewhere (another shell's,
++// or nobody's) can be imported: it gets the thread's tag and backs a new
++// preview tab, and closing that preview takes the tag off again. What a tab's
++// page opens in a new tab or window opens as another tab of its thread, as
++// in the Electron build. That tab is the page's own new one, so a sign-in
++// popup keeps `window.opener` to report back through, and closes its preview
++// tab when it closes itself.
++//
++// A dock slot's tab carries the slot's tag (t3:dock/<slot id>). Kept per
++// project or everywhere, it carries the scope's tag too (t3:project/<id>,
++// t3:global), and moves to the thread whose dock key or button asks for it
++// (releaseTab, then an import there). A page's new tab starts with its
++// opener's tags, but not its slot: that comes off again.
++import type {
++  DesktopPreviewBridge,
++  DesktopPreviewNavStatus,
++  DesktopPreviewOpenLinkEvent,
++  DesktopPreviewPointerEvent,
++  DesktopPreviewTabDefaults,
++  DesktopPreviewTabState,
++} from "@t3tools/contracts";
++
++import { isDockScopeTag, isDockSlotTag, threadIdOfTag, threadTag } from "./threadTag";
++import { plutoniumShell } from "./windowStore";
++
++/** A tab as `navigator.windowBroker` reports it (BrowserTabEntry). */
++export interface BrokerTab {
++  readonly id: number;
++  readonly contentId: string;
++  readonly url: string;
++  readonly title: string;
++  readonly loading: boolean;
++  readonly canGoBack: boolean;
++  readonly canGoForward: boolean;
++  readonly embedded: boolean;
++  readonly focused: boolean;
++  readonly tag: string;
++  /** The origin tag first, then the ones shells added (older browsers: missing). */
++  readonly tags?: readonly string[];
++  readonly openerId: number;
++  readonly openedBy: "shell" | "page";
++  readonly dialogType: "" | "alert" | "confirm" | "prompt" | "beforeunload";
++  readonly dialogMessage: string;
++  readonly dialogDefaultPrompt: string;
++  /** In throwaway storage of its own (browsers with incognito tabs; older: missing). */
++  readonly incognito?: boolean;
++  /** Feature state as a JSON object, e.g. "zoom" in percent (browsers with tab features; older: missing). */
++  readonly stateJson?: string;
++}
++
++interface BrowserTabEvent extends Event {
++  readonly tabId: number;
++  readonly entry: BrokerTab | null;
++}
++
++interface TabBroker extends EventTarget {
++  getTabs(): Promise<BrokerTab[]>;
++  createTab(url: string, tag: string, incognito?: boolean): Promise<BrokerTab>;
++  navigateTab(tabId: number, url: string): Promise<void>;
++  tabCommand(tabId: number, command: "back" | "forward" | "reload" | "stop" | "close"): void;
++  answerTabDialog(tabId: number, accept: boolean, text?: string): void;
++  snapshotTab(tabId: number): Promise<Blob>;
++  sendTabDevToolsCommand?(tabId: number, method: string, paramsJson?: string): Promise<string>;
++  updateTabTags?(tabId: number, add: readonly string[], remove?: readonly string[]): Promise<void>;
++}
++
++/** The server's name for a tab it drives. */
++type ServerTab = NonNullable<DesktopPreviewTabDefaults["serverTab"]>;
++
++/** A tab's tags (before the browser had tags: just its creation tag). */
++export function tabTags(tab: BrokerTab): readonly string[] {
++  return tab.tags ?? (tab.tag ? [tab.tag] : []);
++}
++
++const isThreadTag = (tag: string) => threadIdOfTag(tag) !== null;
++
++function tabBroker(): TabBroker | null {
++  if (typeof navigator === "undefined") return null;
++  const broker = (navigator as Navigator & { windowBroker?: Partial<TabBroker> }).windowBroker;
++  return broker && typeof broker.createTab === "function" ? (broker as TabBroker) : null;
++}
++
++/** Part `index` of a previewRuntimeTabId ([environmentId, threadId, epoch, tabId]). */
++function runtimePart(runtimeTabId: string, index: number): string | null {
++  try {
++    const parsed: unknown = JSON.parse(runtimeTabId);
++    if (Array.isArray(parsed) && typeof parsed[index] === "string") return parsed[index];
++  } catch {
++    // Not a runtime tab id.
++  }
++  return null;
++}
++
++/** The tag of the thread a preview tab is in ("" if none). */
++function threadOf(runtimeTabId: string): string {
++  const threadId = runtimePart(runtimeTabId, 1);
++  return threadId === null ? "" : threadTag(threadId);
++}
++
++/** How long an imported tab whose preview closed waits to be taken back. */
++const REIMPORT_MS = 2000;
++
++/** How long a tab a page opened waits for its preview tab before it closes. */
++const POPUP_ADOPT_MS = 15_000;
++
++/** A popup's preview tab and its opener's (null if that is gone), by runtime tab id. */
++export interface PopupClosedEvent {
++  readonly tabId: string;
++  readonly openerTabId: string | null;
++}
++
++export const isBlank = (url: string) => url === "" || url === "about:blank";
++
++// Which broker tab backs which preview tab. Tabs outlive a reload of the
++// shell page, so the reloaded page adopts them instead of opening new ones.
++const STORAGE_KEY = "t3code:plutonium-preview-tabs";
++
++function loadStoredIds(): Record<string, number> {
++  try {
++    const parsed: unknown = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "{}");
++    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
++  } catch {
++    return {};
++  }
++}
++
++class PlutoniumPreview {
++  readonly broker: TabBroker;
++  /** runtime tab id → broker tab id, and back. */
++  private readonly ids = new Map<string, number>();
++  private readonly runtimeIds = new Map<number, string>();
++  private readonly tabs = new Map<number, BrokerTab>();
++  /** Tabs a page opened that haven't got a URL yet: their opener's broker id. */
++  private readonly pendingPopups = new Map<number, number>();
++  /**
++   * Tabs a page opened, waiting for the preview tab that will show them, by
++   * thread tag, oldest first: the next new preview tab of the thread adopts
++   * one instead of opening a blank tab and loading its URL again.
++   */
++  private readonly popups = new Map<string, number[]>();
++  /** Opened tabs, waiting or shown: their opener's broker id. */
++  private readonly popupOpeners = new Map<number, number>();
++  private readonly popupClosedListeners = new Set<(event: PopupClosedEvent) => void>();
++  private readonly stateListeners = new Set<
++    (tabId: string, state: DesktopPreviewTabState) => void
++  >();
++  private readonly tabListeners = new Set<() => void>();
++  private readonly openLinkListeners = new Set<(event: DesktopPreviewOpenLinkEvent) => void>();
++  private readonly pointerListeners = new Set<(event: DesktopPreviewPointerEvent) => void>();
++  private pointerSequence = 0;
++  private listeningForPointer = false;
++  /** The server tabs among the preview tabs, by runtime tab id. */
++  private readonly serverTabs = new Map<string, ServerTab>();
++  /** Tabs to open in throwaway storage of their own (the incognito profile). */
++  private readonly incognito = new Set<string>();
++  /** Preview tabs showing a tab brought from elsewhere (imported, or a dock slot's). */
++  private readonly brought = new Set<string>();
++  /**
++   * Imported tabs waiting for their preview tab, by thread tag: the broker
++   * tab, and the server's preview tab id once known (any new one otherwise).
++   */
++  private readonly imports = new Map<string, { tabId: number; serverTabId: string | null }>();
++  /** Tabs a page opened whose inherited dock slot tags were looked at. */
++  private readonly unslotted = new Set<number>();
++  private elsewhereTabs: readonly BrokerTab[] = [];
++  private allTabs: readonly BrokerTab[] = [];
++
++  constructor(broker: TabBroker) {
++    this.broker = broker;
++    const onTab = (event: Event) => {
++      const { entry } = event as BrowserTabEvent;
++      if (entry) this.update(entry);
++    };
++    broker.addEventListener("tabadded", onTab);
++    broker.addEventListener("tabchanged", onTab);
++    broker.addEventListener("tabremoved", (event) => {
++      const { tabId } = event as BrowserTabEvent;
++      this.tabs.delete(tabId);
++      this.unslotted.delete(tabId);
++      this.pendingPopups.delete(tabId);
++      this.dropWaitingPopup(tabId);
++      const openerId = this.popupOpeners.get(tabId);
++      this.popupOpeners.delete(tabId);
++      const runtimeTabId = this.runtimeIds.get(tabId);
++      if (runtimeTabId !== undefined) {
++        // The page closed itself (window.close()). The preview tab stays,
++        // idle, unless a page opened it: then it closes, as a popup window.
++        this.runtimeIds.delete(tabId);
++        this.ids.delete(runtimeTabId);
++        this.storeIds();
++        this.emit(runtimeTabId, null);
++        if (openerId !== undefined) {
++          const event = {
++            tabId: runtimeTabId,
++            openerTabId: this.runtimeIds.get(openerId) ?? null,
++          };
++          this.once(`closed:${tabId}`, () => {
++            for (const listener of this.popupClosedListeners) listener(event);
++          });
++        }
++      }
++      this.notifyTabs();
++    });
++    // Tabs from before this page loaded (other shells', or ones it adopts).
++    void broker.getTabs().then((list) => {
++      for (const entry of list) if (!this.tabs.has(entry.id)) this.tabs.set(entry.id, entry);
++      this.notifyTabs();
++    });
++  }
++
++  private update(entry: BrokerTab): void {
++    this.tabs.set(entry.id, entry);
++    this.dropInheritedSlots(entry);
++    // What a preview's page opens becomes another preview tab of its thread.
++    const opener =
++      entry.openedBy === "page"
++        ? (this.pendingPopups.get(entry.id) ??
++          (this.runtimeIds.has(entry.openerId) ? entry.openerId : undefined))
++        : undefined;
++    if (opener !== undefined && !this.runtimeIds.has(entry.id)) {
++      if (isBlank(entry.url)) {
++        this.pendingPopups.set(entry.id, opener);
++      } else if (!this.popupOpeners.has(entry.id)) {
++        this.pendingPopups.delete(entry.id);
++        const source = this.runtimeIds.get(opener);
++        const tag = source === undefined ? "" : threadOf(source);
++        if (source === undefined || !tag) {
++          this.broker.tabCommand(entry.id, "close");
++          return;
++        }
++        // The thread's next preview tab (the one this asks for) shows it.
++        this.popupOpeners.set(entry.id, opener);
++        this.popups.set(tag, [...(this.popups.get(tag) ?? []), entry.id]);
++        let asked = false;
++        this.once(`opened:${entry.id}`, () => {
++          asked = true;
++          for (const listener of this.openLinkListeners) {
++            listener({ tabId: source, url: entry.url, background: false });
++          }
++        });
++        // Unshown by then, the page that asked for its preview tab closes it.
++        window.setTimeout(() => {
++          if (this.dropWaitingPopup(entry.id) && asked) this.broker.tabCommand(entry.id, "close");
++        }, POPUP_ADOPT_MS);
++      }
++      return;
++    }
++    const runtimeTabId = this.runtimeIds.get(entry.id);
++    if (runtimeTabId !== undefined) this.emit(runtimeTabId, entry);
++    this.notifyTabs();
++  }
++
++  /**
++   * A page's new tab starts with its opener's tags, a dock slot's among them;
++   * it isn't the slot's (only what was put in the slot is). Looked at once,
++   * when the tab first shows up, so the tab can be put in a slot itself.
++   */
++  private dropInheritedSlots(entry: BrokerTab): void {
++    if (entry.openedBy !== "page" || this.unslotted.has(entry.id)) return;
++    this.unslotted.add(entry.id);
++    const opener = this.tabs.get(entry.openerId);
++    if (!opener) return;
++    const inherited = tabTags(entry).filter(
++      (tag) => isDockSlotTag(tag) && tabTags(opener).includes(tag),
++    );
++    if (inherited.length > 0) {
++      void this.broker.updateTabTags?.(entry.id, [], inherited).catch(() => {});
++    }
++  }
++
++  /**
++   * Runs `run` in one shell page only: every page that shows a tab sees what
++   * happens to it, and each would otherwise open (or close) a preview tab.
++   */
++  private once(event: string, run: () => void): void {
++    if (typeof navigator.locks?.request !== "function") {
++      run();
++      return;
++    }
++    void navigator.locks.request(
++      `t3code:plutonium-preview:${event}`,
++      { ifAvailable: true },
++      (lock) => {
++        if (!lock) return;
++        run();
++        // Held while the other pages hear of the same event.
++        return new Promise((resolve) => window.setTimeout(resolve, POPUP_ADOPT_MS));
++      },
++    );
++  }
++
++  /** Takes broker tab `tabId` off the popups waiting for a preview tab; true if it was. */
++  private dropWaitingPopup(tabId: number): boolean {
++    for (const [tag, queue] of this.popups) {
++      if (!queue.includes(tabId)) continue;
++      const rest = queue.filter((id) => id !== tabId);
++      if (rest.length > 0) this.popups.set(tag, rest);
++      else this.popups.delete(tag);
++      return true;
++    }
++    return false;
++  }
++
++  private emit(runtimeTabId: string, entry: BrokerTab | null): void {
++    const state = toState(runtimeTabId, entry);
++    for (const listener of this.stateListeners) listener(runtimeTabId, state);
++  }
++
++  private notifyTabs(): void {
++    const elsewhere = [...this.tabs.values()]
++      .filter(
++        (tab) =>
++          !this.runtimeIds.has(tab.id) &&
++          !this.pendingPopups.has(tab.id) &&
++          !isBlank(tab.url) &&
++          // Imported tabs whose preview is gone (e.g. after a reload) too.
++          !isThreadTag(tabTags(tab)[0] ?? "") &&
++          // A dock slot's, on its way to another thread.
++          !tabTags(tab).some(isDockScopeTag),
++      )
++      .toSorted((a, b) => a.id - b.id);
++    // Unchanged, the list keeps its identity (useSyncExternalStore).
++    if (JSON.stringify(elsewhere) !== JSON.stringify(this.elsewhereTabs)) {
++      this.elsewhereTabs = elsewhere;
++    }
++    this.allTabs = [...this.tabs.values()].toSorted((a, b) => a.id - b.id);
++    for (const listener of this.tabListeners) listener();
++  }
++
++  /** The broker tab behind a preview tab, once it exists. */
++  tab(runtimeTabId: string): BrokerTab | null {
++    const id = this.ids.get(runtimeTabId);
++    return id === undefined ? null : (this.tabs.get(id) ?? null);
++  }
++
++  /** The preview tab showing broker tab `tabId`, if one does. */
++  runtimeTabIdOf(tabId: number): string | null {
++    return this.runtimeIds.get(tabId) ?? null;
++  }
++
++  /** Every tab the browser has, oldest first (a new list when one changes). */
++  tabList(): readonly BrokerTab[] {
++    return this.allTabs;
++  }
++
++  /** The thread and server tab id of the preview tab showing broker tab `tabId`, if one does. */
++  previewOf(tabId: number): {
++    readonly runtimeTabId: string;
++    readonly environmentId: string;
++    readonly threadId: string;
++    readonly tabId: string;
++  } | null {
++    const runtimeTabId = this.runtimeIds.get(tabId);
++    if (runtimeTabId === undefined) return null;
++    const environmentId = runtimePart(runtimeTabId, 0);
++    const threadId = runtimePart(runtimeTabId, 1);
++    const serverTabId = runtimePart(runtimeTabId, 3);
++    return environmentId && threadId && serverTabId
++      ? { runtimeTabId, environmentId, threadId, tabId: serverTabId }
++      : null;
++  }
++
++  /**
++   * A new tab at `url` for a dock slot, its origin its scope's `tag`, and
++   * tagged `slotTag` (shown by none yet).
++   */
++  async createDockTab(url: string, tag: string, slotTag: string): Promise<BrokerTab> {
++    const tab = await this.broker.createTab(url, tag);
++    try {
++      if (!this.broker.updateTabTags) throw new Error("This browser has no tab tags");
++      await this.broker.updateTabTags(tab.id, [slotTag]);
++    } catch (error) {
++      this.broker.tabCommand(tab.id, "close");
++      throw error;
++    }
++    const entry = this.tabs.get(tab.id) ?? tab;
++    return tabTags(entry).includes(slotTag)
++      ? entry
++      : { ...entry, tags: [...tabTags(entry), slotTag] };
++  }
++
++  /**
++   * Lets go of the tab behind `runtimeTabId` without closing it, for a dock
++   * slot's tab moving to another thread: it loses this thread's tag. Its
++   * preview tab is closed after this, and closes nothing then.
++   */
++  releaseTab(runtimeTabId: string): void {
++    const id = this.ids.get(runtimeTabId);
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    this.serverTabs.delete(runtimeTabId);
++    this.incognito.delete(runtimeTabId);
++    this.brought.delete(runtimeTabId);
++    if (serverTab) void plutoniumShell().then((shell) => shell?.releaseServerTab(serverTab));
++    if (id === undefined) return;
++    this.ids.delete(runtimeTabId);
++    this.runtimeIds.delete(id);
++    this.storeIds();
++    const tag = threadOf(runtimeTabId);
++    // A tab opened in the thread keeps its tag (the first is its origin).
++    if (tag) void this.broker.updateTabTags?.(id, [], [tag]).catch(() => {});
++    this.notifyTabs();
++  }
++
++  /** Tabs from elsewhere (another shell's, or nobody's) no preview shows, oldest first. */
++  elsewhere(): readonly BrokerTab[] {
++    return this.elsewhereTabs;
++  }
++
++  /**
++   * Brings broker tab `tabId` into `threadId`: tags it, and has the thread's
++   * next new preview tab show it instead of opening a blank one.
++   */
++  async importTab(threadId: string, tabId: number): Promise<void> {
++    if (!this.broker.updateTabTags) throw new Error("This browser has no tab tags");
++    const tag = threadTag(threadId);
++    await this.broker.updateTabTags(tabId, [tag]);
++    this.imports.set(tag, { tabId, serverTabId: null });
++  }
++
++  /** Forgets an import whose preview tab couldn't be opened (and untags it). */
++  cancelImport(threadId: string, tabId: number): void {
++    const tag = threadTag(threadId);
++    if (this.imports.get(tag)?.tabId === tabId) this.imports.delete(tag);
++    void this.broker.updateTabTags?.(tabId, [], [tag]).catch(() => {});
++  }
++
++  /** Called whenever any preview tab's broker tab changes. */
++  onTabs(listener: () => void): () => void {
++    this.tabListeners.add(listener);
++    return () => this.tabListeners.delete(listener);
++  }
++
++  answerDialog(runtimeTabId: string, accept: boolean, text?: string): void {
++    const id = this.ids.get(runtimeTabId);
++    if (id !== undefined) this.broker.answerTabDialog(id, accept, text);
++  }
++
++  private require(runtimeTabId: string): number {
++    const id = this.ids.get(runtimeTabId);
++    if (id === undefined) throw new Error(`No browser tab for ${runtimeTabId}`);
++    return id;
++  }
++
++  private storeIds(): void {
++    try {
++      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(this.ids)));
++    } catch {
++      // Not remembered: a reload opens a new tab.
++    }
++  }
++
++  async createTab(runtimeTabId: string, serverTab?: ServerTab, incognito = false): Promise<void> {
++    if (serverTab) this.serverTabs.set(runtimeTabId, serverTab);
++    if (incognito) this.incognito.add(runtimeTabId);
++    await this.attachTab(runtimeTabId);
++    await this.showServerTab(runtimeTabId);
++  }
++
++  /**
++   * Lets the server drive the tab behind `runtimeTabId`, if it is a server
++   * tab. Another shell page may show it already (several shells run at once):
++   * then this page shows that page's tab too.
++   */
++  private async showServerTab(runtimeTabId: string): Promise<void> {
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    const id = this.ids.get(runtimeTabId);
++    if (!serverTab || id === undefined) return;
++    const shell = await plutoniumShell();
++    // A tab brought here is the one, not a tab the helper opened for the server.
++    const replace = this.brought.has(runtimeTabId);
++    const shown = await shell?.showServerTab(id, serverTab, { replace }).catch((error: unknown) => {
++      console.warn(`Plutonium: the server can't drive tab ${id}`, error);
++      return id;
++    });
++    if (shown === undefined || shown === id || this.ids.get(runtimeTabId) !== id) return;
++    this.runtimeIds.delete(id);
++    this.ids.set(runtimeTabId, shown);
++    this.runtimeIds.set(shown, runtimeTabId);
++    this.storeIds();
++    this.broker.tabCommand(id, "close");
++    const entry =
++      this.tabs.get(shown) ?? (await this.broker.getTabs()).find((tab) => tab.id === shown);
++    if (entry) this.update(entry);
++  }
++
++  private async attachTab(runtimeTabId: string): Promise<void> {
++    if (this.ids.has(runtimeTabId)) return;
++    const tag = threadOf(runtimeTabId);
++    const incognito = this.incognito.has(runtimeTabId);
++    const pending = this.imports.get(tag);
++    const imported =
++      pending &&
++      (pending.serverTabId === null || pending.serverTabId === runtimePart(runtimeTabId, 3))
++        ? pending.tabId
++        : undefined;
++    // The same preview, created again now that the server's epoch is known:
++    // it keeps its tab (the old runtime id's close then finds none).
++    const renamed = [...this.ids].find(
++      ([other]) =>
++        runtimePart(other, 0) === runtimePart(runtimeTabId, 0) &&
++        runtimePart(other, 1) === runtimePart(runtimeTabId, 1) &&
++        runtimePart(other, 2) === null &&
++        runtimePart(other, 3) === runtimePart(runtimeTabId, 3),
++    );
++    if (renamed) {
++      const [other, id] = renamed;
++      if (this.brought.delete(other)) this.brought.add(runtimeTabId);
++      this.ids.delete(other);
++      this.ids.set(runtimeTabId, id);
++      this.runtimeIds.set(id, runtimeTabId);
++      this.storeIds();
++      const entry = this.tabs.get(id);
++      if (entry) this.update(entry);
++      return;
++    }
++    const popup = this.popups.get(tag)?.[0];
++    const storedId = loadStoredIds()[runtimeTabId] ?? imported ?? popup;
++    if (imported !== undefined && imported === storedId) this.imports.delete(tag);
++    if (popup !== undefined && popup === storedId) this.dropWaitingPopup(popup);
++    const adopted =
++      storedId === undefined
++        ? undefined
++        : (await this.broker.getTabs()).find(
++            (tab) =>
++              tab.id === storedId &&
++              tabTags(tab).includes(tag) &&
++              !this.runtimeIds.has(tab.id) &&
++              (tab.incognito === true) === incognito,
++          );
++    if (this.ids.has(runtimeTabId)) return;
++    if (adopted && adopted.id !== loadStoredIds()[runtimeTabId]) this.brought.add(runtimeTabId);
++    const entry = adopted ?? (await this.broker.createTab("about:blank", tag, incognito));
++    // A browser without incognito tabs ignores the request: never show the
++    // shared profile's storage as incognito.
++    if (incognito && entry.incognito !== true) {
++      this.broker.tabCommand(entry.id, "close");
++      throw new Error("This browser can't open incognito tabs.");
++    }
++    this.ids.set(runtimeTabId, entry.id);
++    this.runtimeIds.set(entry.id, runtimeTabId);
++    this.storeIds();
++    this.update(entry);
++  }
++
++  closeTab(runtimeTabId: string): void {
++    const serverTab = this.serverTabs.get(runtimeTabId);
++    this.serverTabs.delete(runtimeTabId);
++    this.incognito.delete(runtimeTabId);
++    this.brought.delete(runtimeTabId);
++    if (serverTab) void plutoniumShell().then((shell) => shell?.releaseServerTab(serverTab));
++    const id = this.ids.get(runtimeTabId);
++    if (id === undefined) return;
++    this.ids.delete(runtimeTabId);
++    this.runtimeIds.delete(id);
++    this.storeIds();
++    const tag = threadOf(runtimeTabId);
++    const tab = this.tabs.get(id);
++    // A dock slot's tab may have moved here from the thread it was opened in.
++    const kept = tab && (tabTags(tab)[0] !== tag || tabTags(tab).some(isDockScopeTag));
++    if (tab && tag && kept && this.broker.updateTabTags) {
++      // Imported: it goes back where it came from, unless the same preview
++      // is opened again under a new runtime id (once the server's epoch is
++      // known, the preview's tab is closed and created again).
++      const serverTabId = runtimePart(runtimeTabId, 3);
++      this.imports.set(tag, { tabId: id, serverTabId });
++      window.setTimeout(() => {
++        if (this.imports.get(tag)?.tabId !== id) return;
++        this.imports.delete(tag);
++        if (this.runtimeIds.has(id)) return;
++        const current = this.tabs.get(id);
++        // A dock slot's tab nobody shows any more is closed, as a thread's is.
++        if (current && tabTags(current).some(isDockScopeTag)) this.broker.tabCommand(id, "close");
++        else void this.broker.updateTabTags?.(id, [], [tag]).catch(() => {});
++      }, REIMPORT_MS);
++    } else {
++      this.broker.tabCommand(id, "close");
++    }
++    this.notifyTabs();
++  }
++
++  async navigate(runtimeTabId: string, url: string): Promise<void> {
++    if (!this.ids.has(runtimeTabId)) await this.attachTab(runtimeTabId);
++    await this.broker.navigateTab(this.require(runtimeTabId), url);
++  }
++
++  command(runtimeTabId: string, command: "back" | "forward" | "reload" | "stop"): void {
++    const id = this.ids.get(runtimeTabId);
++    if (id !== undefined) this.broker.tabCommand(id, command);
++  }
++
++  snapshot(runtimeTabId: string): Promise<Blob> {
++    return this.broker.snapshotTab(this.require(runtimeTabId));
++  }
++
++  // Where the agent is about to click in a tab the server drives.
++  private listenForPointer(): void {
++    void plutoniumShell().then((shell) =>
++      shell?.addEventListener("agentpointer", (event) => {
++        const pointer = (
++          event as CustomEvent<ServerTab & { phase: "move" | "click"; x: number; y: number }>
++        ).detail;
++        const runtimeTabId = [...this.serverTabs].find(
++          ([, tab]) => tab.threadId === pointer.threadId && tab.tabId === pointer.tabId,
++        )?.[0];
++        if (runtimeTabId === undefined) return;
++        const pointerEvent: DesktopPreviewPointerEvent = {
++          tabId: runtimeTabId,
++          phase: pointer.phase,
++          x: pointer.x,
++          y: pointer.y,
++          sequence: ++this.pointerSequence,
++          createdAt: new Date().toISOString(),
++        };
++        for (const listener of this.pointerListeners) listener(pointerEvent);
++      }),
++    );
++  }
++
++  onOpenLink(listener: (event: DesktopPreviewOpenLinkEvent) => void): () => void {
++    this.openLinkListeners.add(listener);
++    return () => this.openLinkListeners.delete(listener);
++  }
++
++  /** A preview tab whose page a preview page opened has closed itself (window.close()). */
++  onPopupClosed(listener: (event: PopupClosedEvent) => void): () => void {
++    this.popupClosedListeners.add(listener);
++    return () => this.popupClosedListeners.delete(listener);
++  }
++
++  onPointerEvent(listener: (event: DesktopPreviewPointerEvent) => void): () => void {
++    if (!this.listeningForPointer) {
++      this.listeningForPointer = true;
++      this.listenForPointer();
++    }
++    this.pointerListeners.add(listener);
++    return () => this.pointerListeners.delete(listener);
++  }
++
++  onStateChange(listener: (tabId: string, state: DesktopPreviewTabState) => void): () => void {
++    this.stateListeners.add(listener);
++    // Like the Electron bridge, a new listener learns the current state.
++    for (const [runtimeTabId, id] of this.ids) {
++      listener(runtimeTabId, toState(runtimeTabId, this.tabs.get(id) ?? null));
++    }
++    return () => this.stateListeners.delete(listener);
++  }
++}
++
++function toState(runtimeTabId: string, entry: BrokerTab | null): DesktopPreviewTabState {
++  const navStatus: DesktopPreviewNavStatus =
++    !entry || isBlank(entry.url)
++      ? { kind: "Idle" }
++      : { kind: entry.loading ? "Loading" : "Success", url: entry.url, title: entry.title };
++  return {
++    tabId: runtimeTabId,
++    webContentsId: entry ? entry.id : null,
++    navStatus,
++    canGoBack: entry?.canGoBack ?? false,
++    canGoForward: entry?.canGoForward ?? false,
++    zoomFactor: zoomFactorOf(entry),
++    pictureInPicture: false,
++    colorScheme: "system",
++    audioMuted: false,
++    audible: false,
++    controller: "none",
++    capturing: false,
++    updatedAt: new Date().toISOString(),
++  };
++}
++
++/** The tab's page zoom (its "zoom" state, in percent), 1 when it has none. */
++export function zoomFactorOf(entry: BrokerTab | null): number {
++  if (!entry?.stateJson) return 1;
++  try {
++    const zoom = (JSON.parse(entry.stateJson) as { zoom?: unknown }).zoom;
++    return typeof zoom === "number" && zoom > 0 ? zoom / 100 : 1;
++  } catch {
++    return 1;
++  }
++}
++
++const unsupported = (what: string) => () =>
++  Promise.reject(new Error(`${what} is not available in the Plutonium browser yet`));
++const ignored = () => Promise.resolve();
++
++let preview: PlutoniumPreview | null | undefined;
++
++/** The Plutonium preview, or null outside the Plutonium shell. */
++export function plutoniumPreview(): PlutoniumPreview | null {
++  if (preview === undefined) {
++    const broker = tabBroker();
++    preview = broker ? new PlutoniumPreview(broker) : null;
++  }
++  return preview;
++}
++
++/** DesktopPreviewBridge on Plutonium's browser tabs, or null outside the shell. */
++export function createPlutoniumPreviewBridge(): DesktopPreviewBridge | null {
++  const p = plutoniumPreview();
++  if (!p) return null;
++  return {
++    createTab: (tabId, defaults) =>
++      p.createTab(tabId, defaults?.serverTab, defaults?.incognito === true),
++    closeTab: async (tabId) => p.closeTab(tabId),
++    // The shell takes its own keys from a focused tab (panelKeys.ts).
++    setForwardedShortcuts: ignored,
++    registerWebview: ignored,
++    navigate: (tabId, url) => p.navigate(tabId, url),
++    goBack: async (tabId) => p.command(tabId, "back"),
++    goForward: async (tabId) => p.command(tabId, "forward"),
++    refresh: async (tabId) => p.command(tabId, "reload"),
++    hardReload: async (tabId) => p.command(tabId, "reload"),
++    zoomIn: ignored,
++    zoomOut: ignored,
++    resetZoom: ignored,
++    setZoomFactor: ignored,
++    setColorScheme: ignored,
++    setAudioMuted: ignored,
++    openDevTools: ignored,
++    clearCookies: ignored,
++    clearCache: ignored,
++    getPreviewConfig: async () => ({ partition: "", webPreferences: "", preloadUrl: null }),
++    listBrowserImportSources: async () => [],
++    importBrowserCookies: unsupported("Importing cookies"),
++    setAnnotationTheme: ignored,
++    setAnnotationSendEnabled: ignored,
++    pickElement: unsupported("Picking elements"),
++    cancelPickElement: ignored,
++    captureScreenshot: unsupported("Saving screenshots"),
++    revealArtifact: ignored,
++    copyArtifactToClipboard: ignored,
++    pictureInPicture: { open: ignored, close: ignored },
++    recording: {
++      onInput: () => () => undefined,
++      startScreencast: unsupported("Recording"),
++      stopScreencast: ignored,
++      save: unsupported("Recording"),
++    },
++    onStateChange: (listener) => p.onStateChange(listener),
++    onPointerEvent: (listener) => p.onPointerEvent(listener),
++    onOpenLink: (listener) => p.onOpenLink(listener),
++  };
++}
+diff --git a/apps/web/src/previewStateStore.ts b/apps/web/src/previewStateStore.ts
+index 37a5bec395..62bab5136c 100644
+--- a/apps/web/src/previewStateStore.ts
++++ b/apps/web/src/previewStateStore.ts
+@@ -11,6 +11,7 @@ import {
+ import { Atom } from "effect/reactivity";
+ 
+ import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
++import { plutoniumPreview } from "./plutonium/previewBridge";
+ import { appAtomRegistry } from "./rpc/atomRegistry";
+ 
+ export interface DesktopPreviewOverlay {
+@@ -506,7 +507,7 @@ export function rememberPreviewUrl(ref: ScopedThreadRef, url: string): void {
+ 
+ export function isPreviewSupportedInRuntime(): boolean {
+   if (typeof window === "undefined") return false;
+-  return Boolean(window.desktopBridge?.preview);
++  return Boolean(window.desktopBridge?.preview ?? plutoniumPreview());
+ }
+ 
+ /** Releases desktop-host pages as well as local session state. */

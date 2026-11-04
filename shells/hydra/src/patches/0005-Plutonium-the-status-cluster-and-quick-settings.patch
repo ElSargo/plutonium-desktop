@@ -1,73 +1,26 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Fri, 30 Oct 2026 19:27:35 +1300
-Subject: [PATCH 47/56] Plutonium: the status cluster: clock, battery and quick
- settings in the title bar
+Date: Thu, 5 Nov 2026 09:18:48 +1300
+Subject: [PATCH 05/10] Plutonium: the status cluster and quick settings
 
-At the title bar's right end, shown whatever else is open: the time, the
-battery when not on AC, and an icon for offline or muted. A click opens
-quick settings over the helper's desktop services: the date and a
-calendar, volume and output, brightness, Wi-Fi and Bluetooth, what's
-playing, the battery, and lock, suspend, log out, restart and power off.
-
-Its width is --plutonium-status-width; --workspace-controls-right adds it,
-so the panel toggles sit left of it, and the chat header, the panel's tab
-strip and the page headers reserve it. Only in the Plutonium shell.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Folded from:
+- the status cluster: clock, battery and quick settings in the title bar
+- display settings and every setting from the status cluster
 ---
- apps/web/src/components/AppSidebarLayout.tsx  |   2 +
- apps/web/src/components/RightPanelTabs.tsx    |   4 +-
  .../src/components/WorkspacePageHeader.tsx    |   2 +-
  apps/web/src/components/chat/ChatHeader.tsx   |   2 +-
  apps/web/src/index.css                        |  11 +-
- apps/web/src/plutonium/PlutoniumStatus.tsx    | 867 ++++++++++++++++++
- apps/web/src/plutonium/systemServices.ts      | 176 ++++
- apps/web/src/plutonium/windowStore.ts         |  10 +
- 8 files changed, 1070 insertions(+), 4 deletions(-)
+ apps/web/src/plutonium/PlutoniumStatus.tsx    | 905 ++++++++++++++++++
+ apps/web/src/plutonium/systemServices.ts      | 188 ++++
+ 5 files changed, 1105 insertions(+), 3 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumStatus.tsx
  create mode 100644 apps/web/src/plutonium/systemServices.ts
 
-diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
-index a1eb647a53..dccf15a065 100644
---- a/apps/web/src/components/AppSidebarLayout.tsx
-+++ b/apps/web/src/components/AppSidebarLayout.tsx
-@@ -34,6 +34,7 @@ import {
- import LegacyThreadSidebar from "./LegacySidebar";
- import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
- import { PlutoniumWindowsStarter } from "../plutonium/PlutoniumWindows";
-+import { PlutoniumStatus } from "../plutonium/PlutoniumStatus";
- import ThreadSidebar from "./Sidebar";
- import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
- import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
-@@ -357,6 +358,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
-         <NavigationHistoryShortcuts />
-         <MainAppLocationTracker />
-         <PlutoniumWindowsStarter />
-+        <PlutoniumStatus />
-       </SidebarProvider>
-     </PanelAnimationSuppressionProvider>
-   );
-diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
-index 3ae8dad5bc..2dceafe04a 100644
---- a/apps/web/src/components/RightPanelTabs.tsx
-+++ b/apps/web/src/components/RightPanelTabs.tsx
-@@ -1291,7 +1291,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
-           // The sheet overlays from the viewport top, so its tab bar keeps
-           // the titlebar's height: a compact row re-centers the layout
-           // controls a few pixels higher and the cluster jumps on open.
--          props.mode === "inline" && !props.layoutControls ? "pr-28" : "pr-3",
-+          props.mode === "inline" && !props.layoutControls
-+            ? "pr-(--right-panel-tabbar-toggles-end)"
-+            : "pr-(--right-panel-tabbar-end)",
-           ownsDesktopTitleBar && "drag-region",
-           ownsDesktopTitleBar && "wco:pr-(--workspace-native-controls-inset)",
-           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
 diff --git a/apps/web/src/components/WorkspacePageHeader.tsx b/apps/web/src/components/WorkspacePageHeader.tsx
-index 0fb53585d1..3ea345ffc3 100644
+index 9c4f455ffe..648b52b73a 100644
 --- a/apps/web/src/components/WorkspacePageHeader.tsx
 +++ b/apps/web/src/components/WorkspacePageHeader.tsx
-@@ -19,7 +19,7 @@ export function WorkspacePageHeader({
+@@ -15,7 +15,7 @@ export function WorkspacePageHeader({
    return (
      <header
        className={cn(
@@ -77,10 +30,10 @@ index 0fb53585d1..3ea345ffc3 100644
          reserveNativeControls && "wco:pr-(--workspace-native-controls-inset)",
          COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
 diff --git a/apps/web/src/components/chat/ChatHeader.tsx b/apps/web/src/components/chat/ChatHeader.tsx
-index c2b1a80501..612d9b0d81 100644
+index 49f21a1ddc..c87ffc40c7 100644
 --- a/apps/web/src/components/chat/ChatHeader.tsx
 +++ b/apps/web/src/components/chat/ChatHeader.tsx
-@@ -302,7 +302,7 @@ export const ChatHeader = memo(function ChatHeader({
+@@ -284,7 +284,7 @@ export const ChatHeader = memo(function ChatHeader({
        ref={breadcrumbContainerRef}
        className={cn(
          "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
@@ -90,10 +43,10 @@ index c2b1a80501..612d9b0d81 100644
        onContextMenu={handleHeaderContextMenu}
      >
 diff --git a/apps/web/src/index.css b/apps/web/src/index.css
-index 90f204d201..fcea60ce5c 100644
+index 15dd5e14d3..7868ed0fc2 100644
 --- a/apps/web/src/index.css
 +++ b/apps/web/src/index.css
-@@ -120,7 +120,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+@@ -123,7 +123,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    --workspace-topbar-height: 52px;
    --workspace-controls-top: 0px;
    --workspace-controls-left: calc(env(safe-area-inset-left) + 0.75rem);
@@ -113,17 +66,18 @@ index 90f204d201..fcea60ce5c 100644
    --workspace-titlebar-control-gap: 0.75rem;
 diff --git a/apps/web/src/plutonium/PlutoniumStatus.tsx b/apps/web/src/plutonium/PlutoniumStatus.tsx
 new file mode 100644
-index 0000000000..206e0366e5
+index 0000000000..605f76ca45
 --- /dev/null
 +++ b/apps/web/src/plutonium/PlutoniumStatus.tsx
-@@ -0,0 +1,867 @@
+@@ -0,0 +1,905 @@
 +// Plutonium: the status cluster, at the title bar's right edge, where it shows
 +// whatever else is open (sidebar hidden, panel maximized, chat folded): the
 +// time, the battery when it isn't on AC, and an icon only for something
 +// wrong (offline, muted). A click opens quick settings: the date and a
-+// calendar, volume and brightness, Wi-Fi and Bluetooth, what's playing, the
-+// battery, and lock, suspend, log out, restart and power off. Over the
-+// helper's desktop services (systemServices.ts); only in the Plutonium shell.
++// calendar, volume and brightness, Wi-Fi and Bluetooth, Displays and All
++// settings (the switcher's pages), what's playing, the battery, and lock,
++// suspend, log out, restart and power off. Over the helper's desktop services
++// (systemServices.ts); only in the Plutonium shell.
 +//
 +// Its width is --plutonium-status-width on the document: the title bar's
 +// other right-hand controls (--workspace-controls-right) and the headers they
@@ -142,6 +96,7 @@ index 0000000000..206e0366e5
 +  LockIcon,
 +  LockKeyholeIcon,
 +  LogOutIcon,
++  MonitorIcon,
 +  MoonIcon,
 +  PauseIcon,
 +  PlayIcon,
@@ -149,6 +104,7 @@ index 0000000000..206e0366e5
 +  RotateCcwIcon,
 +  SkipBackIcon,
 +  SkipForwardIcon,
++  SlidersHorizontalIcon,
 +  SunIcon,
 +  Volume1Icon,
 +  Volume2Icon,
@@ -400,8 +356,9 @@ index 0000000000..206e0366e5
 +  onExpandedChange: (expanded: boolean) => void;
 +}) {
 +  const Chevron = expanded ? ChevronDownIcon : ChevronRightIcon;
++  // min-w-0: a long detail truncates instead of widening the popover.
 +  return (
-+    <div className="flex items-center gap-2">
++    <div className="flex min-w-0 items-center gap-2">
 +      <button
 +        type="button"
 +        onClick={() => onExpandedChange(!expanded)}
@@ -648,6 +605,8 @@ index 0000000000..206e0366e5
 +  const bluetooth = useSystemService("bluetooth");
 +  const media = useSystemService("media");
 +  const session = useSystemService("session");
++  const display = useSystemService("display");
++  const displayState = display.state?.available ? display.state : null;
 +  const [expanded, setExpanded] = useState<"calendar" | "wifi" | "bluetooth" | null>(null);
 +  const [error, setError] = useState("");
 +  const setVolume = useLatestSender((volume) => audio.call("set-volume", { volume }));
@@ -660,6 +619,15 @@ index 0000000000..206e0366e5
 +    promise.catch((cause: unknown) =>
 +      setError(`${label}: ${String((cause as Error)?.message ?? cause)}`),
 +    );
++  // The switcher's Displays page (the display configuration tool), or its
++  // quick settings; it opens over this, so the popover closes.
++  const openSettings = (page: "displays" | "settings") => {
++    close();
++    void run(
++      page === "displays" ? "Displays" : "Settings",
++      display.call("open-settings", { page }),
++    );
++  };
 +
 +  const audioState = audio.state?.available ? audio.state : null;
 +  const VolumeGlyph = !audioState
@@ -738,7 +706,7 @@ index 0000000000..206e0366e5
 +        </div>
 +      ) : null}
 +
-+      {networkState || bluetoothState ? (
++      {networkState || bluetoothState || displayState ? (
 +        <div className="grid gap-1">
 +          {networkState ? (
 +            <>
@@ -811,6 +779,29 @@ index 0000000000..206e0366e5
 +                  ) : null}
 +                </div>
 +              ) : null}
++            </>
++          ) : null}
++          {displayState ? (
++            <>
++              {/* The switcher's pages: they go there, so no switch and nothing to expand. */}
++              <ToggleRow
++                icon={<MonitorIcon />}
++                title="Displays"
++                detail={
++                  displayState.displays.length === 1
++                    ? displayState.displays[0]!.name
++                    : `${displayState.displays.length} displays`
++                }
++                expanded={false}
++                onExpandedChange={() => openSettings("displays")}
++              />
++              <ToggleRow
++                icon={<SlidersHorizontalIcon />}
++                title="All settings"
++                detail="Sound, network, Bluetooth, power, notifications"
++                expanded={false}
++                onExpandedChange={() => openSettings("settings")}
++              />
 +            </>
 +          ) : null}
 +        </div>
@@ -986,13 +977,13 @@ index 0000000000..206e0366e5
 +}
 diff --git a/apps/web/src/plutonium/systemServices.ts b/apps/web/src/plutonium/systemServices.ts
 new file mode 100644
-index 0000000000..6b9d49e1f0
+index 0000000000..6166f1d21e
 --- /dev/null
 +++ b/apps/web/src/plutonium/systemServices.ts
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,188 @@
 +// Plutonium: the desktop services Hydra draws in its status cluster
-+// (PlutoniumStatus.tsx): the helper's audio, power, network, Bluetooth, media
-+// and session services, through the shell library (`shell.system.<name>`,
++// (PlutoniumStatus.tsx): the helper's audio, power, network, Bluetooth, media,
++// session and display services, through the shell library (`shell.system.<name>`,
 +// docs/features/DESKTOP_SERVICES.md in the plutonium repo). Each one's state
 +// is the helper's JSON, typed here as far as the status cluster reads it.
 +import { useCallback, useEffect, useState } from "react";
@@ -1111,6 +1102,17 @@ index 0000000000..6b9d49e1f0
 +  readonly problem: string | null;
 +}
 +
++/** The display service: the monitors, and the switcher's Displays page (open-settings). */
++export interface DisplayState {
++  readonly available: boolean;
++  readonly displays: readonly {
++    readonly id: string;
++    readonly index: number;
++    readonly name: string;
++    readonly primary: boolean;
++  }[];
++}
++
 +interface ServiceStates {
 +  audio: AudioState;
 +  power: PowerState;
@@ -1118,6 +1120,7 @@ index 0000000000..6b9d49e1f0
 +  bluetooth: BluetoothState;
 +  media: MediaState;
 +  session: SessionState;
++  display: DisplayState;
 +}
 +
 +export type SystemServiceName = keyof ServiceStates;
@@ -1166,24 +1169,3 @@ index 0000000000..6b9d49e1f0
 +
 +  return { state, call };
 +}
-diff --git a/apps/web/src/plutonium/windowStore.ts b/apps/web/src/plutonium/windowStore.ts
-index 3906ea03bd..21fcebd84e 100644
---- a/apps/web/src/plutonium/windowStore.ts
-+++ b/apps/web/src/plutonium/windowStore.ts
-@@ -128,6 +128,16 @@ interface PlutoniumShell extends EventTarget {
-   /** The displays (older libraries: missing). */
-   readonly displays?: readonly PlutoniumDisplay[];
-   showOnDisplay?(windowId: number, display: number | string): Promise<boolean>;
-+  /** Desktop services (DESKTOP_SERVICES.md; older libraries: missing). */
-+  readonly system?: { get(name: string): SystemServiceHandle };
-+}
-+
-+/** A desktop service in the shell library (`shell.system.<name>`): its state, kept current by "change" events. */
-+export interface SystemServiceHandle extends EventTarget {
-+  readonly state: unknown;
-+  readonly error: string | null;
-+  readonly ready: Promise<unknown>;
-+  call(action: string, args?: Record<string, unknown>): Promise<unknown>;
- }
- 
- interface PlutoniumWindowState {

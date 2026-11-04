@@ -7,7 +7,7 @@
 | The helper, its API, link opening, MCP tools | `helper/` (TypeScript run by Node 24 directly, no build) | restart the session, or only its helper |
 | The shell library (`/v1/shell.js`) | `helper/web/plutonium-shell.js` | reload the shells; from a worktree, `plutonium live apply shell-lib` |
 | A shell's UI | `shells/<name>/` (what's shipped) | the next session merges it into the installed copy; now: `plutonium shells update <name> [--from <checkout>]`, whose save reloads the shell. Or edit `$PLUTO_HOME/shells/<name>` directly, then `plutonium shells export <name>` brings the edits back here ([features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md)) |
-| Hydra: T3 Code's integration | its T3 Code checkout (`T3CODE_DIR`, default `shells/hydra/src/checkout`) | `plutonium hydra build`, reload; or `plutonium hydra live apply`; commit, then `plutonium hydra export` ([shells/hydra/README.md](../shells/hydra/README.md)) |
+| Hydra: T3 Code's integration | its T3 Code checkout (`T3CODE_DIR`, default `shells/hydra/src/checkout`), branch `plutonium` | `plutonium hydra build`, reload; or `plutonium hydra live apply`; commit as a fixup of its part's patch, then `plutonium hydra export` ("Hydra workflow" below) |
 | Hydra's launcher: serving, pairing, the database checks | `shells/hydra/bin/hydra` | the next session; now: `plutonium shells update hydra` and `plutonium shells restart hydra` |
 | Chromium: Exo, the broker, elements, tabs, shell mode | the checkout in `$CHROMIUM_DIR/src`, branch `plutonium` | `plutonium chromium build`, restart the session; commit, then `plutonium chromium export` |
 | The `plutonium` command: sessions, shells, setup | `bin/plutonium`, `lib/`: what a release install has too | run it again |
@@ -38,6 +38,15 @@ The patch series in `chromium/patches/` is the source of truth. The checkout's `
 **Applying a series is cheap.** `plutonium chromium patch` applies the patches to a scratch index and then moves the checkout to the result, so it writes only the files that differ from what the checkout has. Moving between two series rebuilds only what differs between them, not everything the patches touch. A series it has applied before takes under a second.
 
 **Running anything inside the container:** `plutonium container shell` opens a shell there with depot_tools on `PATH`, for example to run `gn args`, `autoninja` or a unit test. Exo's tests are `autoninja -C out/Plutonium exo_unittests`.
+
+## Hydra workflow
+
+Hydra is T3 Code with a patch series, kept as Chromium's is: `shells/hydra/src/patches/` is the source of truth, and the T3 Code checkout's `plutonium` branch is that series applied to `shells/hydra/src/BASE`, a stable T3 Code release.
+
+1. Work on `plutonium` (or a branch off it). Commit each change as a fixup of the patch whose files it changes; there is one patch per part of Hydra, and no two share a file ([shells/hydra/README.md](../shells/hydra/README.md), "The patches").
+2. Run `plutonium hydra export`. It rewrites `src/patches/` from `BASE..HEAD`. Commit those patches here.
+
+**Updating T3 Code:** `plutonium hydra update` moves the series to the newest stable release in a worktree of its own, then commits `BASE` and the patches here as one commit; T3 Code's own commits never enter this repository's history. Then build, typecheck and test it before merging (shells/hydra/README.md, "Updating T3 Code").
 
 ## Working in parallel
 
