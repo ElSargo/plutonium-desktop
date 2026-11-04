@@ -15,7 +15,9 @@ if (!t3 || !stage) throw new Error("usage: t3-runtime.ts <T3 Code checkout> <sta
 const artifact = await import(join(t3, "scripts/build-desktop-artifact.ts"));
 const { selectCliRuntimeExternalDependencies } = await import(join(t3, "scripts/lib/cli-external-packages.ts"));
 const { resolveCatalogDependencies } = await import(join(t3, "scripts/lib/resolve-catalog.ts"));
-const { parse } = await import(createRequire(join(t3, "packages/shared/package.json")).resolve("yaml"));
+const { parse, parseAllDocuments } = await import(
+  createRequire(join(t3, "packages/shared/package.json")).resolve("yaml"),
+);
 
 const rootPackage = JSON.parse(readFileSync(join(t3, "package.json"), "utf8"));
 const serverPackage = JSON.parse(readFileSync(join(t3, "apps/server/package.json"), "utf8"));
@@ -25,7 +27,11 @@ const serverDependencies = resolveCatalogDependencies(serverPackage.dependencies
 // The versions T3's own install has (its lockfile's), not the newest a range
 // allows: T3's patches name exact versions (node-pty@1.2.0-beta.15), and a
 // newer one leaves them unused, which pnpm refuses.
-const lock = parse(readFileSync(join(t3, "pnpm-lock.yaml"), "utf8"));
+// pnpm 12's lockfile starts with a document of its own (the package manager's
+// pins); the importers are in the one after it.
+const lock = parseAllDocuments(readFileSync(join(t3, "pnpm-lock.yaml"), "utf8"))
+  .map((document: { toJS: () => unknown }) => document.toJS() as { importers?: Record<string, { dependencies?: Record<string, { version: string }> }> })
+  .find((document) => document?.importers) ?? {};
 const locked: Record<string, { version: string }> = lock.importers?.["apps/server"]?.dependencies ?? {};
 // "1.2.0-beta.15(patch_hash=…)" → "1.2.0-beta.15"
 const installed = (name: string, range: string) => locked[name]?.version.replace(/\(.*$/, "") ?? range;
