@@ -1,0 +1,1373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Wed, 4 Nov 2026 14:48:07 +1300
+Subject: [PATCH 54/54] Plutonium: native windows are their threads' server
+ tabs
+
+The Apps panel's window stream is Plutonium's own, so only Hydra's web app
+could show a native window away from the desktop. Each window tagged with a
+thread is now one of its server tabs: the mobile app, T3's desktop app and
+any other client list it, stream it through /api/preview-stream, take control
+of it and type into it as they do a page. Closing the tab asks the app to
+close the window.
+
+Agents' preview tools and the server's browser don't see these tabs, and
+Hydra's web app leaves them out: it shows windows as app tabs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/plutonium/windowTabs.test.ts  | 343 +++++++++++
+ apps/server/src/plutonium/windowTabs.ts       | 573 ++++++++++++++++++
+ apps/server/src/preview/Manager.test.ts       |  68 +++
+ apps/server/src/preview/Manager.ts            | 122 +++-
+ apps/server/src/preview/ServerBrowser.ts      |  15 +
+ apps/server/src/server.ts                     |   3 +
+ apps/server/src/ws.ts                         |  13 +-
+ .../components/preview/usePreviewSession.ts   |   8 +-
+ packages/shared/package.json                  |   4 +
+ packages/shared/src/plutoniumWindowTabs.ts    |  25 +
+ 10 files changed, 1162 insertions(+), 12 deletions(-)
+ create mode 100644 apps/server/src/plutonium/windowTabs.test.ts
+ create mode 100644 apps/server/src/plutonium/windowTabs.ts
+ create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
+
+diff --git a/apps/server/src/plutonium/windowTabs.test.ts b/apps/server/src/plutonium/windowTabs.test.ts
+new file mode 100644
+index 0000000000..05bc4d5e56
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTabs.test.ts
+@@ -0,0 +1,343 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - a stand-in for the helper on a Unix socket
++import * as Effect from "effect/Effect";
++import * as Queue from "effect/Queue";
++import * as NodeFs from "node:fs";
++import * as NodeHttp from "node:http";
++import * as NodeOs from "node:os";
++import * as NodePath from "node:path";
++import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
++
++import type { ServerBrowserViewerOutput } from "../preview/ServerBrowser.ts";
++import {
++  attachWindowViewer,
++  closeWindow,
++  FrameReader,
++  type HelperWindow,
++  WindowInputTranslator,
++  windowTabs,
++} from "./windowTabs.ts";
++
++const frame = (jpeg: string, width: number, height: number) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(jpeg.length, 0);
++  header.writeUInt16BE(width, 4);
++  header.writeUInt16BE(height, 6);
++  return Buffer.concat([header, Buffer.from(jpeg)]);
++};
++
++const kwrite: HelperWindow = {
++  id: 5,
++  appId: "org.kde.kwrite",
++  title: "Untitled",
++  width: 800,
++  height: 600,
++  pid: 4242,
++  tags: ["t3:dock/1", "t3:thread/thread-a"],
++};
++
++describe("window tabs", () => {
++  it("lists a thread's windows as its tabs", () => {
++    expect(
++      windowTabs([
++        kwrite,
++        { ...kwrite, id: 6, title: " ", appId: "", tags: ["t3:thread/thread-b"] },
++        // No thread: no tab.
++        { ...kwrite, id: 7, tags: ["t3:global"] },
++        { id: 8, appId: "x", title: "x", width: 1, height: 1, pid: 1 },
++      ]),
++    ).toEqual([
++      {
++        threadId: "thread-a",
++        tabId: "plutonium-window-5-4242",
++        url: "app://org.kde.kwrite",
++        title: "Untitled",
++      },
++      {
++        threadId: "thread-b",
++        tabId: "plutonium-window-6-4242",
++        url: "app://window",
++        title: "window",
++      },
++    ]);
++  });
++
++  it("splits the helper's frames, with their size, however they arrive", () => {
++    const bytes = Buffer.concat([frame("first", 640, 480), frame("2", 1, 1)]);
++    for (let cut = 0; cut <= bytes.length; cut++) {
++      const reader = new FrameReader();
++      const got = [...reader.push(bytes.subarray(0, cut)), ...reader.push(bytes.subarray(cut))];
++      expect(got.map(({ data, width, height }) => [String(data), width, height])).toEqual([
++        ["first", 640, 480],
++        ["2", 1, 1],
++      ]);
++    }
++  });
++
++  it("turns a viewer's mouse, keys and text into the helper's input", () => {
++    const translator = new WindowInputTranslator();
++    const at = { x: 10, y: 20, modifiers: 2 };
++    expect(
++      translator.translate({
++        type: "mouse",
++        action: "down",
++        ...at,
++        button: "left",
++        buttons: 1,
++        clickCount: 2,
++      }),
++    ).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: 2 },
++      },
++    ]);
++    expect(
++      translator.translate({ type: "key", action: "down", key: "a", code: "KeyA", modifiers: 8 }),
++    ).toEqual([
++      { path: "keys", body: { events: [{ type: "keyDown", code: "KeyA", modifiers: 8 }] } },
++    ]);
++    // A soft keyboard's keys: named keys by name, others as their text.
++    expect(
++      translator.translate({ type: "key", action: "down", key: "Backspace", code: "" }),
++    ).toEqual([
++      { path: "keys", body: { events: [{ type: "keyDown", code: "Backspace", modifiers: 0 }] } },
++    ]);
++    expect(
++      translator.translate({ type: "key", action: "down", key: "é", code: "", text: "é" }),
++    ).toEqual([{ path: "text", body: { text: "é" } }]);
++    expect(translator.translate({ type: "key", action: "up", key: "é", code: "" })).toEqual([]);
++    expect(translator.translate({ type: "text", text: "hello" })).toEqual([
++      { path: "text", body: { text: "hello" } },
++    ]);
++    // Only for pages.
++    expect(translator.translate({ type: "navigate", url: "https://example.com" })).toEqual([]);
++    expect(translator.translate({ type: "mouse", action: "down", x: "1", y: 2 })).toEqual([]);
++    // Losing control lets go of what is held.
++    expect(translator.release()).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseReleased", x: 10, y: 20, button: "left", buttons: 0, clickCount: 1 },
++      },
++      {
++        path: "keys",
++        body: {
++          events: [
++            { type: "keyUp", code: "KeyA" },
++            { type: "keyUp", code: "Backspace" },
++          ],
++        },
++      },
++    ]);
++    expect(translator.release()).toEqual([]);
++  });
++
++  it("scrolls by whole notches, keeping what a pan has not yet made one", () => {
++    const translator = new WindowInputTranslator();
++    const wheel = (deltaY: number) =>
++      translator.translate({ type: "wheel", x: 1, y: 2, deltaX: 0, deltaY, modifiers: 0 });
++    expect(wheel(60)).toEqual([]);
++    expect(wheel(60)).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseWheel", x: 1, y: 2, deltaX: 0, deltaY: 1, modifiers: 0 },
++      },
++    ]);
++    expect(wheel(-250)).toEqual([
++      {
++        path: "mouse",
++        body: { type: "mouseWheel", x: 1, y: 2, deltaX: 0, deltaY: -2, modifiers: 0 },
++      },
++    ]);
++  });
++});
++
++describe("a window's viewer", () => {
++  let directory: string;
++  let helper: NodeHttp.Server;
++  let windows: HelperWindow[];
++  let posts: Array<{ path: string; body: unknown }>;
++  let stream: NodeHttp.ServerResponse | null;
++  const previousSocket = process.env.PLUTONIUM_HELPER;
++
++  beforeEach(async () => {
++    directory = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-window-tabs-"));
++    windows = [kwrite];
++    posts = [];
++    stream = null;
++    helper = NodeHttp.createServer((request, response) => {
++      let body = "";
++      request.on("data", (chunk) => (body += chunk));
++      request.on("end", () => {
++        const path = request.url ?? "";
++        if (path === "/v1/windows") {
++          response.writeHead(200, { "Content-Type": "application/json" });
++          return response.end(JSON.stringify(windows));
++        }
++        if (path.startsWith("/v1/windows/5/stream?")) {
++          response.writeHead(200);
++          response.flushHeaders();
++          stream = response;
++          return;
++        }
++        posts.push({ path, body: body ? JSON.parse(body) : undefined });
++        response.writeHead(204).end();
++      });
++    });
++    const socketPath = NodePath.join(directory, "helper.sock");
++    await new Promise<void>((resolve) => helper.listen(socketPath, resolve));
++    process.env.PLUTONIUM_HELPER = socketPath;
++  });
++
++  afterEach(async () => {
++    stream?.destroy();
++    await new Promise((resolve) => helper.close(resolve));
++    NodeFs.rmSync(directory, { recursive: true, force: true });
++    if (previousSocket === undefined) delete process.env.PLUTONIUM_HELPER;
++    else process.env.PLUTONIUM_HELPER = previousSocket;
++  });
++
++  const attach = (threadId = "thread-a", canOperate = true) =>
++    attachWindowViewer({
++      threadId,
++      tabId: "plutonium-window-5-4242",
++      windowId: 5,
++      pid: 4242,
++      maxWidth: 1280,
++      maxHeight: 800,
++      quality: 70,
++      canOperate,
++    });
++  const next = (output: Queue.Dequeue<ServerBrowserViewerOutput>) => Queue.take(output);
++  const waitFor = async (check: () => boolean) => {
++    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
++    expect(check()).toBe(true);
++  };
++
++  it("streams the window's frames, paced by acks, and sends its input", () =>
++    Effect.runPromise(
++      Effect.scoped(
++        Effect.gen(function* () {
++          const viewer = yield* attach();
++          expect(yield* next(viewer.output)).toEqual({ _tag: "viewport", width: 800, height: 600 });
++          expect(yield* next(viewer.output)).toMatchObject({
++            _tag: "control",
++            canOperate: true,
++            controller: "you",
++          });
++
++          yield* Effect.promise(() => waitFor(() => stream !== null));
++          for (const name of ["1", "2", "3", "4"]) stream!.write(frame(name, 1600, 1200));
++          const first = yield* next(viewer.output);
++          const second = yield* next(viewer.output);
++          expect([first, second].map((each) => each._tag === "frame" && String(each.data))).toEqual(
++            ["1", "2"],
++          );
++          // Two wait for their acks; of those behind them, only the newest is kept.
++          yield* Effect.promise(() => new Promise((r) => setTimeout(r, 30)));
++          expect(yield* Queue.size(viewer.output)).toBe(0);
++          if (first._tag === "frame") yield* first.ack;
++          const third = yield* next(viewer.output);
++          expect(third._tag === "frame" && String(third.data)).toBe("4");
++
++          yield* viewer.input({
++            type: "mouse",
++            action: "move",
++            x: 3,
++            y: 4,
++            button: "none",
++            buttons: 0,
++            clickCount: 0,
++            modifiers: 0,
++          });
++          yield* viewer.input({ type: "text", text: "hi" });
++          expect(posts).toEqual([
++            {
++              path: "/v1/windows/5/mouse",
++              body: {
++                type: "mouseMoved",
++                x: 3,
++                y: 4,
++                button: "none",
++                buttons: 0,
++                clickCount: 0,
++                modifiers: 0,
++              },
++            },
++            { path: "/v1/windows/5/text", body: { text: "hi" } },
++          ]);
++          // A touch viewer may raise its keyboard anywhere.
++          yield* viewer.input({ type: "probe", x: 3, y: 4 });
++          expect(yield* next(viewer.output)).toEqual({ _tag: "probe", x: 3, y: 4, editable: true });
++
++          // Resized: its new size, once its frames change shape.
++          windows = [{ ...kwrite, width: 1000, height: 700 }];
++          stream!.write(frame("5", 1280, 896));
++          yield* Effect.promise(() => new Promise((r) => setTimeout(r, 30)));
++          const outputs = yield* Queue.takeAll(viewer.output);
++          expect(outputs.filter((each) => each._tag === "viewport")).toEqual([
++            { _tag: "viewport", width: 1000, height: 700 },
++          ]);
++
++          stream!.end();
++          let output = yield* next(viewer.output);
++          while (output._tag === "frame") output = yield* next(viewer.output);
++          expect(output).toEqual({ _tag: "gone" });
++        }),
++      ),
++    ));
++
++  it("gives control to one viewer at a time, which lets go of what it held", () =>
++    Effect.runPromise(
++      Effect.scoped(
++        Effect.gen(function* () {
++          const first = yield* attach();
++          const second = yield* attach();
++          const control = async (output: Queue.Dequeue<ServerBrowserViewerOutput>) => {
++            const all = await Effect.runPromise(Queue.takeAll(output));
++            return all.filter((each) => each._tag === "control").at(-1);
++          };
++          expect(yield* Effect.promise(() => control(first.output))).toMatchObject({
++            controller: "you",
++          });
++          expect(yield* Effect.promise(() => control(second.output))).toMatchObject({
++            controller: "another-viewer",
++          });
++          // Without control, input goes nowhere.
++          yield* second.input({ type: "text", text: "no" });
++          yield* first.input({ type: "key", action: "down", key: "a", code: "KeyA", modifiers: 0 });
++          yield* second.input({ type: "takeControl" });
++          yield* Effect.promise(() => waitFor(() => posts.length === 2));
++          expect(posts).toEqual([
++            {
++              path: "/v1/windows/5/keys",
++              body: { events: [{ type: "keyDown", code: "KeyA", modifiers: 0 }] },
++            },
++            { path: "/v1/windows/5/keys", body: { events: [{ type: "keyUp", code: "KeyA" }] } },
++          ]);
++          expect(yield* Effect.promise(() => control(first.output))).toMatchObject({
++            controller: "another-viewer",
++          });
++          expect(yield* Effect.promise(() => control(second.output))).toMatchObject({
++            controller: "you",
++          });
++        }),
++      ),
++    ));
++
++  it("closes the tab's window, and not another that reused its number", async () => {
++    await Effect.runPromise(closeWindow({ windowId: 5, pid: 1 }));
++    expect(posts).toEqual([]);
++    await Effect.runPromise(closeWindow({ windowId: 5, pid: 4242 }));
++    expect(posts.map((post) => post.path)).toEqual(["/v1/windows/5/close"]);
++  });
++
++  it("finds no window that isn't the thread's, or has gone", async () => {
++    await expect(Effect.runPromise(Effect.scoped(attach("thread-b")))).rejects.toMatchObject({
++      _tag: "PlutoniumWindowGoneError",
++    });
++    windows = [{ ...kwrite, pid: 1 }];
++    await expect(Effect.runPromise(Effect.scoped(attach()))).rejects.toMatchObject({
++      _tag: "PlutoniumWindowGoneError",
++    });
++  });
++});
+diff --git a/apps/server/src/plutonium/windowTabs.ts b/apps/server/src/plutonium/windowTabs.ts
+new file mode 100644
+index 0000000000..9137a25dfe
+--- /dev/null
++++ b/apps/server/src/plutonium/windowTabs.ts
+@@ -0,0 +1,573 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - the Plutonium helper is a Unix socket, read from Node callbacks
++/**
++ * Plutonium: native windows as server tabs, for every T3 client.
++ *
++ * Each window the helper lists under a thread (its first `t3:thread/` tag)
++ * is one of that thread's preview tabs, `runtime: "server"`, so any client
++ * that lists and streams server tabs (the mobile app, the desktop app, a
++ * browser elsewhere) gets it as it gets a page:
++ *
++ * - The list: `PreviewManager.syncPlutoniumWindows`, from the helper's
++ *   `GET /v1/windows` each second. The tab's address is `app://<app id>`, its
++ *   title the window's. Agents' preview tools and the server's browser don't
++ *   see these tabs (`PreviewManager.list` leaves them out).
++ * - The stream: `/api/preview-stream/ws` with the window's tab id comes here
++ *   (`attachWindowViewer`): the helper's frames (`GET /v1/windows/:id/stream`)
++ *   as the viewer's frames, the window's size in DIPs as its viewport, and the
++ *   viewer's input as the helper's (`POST /v1/windows/:id/{mouse,keys,text}`).
++ *   One viewer at a time has control, as with a page.
++ * - Closing the tab asks the app to close the window (`closeWindow`).
++ */
++import { plutoniumHelperSocket } from "@t3tools/shared/plutonium";
++import { plutoniumWindowTabId } from "@t3tools/shared/plutoniumWindowTabs";
++import { ThreadId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Queue from "effect/Queue";
++import * as Schedule from "effect/Schedule";
++import * as Schema from "effect/Schema";
++import * as NodeCrypto from "node:crypto";
++import * as NodeHttp from "node:http";
++
++import * as PreviewManager from "../preview/Manager.ts";
++import type { ServerBrowserViewer, ServerBrowserViewerOutput } from "../preview/ServerBrowser.ts";
++import { forkParked } from "../serverActivation.ts";
++
++const LIST_INTERVAL = "1 second";
++const REQUEST_TIMEOUT_MS = 10_000;
++const FRAME_HEADER_BYTES = 8;
++/** Frames sent and not yet acknowledged; a newer frame replaces one waiting behind them. */
++const MAX_FRAMES_IN_FLIGHT = 2;
++const VIEWER_OUTPUT_LIMIT = 64;
++/** Pixels of a viewer's wheel or touch pan that make one wheel notch. */
++const WHEEL_PX_PER_NOTCH = 100;
++const THREAD_TAG_PREFIX = "t3:thread/";
++
++/** A window as the helper lists it (helper/src/relay.ts, NativeWindowEntry). */
++export interface HelperWindow {
++  readonly id: number;
++  readonly appId: string;
++  readonly title: string;
++  /** DIPs. */
++  readonly width: number;
++  readonly height: number;
++  readonly pid: number;
++  readonly tags?: ReadonlyArray<string>;
++}
++
++export class PlutoniumWindowGoneError extends Schema.TaggedError<PlutoniumWindowGoneError>()(
++  "PlutoniumWindowGoneError",
++  { windowId: Schema.Number },
++) {}
++
++/** The thread a window belongs to: its first T3 thread tag's. */
++export const windowThread = (window: HelperWindow): string | null => {
++  const tag = (window.tags ?? []).find((each) => each.startsWith(THREAD_TAG_PREFIX));
++  return tag ? tag.slice(THREAD_TAG_PREFIX.length) || null : null;
++};
++
++/** The helper's window list as the threads' window tabs. */
++export const windowTabs = (
++  windows: ReadonlyArray<HelperWindow>,
++): Array<PreviewManager.PlutoniumWindowTabInput> =>
++  windows.flatMap((window) => {
++    const threadId = windowThread(window);
++    if (threadId === null) return [];
++    const app = window.appId.trim() || "window";
++    return [
++      {
++        threadId: ThreadId.make(threadId),
++        tabId: plutoniumWindowTabId(window.id, window.pid),
++        url: `app://${app}`.slice(0, 2048),
++        title: (window.title.trim() || app).slice(0, 512),
++      },
++    ];
++  });
++
++/** Splits the helper's frame stream (helper/src/windowStream.ts) into JPEGs and their size. */
++export class FrameReader {
++  private pending: Buffer = Buffer.alloc(0);
++
++  push(chunk: Buffer): Array<{ data: Buffer; width: number; height: number }> {
++    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk;
++    const frames = [];
++    while (this.pending.length >= FRAME_HEADER_BYTES) {
++      const length = this.pending.readUInt32BE(0);
++      if (this.pending.length < FRAME_HEADER_BYTES + length) break;
++      frames.push({
++        width: this.pending.readUInt16BE(4),
++        height: this.pending.readUInt16BE(6),
++        data: this.pending.subarray(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length),
++      });
++      this.pending = this.pending.subarray(FRAME_HEADER_BYTES + length);
++    }
++    return frames;
++  }
++}
++
++/** A request to the helper: its status and body. */
++const helperRequest = (
++  socketPath: string,
++  method: "GET" | "POST",
++  path: string,
++  body?: unknown,
++): Promise<{ readonly status: number; readonly text: string }> =>
++  new Promise((resolve, reject) => {
++    const request = NodeHttp.request(
++      {
++        socketPath,
++        method,
++        path,
++        timeout: REQUEST_TIMEOUT_MS,
++        headers: body === undefined ? {} : { "Content-Type": "application/json" },
++      },
++      (response) => {
++        let text = "";
++        response.setEncoding("utf8");
++        response.on("data", (chunk: string) => (text += chunk));
++        response.on("end", () => resolve({ status: response.statusCode ?? 500, text }));
++      },
++    );
++    request.on("timeout", () => request.destroy(new Error("timed out")));
++    request.on("error", reject);
++    request.end(body === undefined ? undefined : JSON.stringify(body));
++  });
++
++const listWindows = async (socketPath: string): Promise<Array<HelperWindow>> => {
++  const { status, text } = await helperRequest(socketPath, "GET", "/v1/windows");
++  if (status !== 200) throw new Error(`The helper said ${status}.`);
++  const windows: unknown = JSON.parse(text);
++  return Array.isArray(windows) ? (windows as Array<HelperWindow>) : [];
++};
++
++// --- Input ------------------------------------------------------------------
++
++/** The helper's input for one viewer message. */
++export type WindowInput =
++  | { readonly path: "mouse"; readonly body: Record<string, unknown> }
++  | { readonly path: "keys"; readonly body: { readonly events: ReadonlyArray<unknown> } }
++  | { readonly path: "text"; readonly body: { readonly text: string } };
++
++const MOUSE_TYPES = { move: "mouseMoved", down: "mousePressed", up: "mouseReleased" } as const;
++const MOUSE_BUTTONS = new Set(["none", "left", "middle", "right", "back", "forward"]);
++/** Keys a soft keyboard sends without a `code`, whose `key` names the physical key. */
++const NAMED_KEYS = new Set([
++  "Backspace",
++  "Delete",
++  "Enter",
++  "Tab",
++  "Escape",
++  "ArrowLeft",
++  "ArrowRight",
++  "ArrowUp",
++  "ArrowDown",
++  "Home",
++  "End",
++  "PageUp",
++  "PageDown",
++  "Insert",
++]);
++
++const finite = (value: unknown): value is number =>
++  typeof value === "number" && Number.isFinite(value);
++const int = (value: unknown) => (finite(value) ? Math.round(value) : 0);
++
++/**
++ * Turns a viewer's input into the helper's, keeping what it needs between
++ * messages (wheel remainders, keys and buttons held). Messages for pages
++ * only (navigation, resizing, dialogs) are none.
++ */
++export class WindowInputTranslator {
++  private wheelX = 0;
++  private wheelY = 0;
++  /** Codes held down, so losing control releases them. */
++  readonly heldKeys = new Set<string>();
++  /** Buttons held, and where, so losing control releases them. */
++  readonly heldButtons = new Map<string, { x: number; y: number }>();
++
++  translate(message: Record<string, unknown>): Array<WindowInput> {
++    switch (message.type) {
++      case "mouse": {
++        const type = MOUSE_TYPES[message.action as keyof typeof MOUSE_TYPES];
++        if (!type || !finite(message.x) || !finite(message.y)) return [];
++        const button =
++          typeof message.button === "string" && MOUSE_BUTTONS.has(message.button)
++            ? message.button
++            : "none";
++        if (type === "mousePressed" && button !== "none")
++          this.heldButtons.set(button, { x: message.x, y: message.y });
++        if (type === "mouseReleased") this.heldButtons.delete(button);
++        return [
++          {
++            path: "mouse",
++            body: {
++              type,
++              x: message.x,
++              y: message.y,
++              button,
++              buttons: int(message.buttons),
++              clickCount: int(message.clickCount),
++              modifiers: int(message.modifiers),
++            },
++          },
++        ];
++      }
++      case "wheel": {
++        if (!finite(message.x) || !finite(message.y)) return [];
++        // Touch pans come as many small deltas; the helper takes whole notches.
++        this.wheelX += finite(message.deltaX) ? message.deltaX : 0;
++        this.wheelY += finite(message.deltaY) ? message.deltaY : 0;
++        const deltaX = Math.trunc(this.wheelX / WHEEL_PX_PER_NOTCH);
++        const deltaY = Math.trunc(this.wheelY / WHEEL_PX_PER_NOTCH);
++        if (deltaX === 0 && deltaY === 0) return [];
++        this.wheelX -= deltaX * WHEEL_PX_PER_NOTCH;
++        this.wheelY -= deltaY * WHEEL_PX_PER_NOTCH;
++        return [
++          {
++            path: "mouse",
++            body: {
++              type: "mouseWheel",
++              x: message.x,
++              y: message.y,
++              deltaX,
++              deltaY,
++              modifiers: int(message.modifiers),
++            },
++          },
++        ];
++      }
++      case "key": {
++        const down = message.action === "down";
++        if (!down && message.action !== "up") return [];
++        const key = typeof message.key === "string" ? message.key : "";
++        const code =
++          typeof message.code === "string" && message.code.length > 0
++            ? message.code
++            : NAMED_KEYS.has(key)
++              ? key
++              : key === " "
++                ? "Space"
++                : "";
++        if (code === "") {
++          // A soft keyboard's key with no physical key: its text, typed.
++          const text = typeof message.text === "string" ? message.text : "";
++          return down && text.length > 0 ? [{ path: "text", body: { text } }] : [];
++        }
++        if (down) this.heldKeys.add(code);
++        else this.heldKeys.delete(code);
++        return [
++          {
++            path: "keys",
++            body: {
++              events: [
++                { type: down ? "keyDown" : "keyUp", code, modifiers: int(message.modifiers) },
++              ],
++            },
++          },
++        ];
++      }
++      case "text":
++        return typeof message.text === "string" && message.text.length > 0
++          ? [{ path: "text", body: { text: message.text } }]
++          : [];
++      default:
++        return [];
++    }
++  }
++
++  /** Releases what is held: the viewer lost control, or left. */
++  release(): Array<WindowInput> {
++    const inputs: Array<WindowInput> = [];
++    for (const [button, at] of this.heldButtons) {
++      inputs.push({
++        path: "mouse",
++        body: { type: "mouseReleased", ...at, button, buttons: 0, clickCount: 1 },
++      });
++    }
++    if (this.heldKeys.size > 0) {
++      inputs.push({
++        path: "keys",
++        body: { events: [...this.heldKeys].map((code) => ({ type: "keyUp", code })) },
++      });
++    }
++    this.heldButtons.clear();
++    this.heldKeys.clear();
++    this.wheelX = this.wheelY = 0;
++    return inputs;
++  }
++}
++
++// --- Control ----------------------------------------------------------------
++
++interface WindowViewerState {
++  readonly id: string;
++  readonly canOperate: boolean;
++  readonly push: (output: ServerBrowserViewerOutput) => void;
++  /** Releases what the viewer holds, when it loses control. */
++  readonly release: () => void;
++}
++
++interface WindowControl {
++  controller: string | null;
++  generation: number;
++  readonly viewers: Map<string, WindowViewerState>;
++}
++
++/** Who controls each window's tab, by tab id. */
++const controls = new Map<string, WindowControl>();
++
++const broadcastControl = (control: WindowControl) => {
++  for (const viewer of control.viewers.values()) {
++    viewer.push({
++      _tag: "control",
++      canOperate: viewer.canOperate,
++      controller:
++        control.controller === viewer.id
++          ? "you"
++          : control.controller !== null
++            ? "another-viewer"
++            : "unclaimed",
++      generation: control.generation,
++      dialog: null,
++    });
++  }
++};
++
++const setController = (control: WindowControl, controller: string | null) => {
++  if (control.controller === controller) return;
++  const previous =
++    control.controller === null ? undefined : control.viewers.get(control.controller);
++  previous?.release();
++  control.controller = controller;
++  control.generation += 1;
++  broadcastControl(control);
++};
++
++// --- Viewing ----------------------------------------------------------------
++
++/**
++ * A viewer of native window `windowId` (drawn by `pid`) in thread
++ * `threadId`'s tab, in the protocol of `ServerBrowser.attachViewer`.
++ */
++export const attachWindowViewer = (input: {
++  readonly threadId: string;
++  readonly tabId: string;
++  readonly windowId: number;
++  readonly pid: number;
++  readonly maxWidth: number;
++  readonly maxHeight: number;
++  readonly quality: number;
++  readonly canOperate: boolean;
++}) =>
++  Effect.gen(function* () {
++    const gone = new PlutoniumWindowGoneError({ windowId: input.windowId });
++    const socketPath = plutoniumHelperSocket();
++    if (socketPath === undefined) return yield* gone;
++    const findWindow = () =>
++      listWindows(socketPath).then((windows) =>
++        windows.find(
++          (window) =>
++            window.id === input.windowId &&
++            window.pid === input.pid &&
++            windowThread(window) === input.threadId,
++        ),
++      );
++    const found = yield* Effect.promise(() => findWindow().catch(() => undefined));
++    if (found === undefined) return yield* gone;
++
++    const output = yield* Queue.make<ServerBrowserViewerOutput>({
++      capacity: VIEWER_OUTPUT_LIMIT,
++      strategy: "dropping",
++    });
++    const push = (next: ServerBrowserViewerOutput) => {
++      if (Queue.offerUnsafe(output, next)) return true;
++      // A stalled viewer must not miss who controls it, or that the window went.
++      if (next._tag === "control" || next._tag === "gone") {
++        // Dropped frames count as seen, or pacing would wait for them.
++        for (const item of Effect.runSync(Queue.clear(output)))
++          if (item._tag === "frame") Effect.runSync(item.ack);
++        return Queue.offerUnsafe(output, next);
++      }
++      return false;
++    };
++
++    // Input goes to the helper in order, one request at a time.
++    let inputs: Promise<unknown> = Promise.resolve();
++    const send = (each: WindowInput) => {
++      inputs = inputs
++        .then(() =>
++          helperRequest(
++            socketPath,
++            "POST",
++            `/v1/windows/${input.windowId}/${each.path}`,
++            each.body,
++          ),
++        )
++        .catch(() => {});
++      return inputs;
++    };
++    const translator = new WindowInputTranslator();
++
++    let control = controls.get(input.tabId);
++    if (!control) {
++      control = { controller: null, generation: 0, viewers: new Map() };
++      controls.set(input.tabId, control);
++    }
++    const windowControl = control;
++    const viewer: WindowViewerState = {
++      id: NodeCrypto.randomUUID(),
++      canOperate: input.canOperate,
++      push: (next) => void push(next),
++      release: () => {
++        for (const each of translator.release()) void send(each);
++      },
++    };
++    yield* Effect.acquireRelease(
++      Effect.sync(() => windowControl.viewers.set(viewer.id, viewer)),
++      () =>
++        Effect.sync(() => {
++          if (windowControl.controller === viewer.id) setController(windowControl, null);
++          windowControl.viewers.delete(viewer.id);
++          if (windowControl.viewers.size === 0) controls.delete(input.tabId);
++        }),
++    );
++
++    // The window's size in DIPs maps the viewer's points to the window's.
++    let viewport = { width: found.width, height: found.height };
++    push({ _tag: "viewport", ...viewport });
++    const remeasure = () =>
++      void findWindow()
++        .then((window) => {
++          if (!window || (window.width === viewport.width && window.height === viewport.height))
++            return;
++          viewport = { width: window.width, height: window.height };
++          push({ _tag: "viewport", ...viewport });
++        })
++        .catch(() => {});
++
++    if (input.canOperate && windowControl.controller === null)
++      setController(windowControl, viewer.id);
++    else broadcastControl(windowControl);
++
++    // Frames, paced by the viewer's acks: a newer frame replaces one still waiting.
++    let inFlight = 0;
++    let waiting: Buffer | null = null;
++    let shape = "";
++    const deliver = (data: Buffer) => {
++      inFlight += 1;
++      if (!push({ _tag: "frame", data, ack: Effect.sync(acknowledged) })) inFlight -= 1;
++    };
++    const acknowledged = () => {
++      inFlight = Math.max(0, inFlight - 1);
++      if (waiting !== null && inFlight < MAX_FRAMES_IN_FLIGHT) {
++        const next = waiting;
++        waiting = null;
++        deliver(next);
++      }
++    };
++    const reader = new FrameReader();
++    const query = new URLSearchParams({
++      maxWidth: String(input.maxWidth),
++      maxHeight: String(input.maxHeight),
++      quality: String(input.quality),
++    });
++    yield* Effect.acquireRelease(
++      Effect.sync(() => {
++        const request = NodeHttp.request(
++          {
++            socketPath,
++            method: "GET",
++            path: `/v1/windows/${input.windowId}/stream?${query.toString()}`,
++          },
++          (response) => {
++            if (response.statusCode !== 200) {
++              response.resume();
++              push({ _tag: "gone" });
++              return;
++            }
++            response.on("data", (chunk: Buffer) => {
++              for (const frame of reader.push(chunk)) {
++                // A resized window: its new size, for mapping input.
++                const next = `${frame.width}x${frame.height}`;
++                if (next !== shape) {
++                  if (shape !== "") remeasure();
++                  shape = next;
++                }
++                if (inFlight < MAX_FRAMES_IN_FLIGHT) deliver(frame.data);
++                else waiting = frame.data;
++              }
++            });
++            response.on("end", () => push({ _tag: "gone" }));
++          },
++        );
++        request.on("error", () => push({ _tag: "gone" }));
++        request.end();
++        return request;
++      }),
++      (request) => Effect.sync(() => request.destroy()),
++    );
++
++    return {
++      output,
++      input: (raw: unknown) =>
++        Effect.promise(async () => {
++          if (!viewer.canOperate || typeof raw !== "object" || raw === null) return;
++          const message = raw as Record<string, unknown>;
++          if (message.type === "takeControl") return setController(windowControl, viewer.id);
++          if (message.type === "releaseControl") {
++            if (windowControl.controller === viewer.id) setController(windowControl, null);
++            return;
++          }
++          if (windowControl.controller !== viewer.id) return;
++          if (message.type === "probe") {
++            // Whether a point takes text isn't known for a native window: any
++            // may, so a touch viewer raises its keyboard.
++            if (finite(message.x) && finite(message.y))
++              push({ _tag: "probe", x: message.x, y: message.y, editable: true });
++            return;
++          }
++          for (const each of translator.translate(message)) await send(each);
++        }),
++    } satisfies ServerBrowserViewer;
++  });
++
++/** Asks the app to close the window, as its close button does, if it's still that process's. */
++export const closeWindow = (window: { readonly windowId: number; readonly pid: number }) =>
++  Effect.promise(async () => {
++    const socketPath = plutoniumHelperSocket();
++    if (socketPath === undefined) return;
++    try {
++      const windows = await listWindows(socketPath);
++      if (!windows.some((each) => each.id === window.windowId && each.pid === window.pid)) return;
++      await helperRequest(socketPath, "POST", `/v1/windows/${window.windowId}/close`);
++    } catch {
++      // No helper: nothing to close.
++    }
++  });
++
++// --- The list ---------------------------------------------------------------
++
++/** Keeps the threads' window tabs in step with the helper's windows, while Plutonium runs. */
++export const layer = process.env.PLUTONIUM_T3
++  ? Layer.effectDiscard(
++      Effect.gen(function* () {
++        const socketPath = plutoniumHelperSocket();
++        if (socketPath === undefined) return;
++        const manager = yield* PreviewManager.PreviewManager;
++        let last = "";
++        const sync = Effect.promise(() =>
++          listWindows(socketPath).then(windowTabs, () => null),
++        ).pipe(
++          Effect.flatMap((tabs) => {
++            // No helper: the tabs stay as they were until it answers again.
++            if (tabs === null) return Effect.void;
++            const key = JSON.stringify(tabs);
++            if (key === last) return Effect.void;
++            last = key;
++            return manager.syncPlutoniumWindows(tabs);
++          }),
++        );
++        yield* forkParked(sync.pipe(Effect.repeat(Schedule.spaced(LIST_INTERVAL))));
++      }),
++    )
++  : Layer.empty;
+diff --git a/apps/server/src/preview/Manager.test.ts b/apps/server/src/preview/Manager.test.ts
+index 48657d85d9..d9de4f9129 100644
+--- a/apps/server/src/preview/Manager.test.ts
++++ b/apps/server/src/preview/Manager.test.ts
+@@ -536,3 +536,71 @@ it.layer(layer)("PreviewManager", (it) => {
+     }),
+   );
+ });
++
++it.layer(layer)("PreviewManager: Plutonium's native windows", (it) => {
++  it.effect("opens, retitles and closes window tabs, which only clients list", () =>
++    Effect.gen(function* () {
++      const threadId = freshThreadId();
++      const manager = yield* PreviewManager.PreviewManager;
++      const collector = yield* collectEvents;
++      const page = yield* manager.open({ threadId, url: "localhost:5173" });
++      const window = {
++        threadId,
++        tabId: "plutonium-window-7-100",
++        url: "app://org.kde.kwrite",
++        title: "Untitled",
++      };
++
++      yield* manager.syncPlutoniumWindows([window]);
++      // Unchanged: nothing to say.
++      yield* manager.syncPlutoniumWindows([window]);
++      const forClients = yield* manager.listForClients({ threadId });
++      expect(forClients.sessions.map((session) => session.tabId)).toEqual([
++        page.tabId,
++        window.tabId,
++      ]);
++      expect(forClients.sessions[1]).toMatchObject({
++        runtime: "server",
++        navStatus: { _tag: "Success", url: "app://org.kde.kwrite", title: "Untitled" },
++      });
++      // Agents and the server's browser see pages only.
++      expect((yield* manager.list({ threadId })).sessions.map((session) => session.tabId)).toEqual([
++        page.tabId,
++      ]);
++
++      yield* manager.syncPlutoniumWindows([{ ...window, title: "notes.txt" }]);
++      yield* manager.syncPlutoniumWindows([]);
++      const events = yield* collector.drain;
++      expect(events.map((event) => [event.type, event.tabId])).toEqual([
++        ["opened", page.tabId],
++        ["opened", window.tabId],
++        ["navigated", window.tabId],
++        ["closed", window.tabId],
++      ]);
++      // One ordering for pages and windows, as clients apply events by revision.
++      const revisions = events.map((event) => event.revision);
++      expect(revisions).toEqual([...revisions].toSorted((a, b) => a - b));
++      expect(new Set(revisions).size).toBe(revisions.length);
++      // The page is untouched.
++      expect((yield* manager.listForClients({ threadId })).sessions.map((s) => s.tabId)).toEqual([
++        page.tabId,
++      ]);
++    }),
++  );
++
++  it.effect("moves a window's tab to the thread it was moved to", () =>
++    Effect.gen(function* () {
++      const from = freshThreadId();
++      const to = freshThreadId();
++      const manager = yield* PreviewManager.PreviewManager;
++      const window = { tabId: "plutonium-window-8-100", url: "app://gimp", title: "GIMP" };
++      yield* manager.syncPlutoniumWindows([{ ...window, threadId: from }]);
++      yield* manager.syncPlutoniumWindows([{ ...window, threadId: to }]);
++      expect((yield* manager.listForClients({ threadId: from })).sessions).toEqual([]);
++      expect(
++        (yield* manager.listForClients({ threadId: to })).sessions.map((s) => s.tabId),
++      ).toEqual([window.tabId]);
++      yield* manager.syncPlutoniumWindows([]);
++    }),
++  );
++});
+diff --git a/apps/server/src/preview/Manager.ts b/apps/server/src/preview/Manager.ts
+index c5124a1442..cfef1154bb 100644
+--- a/apps/server/src/preview/Manager.ts
++++ b/apps/server/src/preview/Manager.ts
+@@ -25,7 +25,9 @@ import {
+   FILL_PREVIEW_VIEWPORT,
+   PreviewSessionLookupError,
+   type PreviewSessionSnapshot,
++  type ThreadId,
+ } from "@t3tools/contracts";
++import { isPlutoniumWindowTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import {
+   isPreviewUrlNormalizationError,
+   newPreviewTabId,
+@@ -74,12 +76,34 @@ export class PreviewManager extends Context.Service<
+     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
+     readonly refresh: (input: PreviewRefreshInput) => Effect.Effect<void, PreviewError>;
+     readonly close: (input: PreviewCloseInput) => Effect.Effect<void, PreviewError>;
++    /** The thread's tabs, without Plutonium's native windows (agents and the server's browser see these). */
+     readonly list: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
++    /**
++     * Plutonium: the thread's tabs with its native windows, for clients. A
++     * client lists and streams a window as it does a server tab.
++     */
++    readonly listForClients: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
++    /**
++     * Plutonium: makes the native windows' tabs these (every thread's), opening,
++     * updating and closing tabs as they changed. Only window tabs are touched.
++     */
++    readonly syncPlutoniumWindows: (
++      windows: ReadonlyArray<PlutoniumWindowTabInput>,
++    ) => Effect.Effect<void>;
+     readonly events: Stream.Stream<PreviewEvent>;
+     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
+   }
+ >()("t3/preview/Manager/PreviewManager") {}
+ 
++/** Plutonium: a native window, as the tab clients list it under its thread. */
++export interface PlutoniumWindowTabInput {
++  readonly threadId: ThreadId;
++  readonly tabId: string;
++  /** What a client shows as the tab's address: `app://<app id>`. */
++  readonly url: string;
++  readonly title: string;
++}
++
+ interface PreviewSessionState {
+   readonly threadId: string;
+   readonly tabId: string;
+@@ -454,19 +478,97 @@ export const make = Effect.gen(function* PreviewManagerMake() {
+     },
+   );
+ 
++  const listSessions = (input: PreviewListInput, windows: boolean) =>
++    SynchronizedRef.get(stateRef).pipe(
++      Effect.map((state): PreviewListResult => ({
++        sessions: sessionsForThread(state, input.threadId)
++          .filter((s) => windows || !isPlutoniumWindowTab(s.tabId))
++          .map((s) => s.snapshot)
++          .toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt)),
++        serverEpoch,
++        revision: state.revision,
++      })),
++    );
+   const list: PreviewManager["Service"]["list"] = Effect.fn("PreviewManager.list")(
+     function* (input) {
+-      return yield* SynchronizedRef.get(stateRef).pipe(
+-        Effect.map((state): PreviewListResult => ({
+-          sessions: sessionsForThread(state, input.threadId)
+-            .map((s) => s.snapshot)
+-            .toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt)),
+-          serverEpoch,
+-          revision: state.revision,
+-        })),
+-      );
++      return yield* listSessions(input, false);
+     },
+   );
++  const listForClients: PreviewManager["Service"]["listForClients"] = Effect.fn(
++    "PreviewManager.listForClients",
++  )(function* (input) {
++    return yield* listSessions(input, true);
++  });
++
++  const syncPlutoniumWindows: PreviewManager["Service"]["syncPlutoniumWindows"] = Effect.fn(
++    "PreviewManager.syncPlutoniumWindows",
++  )(function* (windows) {
++    const now = yield* currentIsoTimestamp;
++    yield* SynchronizedRef.modifyEffect(stateRef, (state) => {
++      const sessions = new Map(state.sessions);
++      const emitted: PreviewEvent[] = [];
++      let revision = state.revision;
++      const emit = (event: PreviewEventDraft) => {
++        revision += 1;
++        emitted.push({ ...event, revision, serverEpoch } as PreviewEvent);
++      };
++      const wanted = new Map(
++        windows.map((window) => [compositeKey(window.threadId, window.tabId), window]),
++      );
++      for (const [key, session] of state.sessions) {
++        if (!isPlutoniumWindowTab(session.tabId) || wanted.has(key)) continue;
++        sessions.delete(key);
++        emit({ type: "closed", threadId: session.threadId, tabId: session.tabId, createdAt: now });
++      }
++      for (const [key, window] of wanted) {
++        const navStatus = { _tag: "Success", url: window.url, title: window.title } as const;
++        const existing = state.sessions.get(key);
++        if (existing) {
++          const current = existing.snapshot.navStatus;
++          if (
++            current._tag === "Success" &&
++            current.url === window.url &&
++            current.title === window.title
++          )
++            continue;
++          // A new title keeps the tab's time: clients default to the tab used last.
++          const snapshot: PreviewSessionSnapshot = { ...existing.snapshot, navStatus };
++          sessions.set(key, { ...existing, snapshot });
++          emit({
++            type: "navigated",
++            threadId: window.threadId,
++            tabId: window.tabId,
++            createdAt: now,
++            snapshot,
++          });
++          continue;
++        }
++        const snapshot: PreviewSessionSnapshot = {
++          threadId: window.threadId,
++          tabId: window.tabId,
++          navStatus,
++          canGoBack: false,
++          canGoForward: false,
++          viewport: FILL_PREVIEW_VIEWPORT,
++          runtime: "server",
++          updatedAt: now,
++        };
++        sessions.set(key, { threadId: window.threadId, tabId: window.tabId, snapshot });
++        emit({
++          type: "opened",
++          threadId: window.threadId,
++          tabId: window.tabId,
++          createdAt: now,
++          snapshot,
++        });
++      }
++      if (emitted.length === 0) return Effect.succeed([undefined, state] as const);
++      return Effect.as(
++        Effect.forEach(emitted, (event) => PubSub.publish(eventsPubSub, event), { discard: true }),
++        [undefined, { sessions, revision }] as const,
++      );
++    });
++  });
+ 
+   const requestReveal: PreviewManager["Service"]["requestReveal"] = Effect.fn(
+     "PreviewManager.requestReveal",
+@@ -509,6 +611,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
+     refresh,
+     close,
+     list,
++    listForClients,
++    syncPlutoniumWindows,
+     events,
+     subscribeEvents: PubSub.subscribe(eventsPubSub),
+   });
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index 7df7db8f72..4aeecb973b 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -77,6 +77,8 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+ import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
+ import * as PreviewManager from "./Manager.ts";
++import * as PlutoniumWindowTabs from "../plutonium/windowTabs.ts";
++import { isPlutoniumWindowTab, plutoniumWindowOfTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+ import { withRecordingDuration } from "./recordingDuration.ts";
+ import * as PreviewBrowser from "./PreviewBrowser.ts";
+@@ -2336,6 +2338,8 @@ const make = Effect.gen(function* () {
+ 
+   const mirrorManagerEvent = (event: PreviewEvent) =>
+     Effect.promise(async () => {
++      // Plutonium: a native window's tab has no page here (PlutoniumWindowTabs).
++      if (isPlutoniumWindowTab(event.tabId)) return;
+       if (event.type === "opened" && event.snapshot.runtime === "server") {
+         await ensureTab(event.snapshot).catch(constVoid);
+         return;
+@@ -2532,6 +2536,17 @@ const make = Effect.gen(function* () {
+ 
+   const attachViewer: ServerBrowser["Service"]["attachViewer"] = (input) =>
+     Effect.gen(function* () {
++      // Plutonium: a native window streams from the helper, through the same viewer protocol.
++      const window = plutoniumWindowOfTab(input.tabId);
++      if (window !== null) {
++        return yield* PlutoniumWindowTabs.attachWindowViewer({ ...input, ...window }).pipe(
++          Effect.catchTag("PlutoniumWindowGoneError", () =>
++            Effect.fail(
++              new ServerBrowserTabNotFoundError({ threadId: input.threadId, tabId: input.tabId }),
++            ),
++          ),
++        );
++      }
+       const tab = yield* findTab(input.threadId, input.tabId);
+       const output = yield* Queue.make<ServerBrowserViewerOutput>({
+         capacity: VIEWER_OUTPUT_LIMIT,
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index d648dcf8a5..877da216ca 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -34,6 +34,7 @@ import { fixPath } from "./os-jank.ts";
+ import * as Ws from "./ws.ts";
+ import * as PlutoniumNetworkAccess from "./plutonium/networkAccess.ts";
+ import * as PlutoniumWindowStream from "./plutonium/windowStream.ts";
++import * as PlutoniumWindowTabs from "./plutonium/windowTabs.ts";
+ import * as PlutoniumThreadPermissions from "./plutonium/threadPermissions.ts";
+ import * as AgentScopeLive from "./process/agentScope.ts";
+ import * as ExternalLauncher from "./process/externalLauncher.ts";
+@@ -586,6 +587,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
+   ProviderUsageLimitsIngestion.layer,
+   // Plutonium: an archived or deleted thread's permission grants are forgotten.
+   PlutoniumThreadPermissions.layer,
++  // Plutonium: native windows are their threads' server tabs, for every client.
++  PlutoniumWindowTabs.layer,
+   layerProviderInstallationRefresh,
+   ReplayMarkers.layer,
+   // Catches overrides left behind by a project deleted before this cleanup
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 96994ee37c..04d105dc3b 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -184,6 +184,8 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
+ import * as DeviceService from "./device/DeviceService.ts";
+ import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
+ import * as PreviewManager from "./preview/Manager.ts";
++import * as PlutoniumWindowTabs from "./plutonium/windowTabs.ts";
++import { plutoniumWindowOfTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import { issueAssetUrl } from "./assets/AssetAccess.ts";
+ import {
+   attachmentRelativePath,
+@@ -2931,8 +2933,15 @@ const layerWsRpc = (
+         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
+         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
+         [WS_METHODS.previewRefresh]: (input) => previewManager.refresh(input),
+-        [WS_METHODS.previewClose]: (input) => previewManager.close(input),
+-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
++        // Plutonium: closing a native window's tab asks its app to close it.
++        [WS_METHODS.previewClose]: (input) => {
++          const window = input.tabId === undefined ? null : plutoniumWindowOfTab(input.tabId);
++          return window === null
++            ? previewManager.close(input)
++            : PlutoniumWindowTabs.closeWindow(window);
++        },
++        // Plutonium: clients list native windows with the thread's tabs.
++        [WS_METHODS.previewList]: (input) => previewManager.listForClients(input),
+         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
+         [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
+         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
+diff --git a/apps/web/src/components/preview/usePreviewSession.ts b/apps/web/src/components/preview/usePreviewSession.ts
+index b529d044f3..baa8e61a26 100644
+--- a/apps/web/src/components/preview/usePreviewSession.ts
++++ b/apps/web/src/components/preview/usePreviewSession.ts
+@@ -3,6 +3,7 @@
+ import { useAtomValue } from "@effect/atom-react";
+ import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
+ import type { ScopedThreadRef } from "@t3tools/contracts";
++import { isPlutoniumWindowTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import * as Schema from "effect/Schema";
+ import { AsyncResult, Atom } from "effect/reactivity";
+ 
+@@ -43,7 +44,11 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
+ 
+     const reconcileSessions = (result: Atom.Type<typeof sessionsAtom>) => {
+       if (!AsyncResult.isSuccess(result)) return;
+-      reconcilePreviewServerSessions(threadRef, result.value);
++      // Plutonium: native windows are app tabs here (PlutoniumWindows), not browser tabs.
++      reconcilePreviewServerSessions(threadRef, {
++        ...result.value,
++        sessions: result.value.sessions.filter((session) => !isPlutoniumWindowTab(session.tabId)),
++      });
+       if (!result.waiting && !readThreadPreviewState(threadRef).listLoaded) {
+         // An event overtook the first list. Retry the authoritative baseline;
+         // do not declare a partial event-only index ready for surface cleanup.
+@@ -55,6 +60,7 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
+ 
+     const applyLatestEvent = (result: Atom.Type<typeof eventsAtom>) => {
+       if (!AsyncResult.isSuccess(result) || result.value.threadId !== threadRef.threadId) return;
++      if (isPlutoniumWindowTab(result.value.tabId)) return;
+       const currentEpoch = readThreadPreviewState(threadRef).serverEpoch;
+       if (currentEpoch !== null && currentEpoch !== result.value.serverEpoch) {
+         get.refresh(sessionsAtom);
+diff --git a/packages/shared/package.json b/packages/shared/package.json
+index bd0a3f7c7a..b235b1e5fd 100644
+--- a/packages/shared/package.json
++++ b/packages/shared/package.json
+@@ -494,6 +494,10 @@
+     "./plutonium": {
+       "types": "./src/plutonium.ts",
+       "import": "./src/plutonium.ts"
++    },
++    "./plutoniumWindowTabs": {
++      "types": "./src/plutoniumWindowTabs.ts",
++      "import": "./src/plutoniumWindowTabs.ts"
+     }
+   },
+   "scripts": {
+diff --git a/packages/shared/src/plutoniumWindowTabs.ts b/packages/shared/src/plutoniumWindowTabs.ts
+new file mode 100644
+index 0000000000..ab076bbbf5
+--- /dev/null
++++ b/packages/shared/src/plutoniumWindowTabs.ts
+@@ -0,0 +1,25 @@
++// Plutonium: native windows as preview tabs. The server lists each window of
++// a thread as one of its server tabs, so every T3 client (the mobile app, a
++// browser elsewhere) lists and streams it as it does a page. Its tab id names
++// the window, and the process that drew it, so a client holding the id of a
++// window that has gone can't land on another that reused its number.
++
++const WINDOW_TAB_PATTERN = /^plutonium-window-(\d+)-(\d+)$/;
++
++/** The preview tab id of native window `windowId`, of process `pid`. */
++export function plutoniumWindowTabId(windowId: number, pid: number): string {
++  return `plutonium-window-${windowId}-${pid}`;
++}
++
++/** The native window a preview tab id names, or null for any other tab. */
++export function plutoniumWindowOfTab(
++  tabId: string,
++): { readonly windowId: number; readonly pid: number } | null {
++  const match = WINDOW_TAB_PATTERN.exec(tabId);
++  return match ? { windowId: Number(match[1]), pid: Number(match[2]) } : null;
++}
++
++/** Whether a preview tab is a native window (the Plutonium shell shows those itself). */
++export function isPlutoniumWindowTab(tabId: string): boolean {
++  return WINDOW_TAB_PATTERN.test(tabId);
++}

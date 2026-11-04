@@ -1509,6 +1509,57 @@ export class Daemon {
     }
   }
 
+  /**
+   * Types `text` into window `windowId`, key by key under the session's keymap
+   * (type_window, and a remote viewer's soft keyboard). `keys` sends a batch.
+   */
+  private async typeText(
+    desktop: Desktop,
+    windowId: number,
+    text: string,
+    keys: (events: WindowKeyEvent[]) => Promise<void>,
+  ): Promise<void> {
+    const layout = await desktop.keymap();
+    let runs;
+    try {
+      runs = typingRuns(text, layout);
+    } catch (error) {
+      throw new HttpError(400, (error as Error).message);
+    }
+    // In batches, so a long text doesn't hold the keyboard all at once, and
+    // apart: Exo drops a client that can't keep up (a busy LibreOffice died
+    // of a poem typed back to back). Each batch is a focus blip
+    // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
+    // what fills a field.
+    // And a pause after each Tab or Enter, while the app commits.
+    // Characters the layout lacks go in under a temporary keymap, with a
+    // pause each side for the app (and Xwayland) to take it.
+    let first = true;
+    for (const { keymap, events } of runs) {
+      if (keymap) {
+        await desktop.setWindowKeymap(windowId, keymap).catch((error: Error) => {
+          throw new HttpError(409, error.message);
+        });
+        await sleep(KEYMAP_GAP_MS);
+      }
+      try {
+        for (const run of commitRuns(events)) {
+          if (!first) await sleep(COMMIT_GAP_MS);
+          first = false;
+          for (let i = 0; i < run.length; i += TYPE_BATCH) {
+            if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
+            await keys(run.slice(i, i + TYPE_BATCH));
+          }
+        }
+      } finally {
+        if (keymap) {
+          await sleep(KEYMAP_GAP_MS);
+          await desktop.setWindowKeymap(windowId).catch(() => {});
+        }
+      }
+    }
+  }
+
   async windowInput(threadId: string, windowId: number, body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const desktop = await this.requireDirect("Driving windows");
     await this.ownedWindow(threadId, windowId);
@@ -1582,45 +1633,7 @@ export class Daemon {
       }
       case "type": {
         if (typeof body.text !== "string") throw new HttpError(400, "text is required.");
-        const layout = await desktop.keymap();
-        let runs;
-        try {
-          runs = typingRuns(body.text, layout);
-        } catch (error) {
-          throw new HttpError(400, (error as Error).message);
-        }
-        // In batches, so a long text doesn't hold the keyboard all at once, and
-        // apart: Exo drops a client that can't keep up (a busy LibreOffice died
-        // of a poem typed back to back). Each batch is a focus blip
-        // (docs/features/AGENT_CONTROL.md, Limits), so they stay big enough for
-        // what fills a field.
-        // And a pause after each Tab or Enter, while the app commits.
-        // Characters the layout lacks go in under a temporary keymap, with a
-        // pause each side for the app (and Xwayland) to take it.
-        let first = true;
-        for (const { keymap, events } of runs) {
-          if (keymap) {
-            await desktop.setWindowKeymap(windowId, keymap).catch((error: Error) => {
-              throw new HttpError(409, error.message);
-            });
-            await sleep(KEYMAP_GAP_MS);
-          }
-          try {
-            for (const run of commitRuns(events)) {
-              if (!first) await sleep(COMMIT_GAP_MS);
-              first = false;
-              for (let i = 0; i < run.length; i += TYPE_BATCH) {
-                if (i > 0) await sleep(TYPE_BATCH_GAP_MS);
-                await keys(run.slice(i, i + TYPE_BATCH));
-              }
-            }
-          } finally {
-            if (keymap) {
-              await sleep(KEYMAP_GAP_MS);
-              await desktop.setWindowKeymap(windowId).catch(() => {});
-            }
-          }
-        }
+        await this.typeText(desktop, windowId, body.text, keys);
         break;
       }
       case "press": {
@@ -2446,7 +2459,7 @@ export class Daemon {
       if (method === "GET" && path === "/v1/windows") {
         return sendJson(response, 200, await this.allWindows());
       }
-      const userWindow = path.match(/^\/v1\/windows\/(\d+)\/(stream|mouse|keys)$/);
+      const userWindow = path.match(/^\/v1\/windows\/(\d+)\/(stream|mouse|keys|text|close)$/);
       if (userWindow) {
         const desktop = await this.requireDirect("Streaming windows");
         const windowId = Number(userWindow[1]);
@@ -2469,6 +2482,18 @@ export class Daemon {
           const { events } = await readJson(request);
           if (!Array.isArray(events)) throw new HttpError(400, "Give events.");
           await desktop.keys(windowId, events as WindowKeyEvent[]);
+          return void response.writeHead(204).end();
+        }
+        // Text as typed on a viewer's soft keyboard, key by key as type_window types it.
+        if (method === "POST" && userWindow[2] === "text") {
+          const { text } = await readJson(request);
+          if (typeof text !== "string") throw new HttpError(400, "Give text.");
+          await this.typeText(desktop, windowId, text, (events) => desktop.keys(windowId, events));
+          return void response.writeHead(204).end();
+        }
+        // Asks the app to close it, as its close button does: it may ask to save first.
+        if (method === "POST" && userWindow[2] === "close") {
+          await desktop.closeWindow(windowId);
           return void response.writeHead(204).end();
         }
       }
