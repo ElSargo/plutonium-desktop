@@ -38,7 +38,7 @@
                  radial-gradient(circle at 20% 85%, #7a4fb3 0, transparent 40%),
                  linear-gradient(135deg, #1b2a4e, #1a3f7a 50%, #2b1d4f);
     --ease: cubic-bezier(.25, 1, .5, 1); --dur: .25s;
-    /* GNOME's overview: 250 ms, ease-out-quad. */
+    /* GNOME's ease-out-quad (the dock's auto-hide; the overview is eased in the script). */
     --ov-ease: cubic-bezier(.25, .46, .45, .94);
   }
   @media (prefers-color-scheme: dark) {
@@ -62,15 +62,13 @@
   .round { width: 34px; height: 34px; border-radius: 99px; display: grid; place-items: center; }
   .round:hover:not(:disabled) { background: #ffffff1f; }
   #kbd-sink { position: fixed; width: 1px; height: 1px; left: -10px; top: -10px; outline: none; }
-  body.live .win, body.live .wscard, body.live #dash, body.live #ov-top, body.live #shade, body.live #grid, body.live #thumbs, body.live #ov-chrome .cap, body.live #ov-chrome .cap-icon { transition: none !important; }
 
   /* Top bar. */
   #topbar {
     position: fixed; inset: 0 0 auto; height: var(--bar-h); z-index: 1000; background: #000;
     display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 6px;
-    font-weight: 700; font-size: 14px; transition: background .25s;
+    font-weight: 700; font-size: 14px;
   }
-  body.overview #topbar { background: transparent; }
   #topbar > :first-child { justify-self: start; }
   #topbar > :nth-child(2) { justify-self: center; }
   #topbar > :last-child { justify-self: end; }
@@ -86,20 +84,22 @@
   .clock-dot[hidden] { display: none; }
 
   /* The desktop. */
+  /* The overview's backdrop: the wallpaper, dimmed (#shade). The workspaces
+     are the cards above it, the desktop included: at rest one covers the desk. */
   #desk { position: fixed; inset: var(--bar-h) 0 0; overflow: hidden; background: var(--wallpaper) center / cover; }
-  #shade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ov-ease); }
+  #shade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; }
   #hotcorner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 1001; }
   #cards { position: absolute; inset: 0; pointer-events: none; }
   .wscard {
-    position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 16px; opacity: 0;
+    position: absolute; left: 0; top: 0; transform-origin: 0 0;
     background: var(--wallpaper) center / cover; box-shadow: 0 4px 24px #0008;
-    transition: transform var(--dur) var(--ov-ease), opacity var(--dur) var(--ov-ease), box-shadow .15s;
   }
   body.overview .wscard { pointer-events: auto; }
   .wscard.drop { box-shadow: 0 4px 24px #0008, 0 0 0 calc(3px / var(--s, 1)) var(--accent); }
   #windows { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
   body.ovdragging #windows { z-index: 5; }
   body.searching #windows, body.searching #cards, body.searching #ov-chrome { opacity: 0; pointer-events: none !important; }
+  /* Search fades the workspaces (opacity only: what moves is placed every frame). */
   #windows, #cards, #ov-chrome { transition: opacity .2s; }
   #windows > * { pointer-events: auto; }
   #snap-preview {
@@ -113,14 +113,13 @@
   .win {
     position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 12px;
     background: var(--win-bg); box-shadow: 0 2px 6px #0003, 0 8px 28px #0004;
-    transition: transform var(--dur) var(--ov-ease), box-shadow .2s, opacity var(--dur) var(--ov-ease), scale var(--dur) var(--ease);
+    transition: box-shadow .2s;
   }
-  .win.dragging, .win.resizing { transition: box-shadow .2s; }
-  .win.hidden { opacity: 0; pointer-events: none; }
+  body.overview .win { transition: none; }
+  .win.hidden { pointer-events: none; }
   .win.focused { box-shadow: 0 3px 9px #0004, 0 14px 44px #0007; }
   .win.tiled { border-radius: 0; }
   .win.max { border-radius: 0; box-shadow: none; }
-  .win.opening { opacity: 0 !important; scale: .94; }
   .win .hb {
     height: var(--hb-h); border-radius: 12px 12px 0 0; background: var(--hb-inactive); color: var(--hb-fg);
     display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 7px; gap: 6px;
@@ -161,8 +160,7 @@
   .rs.ne { top: -5px; right: -5px; cursor: nesw-resize; } .rs.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
   .rs.nw { top: -5px; left: -5px; cursor: nwse-resize; } .rs.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
   body.overview .win .rs { display: none; }
-  body.overview .win { border-radius: 12px; pointer-events: none; }
-  body.overview .win.hidden { opacity: 1; }
+  body.overview .win { pointer-events: none; }
   .win .taken {
     position: absolute; inset: 0; display: none; place-content: center; gap: 10px; text-align: center;
     background: var(--win-bg); color: var(--hb-fg);
@@ -175,16 +173,11 @@
   /* A caption per window, always there and on the window: in the overview its
      icon scales and fades in with the spread, as GNOME's (windowPreview.js,
      _updateIconScale); the title and close button show on hover once settled. */
-  #ov-chrome .cap {
-    position: absolute; pointer-events: none;
-    transition: left var(--dur) var(--ov-ease), top var(--dur) var(--ov-ease), width var(--dur) var(--ov-ease), height var(--dur) var(--ov-ease);
-  }
+  #ov-chrome .cap { position: absolute; left: 0; top: 0; pointer-events: none; }
   body.overview.settled #ov-chrome .cap { pointer-events: auto; }
-  body.overview .win.ov-hover { box-shadow: 0 0 0 calc(5px / var(--s, 1)) #ffffff70, 0 8px 28px #0006; }
   #ov-chrome .cap .cap-icon {
     position: absolute; left: 50%; bottom: -19px; width: 64px; height: 64px; margin-left: -32px; display: grid; place-items: center;
     transform-origin: 50% 70%; transform: scale(var(--spread, 0)); opacity: var(--spread, 0);
-    transition: transform var(--dur) var(--ov-ease), opacity var(--dur) var(--ov-ease);
     filter: drop-shadow(0 1px 3px #0008);
   }
   #ov-chrome .cap .cap-icon img, #ov-chrome .cap .cap-icon .letter, #ov-chrome .cap .cap-icon .glyph { width: 56px; height: 56px; }
@@ -192,17 +185,17 @@
     position: absolute; left: 50%; top: calc(100% + 23px); transform: translateX(-50%); max-width: 100%; padding: 3px 10px; border-radius: 99px;
     background: #000a; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity .2s;
   }
-  body.overview.settled #ov-chrome .cap:hover .cap-title { opacity: 1; }
+  body.overview.settled #ov-chrome .cap.hover .cap-title { opacity: 1; }
   #ov-chrome .cap .cap-close {
     position: absolute; right: -12px; top: -12px; width: 28px; height: 28px; border-radius: 99px; background: #3a3a3a;
     display: grid; place-items: center; opacity: 0; transition: opacity .2s; box-shadow: 0 2px 6px #0006;
   }
   #ov-chrome .cap .cap-close:hover { background: #4a4a4a; }
-  body.overview.settled #ov-chrome .cap:hover .cap-close { opacity: 1; }
+  body.overview.settled #ov-chrome .cap.hover .cap-close { opacity: 1; }
   #ov-chrome .cap.dragging { opacity: 0 !important; }
   #ov-top {
     position: absolute; top: 0; left: 0; right: 0; display: grid; justify-items: center; gap: 12px; padding-top: 14px;
-    opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ov-ease);
+    opacity: 0; pointer-events: none;
   }
   body.overview #search, body.overview .thumb { pointer-events: auto; }
   #search {
@@ -211,13 +204,15 @@
   }
   #search:focus { box-shadow: 0 0 0 2px var(--accent); }
   #search::placeholder { color: #ffffffa0; }
-  #thumbs { display: flex; gap: 10px; height: var(--thumb-h, 58px); transition: opacity var(--dur) var(--ov-ease), transform var(--dur) var(--ov-ease); }
+  #thumbs { position: relative; display: flex; gap: 10px; height: var(--thumb-h, 58px); }
   .thumb {
     position: relative; height: 100%; border-radius: 8px; overflow: hidden; background: var(--wallpaper) center / cover;
     box-shadow: 0 1px 4px #0006; outline: 2px solid transparent; outline-offset: 2px;
   }
-  .thumb.cur { outline-color: #fff; }
   .thumb.drop { outline-color: var(--accent); }
+  /* The current workspace's frame: one, sliding between the thumbnails with
+     the workspaces (workspaceThumbnail.js, the indicator follows the scroll). */
+  #thumbs .thumb-ind { position: absolute; left: 0; top: 0; height: 100%; border-radius: 8px; outline: 2px solid #fff; outline-offset: 2px; pointer-events: none; }
   .thumb .tw { position: absolute; border-radius: 2px; box-shadow: 0 1px 3px #0006; display: flex; flex-direction: column; overflow: hidden; }
   .thumb .tw .thb { flex: none; background: var(--hb-bg); }
   .thumb .tw canvas { flex: 1; min-height: 0; width: 100%; display: block; }
@@ -231,7 +226,10 @@
     padding: 6px; border-radius: 22px; background: #2e2e2ee6; transition: transform var(--dur) var(--ov-ease); z-index: 950;
     box-shadow: 0 2px 12px #0006;
   }
-  body.overview #dash, body.dock-always #dash, body.dock-shown #dash { transform: translate(-50%, 0); }
+  body.dock-shown #dash { transform: translate(-50%, 0); }
+  /* In the overview it comes up with it, frame by frame (--ovp, the overview's progress). */
+  body.overview #dash { transition: none; transform: translate(-50%, calc(150% * (1 - var(--ovp, 1)))); }
+  body.dock-always #dash, body.overview.dock-shown #dash { transform: translate(-50%, 0); }
   #dock-edge { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 949; display: none; }
   body.dock-auto #dock-edge { display: block; }
   #dash .sep { width: 1px; height: 40px; margin: 0 4px; background: #ffffff30; }
@@ -268,7 +266,6 @@
   /* The app grid: pages side by side, one shown (iconGrid.js); search results: a list. */
   #grid {
     position: absolute; left: 0; right: 0; opacity: 0; pointer-events: none; overflow: hidden;
-    transition: opacity var(--dur) var(--ov-ease), transform var(--dur) var(--ov-ease);
     /* Rastered while hidden (cc draws a layer that may animate its opacity), so
        opening it never shows tiles not drawn yet. */
     will-change: opacity, transform;
@@ -736,7 +733,9 @@ function normalizeWorkspaces() {
     known.add(item.ws);
     nextWsId = Math.max(nextWsId, item.ws + 1);
   }
-  if (prefs.dynamicWorkspaces) {
+  // Removing one while they scroll would pull it from under the animation: once they stop.
+  if (scrolling()) normalizeLater = true;
+  else if (prefs.dynamicWorkspaces) {
     const full = (w) => itemsOn(w.id).length > 0;
     const last = workspaces.at(-1);
     // A workspace the user named is a thread they keep, empty or not.
@@ -767,6 +766,8 @@ function publishGroups() {
 /** Moves an item to workspace `id`: its thread becomes that workspace's. */
 function moveToWorkspace(item, id, { follow = false } = {}) {
   if (item.ws === id) return;
+  // Taken along: it stays where it is on the screen while the workspaces slide under it.
+  if (follow) pinWindow(item, { hold: true });
   if (shell?.tagsAvailable) claim(item.entry, item.kind, id);
   item.ws = id;
   if (focused === item.key && !follow) { focused = null; focusTop(); }
@@ -780,12 +781,11 @@ function switchTo(index, { focusKey, animate = true } = {}) {
   const changed = index !== cur;
   cur = index;
   slide = 0;
-  if (!animate) document.body.classList.add("live");
+  if (!animate) snapPos = true;
   if (focusKey) focusItem(focusKey);
   else if (changed && !overview()) focusTop();
   normalizeWorkspaces();
   render();
-  if (!animate) requestAnimationFrame(() => document.body.classList.remove("live"));
 }
 const switchBy = (d) => switchTo(cur + d);
 
@@ -926,9 +926,9 @@ function createItem(key, entry) {
   stack.push(key);
   restack();
   if (listed && !saved) {
-    // GNOME's open animation: from a little smaller, fading in.
-    root.classList.add("opening");
-    requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove("opening")));
+    // GNOME's open animation: from a little smaller, fading in (frame()).
+    animOf(item).open = new Tween(0);
+    item.anim.open.set(1, performance.now(), { time: OPEN_TIME });
   }
   return item;
 }
@@ -949,6 +949,11 @@ function removeItem(key) {
   stack = stack.filter((k) => k !== key);
   mru = mru.filter((k) => k !== key);
   if (focused === key) { focused = null; if (!overview()) focusTop(); }
+  if (ovHover === key) ovHover = null;
+  if (overviewTarget === 1) {
+    relayoutAt = performance.now() + RELAYOUT_DELAY;
+    setTimeout(render, RELAYOUT_DELAY + 10);
+  }
 }
 
 function closeItem(item) {
@@ -1127,14 +1132,116 @@ const toUrl = (q) => (looksLikeAddress(q) ? q : `https://duckduckgo.com/?q=${enc
 
 // ---------------------------------------------------------------- rendering
 // The view: 0 the desktop, 1 the overview, 2 the app grid; in between while
-// a swipe follows the fingers. `slide` is the workspaces' offset (pixels on
-// the desktop), while a swipe or a drag moves between them.
+// a swipe follows the fingers. `slide` is the workspaces' offset (pixels),
+// while a swipe moves between them. These say where things are going; what's
+// on screen eases toward them (the animation, below).
 let view = 0;
 let slide = 0;
 let searching = false;
 const overview = () => view > 0.5;
 
 const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ---------------------------------------------------------------- the animation
+// As GNOME Shell's: a few values are eased, and everything on screen is
+// placed from them every frame, so no part moves on its own. (A CSS
+// transition per element can't keep a window on its workspace: it eases the
+// window's offset and the workspace's scale apart, so the window drifts off
+// its backdrop on the way.)
+//  - the view: overviewControls.js's state adjustment, 250 ms, ease-out-quad;
+//  - the workspace scrolled to, a fractional index: workspacesView.js's
+//    scroll adjustment and workspaceAnimation.js's switch, 250 ms, ease-out-cubic;
+//  - each workspace's place in the row, when one comes or goes before it;
+//  - per window, in its workspace's coordinates (the desktop's, unscaled):
+//    where it is on the desktop and where it is spread, each eased when it
+//    changes (workspace.js lays out again); the hover (windowPreview.js: 5px
+//    a side, 200 ms); opening; minimizing; and a pin, which holds it where it
+//    was shown while it's dragged or changes workspace, then lets it go.
+// A window is drawn at its workspace's place and scale composed with its own,
+// and its outline, caption and icon are drawn from that same rect.
+const EASE = { quad: (t) => 1 - (1 - t) * (1 - t), cubic: (t) => 1 - (1 - t) ** 3 };
+const OV_TIME = 250, SWITCH_TIME = 250, HOVER_TIME = 200, OPEN_TIME = 150, DRAG_TIME = 200;
+// Between workspaces on the desktop, while switching (workspaceAnimation.js's WORKSPACE_SPACING).
+const DESK_GAP = 100;
+// After a window closes in the overview the others stay put a moment, so the
+// next close button is still under the pointer (workspace.js, WINDOW_REPOSITIONING_DELAY).
+const RELAYOUT_DELAY = 750;
+const mix = (a, b, t) => (typeof a === "number" ? lerp(a, b, t)
+  : { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), w: lerp(a.w, b.w, t), h: lerp(a.h, b.h, t) });
+const near = (a, b) => (typeof a === "number" ? Math.abs(a - b) < 1e-4
+  : Math.abs(a.x - b.x) < 0.05 && Math.abs(a.y - b.y) < 0.05 && Math.abs(a.w - b.w) < 0.05 && Math.abs(a.h - b.h) < 0.05);
+/** A number or a rect eased toward its target, from wherever it is when the target changes (as Clutter's ease()). */
+class Tween {
+  constructor(v) { this.from = this.to = v; this.t0 = 0; this.dur = 0; this.curve = EASE.quad; }
+  at(now) {
+    const k = this.dur ? Math.max(0, (now - this.t0) / this.dur) : 1;
+    return k >= 1 ? this.to : mix(this.from, this.to, this.curve(k));
+  }
+  busy(now) { return this.dur > 0 && now - this.t0 < this.dur; }
+  set(to, now, { time = OV_TIME, curve = EASE.quad, instant = false } = {}) {
+    if (instant || !time) { this.from = this.to = to; this.dur = 0; return; }
+    if (near(to, this.to)) return;
+    this.from = this.at(now); this.to = to; this.t0 = now; this.dur = time; this.curve = curve;
+  }
+  /** Both ends moved by `d` (numbers only): what's shown moves with them, at once. */
+  shift(d) { this.from += d; this.to += d; }
+}
+const viewT = new Tween(0);     // the view shown
+const posT = new Tween(0);      // the workspace scrolled to
+const slotT = new Map();        // workspace id → its index shown
+let lastIndex = new Map();      // workspace id → its index at the last render
+let snapAll = true;             // the next render places everything at once (the first; a resize)
+let snapPos = false;            // ... the scroll (a switch that isn't animated)
+let relayoutAt = 0;             // the overview's layout is held until then
+let normalizeLater = false;     // a workspace to remove once the scroll stops
+
+const rectNow = (item) => ({ ...rectOf(item) });
+/** A window's animation state, made when it's first placed. */
+function animOf(item) {
+  return item.anim ??= {
+    desk: new Tween(rectNow(item)), spread: null, hover: new Tween(0), open: new Tween(1),
+    shown: new Tween(item.hidden ? 0 : 1), pin: new Tween(0), pinRect: null, pinHold: false, last: null, ws: undefined,
+  };
+}
+/**
+ * Holds a window where it's shown now, then lets it ease to its place: at
+ * once, or (`hold`) once the workspaces stop scrolling, as a window moved
+ * along with a switch stays put on the screen while they slide under it.
+ */
+function pinWindow(item, { hold = false } = {}) {
+  const a = animOf(item);
+  if (!a.last) return;
+  a.pinRect = { ...a.last };
+  a.pin.set(1, 0, { instant: true });
+  a.pinHold = hold;
+  if (!hold) a.pin.set(0, performance.now());
+}
+/** Workspaces came or went: their places ease to the new ones, and the scroll stays on the current one. */
+function reslot(now, instant) {
+  const was = lastIndex.get(curWs()?.id);
+  // The current workspace's index changed under it (one before it came or
+  // went): the scroll and every place move by as much, so nothing on screen does.
+  const shift = was === undefined ? 0 : cur - was;
+  if (shift) { posT.shift(shift); for (const s of slotT.values()) s.shift(shift); }
+  workspaces.forEach((ws, i) => {
+    const s = slotT.get(ws.id);
+    if (!s) slotT.set(ws.id, new Tween(i));
+    else s.set(i, now, { time: SWITCH_TIME, curve: EASE.cubic, instant });
+  });
+  for (const id of [...slotT.keys()]) if (!wsById(id)) slotT.delete(id);
+  lastIndex = new Map(workspaces.map((w, i) => [w.id, i]));
+}
+/** Whether the workspaces are scrolling (or about to): removing one now would pull the floor from under it. */
+const scrolling = () => !!swipe || posT.busy(performance.now()) || Math.abs(posT.to - (cur - slide / W())) > 1e-3;
+
+let raf = 0;
+function kick() { if (!raf) raf = requestAnimationFrame(tick); }
+function tick() {
+  raf = 0;
+  if (frame(performance.now())) { kick(); return; }
+  if (normalizeLater && !swipe) { normalizeLater = false; normalizeWorkspaces(); render(); }
+}
 
 // The overview's geometry, after GNOME's ControlsManagerLayout: the search
 // entry at the top, the thumbnails under it, the workspaces between them and
@@ -1158,10 +1265,42 @@ function ovMetrics() {
   return { w, h, sp, thumbH, thumbY, pickY, pickH, smallY, smallH, gridY, gridH };
 }
 
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-// GNOME's inactive workspaces are a little smaller.
+// GNOME's inactive workspaces are a little smaller (WORKSPACE_INACTIVE_SCALE).
 const inactiveScale = (i, pos) => lerp(0.94, 1, 1 - Math.min(1, Math.abs(i - pos)));
 const scaleBox = (b, k) => ({ x: b.x + b.w * (1 - k) / 2, y: b.y + b.h * (1 - k) / 2, w: b.w * k, h: b.h * k });
+
+/** The current workspace's box in the overview (the others are beside it, a gap of 24 to 80 apart). */
+function pickBox(m) {
+  const { w, h } = m;
+  let ch = m.pickH, cw = ch * (w / h);
+  if (cw > w * 0.85) { cw = w * 0.85; ch = cw * (h / w); }
+  return { x: (w - cw) / 2, y: m.pickY + (m.pickH - ch) / 2, w: cw, h: ch, gap: clamp((w - cw) / 2 - cw * 0.4, 24, 80) };
+}
+/** The row of workspaces above the app grid. */
+function gridRow(m) {
+  const { w, h } = m;
+  const n = workspaces.length, gap = 24;
+  let cw = (w - gap * (n + 1)) / n, ch = cw * (h / w), x0 = gap;
+  if (ch > m.smallH) { ch = m.smallH; cw = ch * (w / h); x0 = gap + Math.max(0, (w - gap * (n + 1) - cw * n) / 2); }
+  return { x0, y: m.smallY + (m.smallH - ch) / 2, w: cw, h: ch, gap };
+}
+/** Where the workspace at `slot` is in a state (0 the desktop, 1 the overview, 2 the app grid), scrolled to `pos`. */
+function wsBox(state, slot, pos, m) {
+  const { w, h } = m;
+  if (state === 0) return { x: (slot - pos) * (w + DESK_GAP), y: 0, w, h };
+  if (state === 1) {
+    const b = pickBox(m);
+    return scaleBox({ x: b.x + (slot - pos) * (b.w + b.gap), y: b.y, w: b.w, h: b.h }, inactiveScale(slot, pos));
+  }
+  const r = gridRow(m);
+  return scaleBox({ x: r.x0 + slot * (r.w + r.gap), y: r.y, w: r.w, h: r.h }, inactiveScale(slot, pos));
+}
+/** ... between two states, `p` being the view. */
+function wsBoxAt(p, slot, pos, m) {
+  const from = Math.min(1, Math.floor(p)), f = p - from;
+  const a = wsBox(from, slot, pos, m);
+  return f > 0 ? mix(a, wsBox(from + 1, slot, pos, m), f) : a;
+}
 
 /** The windows of a workspace spread out in its box, none overlapping: where each goes and its scale. */
 function spread(list, box, out) {
@@ -1177,119 +1316,166 @@ function spread(list, box, out) {
     const inRow = r === rows - 1 ? n - r * cols : cols;
     const c = i % cols;
     const g = rectOf(item);
-    let s = Math.max(0.01, Math.min((cellW - 28) / g.w, (cellH - 48) / g.h, 1));
-    let x = area.x + (cols - inRow) * cellW / 2 + c * cellW + (cellW - g.w * s) / 2;
-    let y = area.y + r * cellH + (cellH - 30 - g.h * s) / 2;
-    // The window under the pointer grows by 5px a side, as GNOME's.
-    if (item.key === ovHover) {
-      const k = (g.w * s + 10) / (g.w * s);
-      x -= g.w * s * (k - 1) / 2; y -= g.h * s * (k - 1) / 2; s *= k;
-    }
-    out.set(item.key, { x, y, s, w: g.w * s, h: g.h * s });
+    const s = Math.max(0.01, Math.min((cellW - 28) / g.w, (cellH - 48) / g.h, 1));
+    const x = area.x + (cols - inRow) * cellW / 2 + c * cellW + (cellW - g.w * s) / 2;
+    const y = area.y + r * cellH + (cellH - 30 - g.h * s) / 2;
+    out.set(item.key, { x, y, w: g.w * s, h: g.h * s });
   });
+}
+/** Every window's spread place, in its workspace's coordinates (laid out in the current workspace's overview box). */
+function spreadTargets(m) {
+  const box = pickBox(m);
+  const k = box.w / m.w;
+  const out = new Map();
+  for (const ws of workspaces) spread(itemsOn(ws.id).sort((a, b) => a.id - b.id), box, out);
+  for (const [key, s] of out) out.set(key, { x: (s.x - box.x) / k, y: (s.y - box.y) / k, w: s.w / k, h: s.h / k });
+  return out;
 }
 
 /**
- * Where the workspaces and windows are in a state: 0 the desktop, 1 the
- * overview (windows spread), 2 the app grid (windows where they are on the
- * desktop, in small workspaces).
+ * The page after a change: the classes, the elements there are, and where
+ * everything is going (the tweens' targets); then a frame, and more while
+ * anything is still moving.
  */
-function stateLayout(state, m) {
-  const { w, h } = m;
-  const n = workspaces.length;
-  const pos = cur - slide / w; // the workspace in the middle, between two while sliding
-  let cards;
-  if (state === 0) cards = workspaces.map((ws, i) => ({ x: (i - cur) * w + slide, y: 0, w, h }));
-  else if (state === 1) {
-    let ch = m.pickH, cw = ch * (w / h);
-    if (cw > w * 0.85) { cw = w * 0.85; ch = cw * (h / w); }
-    const y = m.pickY + (m.pickH - ch) / 2;
-    const gap = clamp((w - cw) / 2 - cw * 0.4, 24, 80);
-    cards = workspaces.map((ws, i) => scaleBox({ x: (w - cw) / 2 + (i - pos) * (cw + gap), y, w: cw, h: ch }, inactiveScale(i, pos)));
-  } else {
-    const gap = 24;
-    let cw = (w - gap * (n + 1)) / n, ch = cw * (h / w), x0 = gap;
-    if (ch > m.smallH) { ch = m.smallH; cw = ch * (w / h); x0 = gap + Math.max(0, (w - gap * (n + 1) - cw * n) / 2); }
-    const y = m.smallY + (m.smallH - ch) / 2;
-    cards = workspaces.map((ws, i) => scaleBox({ x: x0 + i * (cw + gap), y, w: cw, h: ch }, inactiveScale(i, pos)));
-  }
-  const wins = new Map();
-  workspaces.forEach((ws, i) => {
-    const box = cards[i];
-    if (state === 1) { spread(itemsOn(ws.id).sort((a, b) => a.id - b.id), box, wins); return; }
-    const k = box.w / w;
-    for (const item of itemsOn(ws.id)) {
-      const r = rectOf(item);
-      wins.set(item.key, { x: box.x + r.x * k, y: box.y + r.y * k, s: k, w: r.w * k, h: r.h * k });
-    }
-  });
-  return { cards, wins };
-}
-
 function render() {
-  const p = view;
-  const live = document.body.classList.contains("live");
+  const now = performance.now();
   const b = document.body.classList;
-  b.toggle("overview", p > 0.01 || overviewTarget > 0);
   b.toggle("apps", overviewTarget === 2 && !searching);
   b.toggle("searching", searching);
-  b.toggle("settled", !live && Math.abs(p - overviewTarget) < 0.01 && overviewTarget === 1);
-  const w = W(), h = H();
   const m = ovMetrics();
-  // Between two states: `from` and `to`, `f` of the way.
-  const from = Math.min(1, Math.floor(p)), to = from + 1, f = p - from;
-  const A = stateLayout(from, m);
-  const B = p > 0.001 ? stateLayout(to, m) : A;
-  const spreadness = p <= 1 ? p : 2 - p; // how much the windows are spread (minimized ones shown)
-  const t = Math.min(p, 1);
-  const capRects = new Map();
+  const instant = snapAll;
+  snapAll = false;
+  // A swipe's fingers move the view or the scroll directly; anything else eases them.
+  viewT.set(view, now, { time: OV_TIME, curve: EASE.quad, instant: instant || swipe?.axis === "y" });
+  reslot(now, instant);
+  posT.set(cur - slide / m.w, now, { time: SWITCH_TIME, curve: EASE.cubic, instant: instant || snapPos || swipe?.axis === "x" });
+  snapPos = false;
+  if (overviewTarget !== 1) ovHover = null;
+  const held = now < relayoutAt;
+  const shownNow = viewT.at(now) > 0.001 || view > 0;
+  const spreads = spreadTargets(m);
   for (const item of items.values()) {
     size(item);
-    const a = A.wins.get(item.key), z = B.wins.get(item.key);
-    let x = 0, y = 0, s = 1, o = item.hidden ? 0 : 1;
-    if (a && z) {
-      x = lerp(a.x, z.x, f); y = lerp(a.y, z.y, f); s = lerp(a.s, z.s, f);
-      if (item.hidden) o = spreadness;
-    } else {
-      const r = rectOf(item);
-      x = r.x + (wsIndex(item.ws) - cur) * w + slide; y = r.y;
-    }
-    if (ovDrag?.item === item && ovDrag.started) { x = ovDrag.x; y = ovDrag.y; s = ovDrag.s; o = 1; }
-    if (a && z) { const r = rectOf(item); capRects.set(item.key, { x, y, w: r.w * s, h: r.h * s }); }
-    item.el.style.transform = `translate(${x}px, ${y}px) scale(${s})`;
-    item.el.style.opacity = String(o);
-    // The outline of the window under the pointer is the window's own, so it moves and grows with it.
-    item.el.style.setProperty("--s", String(s));
-    item.el.classList.toggle("ov-hover", overviewTarget === 1 && ovHover === item.key && !ovDrag?.started);
+    const a = animOf(item);
+    // A window that changed workspace goes from where it was shown to its place on the new one.
+    if (a.ws != null && a.ws !== item.ws && !a.pinHold) pinWindow(item);
+    const moved = a.ws !== item.ws;
+    a.ws = item.ws;
+    // Moved by the pointer or the keys: it follows them, no easing.
+    const direct = instant || moved || (drag?.item === item && drag.moved) || kbMode?.item === item;
+    a.desk.set(rectNow(item), now, { instant: direct });
+    const spot = spreads.get(item.key) ?? rectNow(item);
+    if (!a.spread) a.spread = new Tween(spot);
+    else if (!held || moved) a.spread.set(spot, now, { instant: instant || moved || !shownNow });
+    a.hover.set(ovHover === item.key && !ovDrag?.started ? 1 : 0, now, { time: HOVER_TIME, instant });
+    a.shown.set(item.hidden ? 0 : 1, now, { instant });
   }
-  // The workspace cards: the desktop itself shrinking into its card.
+  // A card per workspace: its backdrop, which the desktop is at rest.
   const cardsEl = $("cards");
-  while (cardsEl.children.length < workspaces.length) cardsEl.append(makeCard());
-  while (cardsEl.children.length > workspaces.length) cardsEl.lastChild.remove();
+  const have = new Map([...cardsEl.children].map((c) => [Number(c.dataset.ws), c]));
+  for (const ws of workspaces) {
+    const card = have.get(ws.id) ?? cardsEl.appendChild(makeCard(ws.id));
+    have.delete(ws.id);
+    card.classList.toggle("drop", ovDrop?.ws === ws.id);
+  }
+  for (const c of have.values()) c.remove();
+  renderCaptions();
+  renderThumbs();
+  renderIndicator();
+  renderDash();
+  if (!drag && !swipe && !ovDrag?.started) saveGeom();
+  if (frame(now) || (normalizeLater && !swipe)) kick();
+}
+
+/** Places everything for the time `now`; whether anything is still moving. */
+function frame(now) {
+  const m = ovMetrics(), { w, h } = m;
+  const p = viewT.at(now), pos = posT.at(now);
+  const t = Math.min(p, 1);           // toward the overview
+  const g = Math.max(0, p - 1);       // on toward the app grid
+  const spreadness = p <= 1 ? p : 2 - p; // how far the windows are spread (minimized ones shown)
+  const b = document.body.classList;
+  b.toggle("overview", p > 0.01 || overviewTarget > 0);
+  let busy = viewT.busy(now) || posT.busy(now);
+  b.toggle("settled", !busy && !swipe && overviewTarget === 1 && Math.abs(p - 1) < 0.01);
+
+  // The workspaces.
+  const boxes = new Map();
   workspaces.forEach((ws, i) => {
-    const card = cardsEl.children[i];
-    card.dataset.ws = String(ws.id);
-    const a = A.cards[i], z = B.cards[i];
-    const x = lerp(a.x, z.x, f), y = lerp(a.y, z.y, f), sc = lerp(a.w, z.w, f) / w;
+    const s = slotT.get(ws.id);
+    if (s?.busy(now)) busy = true;
+    boxes.set(ws.id, wsBoxAt(p, s ? s.at(now) : i, pos, m));
+  });
+  const radius = lerp(0, lerp(16, 10, g), t);
+  for (const card of $("cards").children) {
+    const c = boxes.get(Number(card.dataset.ws));
+    if (!c) continue;
+    const k = c.w / w;
     card.style.width = `${w}px`;
     card.style.height = `${h}px`;
-    card.style.transform = `translate(${x}px, ${y}px) scale(${sc})`;
-    card.style.opacity = String(p <= 0.001 ? 0 : Math.min(1, p * 3));
-    card.style.borderRadius = `${(p > 1.5 ? 10 : 16) / Math.max(sc, 0.05)}px`;
-    card.style.setProperty("--s", String(sc));
-    card.classList.toggle("drop", ovDrop?.ws === ws.id);
-  });
-  $("shade").style.opacity = String(t * 0.55);
-  $("ov-top").style.opacity = String(t);
-  // The thumbnails: under the search entry; toward the app grid they fade, shrink and drop.
-  const g = Math.max(0, p - 1); // toward the app grid
+    card.style.transform = `translate(${c.x}px, ${c.y}px) scale(${k})`;
+    card.style.borderRadius = `${radius / Math.max(k, 0.05)}px`;
+    card.style.setProperty("--s", String(k));
+  }
+
+  // The windows, each on its workspace.
+  const away = { x: -2 * (w + DESK_GAP), y: 0, w, h };
+  for (const item of items.values()) {
+    const a = animOf(item);
+    const c = boxes.get(item.ws) ?? away;
+    const k = c.w / w;
+    const L = mix(a.desk.at(now), a.spread.at(now), spreadness);
+    let x = c.x + L.x * k, y = c.y + L.y * k, ww = L.w * k, hh = L.h * k;
+    // Under the pointer: 5px bigger a side, about its middle.
+    const hv = a.hover.at(now) * spreadness;
+    if (hv > 0 && ww > 0) {
+      const f = (ww + 10 * hv) / ww;
+      x -= ww * (f - 1) / 2; y -= hh * (f - 1) / 2; ww *= f; hh *= f;
+    }
+    const dragged = ovDrag?.item === item && ovDrag.started;
+    if (dragged) { const r = rectOf(item); a.pinRect = { x: ovDrag.x, y: ovDrag.y, w: r.w * ovDrag.s, h: r.h * ovDrag.s }; }
+    if (a.pinHold && !posT.busy(now)) { a.pinHold = false; a.pin.set(0, now); }
+    const pv = a.pin.at(now);
+    if (pv > 0 && a.pinRect) ({ x, y, w: ww, h: hh } = mix({ x, y, w: ww, h: hh }, a.pinRect, pv));
+    a.last = { x, y, w: ww, h: hh };
+    // Opening: from 94%, fading in, about its middle.
+    const op = a.open.at(now), os = lerp(0.94, 1, op);
+    const r = rectOf(item);
+    const sx = (ww / r.w) * os, sy = (hh / Math.max(1, r.h)) * os;
+    item.el.style.transform = `translate(${x + ww * (1 - os) / 2}px, ${y + hh * (1 - os) / 2}px) scale(${sx}, ${sy})`;
+    const shown = a.shown.at(now);
+    item.el.style.opacity = String(dragged ? 1 : op * (shown + (1 - shown) * spreadness));
+    // The outline is the window's own, so it can't lag or lead it.
+    item.el.style.boxShadow = hv > 0.001 ? `0 0 0 ${(5 * hv) / Math.max(sx, 0.01)}px rgb(255 255 255 / ${0.44 * hv}), 0 8px 28px #0006` : "";
+    busy ||= a.desk.busy(now) || a.spread.busy(now) || a.hover.busy(now) || a.open.busy(now) || a.shown.busy(now) || a.pin.busy(now) || a.pinHold;
+  }
+
+  // The captions, on their windows' rects.
+  const layer = $("ov-chrome");
+  layer.style.setProperty("--spread", String(searching ? 0 : spreadness));
+  for (const cap of layer.children) {
+    const r = items.get(cap.dataset.key)?.anim?.last;
+    if (!r) continue;
+    cap.style.transform = `translate(${r.x}px, ${r.y}px)`;
+    cap.style.width = `${r.w}px`;
+    cap.style.height = `${r.h}px`;
+  }
+
+  // The backdrop dims; the top bar's black goes; the search, thumbnails, grid and dash come.
+  $("shade").style.opacity = String(1 - 0.45 * t);
+  $("topbar").style.backgroundColor = `rgb(0 0 0 / ${1 - t})`;
   const ovTop = $("ov-top");
+  ovTop.style.opacity = String(t);
   ovTop.style.setProperty("--thumb-h", `${m.thumbH}px`);
   ovTop.style.gap = `${m.thumbY - OV_SEARCH}px`;
+  // The thumbnails: under the search entry; toward the app grid they fade, shrink and drop.
   const thumbs = $("thumbs");
   thumbs.style.opacity = String(searching ? 0 : 1 - g);
   thumbs.style.transform = `translateY(${g * m.thumbH / 2}px) scale(${1 - g / 2})`;
   thumbs.style.pointerEvents = searching || g > 0.5 ? "none" : "";
+  const tw = m.thumbH * (w / h);
+  thumbInd.style.width = `${tw}px`;
+  thumbInd.style.transform = `translateX(${pos * (tw + 10)}px)`;
   // The app grid comes up from below; search results take the space under the search entry.
   const grid = $("grid");
   const gridTop = searching ? OV_SEARCH + m.sp : lerp(h, m.gridY, g);
@@ -1298,16 +1484,13 @@ function render() {
     transform: `translateY(${gridTop - m.gridY}px)`,
     opacity: String(searching ? 1 : g),
   });
-  $("dash").style.setProperty("--p", String(t));
-  renderCaptions(capRects, searching ? 0 : spreadness);
-  renderThumbs();
-  renderIndicator();
-  renderDash();
-  if (!live) saveGeom();
+  $("dash").style.setProperty("--ovp", String(t));
+  return busy;
 }
 
-function makeCard() {
+function makeCard(id) {
   const card = el("div", "wscard");
+  card.dataset.ws = String(id);
   card.addEventListener("click", () => {
     const i = wsIndex(Number(card.dataset.ws));
     // As GNOME's: the current workspace (or any, from the app grid) leaves the overview.
@@ -1319,16 +1502,13 @@ function makeCard() {
   return card;
 }
 
-// In the overview: a click target over each window, its app's icon, its title and a close button.
-// They move with the windows (the same transition), and grow with the one under the pointer.
+// In the overview: a click target over each window, its app's icon, its title
+// and a close button. Each frame puts it on its window's rect (frame()).
 let ovHover = null;
-function renderCaptions(slots, spread) {
+function renderCaptions() {
   const layer = $("ov-chrome");
-  layer.style.setProperty("--spread", String(spread));
-  if (overviewTarget !== 1) ovHover = null;
   const have = new Map([...layer.children].map((c) => [c.dataset.key, c]));
-  for (const [key, slot] of slots) {
-    const item = items.get(key);
+  for (const [key, item] of items) {
     let cap = have.get(key);
     have.delete(key);
     if (!cap) {
@@ -1344,22 +1524,24 @@ function renderCaptions(slots, spread) {
       cap.addEventListener("contextmenu", (e) => { e.preventDefault(); windowMenu(items.get(key), { x: e.clientX, y: e.clientY }); });
       layer.append(cap);
     }
-    cap.querySelector(".cap-title").textContent = titleOf(item);
-    Object.assign(cap.style, { left: `${slot.x}px`, top: `${slot.y}px`, width: `${slot.w}px`, height: `${slot.h}px` });
+    const title = titleOf(item);
+    const titleEl = cap.querySelector(".cap-title");
+    if (titleEl.textContent !== title) titleEl.textContent = title;
     cap.classList.toggle("dragging", ovDrag?.item?.key === key && ovDrag.started);
     cap.classList.toggle("hover", ovHover === key);
   }
   for (const c of have.values()) c.remove();
 }
 
-// The workspace thumbnails above the cards.
+// The workspace thumbnails above the cards, and the current one's frame (placed by frame()).
+const thumbInd = el("div", "thumb-ind");
 function renderThumbs() {
   const box = $("thumbs");
   if (!overview()) { if (box.childElementCount) box.replaceChildren(); return; }
   const th = ovMetrics().thumbH, tw = th * (W() / H());
   const k = th / H();
   box.replaceChildren(...workspaces.map((ws, i) => {
-    const t = el("div", `thumb ${i === cur ? "cur" : ""} ${ovDrop?.ws === ws.id ? "drop" : ""}`);
+    const t = el("div", `thumb ${ovDrop?.ws === ws.id ? "drop" : ""}`);
     t.style.width = `${tw}px`;
     t.dataset.ws = String(ws.id);
     t.title = wsName(ws, i);
@@ -1378,7 +1560,7 @@ function renderThumbs() {
     t.addEventListener("click", () => switchTo(i));
     t.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(ws, { x: e.clientX, y: e.clientY }); });
     return t;
-  }));
+  }), thumbInd);
 }
 
 // Window pictures for the thumbnails: the broker's snapshot of the window's
@@ -1437,14 +1619,11 @@ function renderIndicator() {
 
 // ---------------------------------------------------------------- the overview
 let overviewTarget = 0;
-let settleTimer = null;
-function setView(target, { from } = {}) {
-  if (from !== undefined) view = from;
+function setView(target) {
   const was = overviewTarget;
   overviewTarget = target;
   view = target;
   if (target === 0) { searching = false; $("search").value = ""; }
-  document.body.classList.remove("live");
   closeMenu();
   if (target === 1 && !shotTimer) shotTick();
   if (target > 0) {
@@ -1460,8 +1639,6 @@ function setView(target, { from } = {}) {
   }
   updateShortcuts();
   render();
-  clearTimeout(settleTimer);
-  settleTimer = setTimeout(render, 260);
 }
 const toggleOverview = () => setView(overviewTarget === 1 ? 0 : 1);
 const toggleApps = () => setView(overviewTarget === 2 ? 0 : 2);
@@ -1501,8 +1678,10 @@ function ovPointerDown(e, key) {
   ovDrag = { item, sx: e.clientX, sy: e.clientY, ox: (e.clientX - box.left) / box.width, oy: (e.clientY - box.top) / box.height, started: false, d };
   const move = (ev) => {
     if (!ovDrag.started && Math.hypot(ev.clientX - ovDrag.sx, ev.clientY - ovDrag.sy) < 8) return;
+    if (!ovDrag.started) animOf(item).pin.set(1, performance.now(), { time: DRAG_TIME });
     ovDrag.started = true;
-    document.body.classList.add("live", "ovdragging");
+    ovHover = null;
+    document.body.classList.add("ovdragging");
     const r = rectOf(item);
     const s = Math.min(0.22, 280 / r.w);
     ovDrag.s = s;
@@ -1518,15 +1697,18 @@ function ovPointerDown(e, key) {
     cap.removeEventListener("pointercancel", up);
     const was = ovDrag;
     ovDrag = null;
-    document.body.classList.remove("live", "ovdragging");
+    document.body.classList.remove("ovdragging");
     restack();
     if (!was.started) { setView(0); focusItem(key); return; }
+    // From where it's dropped to its place (on the workspace it's dropped on, if any).
+    animOf(item).pin.set(0, performance.now());
     const target = ovDrop;
     ovDrop = null;
     if (target?.ws && target.ws !== item.ws) moveToWorkspace(item, target.ws);
     else if (target?.newAt !== undefined) {
       const ws = { id: nextWsId++, name: "" };
       workspaces.splice(target.newAt, 0, ws);
+      if (target.newAt <= cur) cur++; // the current one stays current
       moveToWorkspace(item, ws.id);
     }
     render();
@@ -1573,7 +1755,6 @@ addEventListener("pointermove", (e) => {
   const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
   if (!drag.moved && Math.hypot(dx, dy) < 4) return;
   drag.moved = true;
-  document.body.classList.add("live");
   const { item, mode } = drag;
   const d = $("desk").getBoundingClientRect();
   const wa = workArea();
@@ -1610,7 +1791,6 @@ function endDrag(e) {
   const drag0 = drag;
   item.el.classList.remove("dragging", "resizing");
   drag = null;
-  document.body.classList.remove("live");
   showSnap(null);
   const away = mode === "move" && moved && shell?.otherDisplayAt(e.clientX, e.clientY);
   if (away) { sendToDisplay(item, away, drag0); return; }
@@ -1670,7 +1850,7 @@ function showSnap(zone) {
   Object.assign(p.style, { left: `${r.x + 4}px`, top: `${r.y + 4}px`, width: `${r.w - 8}px`, height: `${r.h - 8}px` });
   p.classList.add("shown");
 }
-addEventListener("resize", () => render());
+addEventListener("resize", () => { snapAll = true; render(); });
 
 // Keyboard tiling (Super+arrows), GNOME's with quarters added: left/right
 // tile a half, then up/down make it a quarter; up maximizes, down restores,
@@ -2578,8 +2758,7 @@ function showDesktop() {
 // the speed at the end carries it on.
 let swipe = null;
 function swipeBegin() {
-  swipe = { axis: null, sumX: 0, sumY: 0, view0: view, samples: [] };
-  document.body.classList.add("live");
+  swipe = { axis: null, sumX: 0, sumY: 0, view0: view, slide0: 0, samples: [] };
 }
 function swipeUpdate(dx, dy) {
   if (!swipe) return;
@@ -2589,6 +2768,10 @@ function swipeUpdate(dx, dy) {
   if (!swipe.axis) {
     if (Math.hypot(swipe.sumX, swipe.sumY) < 12) return;
     swipe.axis = Math.abs(swipe.sumX) > Math.abs(swipe.sumY) ? "x" : "y";
+    // From what's shown: a swipe caught mid-animation picks it up there.
+    const now = performance.now();
+    if (swipe.axis === "y") swipe.view0 = viewT.at(now);
+    else swipe.slide0 = (cur - posT.at(now)) * W();
   }
   if (swipe.axis === "y") {
     // A full screen's height of travel is one step.
@@ -2598,7 +2781,7 @@ function swipeUpdate(dx, dy) {
   } else {
     const w = W();
     // At the ends: a little give, as GNOME's rubber band.
-    let s = swipe.sumX * (overview() ? 2.2 : 1.6);
+    let s = swipe.slide0 + swipe.sumX * (overview() ? 2.2 : 1.6);
     const min = -(workspaces.length - 1 - cur) * w, max = cur * w;
     if (s > max) s = max + (s - max) * 0.25;
     if (s < min) s = min + (s - min) * 0.25;
@@ -2610,7 +2793,6 @@ function swipeEnd() {
   if (!swipe) return;
   const sw = swipe;
   swipe = null;
-  document.body.classList.remove("live");
   const now = performance.now();
   const recent = sw.samples.filter((s) => now - s.t < 120);
   const span = recent.length > 1 ? (recent.at(-1).t - recent[0].t) || 16 : 16;
@@ -2625,19 +2807,13 @@ function swipeEnd() {
     const pos = -slide / w; // how far toward the next workspace (negative: the previous)
     const by = vx < -FLING ? Math.max(0, Math.ceil(pos - 0.01)) || 1 : vx > FLING ? Math.min(0, Math.floor(pos + 0.01)) || -1 : Math.round(pos);
     const next = Math.max(0, Math.min(workspaces.length - 1, cur + Math.max(-1, Math.min(1, by))));
-    // The workspaces' offset is now relative to the new one.
-    slide = slide + (next - cur) * w;
-    document.body.classList.add("live");
+    // From where the fingers left it, eased the rest of the way.
     cur = next;
+    slide = 0;
+    if (!overview()) focusTop();
+    normalizeWorkspaces();
     render();
-    requestAnimationFrame(() => {
-      document.body.classList.remove("live");
-      slide = 0;
-      if (!overview()) focusTop();
-      normalizeWorkspaces();
-      render();
-    });
-  } else render();
+  } else { view = overviewTarget; slide = 0; render(); }
 }
 
 // ---------------------------------------------------------------- the OSD
