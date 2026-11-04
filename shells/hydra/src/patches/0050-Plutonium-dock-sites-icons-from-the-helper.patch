@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 09:12:33 +1300
-Subject: [PATCH 50/53] Plutonium: dock sites' icons from the helper
+Subject: [PATCH 50/54] Plutonium: dock sites' icons from the helper
 
 A site's /favicon.ico can't always be shown from the page: some sites
 forbid other origins it (claude.ai's Cross-Origin-Resource-Policy:

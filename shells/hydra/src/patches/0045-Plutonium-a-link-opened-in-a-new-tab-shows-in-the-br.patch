@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Fri, 30 Oct 2026 18:59:53 +1300
-Subject: [PATCH 45/53] Plutonium: a link opened in a new tab shows in the
+Subject: [PATCH 45/54] Plutonium: a link opened in a new tab shows in the
  browser panel
 
 The shell hands Hydra a link's new tab while it is still blank, so its
