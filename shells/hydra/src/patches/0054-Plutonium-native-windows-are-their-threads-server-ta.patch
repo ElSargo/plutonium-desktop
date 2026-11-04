@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Wed, 4 Nov 2026 14:48:07 +1300
-Subject: [PATCH 54/55] Plutonium: native windows are their threads' server
+Subject: [PATCH 54/56] Plutonium: native windows are their threads' server
  tabs
 
 The Apps panel's window stream is Plutonium's own, so only Hydra's web app

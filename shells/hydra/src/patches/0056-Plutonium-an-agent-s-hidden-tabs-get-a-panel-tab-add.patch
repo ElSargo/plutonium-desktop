@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Wed, 4 Nov 2026 17:57:01 +1300
+Subject: [PATCH 56/56] Plutonium: an agent's hidden tabs get a panel tab,
+ added in the background
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/ChatView.tsx | 10 +++++++++-
+ apps/web/src/rightPanelStore.test.ts | 26 +++++++++++++++++++++++---
+ apps/web/src/rightPanelStore.ts      | 18 +++++++++++++-----
+ 3 files changed, 45 insertions(+), 9 deletions(-)
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index f7f9fbea21..ef8756ab8c 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -5526,7 +5526,13 @@ export default function ChatView(props: ChatViewProps) {
+       );
+       if (surface && requested?.force === true) {
+         useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
+-      } else if (!surface) {
++      } else if (
++        // Plutonium: a hidden tab already has its background tab; it floats
++        // unless the open panel shows it.
++        !surface ||
++        !rightPanelState.isOpen ||
++        rightPanelState.activeSurfaceId !== surface.id
++      ) {
+         usePreviewMiniPlayerStore
+           .getState()
+           .open(activeThreadRef, browserMiniPlayerSource(session.tabId));
+@@ -5538,6 +5544,8 @@ export default function ChatView(props: ChatViewProps) {
+     activePreviewState.sessions,
+     activeThreadRef,
+     autoShowFloatingPreview,
++    rightPanelState.activeSurfaceId,
++    rightPanelState.isOpen,
+     rightPanelState.surfaces,
+   ]);
+   // The floating preview follows the tab the agent drives: the agent's cursor
+diff --git a/apps/web/src/rightPanelStore.test.ts b/apps/web/src/rightPanelStore.test.ts
+index 961a4a178d..8c5b4d8036 100644
+--- a/apps/web/src/rightPanelStore.test.ts
++++ b/apps/web/src/rightPanelStore.test.ts
+@@ -1178,15 +1178,19 @@ describe("rightPanelStore", () => {
+     });
+   });
+ 
+-  it("does not replace a stale surface with a hidden tab, but preserves explicit opens", () => {
++  it("gives hidden tabs a background tab, preferring shown surfaces when the active one goes", () => {
+     const store = useRightPanelStore.getState();
++    store.openTerminal(refA, "term-1");
+     store.openBrowser(refA, "stale-tab");
+     store.reconcileBrowserSurfaces(refA, ["hidden-tab"], new Set(["hidden-tab"]));
+     expect(
+       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+     ).toMatchObject({
+-      activeSurfaceId: null,
+-      surfaces: [],
++      activeSurfaceId: "terminal:term-1",
++      surfaces: [
++        { id: "terminal:term-1", kind: "terminal" },
++        { id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" },
++      ],
+     });
+ 
+     store.openBrowser(refA, "hidden-tab");
+@@ -1199,6 +1203,22 @@ describe("rightPanelStore", () => {
+       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+     ).toMatchObject({
+       isOpen: true,
++      activeSurfaceId: "browser:hidden-tab",
++      surfaces: [
++        { id: "terminal:term-1", kind: "terminal" },
++        { id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" },
++        { id: "browser:other-tab", kind: "preview", resourceId: "other-tab" },
++      ],
++    });
++  });
++
++  it("shows a hidden tab when it is all that is left", () => {
++    const store = useRightPanelStore.getState();
++    store.openBrowser(refA, "stale-tab");
++    store.reconcileBrowserSurfaces(refA, ["hidden-tab"], new Set(["hidden-tab"]));
++    expect(
++      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
++    ).toMatchObject({
+       activeSurfaceId: "browser:hidden-tab",
+       surfaces: [{ id: "browser:hidden-tab", kind: "preview", resourceId: "hidden-tab" }],
+     });
+diff --git a/apps/web/src/rightPanelStore.ts b/apps/web/src/rightPanelStore.ts
+index 301fe604a3..662491c7a7 100644
+--- a/apps/web/src/rightPanelStore.ts
++++ b/apps/web/src/rightPanelStore.ts
+@@ -971,20 +971,28 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
+                 (surface.id !== "browser:new" && validIds.has(surface.id)),
+             );
+             const knownIds = new Set(kept.map((surface) => surface.id));
++            // Plutonium: hidden tabs (an agent's background tabs and its popups)
++            // get a tab too, in the background: the floating preview that may
++            // show one isn't kept, so after a reload nothing else would.
+             const added = tabIds
+-              .filter((tabId) => !knownIds.has(`browser:${tabId}`) && !hiddenTabIds?.has(tabId))
++              .filter((tabId) => !knownIds.has(`browser:${tabId}`))
+               .map((tabId) => browserSurface(tabId));
+             const surfaces = [...kept, ...added];
+             const activeStillExists = surfaces.some(
+               (surface) => surface.id === current.activeSurfaceId,
+             );
+-            const fallbackBrowser = surfaces.find((surface) => surface.kind === "preview");
++            const shown = surfaces.filter(
++              (surface) =>
++                surface.kind !== "preview" ||
++                !surface.resourceId ||
++                !hiddenTabIds?.has(surface.resourceId),
++            );
++            const fallback =
++              shown.find((surface) => surface.kind === "preview") ?? shown[0] ?? surfaces[0];
+             return {
+               ...current,
+               surfaces,
+-              activeSurfaceId: activeStillExists
+-                ? current.activeSurfaceId
+-                : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null),
++              activeSurfaceId: activeStillExists ? current.activeSurfaceId : (fallback?.id ?? null),
+             };
+           }),
+         ),
