@@ -18,13 +18,13 @@ and the parts in these files of:
 - the hardware keys go to the helper's desktop services; the browser's media session in the Plutonium domain
 - touchpad swipes with three fingers or more go to the shell page
 ---
- .../accelerator_controller_impl.cc            | 133 ++++++++++++++++++
+ .../accelerator_controller_impl.cc            | 133 +++++++++++++++++
  .../accelerator_controller_impl.h             |  13 ++
  .../clipboard_history_controller_impl.cc      |   9 ++
  ash/clipboard/clipboard_nudge_controller.cc   |   9 ++
  .../display_configuration_controller.cc       |   6 +-
- ash/drag_drop/drag_drop_controller.cc         |  21 +++
- ash/drag_drop/drag_drop_controller.h          |  10 ++
+ ash/drag_drop/drag_drop_controller.cc         | 137 ++++++++++++++++++
+ ash/drag_drop/drag_drop_controller.h          |  23 +++
  ash/shell.cc                                  |   5 +-
  .../toast/anchored_nudge_manager_impl.cc      |  11 ++
  ash/system/toast/toast_manager_impl.cc        |  14 ++
@@ -39,7 +39,7 @@ and the parts in these files of:
  ui/wm/core/compound_event_filter.cc           |   2 +
  ui/wm/core/compound_event_filter.h            |   6 +
  ui/wm/core/focus_controller.cc                |   5 +
- 21 files changed, 324 insertions(+), 6 deletions(-)
+ 21 files changed, 453 insertions(+), 6 deletions(-)
 
 diff --git a/ash/accelerators/accelerator_controller_impl.cc b/ash/accelerators/accelerator_controller_impl.cc
 index 5497f10e39..5ca7196375 100644
@@ -337,10 +337,18 @@ index f010b52a70..b5d2621f1a 100644
    }
    if (!g_disable_animator_for_test)
 diff --git a/ash/drag_drop/drag_drop_controller.cc b/ash/drag_drop/drag_drop_controller.cc
-index adfc2ad520..8bb22b5f65 100644
+index adfc2ad520..2cf0d86f3f 100644
 --- a/ash/drag_drop/drag_drop_controller.cc
 +++ b/ash/drag_drop/drag_drop_controller.cc
-@@ -14,6 +14,7 @@
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <memory>
++#include <tuple>
+ #include <utility>
+ 
+ #include "ash/drag_drop/drag_image_view.h"
+@@ -14,6 +15,7 @@
  #include "ash/wm/toplevel_window_event_handler.h"
  #include "ash/wm/window_util.h"
  #include "base/functional/bind.h"
@@ -348,7 +356,19 @@ index adfc2ad520..8bb22b5f65 100644
  #include "base/run_loop.h"
  #include "base/task/single_thread_task_runner.h"
  #include "base/threading/hang_watcher.h"
-@@ -143,6 +144,18 @@ bool DragDropController::IsDragDropCompleted() {
+@@ -32,7 +34,11 @@
+ #include "ui/base/dragdrop/os_exchange_data_provider.h"
+ #include "ui/base/hit_test.h"
+ #include "ui/display/manager/display_manager.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/display/screen.h"
++#include "ui/events/base_event_utils.h"
+ #include "ui/events/event.h"
++#include "ui/events/event_sink.h"
+ #include "ui/events/event_utils.h"
+ #include "ui/gfx/animation/animation_delegate_notifier.h"
+ #include "ui/gfx/animation/linear_animation.h"
+@@ -143,6 +149,29 @@ bool DragDropController::IsDragDropCompleted() {
    return drag_drop_completed_;
  }
  
@@ -364,10 +384,133 @@ index adfc2ad520..8bb22b5f65 100644
 +  GetTargetOverride() = std::move(target_override);
 +}
 +
++namespace {
++bool g_next_drag_sticky = false;
++constexpr int kStickyStep = 16;
++constexpr int kStickyBigStep = 96;
++}  // namespace
++
++// static
++void DragDropController::SetNextDragSticky() {
++  g_next_drag_sticky = true;
++}
++
  DragOperation DragDropController::StartDragAndDrop(
      std::unique_ptr<ui::OSExchangeData> data,
      aura::Window* root_window,
-@@ -397,6 +410,14 @@ void DragDropController::OnMouseEvent(ui::MouseEvent* event) {
+@@ -150,6 +179,7 @@ DragOperation DragDropController::StartDragAndDrop(
+     const gfx::Point& screen_location,
+     int allowed_operations,
+     ui::mojom::DragEventSource source) {
++  const bool sticky = std::exchange(g_next_drag_sticky, false);
+   if (!enabled_ || IsDragDropInProgress())
+     return DragOperation::kNone;
+ 
+@@ -207,6 +237,7 @@ DragOperation DragDropController::StartDragAndDrop(
+     drag_source_window_->AddObserver(this);
+ 
+   drag_drop_completed_ = false;
++  sticky_ = sticky && source == ui::mojom::DragEventSource::kMouse;
+   drag_data_ = std::move(data);
+   allowed_operations_ = allowed_operations;
+   current_drag_info_ = aura::client::DragUpdateInfo();
+@@ -251,6 +282,13 @@ DragOperation DragDropController::StartDragAndDrop(
+   if (touch_capture_attempted && !capture_delegate_) {
+     Cleanup();
+   } else {
++    // A sticky drag shows at once, with no move needed to start it.
++    if (sticky_) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&DragDropController::StickyMove,
++                                    weak_factory_.GetWeakPtr(),
++                                    gfx::Vector2d()));
++    }
+     if (test_loop_closure_) {
+       while (!quit_closure_.is_null())
+         test_loop_closure_.Run();
+@@ -369,7 +407,81 @@ void DragDropController::OnKeyEvent(ui::KeyEvent* event) {
+   if (IsDragDropInProgress() && event->key_code() == ui::VKEY_ESCAPE) {
+     DragCancel();
+     event->StopPropagation();
++    return;
++  }
++  if (!IsDragDropInProgress() || !sticky_) {
++    return;
++  }
++  // The keyboard is the drag's while it rides on the pointer.
++  event->StopPropagation();
++  if (event->type() != ui::EventType::kKeyPressed) {
++    return;
++  }
++  const int step = event->IsShiftDown() ? kStickyBigStep : kStickyStep;
++  gfx::Vector2d delta;
++  switch (event->key_code()) {
++    case ui::VKEY_H:
++    case ui::VKEY_LEFT:
++      delta.set_x(-step);
++      break;
++    case ui::VKEY_L:
++    case ui::VKEY_RIGHT:
++      delta.set_x(step);
++      break;
++    case ui::VKEY_K:
++    case ui::VKEY_UP:
++      delta.set_y(-step);
++      break;
++    case ui::VKEY_J:
++    case ui::VKEY_DOWN:
++      delta.set_y(step);
++      break;
++    case ui::VKEY_RETURN:
++    case ui::VKEY_SPACE:
++      // Not from inside this event's dispatch.
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&DragDropController::StickyDrop,
++                                    weak_factory_.GetWeakPtr()));
++      return;
++    default:
++      return;
+   }
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&DragDropController::StickyMove,
++                                weak_factory_.GetWeakPtr(), delta));
++}
++
++void DragDropController::StickyMove(gfx::Vector2d delta) {
++  if (!IsDragDropInProgress() || !sticky_) {
++    return;
++  }
++  const gfx::Point point =
++      display::Screen::Get()->GetCursorScreenPoint() + delta;
++  aura::Window* root = window_util::GetRootWindowAt(point);
++  gfx::Point in_root = point;
++  wm::ConvertPointFromScreen(root, &in_root);
++  root->MoveCursorTo(in_root);
++  SendStickyMouseEvent(ui::EventType::kMouseMoved, ui::EF_NONE);
++}
++
++void DragDropController::StickyDrop() {
++  if (!IsDragDropInProgress() || !sticky_) {
++    return;
++  }
++  SendStickyMouseEvent(ui::EventType::kMousePressed, ui::EF_LEFT_MOUSE_BUTTON);
++}
++
++void DragDropController::SendStickyMouseEvent(ui::EventType type, int flags) {
++  const gfx::Point point = display::Screen::Get()->GetCursorScreenPoint();
++  aura::Window* root = window_util::GetRootWindowAt(point);
++  gfx::Point in_root = point;
++  wm::ConvertPointFromScreen(root, &in_root);
++  // An event from the source is in the host's pixels.
++  gfx::Point in_host = root->GetHost()->GetRootTransform().MapPoint(in_root);
++  ui::MouseEvent event(type, in_host, in_host, ui::EventTimeForNow(), flags,
++                       flags);
++  // The controller is a pre-target handler: it sees this as any mouse event.
++  std::ignore = root->GetHost()->GetEventSink()->OnEventFromSource(&event);
+ }
+ 
+ void DragDropController::OnMouseEvent(ui::MouseEvent* event) {
+@@ -397,11 +509,36 @@ void DragDropController::OnMouseEvent(ui::MouseEvent* event) {
    }
  
    auto translated_event = ConvertEvent(translated_target, *event);
@@ -380,10 +523,32 @@ index adfc2ad520..8bb22b5f65 100644
 +    }
 +  }
    switch (translated_event->type()) {
++    case ui::EventType::kMouseMoved:
++      if (sticky_) {
++        DragUpdate(translated_target, *translated_event.get());
++      }
++      break;
++    case ui::EventType::kMousePressed:
++      // On the press: nothing needs to come after it, and a click's own
++      // release may sit in the host's queue until the next event.
++      if (sticky_) {
++        Drop(translated_target, *translated_event.get());
++      }
++      break;
      case ui::EventType::kMouseDragged:
        DragUpdate(translated_target, *translated_event.get());
+       break;
+     case ui::EventType::kMouseReleased:
++      // A sticky drag ends with a press: this is the end of a click from
++      // before it.
++      if (sticky_) {
++        break;
++      }
+       Drop(translated_target, *translated_event.get());
+       break;
+     default:
 diff --git a/ash/drag_drop/drag_drop_controller.h b/ash/drag_drop/drag_drop_controller.h
-index 007153440f..1393278fcc 100644
+index 007153440f..f98cde1445 100644
 --- a/ash/drag_drop/drag_drop_controller.h
 +++ b/ash/drag_drop/drag_drop_controller.h
 @@ -25,6 +25,7 @@
@@ -394,7 +559,7 @@ index 007153440f..1393278fcc 100644
  #include "ui/gfx/geometry/rect.h"
  #include "ui/views/widget/unique_widget_ptr.h"
  
-@@ -47,6 +48,15 @@ class ASH_EXPORT DragDropController : public aura::client::DragDropClient,
+@@ -47,6 +48,20 @@ class ASH_EXPORT DragDropController : public aura::client::DragDropClient,
   public:
    DragDropController();
  
@@ -406,10 +571,32 @@ index 007153440f..1393278fcc 100644
 +      base::RepeatingCallback<aura::Window*(aura::Window* target,
 +                                            gfx::PointF* location_in_target)>;
 +  static void SetTargetOverride(TargetOverride target_override);
++  // PLUTONIUM: the next mouse drag is sticky, for a drag started with no
++  // button held (a keyboard pick): the pointer's plain moves carry it, a click
++  // drops it, and the keyboard moves the pointer (hjkl and the arrows, Shift
++  // for bigger steps), drops it (Enter, Space) or cancels it (Escape).
++  static void SetNextDragSticky();
 +
    DragDropController(const DragDropController&) = delete;
    DragDropController& operator=(const DragDropController&) = delete;
  
+@@ -170,8 +185,16 @@ class ASH_EXPORT DragDropController : public aura::client::DragDropClient,
+ 
+   void CancelIfInProgress();
+ 
++  // PLUTONIUM: moves the pointer by a key's step, or drops at the pointer, as
++  // the mouse would (StartDragAndDrop's sticky drags).
++  void StickyMove(gfx::Vector2d delta);
++  void StickyDrop();
++  void SendStickyMouseEvent(ui::EventType type, int flags);
++
+   bool enabled_ = false;
+   bool drag_drop_completed_ = true;
++  // PLUTONIUM: see SetNextDragSticky().
++  bool sticky_ = false;
+   std::unique_ptr<views::Widget> drag_image_widget_;
+   gfx::Vector2d drag_image_offset_;
+   std::unique_ptr<ui::OSExchangeData> drag_data_;
 diff --git a/ash/shell.cc b/ash/shell.cc
 index fb2b6030be..c7f787ab3f 100644
 --- a/ash/shell.cc

@@ -3,7 +3,7 @@
 // and the paths it gives are the ones Ash opens: Ash on the host, or a
 // container that mounts the user's home at the same path.
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,8 @@ export interface FileEntry {
   readonly modified: number;
   /** A dot file. */
   readonly hidden: boolean;
+  /** A symbolic link (`kind` is what it points at). */
+  readonly link?: boolean;
 }
 
 export interface DirectoryListing {
@@ -75,7 +77,7 @@ export async function listDirectory(dir: string, { hidden = false } = {}): Promi
         const path = join(dir, name);
         try {
           // Follows links: a link to a folder opens like a folder.
-          const info = await stat(path);
+          const [info, own] = await Promise.all([stat(path), lstat(path)]);
           return {
             name,
             path,
@@ -83,6 +85,7 @@ export async function listDirectory(dir: string, { hidden = false } = {}): Promi
             size: info.isDirectory() ? 0 : info.size,
             modified: info.mtimeMs,
             hidden: name.startsWith("."),
+            ...(own.isSymbolicLink() ? { link: true } : {}),
           };
         } catch {
           // A dangling link, or gone meanwhile.

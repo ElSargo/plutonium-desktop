@@ -40,6 +40,7 @@ Everything it starts is in the thread `niri:desktop`. The full list of binds is 
 - Alt+1…9 and Ctrl+Tab move between panel tabs.
 - Ctrl+T opens a browser tab.
 - Super+Space opens the app launcher.
+- Ctrl+E (Super+E from a tab or app) opens the file manager, with Yazi's keys (`~` lists them). Super+O picks up a file with no mouse: choose it, steer it with `hjkl`, drop it with Enter ([features/FILE_MANAGER.md](features/FILE_MANAGER.md)).
 
 ## Threads, apps and links
 

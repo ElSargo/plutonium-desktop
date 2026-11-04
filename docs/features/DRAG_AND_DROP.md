@@ -35,6 +35,10 @@ Pointer positions were read from the clients' `WAYLAND_DEBUG` logs. `tools/uinpu
 
 **Not tried yet:** a link from a tab to Firefox or a file manager, files from a tab or page to an app, drag images and cursors during a drag, touch drags, drops onto the shell page itself (it gets them as before, from the same path), and Exo's unit tests (`exo_unittests` may expect the old drop-without-accept behaviour).
 
+## Files from pages, and drags with no mouse
+
+A shell page can drag real host files, and start a drag with no button held (`FILE_MANAGER.md`, "Drag and drop"): `File`s from `fileForPath()` in a drag's `dataTransfer`, and Ash's sticky drags (`DragDropController::SetNextDragSticky()`). Files from a page to an app are verified there, with Dolphin.
+
 ## Not done
 
 - **Clipboard.** It is a separate path (`wl_data_device.set_selection`) and is untested between apps and pages.

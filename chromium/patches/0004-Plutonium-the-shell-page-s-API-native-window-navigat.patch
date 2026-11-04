@@ -41,7 +41,7 @@ and the parts in these files of:
 ---
  third_party/blink/public/mojom/BUILD.gn       |   16 +
  .../mojom/native_window/native_window.mojom   |  113 ++
- .../mojom/native_window/window_broker.mojom   |  496 ++++++
+ .../mojom/native_window/window_broker.mojom   |  506 ++++++
  third_party/blink/public/web/web_plugin.h     |    4 +
  .../blink/public/web/web_plugin_container.h   |    8 +
  .../renderer/bindings/generated_in_core.gni   |   32 +
@@ -79,9 +79,9 @@ and the parts in these files of:
  .../renderer/core/html/html_tag_names.json5   |    4 +
  .../blink/renderer/core/html/item_group.idl   |   12 +
  .../core/html/native_display_entry.idl        |   32 +
- .../core/html/native_window_broker.cc         | 1409 +++++++++++++++++
- .../renderer/core/html/native_window_broker.h |  332 ++++
- .../core/html/native_window_broker.idl        |  226 +++
+ .../core/html/native_window_broker.cc         | 1453 +++++++++++++++++
+ .../renderer/core/html/native_window_broker.h |  340 ++++
+ .../core/html/native_window_broker.idl        |  241 +++
  .../core/html/native_window_entry.idl         |   29 +
  .../renderer/core/html/native_window_event.cc |   56 +
  .../renderer/core/html/native_window_event.h  |   51 +
@@ -108,7 +108,7 @@ and the parts in these files of:
  .../graphics/compositing/pending_layer.cc     |   21 +-
  .../platform/runtime_enabled_features.json5   |   11 +
  .../widget/compositing/layer_tree_view.cc     |   15 +-
- 69 files changed, 5333 insertions(+), 8 deletions(-)
+ 69 files changed, 5410 insertions(+), 8 deletions(-)
  create mode 100644 third_party/blink/public/mojom/native_window/native_window.mojom
  create mode 100644 third_party/blink/public/mojom/native_window/window_broker.mojom
  create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
@@ -298,10 +298,10 @@ index 0000000000..03343e0e85
 +const int32 kResizeEdgeMargin = 8;
 diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
 new file mode 100644
-index 0000000000..bd08d8aa63
+index 0000000000..19aa78c01f
 --- /dev/null
 +++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,506 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -757,6 +757,16 @@ index 0000000000..bd08d8aa63
 +  // form depends on the kind). False if there is no such open request, or
 +  // the kind doesn't take that answer.
 +  AnswerTabRequest(int32 id, string answer_json) => (bool ok);
++  // EXO-FILES (docs/features/FILE_MANAGER.md): lets this document's renderer
++  // read |paths|, so File objects for them can be dragged or attached.
++  GrantFileAccess(array<string> paths);
++  // Starts a drag of the host files |paths| at the pointer, with no button
++  // held: the file rides on the pointer until a click or Enter drops it, or
++  // Escape cancels; hjkl and the arrows move the pointer. |image_png_base64|
++  // is the drag image, if any. |operation| is "copy", "move", "link" or
++  // "none", once it is over.
++  StartFileDrag(array<string> paths, string image_png_base64)
++      => (string operation);
 +  // EXO-TAB-PERMISSIONS: the threads' permission decisions (TAB_FEATURES.md,
 +  // "Grants and threads"): "list" {thread?, origin?}, "revoke" {thread,
 +  // origin?, permission?} (a thread archived or deleted: {thread}).
@@ -3231,10 +3241,10 @@ index 0000000000..8efe478a61
 +};
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
 new file mode 100644
-index 0000000000..8bd9a9fe0a
+index 0000000000..0bcde6c7d2
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.cc
-@@ -0,0 +1,1409 @@
+@@ -0,0 +1,1453 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3256,6 +3266,7 @@ index 0000000000..8bd9a9fe0a
 +#include "third_party/blink/renderer/core/dom/events/event.h"
 +#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 +#include "third_party/blink/renderer/core/fileapi/blob.h"
++#include "third_party/blink/renderer/core/fileapi/file.h"
 +#include "third_party/blink/renderer/core/frame/local_dom_window.h"
 +#include "third_party/blink/renderer/core/frame/local_frame.h"
 +#include "third_party/blink/renderer/core/html/browser_download_event.h"
@@ -3612,6 +3623,49 @@ index 0000000000..8bd9a9fe0a
 +              return;
 +            }
 +            resolver->Resolve(result);
++          },
++          WrapPersistent(this), WrapPersistent(resolver)));
++  return promise;
++}
++
++void NativeWindowBroker::focusPage(ExecutionContext* context) {
++  if (auto* window = DynamicTo<LocalDOMWindow>(context)) {
++    if (LocalFrame* frame = window->GetFrame()) {
++      frame->DidFocus();
++    }
++  }
++}
++
++File* NativeWindowBroker::fileForPath(ExecutionContext* context,
++                                      const String& path) {
++  if (BindRemote()) {
++    remote_->GrantFileAccess({path});
++  }
++  return File::CreateForUserProvidedFile(context, path, String());
++}
++
++String NativeWindowBroker::pathForFile(File* file) {
++  return file && file->HasBackingFile() ? file->GetPath() : String("");
++}
++
++ScriptPromise<IDLString> NativeWindowBroker::startFileDrag(
++    ScriptState* script_state,
++    const Vector<String>& paths,
++    const String& image_png_base64) {
++  auto* resolver =
++      MakeGarbageCollected<ScriptPromiseResolver<IDLString>>(script_state);
++  auto promise = resolver->Promise();
++  if (!EnsureBound(resolver)) {
++    return promise;
++  }
++  remote_->StartFileDrag(
++      paths, image_png_base64,
++      BindOnce(
++          [](NativeWindowBroker* self,
++             ScriptPromiseResolver<IDLString>* resolver,
++             const String& operation) {
++            self->pending_.erase(resolver);
++            resolver->Resolve(operation);
 +          },
 +          WrapPersistent(this), WrapPersistent(resolver)));
 +  return promise;
@@ -4646,10 +4700,10 @@ index 0000000000..8bd9a9fe0a
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
 new file mode 100644
-index 0000000000..8bb97414a0
+index 0000000000..7180fef49c
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.h
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,340 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4677,6 +4731,8 @@ index 0000000000..8bb97414a0
 +#include "third_party/blink/renderer/platform/wtf/hash_set.h"
 +
 +namespace blink {
++
++class File;
 +
 +class Blob;
 +class BrowserTabEntry;
@@ -4781,6 +4837,12 @@ index 0000000000..8bb97414a0
 +  void closeContextMenu(int32_t menu_id, int32_t item_id);
 +
 +  // EXO-TAB-FEATURES:
++  void focusPage(ExecutionContext*);
++  File* fileForPath(ExecutionContext*, const String& path);
++  String pathForFile(File* file);
++  ScriptPromise<IDLString> startFileDrag(ScriptState*,
++                                         const Vector<String>& paths,
++                                         const String& image_png_base64);
 +  ScriptPromise<IDLBoolean> answerTabRequest(ScriptState*,
 +                                             int32_t request_id,
 +                                             const String& answer_json);
@@ -4984,10 +5046,10 @@ index 0000000000..8bb97414a0
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_NATIVE_WINDOW_BROKER_H_
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.idl b/third_party/blink/renderer/core/html/native_window_broker.idl
 new file mode 100644
-index 0000000000..eb604703a1
+index 0000000000..c9181b6b7b
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.idl
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,241 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5158,6 +5220,21 @@ index 0000000000..eb604703a1
 +    // there is no such open request, or the kind refuses the answer.
 +    [CallWith=ScriptState] Promise<boolean> answerTabRequest(
 +        long requestId, optional DOMString answerJson = "");
++    // EXO-FILES: takes the keyboard from a tab or window this page embeds, for
++    // this page. element.focus() alone doesn't: the page's frame was focused
++    // all along, so the browser hears nothing and keys still go to the tab.
++    [CallWith=ExecutionContext] undefined focusPage();
++    // EXO-FILES (docs/features/FILE_MANAGER.md): a File for the host file
++    // |path| (this document may read it, drag it, or attach it to an input),
++    // and the path of a File that has one (a drop's, say), else "".
++    [CallWith=ExecutionContext] File fileForPath(DOMString path);
++    DOMString pathForFile(File file);
++    // Starts a drag of the host files |paths| with no button held: it rides
++    // on the pointer until a click or Enter drops it, or Escape cancels; hjkl
++    // and the arrows move the pointer. |imagePngBase64| is its drag image.
++    // Resolves with "copy", "move", "link" or "none" once it is over.
++    [CallWith=ScriptState] Promise<DOMString> startFileDrag(
++        sequence<DOMString> paths, optional DOMString imagePngBase64 = "");
 +    // EXO-TAB-PERMISSIONS: the threads' permission decisions: "list"
 +    // {thread?, origin?}, "revoke" {thread, origin?, permission?}. Resolves
 +    // with the result as JSON; rejects (OperationError) if it failed.

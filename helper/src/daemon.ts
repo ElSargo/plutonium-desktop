@@ -20,7 +20,8 @@
 //   in /proc/net/tcp) whose Origin is the shell origin get past the library
 //   download.
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -49,6 +50,7 @@ import {
   type NativeWindowEntry,
 } from "./relay.ts";
 import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
+import { fileIndex, type FileJobRequest, FileJobs, makeFile, previewText, rawFile, renamePath, uploadTarget, watchFolder } from "./fileOps.ts";
 import { comboKeys, commitRuns, typingRuns } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
@@ -382,6 +384,7 @@ export class Daemon {
   );
   readonly apps = new DesktopApps();
   readonly siteIcons = new SiteIcons();
+  readonly fileJobs = new FileJobs();
   /** EXO-LOCK: the lock screen and idle (services/session.ts). */
   readonly session: SessionService;
   readonly terminals: Terminals;
@@ -2155,6 +2158,66 @@ export class Daemon {
         if (method === "POST" && path === "/v1/files/folder") {
           const { path: folder } = await readJson(request);
           return sendJson(response, 200, await makeFolder(typeof folder === "string" ? folder : ""));
+        }
+        // The file manager (FILE_MANAGER.md): only a shell page gets this far.
+        if (method === "POST" && path === "/v1/files/file") {
+          const { path: file } = await readJson(request);
+          return sendJson(response, 200, await makeFile(file));
+        }
+        if (method === "POST" && path === "/v1/files/rename") {
+          const { path: from, name } = await readJson(request);
+          return sendJson(response, 200, await renamePath(from, name));
+        }
+        if (method === "POST" && path === "/v1/files/jobs") {
+          return sendJson(response, 200, this.fileJobs.start((await readJson(request)) as unknown as FileJobRequest));
+        }
+        if (method === "GET" && path === "/v1/files/jobs") {
+          return sendJson(response, 200, { jobs: this.fileJobs.list() });
+        }
+        const job = path.match(/^\/v1\/files\/jobs\/(\d+)(\/cancel)?$/);
+        if (job) {
+          const id = Number(job[1]);
+          if (method === "POST" && job[2]) return sendJson(response, 200, { cancelled: this.fileJobs.cancel(id) });
+          const found = method === "GET" && !job[2] ? this.fileJobs.get(id) : undefined;
+          if (!found) throw new HttpError(404, "No such job.");
+          return sendJson(response, 200, found);
+        }
+        if (method === "GET" && path === "/v1/files/index") {
+          const hidden = url.searchParams.get("hidden") === "1";
+          return sendJson(response, 200, await fileIndex(url.searchParams.get("dir"), { hidden }));
+        }
+        if (method === "GET" && path === "/v1/files/preview") {
+          return sendJson(response, 200, await previewText(url.searchParams.get("path")));
+        }
+        if (method === "GET" && path === "/v1/files/raw") {
+          const file = await rawFile(url.searchParams.get("path"), request.headers.range);
+          response.writeHead(file.partial ? 206 : 200, {
+            "Content-Type": file.contentType,
+            "Content-Length": file.size ? file.end - file.start + 1 : 0,
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
+            ...(file.partial ? { "Content-Range": `bytes ${file.start}-${file.end}/${file.size}` } : {}),
+          });
+          file.stream.pipe(response);
+          return;
+        }
+        if (method === "POST" && path === "/v1/files/open") {
+          const { path: file, thread, show } = await readJson(request);
+          if (typeof file !== "string") throw new HttpError(400, "path is required.");
+          await this.openDownload(file, typeof thread === "string" ? thread : "", show === true);
+          return sendJson(response, 200, {});
+        }
+        if (method === "POST" && path === "/v1/files/upload") {
+          const target = await uploadTarget(url.searchParams.get("dir"), url.searchParams.get("name"));
+          await pipeline(request, createWriteStream(target, { flags: "wx" }));
+          return sendJson(response, 200, { path: target });
+        }
+        if (method === "GET" && path === "/v1/files/watch") {
+          const stop = watchFolder(url.searchParams.get("dir"), () => response.write("data: changed\n\n"));
+          response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+          response.write(": watching\n\n");
+          request.on("close", stop);
+          return;
         }
       } catch (error) {
         if (error instanceof FilesError) throw new HttpError(error.status, error.message);

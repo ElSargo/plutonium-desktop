@@ -194,6 +194,8 @@ Patches "tabs' permission prompts ask the shell" and "per-thread permission gran
 
 ## File pickers
 
+A shell page's own pickers (Hydra's attach button) ask the same way, as a request with tab id 0 and no pending state; before 2026-11-05 they went to the Files app's picker. Hydra's picker is its file manager: `FILE_MANAGER.md`.
+
 **Helpers.**
 - In the delegate, `RunFileChooser()` and `EnumerateDirectory()` call `FileSelectHelper` (`chrome/browser/file_select_helper.h`), as `BrowserWebContentsDelegate` does. Today the default delegate cancels every `<input type=file>`.
 - `FileSelectHelper` opens a `ui::SelectFileDialog` with a `ChromeSelectFilePolicy(web_contents)` (`chrome/browser/ui/select_file_policy/chrome_select_file_policy.h`). So do the File System Access pickers (`content/browser/file_system_access/file_system_chooser.cc`, `showOpenFilePicker`, `showSaveFilePicker`, `showDirectoryPicker`) and a download's Save As (`chrome/browser/download/download_file_picker.cc`).

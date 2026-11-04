@@ -64,21 +64,21 @@ and the parts in these files of:
  .../browser/chrome_content_browser_client.h   |    2 +
  ...ent_browser_client_navigation_throttles.cc |    3 +
  ...ontent_browser_client_receiver_bindings.cc |   14 +-
- chrome/browser/exo_embedder.cc                | 1026 ++++++++++++
+ chrome/browser/exo_embedder.cc                | 1026 +++++++++++
  chrome/browser/exo_embedder.h                 |   81 +
  chrome/browser/exo_parts.cc                   |    9 +
  chrome/browser/exo_parts.h                    |   13 +
  chrome/browser/exo_window_broker.cc           |  395 +++++
- chrome/browser/exo_window_broker.h            |  191 +++
+ chrome/browser/exo_window_broker.h            |  191 ++
  chrome/browser/exo_window_broker_unittest.cc  |  328 ++++
- chrome/browser/plutonium_agent.cc             |   95 ++
+ chrome/browser/plutonium_agent.cc             |   95 +
  chrome/browser/plutonium_agent.h              |   72 +
  chrome/browser/plutonium_groups.cc            |  237 +++
  chrome/browser/plutonium_groups.h             |  114 ++
  chrome/browser/plutonium_keys.cc              |  435 +++++
  chrome/browser/plutonium_keys.h               |   90 +
- chrome/browser/plutonium_shell.cc             | 1443 +++++++++++++++++
- chrome/browser/plutonium_shell.h              |  189 +++
+ chrome/browser/plutonium_shell.cc             | 1544 +++++++++++++++++
+ chrome/browser/plutonium_shell.h              |  189 ++
  chrome/browser/plutonium_shell_unittest.cc    |  528 ++++++
  chrome/browser/plutonium_shells.cc            |  110 ++
  chrome/browser/plutonium_shells.h             |  262 +++
@@ -91,7 +91,7 @@ and the parts in these files of:
  .../public/browser/content_browser_client.h   |    6 +
  content/public/common/content_switches.cc     |    2 +-
  content/public/common/content_switches.h      |    3 +-
- 33 files changed, 5910 insertions(+), 11 deletions(-)
+ 33 files changed, 6011 insertions(+), 11 deletions(-)
  create mode 100644 chrome/browser/exo_embedder.cc
  create mode 100644 chrome/browser/exo_embedder.h
  create mode 100644 chrome/browser/exo_window_broker.cc
@@ -3654,14 +3654,18 @@ index 0000000000..c5f59fc176
 +#endif  // CHROME_BROWSER_PLUTONIUM_KEYS_H_
 diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
 new file mode 100644
-index 0000000000..2f349fdeae
+index 0000000000..e0b0a50053
 --- /dev/null
 +++ b/chrome/browser/plutonium_shell.cc
-@@ -0,0 +1,1443 @@
+@@ -0,0 +1,1544 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
++#include "ash/drag_drop/drag_drop_controller.h"
++#include "base/base64.h"
++#include "base/files/file_path.h"
++#include "base/task/sequenced_task_runner.h"
 +#include "chrome/browser/plutonium_shell.h"
 +
 +#include <algorithm>
@@ -3696,11 +3700,13 @@ index 0000000000..2f349fdeae
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "components/exo/embedded_windows.h"
 +#include "components/surface_embed/browser/surface_embed_host.h"
++#include "content/public/browser/child_process_security_policy.h"
 +#include "content/public/browser/document_service.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/navigation_throttle.h"
 +#include "content/public/browser/navigation_throttle_registry.h"
 +#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
 +#include "content/public/browser/web_contents.h"
 +#include "mojo/public/cpp/bindings/associated_remote.h"
 +#include "mojo/public/cpp/bindings/callback_helpers.h"
@@ -3711,7 +3717,16 @@ index 0000000000..2f349fdeae
 +#include "third_party/blink/public/mojom/native_window/window_broker.mojom.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
 +#include "ui/display/types/display_constants.h"
++#include "ui/aura/client/drag_drop_client.h"
++#include "ui/aura/window.h"
++#include "ui/base/dragdrop/drag_drop_types.h"
++#include "ui/base/dragdrop/mojom/drag_drop_types.mojom.h"
++#include "ui/base/dragdrop/os_exchange_data.h"
++#include "ui/base/dragdrop/os_exchange_data_provider.h"
++#include "ui/base/clipboard/file_info.h"
++#include "ui/display/screen.h"
 +#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image_skia.h"
 +#include "url/gurl.h"
 +#include "url/url_constants.h"
 +
@@ -4419,6 +4434,92 @@ index 0000000000..2f349fdeae
 +        StillShell() &&
 +        PlutoniumTabRequests::Get()->Answer(
 +            request_id, PlutoniumTabRequests::From::kShell, id_, answer_json));
++  }
++
++  void GrantFileAccess(const std::vector<std::string>& paths) override {
++    if (!StillShell()) {
++      return;
++    }
++    auto* policy = content::ChildProcessSecurityPolicy::GetInstance();
++    const auto process = render_frame_host().GetProcess()->GetID();
++    for (const std::string& value : paths) {
++      base::FilePath path(value);
++      if (path.IsAbsolute() && !path.ReferencesParent()) {
++        policy->GrantReadFile(process, path);
++      }
++    }
++  }
++
++  void StartFileDrag(const std::vector<std::string>& paths,
++                     const std::string& image_png_base64,
++                     StartFileDragCallback callback) override {
++    std::vector<ui::FileInfo> files;
++    for (const std::string& value : paths) {
++      base::FilePath path(value);
++      if (!path.IsAbsolute() || path.ReferencesParent()) {
++        std::move(callback).Run("none");
++        return;
++      }
++      files.emplace_back(path, path.BaseName());
++    }
++    aura::Window* source = contents()->GetNativeView();
++    aura::Window* root = source ? source->GetRootWindow() : nullptr;
++    aura::client::DragDropClient* client =
++        root ? aura::client::GetDragDropClient(root) : nullptr;
++    if (!StillShell() || files.empty() || !client) {
++      std::move(callback).Run("none");
++      return;
++    }
++    auto data = std::make_unique<ui::OSExchangeData>();
++    data->SetFilenames(files);
++    std::string png;
++    if (base::Base64Decode(image_png_base64, &png)) {
++      SkBitmap bitmap = gfx::PNGCodec::Decode(base::as_byte_span(png));
++      if (!bitmap.isNull()) {
++        data->provider().SetDragImage(
++            gfx::ImageSkia::CreateFrom1xBitmap(bitmap),
++            gfx::Vector2d(bitmap.width() / 2, bitmap.height() / 2));
++      }
++    }
++    // Starting runs a nested loop until the drop, so it can't run from this
++    // message.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](base::WeakPtr<content::WebContents> contents,
++               std::unique_ptr<ui::OSExchangeData> data,
++               StartFileDragCallback callback) {
++              aura::Window* source =
++                  contents ? contents->GetNativeView() : nullptr;
++              aura::Window* root = source ? source->GetRootWindow() : nullptr;
++              auto* client =
++                  root ? aura::client::GetDragDropClient(root) : nullptr;
++              if (!client) {
++                std::move(callback).Run("none");
++                return;
++              }
++              ash::DragDropController::SetNextDragSticky();
++              const ui::mojom::DragOperation operation =
++                  client->StartDragAndDrop(
++                      std::move(data), root, source,
++                      display::Screen::Get()->GetCursorScreenPoint(),
++                      ui::DragDropTypes::DRAG_COPY |
++                          ui::DragDropTypes::DRAG_MOVE |
++                          ui::DragDropTypes::DRAG_LINK,
++                      ui::mojom::DragEventSource::kMouse);
++              const char* name = "none";
++              if (operation == ui::mojom::DragOperation::kCopy) {
++                name = "copy";
++              } else if (operation == ui::mojom::DragOperation::kMove) {
++                name = "move";
++              } else if (operation == ui::mojom::DragOperation::kLink) {
++                name = "link";
++              }
++              std::move(callback).Run(name);
++            },
++            contents()->GetWeakPtr(), std::move(data),
++            mojo::WrapCallbackWithDefaultInvokeIfNotRun(std::move(callback),
++                                                        "none")));
 +  }
 +
 +  void RunPermissionCommand(const std::string& command,
