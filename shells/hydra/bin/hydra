@@ -24,6 +24,9 @@ From a checkout of the source:
                            and apply src/patches on a branch plutonium
   build                    install its dependencies and build its web app
   export                   rewrite src/patches from T3CODE_DIR's commits since BASE
+  update [<tag>|--continue|--abort]
+                           move the patches to a T3 Code release (default: the newest
+                           stable vX.Y.Z), in a worktree of their own: hydra update --help
   live apply|revert|status a running server's web app, from another T3 Code checkout's
                            build, with no restart: hydra live --help
   bundle <dir>             its server, built for a release, into <dir> (plutonium bundle build)
@@ -175,8 +178,9 @@ t3_pair_url() {
     scopes=$(printf -- '--scope=%s ' $T3_ADMIN_SCOPES)
   else
     scopes=$(cd "$T3CODE_DIR" && "$NODE" --input-type=module -e '
-      const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
-      console.log(AuthAdministrativeScopes.map((scope) => `--scope=${scope}`).join(" "));
+      const auth = await import("./packages/contracts/src/auth.ts");
+      const scopes = auth.AuthAdministrativeScopes ?? auth.AuthStandardClientScopes;
+      console.log(scopes.map((scope) => `--scope=${scope}`).join(" "));
     ' 2> /dev/null) || die "couldn't read T3 Code's scopes"
   fi
   # shellcheck disable=SC2086 # one --scope=… per word
@@ -263,8 +267,8 @@ t3_bundle() {
     echo "T3_DATABASE=$(grep -o 'join(stateDir, "[a-z0-9]*\.sqlite")' apps/server/src/config.ts | head -1 | cut -d'"' -f2)"
     echo "T3_MIGRATION=$(find apps/server/src/persistence/Migrations -maxdepth 1 -name '[0-9]*' ! -name '*.test.ts' -printf '%f\n' | grep -o '^[0-9]*' | sort -n | tail -1)"
     echo "T3_ADMIN_SCOPES=\"$(node --input-type=module -e '
-      const { AuthAdministrativeScopes } = await import("./packages/contracts/src/auth.ts");
-      console.log(AuthAdministrativeScopes.join(" "));')\""
+      const auth = await import("./packages/contracts/src/auth.ts");
+      console.log((auth.AuthAdministrativeScopes ?? auth.AuthStandardClientScopes).join(" "));')\""
     echo "T3_VERSION=$(node -p 'require("./apps/server/package.json").version')"
   ) > "$out/hydra.env"
   printf 'HYDRA_T3_BASE=%s\nHYDRA_PATCHES=%s\n' "$base" "$patches" > "$out/BUILD"
@@ -436,6 +440,113 @@ live_cmd() {
   esac
 }
 
+# --- Updating T3 Code ---------------------------------------------------------
+# The series is rebased onto a release tag in a worktree of T3CODE_DIR, on a
+# branch plutonium-<tag>. Plutonium's history gets one commit per update (src/BASE
+# and src/patches), never T3 Code's commits; T3CODE_DIR's history has upstream's,
+# with the series on top.
+HYDRA_UPDATE_DIR=$DATA_DIR/hydra-update
+update_usage() {
+  cat <<EOF
+Usage: plutonium hydra update [<tag>]   rebase the patches onto T3 Code <tag> (default: the newest vX.Y.Z)
+       plutonium hydra update --continue  after resolving a conflict in the worktree, carry on
+       plutonium hydra update --abort     drop the update and its worktree
+
+The patches (src/BASE and src/patches, not T3CODE_DIR's branch) are applied in a worktree
+of T3CODE_DIR ($HYDRA_UPDATE_DIR), on a branch plutonium-<tag>, and rebased
+onto <tag> with rerere, so a conflict resolved once is not asked again. When the rebase
+is done, src/BASE and src/patches are rewritten and committed here as one commit, and
+T3CODE_DIR's branch plutonium moves to the new series (the old one stays as
+plutonium-<old tag>). Typecheck and test it (shells/hydra/README.md, "Updating T3 Code")
+before merging.
+EOF
+}
+update_tag_of() { git -C "$T3CODE_DIR" describe --tags --exact-match "$1" 2> /dev/null || echo "${1:0:10}"; }
+update_finish() {
+  local tag base old_base old_tag
+  [[ -z $(git -C "$HYDRA_UPDATE_DIR" status --porcelain --untracked-files=no) ]] ||
+    die "$HYDRA_UPDATE_DIR has uncommitted changes"
+  tag=$(git -C "$HYDRA_UPDATE_DIR" rev-parse --abbrev-ref HEAD)
+  tag=${tag#plutonium-}
+  base=$(git -C "$HYDRA_UPDATE_DIR" rev-parse "$tag^{commit}")
+  git -C "$HYDRA_UPDATE_DIR" merge-base --is-ancestor "$base" HEAD || die "the worktree's HEAD isn't on $tag"
+  old_base=$(cat "$HYDRA_SRC/BASE")
+  old_tag=$(update_tag_of "$old_base")
+  echo "$base" > "$HYDRA_SRC/BASE"
+  rm -f "$HYDRA_SRC"/patches/*.patch
+  git -C "$HYDRA_UPDATE_DIR" format-patch -q --zero-commit --no-signature -o "$HYDRA_SRC/patches" "$base"..HEAD
+  local count
+  count=$(find "$HYDRA_SRC/patches" -name '*.patch' | wc -l)
+  if [[ -n $(git -C "$ROOT" status --porcelain -- shells/hydra/src/BASE shells/hydra/src/patches) ]]; then
+    git -C "$ROOT" add -A -- shells/hydra/src/BASE shells/hydra/src/patches
+    git -C "$ROOT" commit -q -m "Hydra: T3 Code $tag (from $old_tag), $count patches" -- shells/hydra/src/BASE shells/hydra/src/patches
+    echo "committed in $ROOT: $(git -C "$ROOT" log -1 --format='%h %s')"
+  fi
+  # T3CODE_DIR's plutonium is the series; keep the old one by its base's tag.
+  local new old
+  new=$(git -C "$HYDRA_UPDATE_DIR" rev-parse HEAD)
+  old=$(git -C "$T3CODE_DIR" rev-parse -q --verify refs/heads/plutonium || true)
+  if [[ -n $old && $old != "$new" ]]; then
+    git -C "$T3CODE_DIR" branch -f "plutonium-$old_tag" "$old"
+    if [[ $(git -C "$T3CODE_DIR" rev-parse --abbrev-ref HEAD) == plutonium ]]; then
+      if [[ -z $(git -C "$T3CODE_DIR" status --porcelain --untracked-files=no) ]]; then
+        t3_unstamp_version
+        git -C "$T3CODE_DIR" checkout -q -B plutonium "$new"
+      else
+        echo "hydra: $T3CODE_DIR has uncommitted changes; its plutonium branch stays. Later: git -C $T3CODE_DIR checkout -B plutonium $new" >&2
+      fi
+    else
+      git -C "$T3CODE_DIR" branch -f plutonium "$new"
+    fi
+    echo "$T3CODE_DIR: plutonium is the $tag series; the $old_tag one is plutonium-$old_tag"
+  fi
+  git -C "$T3CODE_DIR" worktree remove "$HYDRA_UPDATE_DIR"
+  echo "Next: plutonium hydra build, then typecheck and test (shells/hydra/README.md, \"Updating T3 Code\")."
+}
+update_cmd() {
+  [[ -d $T3CODE_DIR/.git || -f $T3CODE_DIR/.git ]] || die "no T3 Code checkout at $T3CODE_DIR (plutonium hydra fetch)"
+  local arg=${1:-} tag base branch
+  case $arg in
+    -h|--help) update_usage; return ;;
+    --abort)
+      [[ -e $HYDRA_UPDATE_DIR ]] || die "no update in progress"
+      git -C "$HYDRA_UPDATE_DIR" rebase --abort 2> /dev/null || true
+      branch=$(git -C "$HYDRA_UPDATE_DIR" rev-parse --abbrev-ref HEAD)
+      git -C "$T3CODE_DIR" worktree remove --force "$HYDRA_UPDATE_DIR"
+      [[ $branch == plutonium-* ]] && git -C "$T3CODE_DIR" branch -D "$branch" > /dev/null
+      echo "update dropped"
+      return ;;
+    --continue)
+      [[ -e $HYDRA_UPDATE_DIR ]] || die "no update in progress (plutonium hydra update [<tag>])"
+      if [[ -d $(git -C "$HYDRA_UPDATE_DIR" rev-parse --git-path rebase-merge) ]]; then
+        GIT_EDITOR=true committer git -C "$HYDRA_UPDATE_DIR" -c merge.conflictStyle=zdiff3 rebase --continue ||
+          die "resolve the conflicts in $HYDRA_UPDATE_DIR (git add them), then plutonium hydra update --continue"
+      fi
+      update_finish
+      return ;;
+  esac
+  [[ ! -e $HYDRA_UPDATE_DIR ]] || die "an update is in progress in $HYDRA_UPDATE_DIR: --continue or --abort it"
+  [[ -z $(git -C "$ROOT" status --porcelain -- shells/hydra/src) ]] || die "commit or drop the changes to shells/hydra/src first"
+  git -C "$T3CODE_DIR" fetch -q --tags origin
+  tag=${arg:-$(git -C "$T3CODE_DIR" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)}
+  [[ -n $tag ]] || die "no release tag found in $T3CODE_DIR"
+  base=$(git -C "$T3CODE_DIR" rev-parse -q --verify "$tag^{commit}") || die "no $tag in $T3CODE_DIR"
+  [[ $base != "$(cat "$HYDRA_SRC/BASE")" ]] || { echo "already on $tag"; return; }
+  branch=plutonium-$tag
+  echo "T3 Code $(update_tag_of "$(cat "$HYDRA_SRC/BASE")") -> $tag: $(git -C "$T3CODE_DIR" rev-list --count "$(cat "$HYDRA_SRC/BASE")..$base") upstream commits; $(find "$HYDRA_SRC/patches" -name '*.patch' | wc -l) patches"
+  git -C "$T3CODE_DIR" worktree add -q -B "$branch" "$HYDRA_UPDATE_DIR" "$(cat "$HYDRA_SRC/BASE")"
+  committer git -C "$HYDRA_UPDATE_DIR" am -q --3way "$HYDRA_SRC"/patches/*.patch ||
+    die "the patches don't apply to src/BASE; fix that first (plutonium hydra update --abort)"
+  git -C "$HYDRA_UPDATE_DIR" config rerere.enabled true
+  if ! committer git -C "$HYDRA_UPDATE_DIR" -c merge.conflictStyle=zdiff3 rebase -q --onto "$base" "$(cat "$HYDRA_SRC/BASE")"; then
+    echo >&2
+    echo "hydra: conflicts. Resolve them in $HYDRA_UPDATE_DIR, git add them, then: plutonium hydra update --continue" >&2
+    echo "Each patch is one part of Hydra (shells/hydra/README.md, \"The patches\"); keep it to its files." >&2
+    exit 1
+  fi
+  update_finish
+}
+
 cmd=${1:-help}
 shift || true
 case $cmd in
@@ -471,6 +582,7 @@ case $cmd in
     git -C "$T3CODE_DIR" format-patch -q --zero-commit --no-signature -o "$HYDRA_SRC/patches" "$(cat "$HYDRA_SRC/BASE")"..HEAD
     find "$HYDRA_SRC/patches" -name '*.patch' | wc -l | xargs echo "patches written to $HYDRA_SRC/patches:" ;;
   live) need_source live; live_cmd "$@" ;;
+  update) need_source update; update_cmd "$@" ;;
   bundle) need_source bundle; t3_bundle "${1:?usage: hydra bundle <dir>}" ;;
   help|-h|--help) usage ;;
   *) t3_cli "$cmd" "$@" ;;
