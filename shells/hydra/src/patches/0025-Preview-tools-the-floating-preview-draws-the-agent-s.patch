@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sarol263@student.otago.ac.nz>
 Date: Sat, 24 Oct 2026 14:49:31 +1300
-Subject: [PATCH 25/54] Preview tools: the floating preview draws the agent's
+Subject: [PATCH 25/55] Preview tools: the floating preview draws the agent's
  cursor; resize answers with the new size; snapshots don't flash on screen
 
 - The floating preview draws the agent's cursor over a Plutonium tab, on the

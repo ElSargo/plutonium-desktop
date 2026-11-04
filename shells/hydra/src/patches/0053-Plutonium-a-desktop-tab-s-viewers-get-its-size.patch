@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 3 Nov 2026 13:31:57 +1300
-Subject: [PATCH 53/54] Plutonium: a desktop tab's viewers get its size
+Subject: [PATCH 53/55] Plutonium: a desktop tab's viewers get its size
 
 A page Playwright attaches to over CDP has no viewport of its own, so
 `viewportSize()` is null for every desktop tab and viewers never got a

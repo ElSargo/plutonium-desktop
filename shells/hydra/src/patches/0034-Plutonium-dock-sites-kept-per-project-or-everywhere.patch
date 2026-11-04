@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Tue, 27 Oct 2026 18:49:21 +1300
-Subject: [PATCH 34/54] Plutonium: dock sites kept per project or everywhere
+Subject: [PATCH 34/55] Plutonium: dock sites kept per project or everywhere
 
 A site slot kept per project or everywhere has one browser tab, tagged with
 its scope's tag (t3:project/<id>, t3:global). Its key or button brings that
