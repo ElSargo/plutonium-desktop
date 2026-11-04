@@ -1,0 +1,2492 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:50 +1300
+Subject: [PATCH 09/10] Plutonium: the server's browser tabs through
+ Plutonium's helper
+
+Folded from:
+- the server drives the browser panel's tabs through Plutonium's helper
+- agents drive windows and tabs
+- recordings encode in a hidden page of Plutonium's browser; visible counts desktop-shown tabs
+- Preview tools: drag along a path; snapshot images in click coordinates; cursor follows a scaled tab
+- Preview tools: the floating preview draws the agent's cursor; resize answers with the new size; snapshots don't flash on screen
+- Preview tools: a stuck action no longer wedges its tab
+- incognito tabs on the desktop
+- agent tool fixes: popups in window snapshots, results that say what happened, private tabs marked
+- agents get the helper's tab tools on T3's tabs
+- preview recordings are captures every shell sees
+- a link opened in a new tab shows in the browser panel
+- a desktop tab's file picker is the desktop's
+- a desktop tab's viewers get its size
+- native windows are their threads' server tabs
+---
+ .../desktop/src/preview/DesktopBrowserHost.ts |   3 +
+ .../src/preview/DesktopBrowserChannel.ts      | 350 +++++++++++++++---
+ apps/server/src/preview/Manager.test.ts       |  68 ++++
+ apps/server/src/preview/Manager.ts            | 122 +++++-
+ .../src/preview/PreviewBrowserHost.test.ts    |  26 ++
+ apps/server/src/preview/PreviewBrowserHost.ts |  74 +++-
+ apps/server/src/preview/ServerBrowser.test.ts |  41 ++
+ apps/server/src/preview/ServerBrowser.ts      | 350 ++++++++++++++++--
+ .../src/preview/ServerBrowserPage.test.ts     | 105 ++++++
+ apps/server/src/preview/ServerBrowserPage.ts  | 133 ++++++-
+ .../src/preview/ServerBrowserStream.test.ts   |   6 +
+ .../server/src/preview/SessionControl.test.ts |  59 +++
+ apps/server/src/preview/SessionControl.ts     |  87 ++++-
+ .../src/preview/recordingDuration.test.ts     | 100 +++++
+ apps/server/src/preview/recordingDuration.ts  | 209 +++++++++++
+ 15 files changed, 1614 insertions(+), 119 deletions(-)
+ create mode 100644 apps/server/src/preview/recordingDuration.test.ts
+ create mode 100644 apps/server/src/preview/recordingDuration.ts
+
+diff --git a/apps/desktop/src/preview/DesktopBrowserHost.ts b/apps/desktop/src/preview/DesktopBrowserHost.ts
+index 3ac6c6d73c..9301dad28f 100644
+--- a/apps/desktop/src/preview/DesktopBrowserHost.ts
++++ b/apps/desktop/src/preview/DesktopBrowserHost.ts
+@@ -478,6 +478,9 @@ export const make = Effect.gen(function* () {
+         dropRelay(tab);
+         return;
+       }
++      // Plutonium's helper opens and closes tabs, and registers recordings; the
++      // desktop app's are its own.
++      if (command.value.type !== "cdp") return;
+       if (AGENT_INPUT_COMMAND.test(command.value.message)) tab.agentInputAt = performance.now();
+       relayFor(tab).receive(command.value.message);
+     });
+diff --git a/apps/server/src/preview/DesktopBrowserChannel.ts b/apps/server/src/preview/DesktopBrowserChannel.ts
+index d407fc78fa..5a3493a3ea 100644
+--- a/apps/server/src/preview/DesktopBrowserChannel.ts
++++ b/apps/server/src/preview/DesktopBrowserChannel.ts
+@@ -1,5 +1,17 @@
+ // @effect-diagnostics nodeBuiltinImport:off - Bridges Playwright's WebSocket transport to the desktop's fds.
+-/** Playwright needs a CDP WebSocket; the secret loopback endpoint relays desktop debugger frames over bootstrap fds. */
++/**
++ * The server end of the desktop browser channel (see `DesktopBrowserEvent`).
++ *
++ * Playwright connects over CDP only through a WebSocket URL, so each attached
++ * desktop tab gets a loopback endpoint with an unguessable path. Its frames
++ * cross the bootstrap file descriptors to the desktop's relay, which owns the
++ * tab's `webContents.debugger`. The endpoint only bridges to that one tab.
++ *
++ * Plutonium: in a Plutonium session the same messages travel over the
++ * Plutonium helper's socket instead (`GET /v1/desktop-browser`, upgraded), and
++ * the helper relays each tab the shell shows to that tab of the real browser.
++ * A tab no shell page shows the helper opens itself (`open`).
++ */
+ import * as NodeStream from "@effect/platform-node/NodeStream";
+ import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
+ import {
+@@ -8,6 +20,7 @@ import {
+   type DesktopBrowserCommand as DesktopBrowserCommandType,
+ } from "@t3tools/contracts";
+ import * as Context from "effect/Context";
++import * as Data from "effect/Data";
+ import * as Duration from "effect/Duration";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+@@ -22,6 +35,8 @@ import * as Ndjson from "effect/encoding/Ndjson";
+ import * as NodeCrypto from "node:crypto";
+ import * as NodeNet from "node:net";
+ 
++import { plutoniumHelperSocket, plutoniumThreadTag } from "@t3tools/shared/plutonium";
++
+ import * as ServerConfig from "../config.ts";
+ import { writeAllToFileDescriptor } from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
+ 
+@@ -45,25 +60,115 @@ export class DesktopBrowserChannel extends Context.Service<
+     readonly attached: Stream.Stream<DesktopTabKey>;
+     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
+     readonly endpoint: (key: DesktopTabKey) => Effect.Effect<string, never, Scope.Scope>;
++    /**
++     * Plutonium: asks the helper to open the tab itself when no shell page
++     * shows it, so it attaches without one; `incognito` opens it in throwaway
++     * storage of its own. A no-op for a desktop app.
++     */
++    readonly open: (
++      key: DesktopTabKey,
++      options?: { readonly incognito?: boolean },
++    ) => Effect.Effect<void>;
++    /** Plutonium: the tab's preview closed; the helper closes a tab it opened. */
++    readonly close: (key: DesktopTabKey) => Effect.Effect<void>;
++    /**
++     * Plutonium: a CDP endpoint for a hidden page the helper opens in its
++     * browser, in no window, for the server's own work. Closing the scope
++     * closes the page. Null when no Plutonium helper is connected.
++     */
++    readonly scratchEndpoint: (
++      threadId: string,
++    ) => Effect.Effect<string | null, PlutoniumScratchPageError, Scope.Scope>;
+     readonly pointer: (
+       key: DesktopTabKey,
+       pointer: { readonly phase: "move" | "click"; readonly x: number; readonly y: number },
+     ) => Effect.Effect<void>;
+     /** Never fails. A failed write means a broken channel; the next backend starts with no turns. */
+     readonly turn: (threadId: string, active: boolean) => Effect.Effect<void>;
++    /**
++     * Plutonium: registers the server's recording of tab `key` with the
++     * helper as a capture, so every shell sees it and can stop it. Why the
++     * helper refused it (the recording switch is off), or null: also when
++     * no helper shows the tab, or an older one doesn't answer.
++     */
++    readonly recordingCapture: (key: DesktopTabKey) => Effect.Effect<string | null>;
++    /** Plutonium: the server stopped recording tab `key`; its capture ends. */
++    readonly recordingCaptureStop: (key: DesktopTabKey) => Effect.Effect<void>;
++    /** Plutonium: a shell, the recording switch or the tab ended a recording's capture first. */
++    readonly recordingEnded: Stream.Stream<{
++      readonly key: DesktopTabKey;
++      readonly message: string;
++    }>;
+   }
+ >()("t3/preview/DesktopBrowserChannel") {}
+ 
++export class PlutoniumScratchPageError extends Data.TaggedError("PlutoniumScratchPageError")<{
++  readonly message: string;
++}> {}
++
++/** How long the helper gets to open a scratch page. */
++const SCRATCH_ATTACH_TIMEOUT = Duration.seconds(10);
++/** An older helper doesn't answer `recording`: the recording goes ahead without a capture. */
++const RECORDING_CAPTURE_TIMEOUT = Duration.seconds(5);
++
++class PlutoniumHelperConnectError extends Data.TaggedError("PlutoniumHelperConnectError")<{
++  readonly message: string;
++}> {}
++
++/** Plutonium: the helper's desktop browser connection, after its upgrade handshake. */
++const connectPlutoniumHelper = (socketPath: string) =>
++  Effect.callback<NodeNet.Socket, PlutoniumHelperConnectError>((resume) => {
++    const socket = NodeNet.connect(socketPath);
++    let head = Buffer.alloc(0);
++    const fail = (error: { readonly message: string }) => {
++      socket.destroy();
++      resume(Effect.fail(new PlutoniumHelperConnectError({ message: error.message })));
++    };
++    const onData = (chunk: Buffer) => {
++      head = Buffer.concat([head, chunk]);
++      const end = head.indexOf("\r\n\r\n");
++      if (end < 0) return;
++      socket.off("data", onData);
++      socket.off("error", fail);
++      if (!head.subarray(0, end).toString("latin1").startsWith("HTTP/1.1 101")) {
++        fail({ message: "The Plutonium helper has no server-driven tabs." });
++        return;
++      }
++      // Nothing reads until the channel's stream does.
++      socket.pause();
++      const rest = head.subarray(end + 4);
++      if (rest.length > 0) socket.unshift(rest);
++      resume(Effect.succeed(socket));
++    };
++    socket.once("error", fail);
++    socket.on("data", onData);
++    socket.once("connect", () =>
++      socket.write(
++        "GET /v1/desktop-browser HTTP/1.1\r\nHost: plutonium\r\n" +
++          "Connection: Upgrade\r\nUpgrade: plutonium-desktop-browser\r\n\r\n",
++      ),
++    );
++    return Effect.sync(() => socket.destroy());
++  });
++
+ const make = Effect.gen(function* () {
+   const config = yield* ServerConfig.ServerConfig;
+   const inputFd = config.desktopBrowserFd;
+   const controlFd = config.desktopBrowserControlFd;
+   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
+-  const attachedTabs = new Set<string>();
++  const recordings = yield* PubSub.unbounded<{
++    key: DesktopTabKey;
++    phase: "started" | "refused" | "ended";
++    message: string | undefined;
++  }>();
++  const attachedTabs = new Map<string, DesktopTabKey>();
+   const inbound = new Map<string, Queue.Queue<string>>();
+   const writeLock = yield* Semaphore.make(1);
+ 
+-  if (inputFd === undefined || controlFd === undefined) {
++  // Plutonium: the helper's socket, when no desktop app started this server.
++  const helperSocket =
++    inputFd === undefined || controlFd === undefined ? plutoniumHelperSocket() : undefined;
++  if ((inputFd === undefined || controlFd === undefined) && helperSocket === undefined) {
+     return DesktopBrowserChannel.of({
+       available: false,
+       awaitAttached: Effect.fn("DesktopBrowserChannel.awaitAttached")(function () {
+@@ -83,56 +188,119 @@ const make = Effect.gen(function* () {
+       pointer: Effect.fn("DesktopBrowserChannel.pointer")(function () {
+         return Effect.void;
+       }),
++      open: Effect.fn("DesktopBrowserChannel.open")(function () {
++        return Effect.void;
++      }),
++      close: Effect.fn("DesktopBrowserChannel.close")(function () {
++        return Effect.void;
++      }),
++      scratchEndpoint: Effect.fn("DesktopBrowserChannel.scratchEndpoint")(function () {
++        return Effect.succeed(null);
++      }),
++      recordingCapture: Effect.fn("DesktopBrowserChannel.recordingCapture")(function () {
++        return Effect.succeed(null);
++      }),
++      recordingCaptureStop: Effect.fn("DesktopBrowserChannel.recordingCaptureStop")(function () {
++        return Effect.void;
++      }),
++      recordingEnded: Stream.empty,
+     });
+   }
+ 
++  let helperConnection: NodeNet.Socket | null = null;
++  const writeLine = (line: string) =>
++    helperSocket !== undefined
++      ? Effect.sync(() => void helperConnection?.write(`${line}\n`))
++      : writeAllToFileDescriptor(controlFd!, Buffer.from(`${line}\n`));
+   const command = (message: DesktopBrowserCommandType) =>
+     writeLock.withPermits(1)(
+       encodeCommand(message).pipe(
+-        Effect.flatMap((line) => writeAllToFileDescriptor(controlFd, Buffer.from(`${line}\n`))),
++        Effect.flatMap(writeLine),
+         Effect.catchCause((cause) =>
+           Effect.logWarning("desktop browser command failed", { cause }),
+         ),
+       ),
+     );
+ 
+-  // Use cancellable socket reads; filesystem pipe reads keep Node alive after scope shutdown.
+-  const readable = yield* Effect.acquireRelease(
+-    Effect.sync(() => new NodeNet.Socket({ fd: inputFd, readable: true, writable: false })),
+-    (stream) => Effect.sync(() => stream.destroy()),
+-  );
+-  yield* NodeStream.fromReadable<Uint8Array, Error>({
+-    evaluate: () => readable,
+-    closeOnDone: true,
+-    onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+-  }).pipe(
+-    Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
+-    Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
+-    Stream.runForEach((decoded) => {
+-      if (Option.isNone(decoded)) return Effect.void;
+-      const event = decoded.value;
+-      const key = { threadId: event.threadId, tabId: event.tabId };
+-      const id = keyOf(key);
+-      switch (event.type) {
+-        case "cdp": {
+-          const queue = inbound.get(id);
+-          return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
++  const consume = (readable: NodeNet.Socket) =>
++    NodeStream.fromReadable<Uint8Array, Error>({
++      evaluate: () => readable,
++      closeOnDone: true,
++      onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
++    }).pipe(
++      Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
++      Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
++      Stream.runForEach((decoded) => {
++        if (Option.isNone(decoded)) return Effect.void;
++        const event = decoded.value;
++        const key = { threadId: event.threadId, tabId: event.tabId };
++        const id = keyOf(key);
++        switch (event.type) {
++          case "cdp": {
++            const queue = inbound.get(id);
++            return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
++          }
++          case "attached":
++            attachedTabs.set(id, key);
++            return PubSub.publish(changes, { key, attached: true });
++          case "detached": {
++            attachedTabs.delete(id);
++            const queue = inbound.get(id);
++            return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
++              Effect.andThen(PubSub.publish(changes, { key, attached: false })),
++            );
++          }
++          case "recording":
++            return PubSub.publish(recordings, { key, phase: event.phase, message: event.message });
+         }
+-        case "attached":
+-          attachedTabs.add(id);
+-          return PubSub.publish(changes, { key, attached: true });
+-        case "detached": {
++      }),
++      Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
++    );
++
++  if (helperSocket === undefined) {
++    // Socket reads can be cancelled while the desktop keeps its write end open.
++    // Filesystem reads on this pipe keep Node alive after scope shutdown.
++    const readable = yield* Effect.acquireRelease(
++      Effect.sync(() => new NodeNet.Socket({ fd: inputFd, readable: true, writable: false })),
++      (stream) => Effect.sync(() => stream.destroy()),
++    );
++    yield* consume(readable).pipe(Effect.forkScoped);
++  } else {
++    // Plutonium: the helper can start after this server, and restart; its tabs
++    // go with it.
++    const detachAll = Effect.suspend(() =>
++      Effect.forEach(
++        [...attachedTabs],
++        ([id, key]) => {
+           attachedTabs.delete(id);
+           const queue = inbound.get(id);
+           return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
+             Effect.andThen(PubSub.publish(changes, { key, attached: false })),
+           );
+-        }
+-      }
+-    }),
+-    Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
+-    Effect.forkScoped,
+-  );
++        },
++        { discard: true },
++      ),
++    );
++    yield* Effect.acquireRelease(connectPlutoniumHelper(helperSocket), (socket) =>
++      Effect.sync(() => socket.destroy()),
++    ).pipe(
++      Effect.flatMap((socket) => {
++        helperConnection = socket;
++        return consume(socket);
++      }),
++      Effect.scoped,
++      Effect.ignore,
++      Effect.andThen(
++        Effect.sync(() => {
++          helperConnection = null;
++        }),
++      ),
++      Effect.andThen(detachAll),
++      Effect.andThen(Effect.sleep(Duration.seconds(2))),
++      Effect.forever,
++      Effect.forkScoped,
++    );
++  }
+ 
+   const endpoint = Effect.fn("DesktopBrowserChannel.endpoint")(function* (key: DesktopTabKey) {
+     const id = keyOf(key);
+@@ -193,22 +361,79 @@ const make = Effect.gen(function* () {
+     return `ws://127.0.0.1:${address.port}/${secret}`;
+   });
+ 
++  /** Runs `request`, then waits for the tab to attach; subscribed first, so a quick attach is seen. */
++  const awaitAttachedAfter = <E>(
++    key: DesktopTabKey,
++    timeout: Duration.Input,
++    request: Effect.Effect<void, E>,
++  ) =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const subscription = yield* PubSub.subscribe(changes);
++        yield* request;
++        if (attachedTabs.has(keyOf(key))) return true;
++        return yield* Stream.fromSubscription(subscription).pipe(
++          Stream.filter((change) => change.attached && keyOf(change.key) === keyOf(key)),
++          Stream.runHead,
++          Effect.map(Option.isSome),
++          Effect.timeoutOption(timeout),
++          Effect.map((result) => Option.getOrElse(result, () => false)),
++        );
++      }),
++    );
++
++  const scratchEndpoint = Effect.fn("DesktopBrowserChannel.scratchEndpoint")(function* (
++    threadId: string,
++  ) {
++    if (helperSocket === undefined || helperConnection === null) return null;
++    const key = { threadId, tabId: `scratch-${NodeCrypto.randomUUID()}` };
++    // Added first, so it runs after the endpoint's release.
++    yield* Effect.addFinalizer(() => command({ type: "close", ...key }));
++    const attached = yield* awaitAttachedAfter(
++      key,
++      SCRATCH_ATTACH_TIMEOUT,
++      command({ type: "scratch", ...key }),
++    );
++    if (!attached) {
++      return yield* new PlutoniumScratchPageError({
++        message:
++          "Plutonium's browser did not open a page for it in time. The Plutonium helper may be older than T3 Code's server; restart the session.",
++      });
++    }
++    return yield* endpoint(key);
++  });
++
++  const recordingCapture = (key: DesktopTabKey) =>
++    helperSocket === undefined || helperConnection === null || !attachedTabs.has(keyOf(key))
++      ? Effect.succeed(null)
++      : Effect.scoped(
++          Effect.gen(function* () {
++            // Subscribed first, so a quick answer is seen.
++            const subscription = yield* PubSub.subscribe(recordings);
++            yield* command({ type: "recording", ...key, phase: "start" });
++            const answer = yield* Stream.fromSubscription(subscription).pipe(
++              Stream.filter(
++                (event) =>
++                  keyOf(event.key) === keyOf(key) &&
++                  (event.phase === "started" || event.phase === "refused"),
++              ),
++              Stream.runHead,
++              Effect.timeoutOption(RECORDING_CAPTURE_TIMEOUT),
++              Effect.map(Option.flatten),
++            );
++            if (Option.isNone(answer) || answer.value.phase === "started") return null;
++            return answer.value.message ?? "Plutonium refused the recording.";
++          }),
++        );
++
+   return DesktopBrowserChannel.of({
+-    available: true,
++    // Plutonium: only while the helper is connected; a new tab otherwise
++    // starts headless at once rather than waiting for a shell.
++    get available() {
++      return helperSocket === undefined || helperConnection !== null;
++    },
+     awaitAttached: Effect.fn("DesktopBrowserChannel.awaitAttached")(function (key, timeout) {
+-      return Effect.scoped(
+-        Effect.gen(function* () {
+-          const subscription = yield* PubSub.subscribe(changes);
+-          if (attachedTabs.has(keyOf(key))) return true;
+-          return yield* Stream.fromSubscription(subscription).pipe(
+-            Stream.filter((change) => change.attached && keyOf(change.key) === keyOf(key)),
+-            Stream.runHead,
+-            Effect.map(Option.isSome),
+-            Effect.timeoutOption(timeout),
+-            Effect.map((result) => Option.getOrElse(result, () => false)),
+-          );
+-        }),
+-      );
++      return awaitAttachedAfter(key, timeout, Effect.void);
+     }),
+     detached: Stream.fromPubSub(changes).pipe(
+       Stream.filter((change) => !change.attached),
+@@ -228,6 +453,33 @@ const make = Effect.gen(function* () {
+     pointer: Effect.fn("DesktopBrowserChannel.pointer")(function (key, pointer) {
+       return command({ type: "pointer", ...key, ...pointer });
+     }),
++    open: Effect.fn("DesktopBrowserChannel.open")(function (key, options) {
++      return helperSocket === undefined
++        ? Effect.void
++        : command({
++            type: "open",
++            ...key,
++            tag: plutoniumThreadTag(key.threadId),
++            ...(options?.incognito ? { incognito: true } : {}),
++          });
++    }),
++    close: Effect.fn("DesktopBrowserChannel.close")(function (key) {
++      return helperSocket === undefined ? Effect.void : command({ type: "close", ...key });
++    }),
++    scratchEndpoint,
++    recordingCapture,
++    recordingCaptureStop: Effect.fn("DesktopBrowserChannel.recordingCaptureStop")(function (key) {
++      return helperSocket === undefined
++        ? Effect.void
++        : command({ type: "recording", ...key, phase: "stop" });
++    }),
++    recordingEnded: Stream.fromPubSub(recordings).pipe(
++      Stream.filter((event) => event.phase === "ended"),
++      Stream.map((event) => ({
++        key: event.key,
++        message: event.message ?? "The recording was stopped.",
++      })),
++    ),
+   });
+ });
+ 
+diff --git a/apps/server/src/preview/Manager.test.ts b/apps/server/src/preview/Manager.test.ts
+index 1c16992123..9b81a57977 100644
+--- a/apps/server/src/preview/Manager.test.ts
++++ b/apps/server/src/preview/Manager.test.ts
+@@ -243,3 +243,71 @@ it.layer(layer)("PreviewManager", (it) => {
+     }),
+   );
+ });
++
++it.layer(layer)("PreviewManager: Plutonium's native windows", (it) => {
++  it.effect("opens, retitles and closes window tabs, which only clients list", () =>
++    Effect.gen(function* () {
++      const threadId = freshThreadId();
++      const manager = yield* PreviewManager.PreviewManager;
++      const collector = yield* collectEvents;
++      const page = yield* manager.open({ threadId, url: "localhost:5173" });
++      const window = {
++        threadId,
++        tabId: "plutonium-window-7-100",
++        url: "app://org.kde.kwrite",
++        title: "Untitled",
++      };
++
++      yield* manager.syncPlutoniumWindows([window]);
++      // Unchanged: nothing to say.
++      yield* manager.syncPlutoniumWindows([window]);
++      const forClients = yield* manager.listForClients({ threadId });
++      expect(forClients.sessions.map((session) => session.tabId)).toEqual([
++        page.tabId,
++        window.tabId,
++      ]);
++      expect(forClients.sessions[1]).toMatchObject({
++        runtime: "server",
++        navStatus: { _tag: "Success", url: "app://org.kde.kwrite", title: "Untitled" },
++      });
++      // Agents and the server's browser see pages only.
++      expect((yield* manager.list({ threadId })).sessions.map((session) => session.tabId)).toEqual([
++        page.tabId,
++      ]);
++
++      yield* manager.syncPlutoniumWindows([{ ...window, title: "notes.txt" }]);
++      yield* manager.syncPlutoniumWindows([]);
++      const events = yield* collector.drain;
++      expect(events.map((event) => [event.type, event.tabId])).toEqual([
++        ["opened", page.tabId],
++        ["opened", window.tabId],
++        ["navigated", window.tabId],
++        ["closed", window.tabId],
++      ]);
++      // One ordering for pages and windows, as clients apply events by revision.
++      const revisions = events.map((event) => event.revision);
++      expect(revisions).toEqual([...revisions].toSorted((a, b) => a - b));
++      expect(new Set(revisions).size).toBe(revisions.length);
++      // The page is untouched.
++      expect((yield* manager.listForClients({ threadId })).sessions.map((s) => s.tabId)).toEqual([
++        page.tabId,
++      ]);
++    }),
++  );
++
++  it.effect("moves a window's tab to the thread it was moved to", () =>
++    Effect.gen(function* () {
++      const from = freshThreadId();
++      const to = freshThreadId();
++      const manager = yield* PreviewManager.PreviewManager;
++      const window = { tabId: "plutonium-window-8-100", url: "app://gimp", title: "GIMP" };
++      yield* manager.syncPlutoniumWindows([{ ...window, threadId: from }]);
++      yield* manager.syncPlutoniumWindows([{ ...window, threadId: to }]);
++      expect((yield* manager.listForClients({ threadId: from })).sessions).toEqual([]);
++      expect(
++        (yield* manager.listForClients({ threadId: to })).sessions.map((s) => s.tabId),
++      ).toEqual([window.tabId]);
++      yield* manager.syncPlutoniumWindows([]);
++    }),
++  );
++});
+diff --git a/apps/server/src/preview/Manager.ts b/apps/server/src/preview/Manager.ts
+index f5db1d2fef..70aa44c2ee 100644
+--- a/apps/server/src/preview/Manager.ts
++++ b/apps/server/src/preview/Manager.ts
+@@ -12,7 +12,9 @@ import {
+   FILL_PREVIEW_VIEWPORT,
+   PreviewSessionLookupError,
+   type PreviewSessionSnapshot,
++  type ThreadId,
+ } from "@t3tools/contracts";
++import { isPlutoniumWindowTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import {
+   isPreviewUrlNormalizationError,
+   newPreviewTabId,
+@@ -56,12 +58,34 @@ export class PreviewManager extends Context.Service<
+       input: PreviewAdjustInput,
+     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
+     readonly close: (input: PreviewCloseInput) => Effect.Effect<void, PreviewError>;
++    /** The thread's tabs, without Plutonium's native windows (agents and the server's browser see these). */
+     readonly list: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
++    /**
++     * Plutonium: the thread's tabs with its native windows, for clients. A
++     * client lists and streams a window as it does a server tab.
++     */
++    readonly listForClients: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
++    /**
++     * Plutonium: makes the native windows' tabs these (every thread's), opening,
++     * updating and closing tabs as they changed. Only window tabs are touched.
++     */
++    readonly syncPlutoniumWindows: (
++      windows: ReadonlyArray<PlutoniumWindowTabInput>,
++    ) => Effect.Effect<void>;
+     readonly events: Stream.Stream<PreviewEvent>;
+     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
+   }
+ >()("t3/preview/Manager/PreviewManager") {}
+ 
++/** Plutonium: a native window, as the tab clients list it under its thread. */
++export interface PlutoniumWindowTabInput {
++  readonly threadId: ThreadId;
++  readonly tabId: string;
++  /** What a client shows as the tab's address: `app://<app id>`. */
++  readonly url: string;
++  readonly title: string;
++}
++
+ interface PreviewSessionState {
+   readonly threadId: string;
+   readonly tabId: string;
+@@ -402,19 +426,97 @@ export const make = Effect.gen(function* PreviewManagerMake() {
+     },
+   );
+ 
++  const listSessions = (input: PreviewListInput, windows: boolean) =>
++    SynchronizedRef.get(stateRef).pipe(
++      Effect.map((state): PreviewListResult => ({
++        sessions: sessionsForThread(state, input.threadId)
++          .filter((s) => windows || !isPlutoniumWindowTab(s.tabId))
++          .map((s) => s.snapshot)
++          .toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt)),
++        serverEpoch,
++        revision: state.revision,
++      })),
++    );
+   const list: PreviewManager["Service"]["list"] = Effect.fn("PreviewManager.list")(
+     function* (input) {
+-      return yield* SynchronizedRef.get(stateRef).pipe(
+-        Effect.map((state): PreviewListResult => ({
+-          sessions: sessionsForThread(state, input.threadId)
+-            .map((s) => s.snapshot)
+-            .toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt)),
+-          serverEpoch,
+-          revision: state.revision,
+-        })),
+-      );
++      return yield* listSessions(input, false);
+     },
+   );
++  const listForClients: PreviewManager["Service"]["listForClients"] = Effect.fn(
++    "PreviewManager.listForClients",
++  )(function* (input) {
++    return yield* listSessions(input, true);
++  });
++
++  const syncPlutoniumWindows: PreviewManager["Service"]["syncPlutoniumWindows"] = Effect.fn(
++    "PreviewManager.syncPlutoniumWindows",
++  )(function* (windows) {
++    const now = yield* currentIsoTimestamp;
++    yield* SynchronizedRef.modifyEffect(stateRef, (state) => {
++      const sessions = new Map(state.sessions);
++      const emitted: PreviewEvent[] = [];
++      let revision = state.revision;
++      const emit = (event: PreviewEventDraft) => {
++        revision += 1;
++        emitted.push({ ...event, revision, serverEpoch } as PreviewEvent);
++      };
++      const wanted = new Map(
++        windows.map((window) => [compositeKey(window.threadId, window.tabId), window]),
++      );
++      for (const [key, session] of state.sessions) {
++        if (!isPlutoniumWindowTab(session.tabId) || wanted.has(key)) continue;
++        sessions.delete(key);
++        emit({ type: "closed", threadId: session.threadId, tabId: session.tabId, createdAt: now });
++      }
++      for (const [key, window] of wanted) {
++        const navStatus = { _tag: "Success", url: window.url, title: window.title } as const;
++        const existing = state.sessions.get(key);
++        if (existing) {
++          const current = existing.snapshot.navStatus;
++          if (
++            current._tag === "Success" &&
++            current.url === window.url &&
++            current.title === window.title
++          )
++            continue;
++          // A new title keeps the tab's time: clients default to the tab used last.
++          const snapshot: PreviewSessionSnapshot = { ...existing.snapshot, navStatus };
++          sessions.set(key, { ...existing, snapshot });
++          emit({
++            type: "navigated",
++            threadId: window.threadId,
++            tabId: window.tabId,
++            createdAt: now,
++            snapshot,
++          });
++          continue;
++        }
++        const snapshot: PreviewSessionSnapshot = {
++          threadId: window.threadId,
++          tabId: window.tabId,
++          navStatus,
++          canGoBack: false,
++          canGoForward: false,
++          viewport: FILL_PREVIEW_VIEWPORT,
++          runtime: "server",
++          updatedAt: now,
++        };
++        sessions.set(key, { threadId: window.threadId, tabId: window.tabId, snapshot });
++        emit({
++          type: "opened",
++          threadId: window.threadId,
++          tabId: window.tabId,
++          createdAt: now,
++          snapshot,
++        });
++      }
++      if (emitted.length === 0) return Effect.succeed([undefined, state] as const);
++      return Effect.as(
++        Effect.forEach(emitted, (event) => PubSub.publish(eventsPubSub, event), { discard: true }),
++        [undefined, { sessions, revision }] as const,
++      );
++    });
++  });
+ 
+   const requestReveal: PreviewManager["Service"]["requestReveal"] = Effect.fn(
+     "PreviewManager.requestReveal",
+@@ -456,6 +558,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
+     adjust,
+     close,
+     list,
++    listForClients,
++    syncPlutoniumWindows,
+     events,
+     subscribeEvents: PubSub.subscribe(eventsPubSub),
+   });
+diff --git a/apps/server/src/preview/PreviewBrowserHost.test.ts b/apps/server/src/preview/PreviewBrowserHost.test.ts
+index 02ea6bedc4..9ca9b59c06 100644
+--- a/apps/server/src/preview/PreviewBrowserHost.test.ts
++++ b/apps/server/src/preview/PreviewBrowserHost.test.ts
+@@ -21,6 +21,13 @@ const LDD_IN_BARE_DEBIAN = `\tlinux-vdso.so.1 (0x00007ffd2d1f8000)
+ const LOADER_ERROR =
+   "chrome-headless-shell: error while loading shared libraries: libglib-2.0.so.0: cannot open shared object file: No such file or directory";
+ 
++// What NixOS's stub loader prints for the headless shell.
++const STUB_LOADER_ERROR = `Could not start dynamically linked executable: /home/me/.t3/tools/chrome-headless-shell/linux64/154/chrome-headless-shell
++NixOS cannot run dynamically linked executables intended for generic
++linux environments out of the box. For more information, see:
++https://nix.dev/permalink/stub-ld
++`;
++
+ const hostReporting = (output: { readonly version: string; readonly ldd: string }) => {
+   const commands: Array<string> = [];
+   const spawner = ChildProcessSpawner.make((command) =>
+@@ -117,6 +124,25 @@ describe("diagnoseLaunchFailure", () => {
+     }),
+   );
+ 
++  it.effect("passes on NixOS's refusal to run a generic Linux build", () =>
++    Effect.gen(function* () {
++      const { error, commands } = yield* diagnose({
++        platform: "linux",
++        output: "",
++        ldd: LDD_IN_BARE_DEBIAN,
++        version: STUB_LOADER_ERROR,
++      });
++      expect(error?._tag).toBe("PreviewBrowserUnrunnableError");
++      expect(error?.message).toContain(
++        "This host cannot run T3's browser (/home/me/.t3/tools/chrome-headless-shell/linux64/154/chrome-headless-shell).",
++      );
++      expect(error?.message).toContain(
++        "NixOS cannot run dynamically linked executables intended for generic linux environments out of the box.",
++      );
++      expect(commands).toHaveLength(1);
++    }),
++  );
++
+   it.effect("trusts the browser's own start over ldd", () =>
+     Effect.gen(function* () {
+       // NixOS: ldd lists libraries that nix-ld still provides to the real loader.
+diff --git a/apps/server/src/preview/PreviewBrowserHost.ts b/apps/server/src/preview/PreviewBrowserHost.ts
+index 1847e5f232..09b1fb04a1 100644
+--- a/apps/server/src/preview/PreviewBrowserHost.ts
++++ b/apps/server/src/preview/PreviewBrowserHost.ts
+@@ -67,6 +67,16 @@ export class PreviewBrowserLibrariesError extends Schema.TaggedError<PreviewBrow
+   }
+ }
+ 
++/** The host cannot start the browser's executable at all, for example NixOS with a generic Linux build. */
++export class PreviewBrowserUnrunnableError extends Schema.TaggedError<PreviewBrowserUnrunnableError>()(
++  "PreviewBrowserUnrunnableError",
++  { executable: Schema.String, output: Schema.String },
++) {
++  override get message(): string {
++    return `This host cannot run T3's browser (${this.executable}). Starting it printed: ${this.output}`;
++  }
++}
++
+ /** Chrome will not start its sandbox as root (crbug.com/638180), which no host setup fixes. */
+ export class PreviewBrowserRootError extends Schema.TaggedError<PreviewBrowserRootError>()(
+   "PreviewBrowserRootError",
+@@ -80,11 +90,44 @@ export class PreviewBrowserRootError extends Schema.TaggedError<PreviewBrowserRo
+ export type PreviewBrowserHostError =
+   | PreviewBrowserSandboxError
+   | PreviewBrowserLibrariesError
+-  | PreviewBrowserRootError;
++  | PreviewBrowserRootError
++  | PreviewBrowserUnrunnableError;
+ 
+ const MISSING_LIBRARY = /^\s*(\S+) => not found$/gm;
+ const LOADER_ERROR = /error while loading shared libraries: ([^:\s]+)/;
++/** NixOS's stub loader, which refuses every executable built for generic Linux. */
++const STUB_LOADER_ERROR = "Could not start dynamically linked executable";
++
++/** A process's output on one line, short enough for an error message. */
++const oneLine = (output: string) => {
++  const line = output
++    .split("\n")
++    .map((part) => part.trim())
++    .filter(Boolean)
++    .join(" ");
++  return line.length > 600 ? `${line.slice(0, 600)}…` : line;
++};
++
++const runForOutput = Effect.fn("PreviewBrowserHost.runForOutput")(function* (
++  command: string,
++  args: ReadonlyArray<string>,
++) {
++  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++  return yield* spawner
++    .string(ChildProcess.make(command, args, { stdin: "ignore" }), { includeStderr: true })
++    .pipe(
++      Effect.timeout("5 seconds"),
++      Effect.orElseSucceed(() => ""),
++    );
++});
+ 
++/**
++ * After a launch fails, names the host setup it is missing: the sandbox, from
++ * Chrome's own abort message, or shared libraries the loader refuses. A host
++ * whose loader refuses the executable outright (NixOS) gets its own message
++ * instead. Undefined when none explains it. Linux only; other hosts never need
++ * these.
++ */
+ export const diagnoseLaunchFailure = Effect.fn("PreviewBrowserHost.diagnoseLaunchFailure")(
+   function* (input: {
+     readonly executable: string;
+@@ -99,7 +142,14 @@ export const diagnoseLaunchFailure = Effect.fn("PreviewBrowserHost.diagnoseLaunc
+         : new PreviewBrowserSandboxError({ setupCommand });
+     }
+     if ((yield* HostProcess.Platform) !== "linux") return undefined;
+-    const libraries = yield* missingLibraries(input.executable);
++    const version = yield* runForOutput(input.executable, ["--version"]);
++    if (version.includes(STUB_LOADER_ERROR)) {
++      return new PreviewBrowserUnrunnableError({
++        executable: input.executable,
++        output: oneLine(version),
++      });
++    }
++    const libraries = yield* librariesFromVersion(input.executable, version);
+     return libraries.length === 0
+       ? undefined
+       : new PreviewBrowserLibrariesError({ setupCommand, libraries });
+@@ -110,17 +160,17 @@ export const diagnoseLaunchFailure = Effect.fn("PreviewBrowserHost.diagnoseLaunc
+ export const missingLibraries = Effect.fn("PreviewBrowserHost.missingLibraries")(function* (
+   executable: string,
+ ) {
+-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+-  const run = (command: string, args: ReadonlyArray<string>) =>
+-    spawner
+-      .string(ChildProcess.make(command, args, { stdin: "ignore" }), { includeStderr: true })
+-      .pipe(
+-        Effect.timeout("5 seconds"),
+-        Effect.orElseSucceed(() => ""),
+-      );
+-  const loaderError = LOADER_ERROR.exec(yield* run(executable, ["--version"]))?.[1];
++  return yield* librariesFromVersion(executable, yield* runForOutput(executable, ["--version"]));
++});
++
++/** `missingLibraries`, given what the browser's `--version` printed. */
++const librariesFromVersion = Effect.fn("PreviewBrowserHost.librariesFromVersion")(function* (
++  executable: string,
++  version: string,
++) {
++  const loaderError = LOADER_ERROR.exec(version)?.[1];
+   if (loaderError === undefined) return [];
+-  const listed = [...(yield* run("ldd", [executable])).matchAll(MISSING_LIBRARY)].map(
++  const listed = [...(yield* runForOutput("ldd", [executable])).matchAll(MISSING_LIBRARY)].map(
+     (match) => match[1]!,
+   );
+   return listed.length > 0 ? listed : [loaderError];
+diff --git a/apps/server/src/preview/ServerBrowser.test.ts b/apps/server/src/preview/ServerBrowser.test.ts
+index c558631fd2..cd30e0b73e 100644
+--- a/apps/server/src/preview/ServerBrowser.test.ts
++++ b/apps/server/src/preview/ServerBrowser.test.ts
+@@ -323,6 +323,9 @@ const desktopRenders = (tabId: string) => {
+ };
+ const releasedDesktopTabs: Array<string> = [];
+ const desktopTurns = new NodeEvents.EventEmitter();
++/** Plutonium: why the helper refuses a recording's capture, if it does. */
++let recordingRefusal: string | null = null;
++const recordingCaptures: Array<string> = [];
+ const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
+ const testThread = {
+   threadId: ThreadId.make("browser-test-thread"),
+@@ -386,8 +389,18 @@ const dependencies = Layer.mergeAll(
+           desktopReleased.resolve();
+         }),
+       ),
++    open: () => Effect.void,
++    close: () => Effect.void,
++    scratchEndpoint: () => Effect.succeed(null),
+     pointer: () => Effect.void,
+     turn: (threadId, active) => Effect.sync(() => desktopTurns.emit("turn", threadId, active)),
++    recordingCapture: (key) =>
++      Effect.sync(() => {
++        recordingCaptures.push(key.tabId);
++        return recordingRefusal;
++      }),
++    recordingCaptureStop: () => Effect.void,
++    recordingEnded: Stream.empty,
+   }),
+   PreviewAgentActivity.layer,
+ ).pipe(
+@@ -462,6 +475,8 @@ beforeEach(() => {
+   desktopReleased = Promise.withResolvers<void>();
+   releasedDesktopTabs.length = 0;
+   desktopConnections.length = 0;
++  recordingRefusal = null;
++  recordingCaptures.length = 0;
+ });
+ 
+ it.live("tells the desktop once per thread when its agent turns start and end", () =>
+@@ -2326,3 +2341,29 @@ it.live("failed session and browser launches release capacity, as does closing a
+     }),
+   ).pipe(Effect.provide(layer)),
+ );
++
++it.live("a navigate isn't busy with itself, and an evaluate is in the action timeline", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const { broker, tabId } = yield* ready;
++      const navigated = yield* broker.invoke<PreviewAutomationStatus>({
++        scope,
++        tabId,
++        operation: "navigate",
++        input: { url: "http://localhost:5173/next" },
++      });
++      expect(navigated).not.toHaveProperty("busy");
++      yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
++      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
++        scope,
++        tabId,
++        operation: "snapshot",
++        input: {},
++      });
++      expect(snapshot.actionTimeline.map((event) => [event.action, event.status])).toEqual([
++        ["navigate", "succeeded"],
++        ["evaluate", "succeeded"],
++      ]);
++    }),
++  ).pipe(Effect.provide(layer)),
++);
+diff --git a/apps/server/src/preview/ServerBrowser.ts b/apps/server/src/preview/ServerBrowser.ts
+index e03d7e3b35..fd9f310649 100644
+--- a/apps/server/src/preview/ServerBrowser.ts
++++ b/apps/server/src/preview/ServerBrowser.ts
+@@ -80,15 +80,28 @@ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+ import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
+ import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
+ import * as PreviewManager from "./Manager.ts";
++import * as PlutoniumWindowTabs from "../plutonium/windowTabs.ts";
++import { isPlutoniumWindowTab, plutoniumWindowOfTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
++import { withRecordingDuration } from "./recordingDuration.ts";
+ import * as PreviewBrowser from "./PreviewBrowser.ts";
+ import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
+ import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
+-import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
++import {
++  type ActionActivity,
++  type ActionBounds,
++  BrowserControlInterrupted,
++  SessionControl,
++} from "./SessionControl.ts";
+ import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
+ 
+ const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
++// Past its timeout, an agent action gets this long to fail on its own before it is abandoned.
++const ACTION_ABANDON_MARGIN_MS = 500;
++// Headless tabs draw each CSS pixel with this many device pixels.
+ const RENDER_SCALE = 2;
++// How long preview_resize waits for a desktop tab to take its new size.
++const DESKTOP_RESIZE_SETTLE_MS = 3_000;
+ // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
+ const SCREENCAST_ACK_PACE_MS = 100;
+ const SCREENCAST_SETTLE_MS = 200;
+@@ -144,6 +157,7 @@ const isHostSetupError = Schema.is(
+     PreviewBrowserHost.PreviewBrowserSandboxError,
+     PreviewBrowserHost.PreviewBrowserLibrariesError,
+     PreviewBrowserHost.PreviewBrowserRootError,
++    PreviewBrowserHost.PreviewBrowserUnrunnableError,
+   ]),
+ );
+ 
+@@ -247,6 +261,16 @@ export class ServerBrowser extends Context.Service<
+     readonly clearProfile: (profileId: string) => Effect.Effect<void, PreviewClearProfileError>;
+ 
+     readonly profileReporter: Effect.Effect<ProfileReporter, never, Scope.Scope>;
++    /**
++     * Plutonium: the browser's id for a live tab of the thread (`tabId`, or the
++     * one a preview tool without a tabId would act on), for the helper's tab
++     * tools. Null when there is none, or it isn't a tab of Plutonium's browser.
++     */
++    readonly plutoniumTabId: (input: {
++      readonly threadId: string;
++      readonly tabId?: string | undefined;
++      readonly agentSessionId?: string | undefined;
++    }) => Effect.Effect<number | null>;
+   }
+ >()("t3/preview/ServerBrowser") {}
+ 
+@@ -274,9 +298,12 @@ interface EncoderWindow {
+ 
+ interface Recording {
+   readonly encoder: Page;
++  readonly closeEncoder: () => Promise<void>;
+   readonly session: CDPSession;
+   readonly startedAt: string;
+   readonly framesInFlight: Set<Promise<void>>;
++  /** Plutonium: registered with the helper as a capture, which stopping ends. */
++  readonly capture: boolean;
+ }
+ 
+ interface ServerTab {
+@@ -298,7 +325,15 @@ interface ServerTab {
+ 
+   readonly isolatedContext: boolean;
+ 
+-  readonly desktop: { readonly close: () => Promise<void> } | null;
++  readonly desktop: {
++    readonly close: () => Promise<void>;
++    /** Whether the desktop shows the page now. False where it cannot tell. */
++    readonly shown: () => Promise<boolean>;
++    /** Plutonium: the browser's id for the tab. */
++    readonly browserTabId: () => Promise<number | null>;
++  } | null;
++  /** Plutonium: what `desktop.shown()` last said (status refreshes it). */
++  shownByDesktop: boolean;
+   readonly profileId: string | undefined;
+   readonly openerTabId: string | undefined;
+ 
+@@ -714,6 +749,30 @@ const make = Effect.gen(function* () {
+     await broadcastViewport(tab);
+   };
+ 
++  /**
++   * A desktop tab's viewport once a resize has reached it. The desktop lays
++   * the page out at the published setting a moment later, so a fixed size is
++   * waited for; a fill takes whatever the panel gives it.
++   */
++  const settledDesktopViewport = async (
++    tab: ServerTab,
++    expected: { readonly width: number; readonly height: number } | null,
++  ) => {
++    const measure = () =>
++      tab.page.evaluate("({ width: innerWidth, height: innerHeight })") as Promise<{
++        readonly width: number;
++        readonly height: number;
++      }>;
++    if (!expected) return measure();
++    const deadline = Date.now() + DESKTOP_RESIZE_SETTLE_MS;
++    for (;;) {
++      const size = await measure();
++      const settled = size.width === expected.width && size.height === expected.height;
++      if (settled || Date.now() >= deadline) return size;
++      await sleepUntil(Date.now() + 50);
++    }
++  };
++
+   const applyRendering = async (tab: ServerTab, snapshot: PreviewSessionSnapshot) => {
+     const colorScheme = snapshot.colorScheme ?? "system";
+     if (colorScheme !== tab.colorScheme) {
+@@ -743,7 +802,7 @@ const make = Effect.gen(function* () {
+     if (tab.desktop) void tab.desktop.close().catch(constVoid);
+     else void tab.page.close().catch(constVoid);
+     if (tab.isolatedContext) void tab.page.context().close().catch(constVoid);
+-    void tab.recording?.encoder.close().catch(constVoid);
++    void tab.recording?.closeEncoder().catch(constVoid);
+     void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
+     reportLiveTabs();
+     if (closeSession) {
+@@ -751,15 +810,17 @@ const make = Effect.gen(function* () {
+     }
+   };
+ 
+-  const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
+-    desktopChannel.available && !snapshot.headless
++  const desktopRenders = (snapshot: PreviewSessionSnapshot) => {
++    const key = { threadId: snapshot.threadId, tabId: snapshot.tabId };
++    return desktopChannel.available && !snapshot.headless
+       ? runPromise(
+-          desktopChannel.awaitAttached(
+-            { threadId: snapshot.threadId, tabId: snapshot.tabId },
+-            DESKTOP_ATTACH_TIMEOUT,
+-          ),
++          // Plutonium: the helper opens the tab if no shell page shows it.
++          desktopChannel
++            .open(key, { incognito: snapshot.profileId === INCOGNITO_BROWSER_PROFILE_ID })
++            .pipe(Effect.andThen(desktopChannel.awaitAttached(key, DESKTOP_ATTACH_TIMEOUT))),
+         )
+       : Promise.resolve(false);
++  };
+ 
+   const connectDesktop = async (snapshot: PreviewSessionSnapshot) => {
+     const scope = await runPromise(Scope.make());
+@@ -770,12 +831,30 @@ const make = Effect.gen(function* () {
+           .pipe(Scope.provide(scope)),
+       );
+       const connected = await contexts.connectDesktopPage(endpoint);
++      let browserSession: Promise<CDPSession> | undefined;
++      const plutoniumTab = async () => {
++        browserSession ??= connected.browser.newBrowserCDPSession();
++        const session = (await browserSession) as unknown as {
++          send: (
++            method: string,
++          ) => Promise<{ tabs?: ReadonlyArray<{ id?: number; embedded?: boolean }> }>;
++        };
++        const { tabs: shownTabs } = await session.send("Plutonium.getTabs");
++        return shownTabs?.[0];
++      };
+       return {
+         page: connected.page,
+         close: async () => {
+           await connected.browser.close().catch(constVoid);
+           await runPromise(Scope.close(scope, Exit.void));
+         },
++        // Plutonium: its relay answers Plutonium.getTabs with this tab alone;
++        // `embedded` is whether a shell page shows it.
++        shown: async () => (await plutoniumTab())?.embedded === true,
++        browserTabId: async () => {
++          const id = (await plutoniumTab())?.id;
++          return typeof id === "number" ? id : null;
++        },
+       };
+     } catch (cause) {
+       await runPromise(Scope.close(scope, Exit.void));
+@@ -863,7 +942,11 @@ const make = Effect.gen(function* () {
+           .catch(constVoid);
+       },
+       isolatedContext,
+-      desktop: desktop === null ? null : { close: desktop.close },
++      desktop:
++        desktop === null
++          ? null
++          : { close: desktop.close, shown: desktop.shown, browserTabId: desktop.browserTabId },
++      shownByDesktop: false,
+       profileId: snapshot.profileId,
+       openerTabId: adopted?.openerTabId,
+       downloads: [],
+@@ -1014,7 +1097,9 @@ const make = Effect.gen(function* () {
+     // Existing desktop and popup PDFs can start loading before interception attaches.
+     if (
+       snapshot.navStatus._tag === "Loading" &&
+-      ((!adopted && !desktop) || isPdfAssetUrl(snapshot.navStatus.url))
++      // Plutonium: a tab the helper opened, which no page shows yet, is still blank.
++      ((!adopted && (!desktop || page.url() === "about:blank")) ||
++        isPdfAssetUrl(snapshot.navStatus.url))
+     ) {
+       const options = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
+       tab.initialNavigation = (
+@@ -1219,7 +1304,9 @@ const make = Effect.gen(function* () {
+     if (!open)
+       throw new ServerBrowserPage.ServerBrowserOperationError(
+         "PreviewAutomationExecutionError",
+-        "No file picker is open. Click the page's upload control first, or pass the file input's locator.",
++        tab.desktop
++          ? "Pass the file input's locator. A picker this tab opened is the desktop's: answer it with choose_files."
++          : "No file picker is open. Click the page's upload control first, or pass the file input's locator.",
+       );
+     if (input.paths.length > 1 && !open.chooser.isMultiple())
+       throw new ServerBrowserPage.ServerBrowserOperationError(
+@@ -1480,8 +1567,8 @@ const make = Effect.gen(function* () {
+         .sort((left, right) => right.createdAt - left.createdAt)[0] ??
+       threadTabs.sort(
+         (left, right) =>
+-          Number(right.viewers.size > 0) - Number(left.viewers.size > 0) ||
+-          right.usedAt - left.usedAt,
++          Number(right.viewers.size > 0 || right.shownByDesktop) -
++            Number(left.viewers.size > 0 || left.shownByDesktop) || right.usedAt - left.usedAt,
+       )[0]
+     );
+   };
+@@ -1571,9 +1658,26 @@ const make = Effect.gen(function* () {
+     );
+   };
+ 
++  /** Whether the user sees the tab now: a viewer streams it, or the desktop shows its page. */
++  const onScreen = async (tab: ServerTab) => {
++    if (tab.desktop) tab.shownByDesktop = await tab.desktop.shown().catch(() => false);
++    return tab.viewers.size > 0 || tab.shownByDesktop;
++  };
++
++  /** Waits a moment for a preview a client was asked to open; false if none shows it. */
++  const awaitOnScreen = async (tab: ServerTab, timeoutMs: number) => {
++    const deadline = Date.now() + timeoutMs;
++    while (!(await onScreen(tab))) {
++      if (Date.now() >= deadline || tab.closing) return false;
++      await sleepUntil(Date.now() + 150);
++    }
++    return true;
++  };
++
+   const statusWithTitle = async (
+     tab: ServerTab | undefined,
+     agentSessionId?: string,
++    fromRunningAction = false,
+   ): Promise<PreviewAutomationStatus> => {
+     if (!tab) {
+       return {
+@@ -1588,9 +1692,13 @@ const make = Effect.gen(function* () {
+     }
+     const url = ServerBrowserPage.withoutDataPayload(tab.page.url());
+     const viewport = tab.desktop ? await layoutSize(tab) : tab.page.viewportSize();
++    const threadTabs = [...tabs.values()].filter(
++      (candidate) => candidate.threadId === tab.threadId,
++    );
++    const shown = await Promise.all(threadTabs.map(onScreen));
+     const status = {
+       available: true,
+-      visible: tab.viewers.size > 0,
++      visible: shown[threadTabs.indexOf(tab)] ?? false,
+       tabId: tab.tabId,
+       url: url === "about:blank" ? null : url,
+       title: null,
+@@ -1601,25 +1709,24 @@ const make = Effect.gen(function* () {
+         generation: tab.control.generation,
+       },
+       dialog: dialogStatus(tab),
++      ...busyStatus(tab, fromRunningAction),
+       fileChooser: tab.fileChooser
+         ? { multiple: tab.fileChooser.chooser.isMultiple(), accept: tab.fileChooser.accept }
+         : null,
+       viewportSetting: tab.setting,
+       ...(viewport ? { viewport } : {}),
+-      tabs: [...tabs.values()]
+-        .filter((candidate) => candidate.threadId === tab.threadId)
+-        .map((candidate) => ({
+-          tabId: candidate.tabId,
+-          url:
+-            candidate.page.url() === "about:blank"
+-              ? null
+-              : ServerBrowserPage.withoutDataPayload(candidate.page.url()),
+-          ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
+-          owner: tabOwner(candidate),
+-          ownedByCaller: candidate.control.agentId === agentSessionId,
+-          visible: candidate.viewers.size > 0,
+-          ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
+-        })),
++      tabs: threadTabs.map((candidate, index) => ({
++        tabId: candidate.tabId,
++        url:
++          candidate.page.url() === "about:blank"
++            ? null
++            : ServerBrowserPage.withoutDataPayload(candidate.page.url()),
++        ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
++        owner: tabOwner(candidate),
++        ownedByCaller: candidate.control.agentId === agentSessionId,
++        visible: shown[index] ?? false,
++        ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
++      })),
+       ...profileStatus(),
+       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
+         fileName,
+@@ -1688,10 +1795,67 @@ const make = Effect.gen(function* () {
+     return run;
+   };
+ 
++  /**
++   * A page to run a recording's encoder in. In Plutonium, a hidden page of its
++   * own browser, so recording needs no headless browser of T3's.
++   */
++  const encoderPage = async (tab: ServerTab) => {
++    const scope = await runPromise(Scope.make());
++    const closeScope = () => runPromise(Scope.close(scope, Exit.void));
++    try {
++      const endpoint = await runPromise(
++        desktopChannel.scratchEndpoint(tab.threadId).pipe(Scope.provide(scope)),
++      );
++      if (endpoint === null) {
++        await closeScope();
++        const page = await contexts.scratchPage();
++        return { page, close: () => page.close() };
++      }
++      const connected = await contexts.connectDesktopPage(endpoint);
++      // The page is in no window, so it is hidden: it would never paint the
++      // encoder's canvas into the video.
++      const cdp = await connected.page.context().newCDPSession(connected.page);
++      await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true });
++      return {
++        page: connected.page,
++        close: async () => {
++          await connected.browser.close().catch(constVoid);
++          await closeScope();
++        },
++      };
++    } catch (cause) {
++      await closeScope().catch(constVoid);
++      const message = cause instanceof Error ? cause.message : String(cause);
++      throw new Error(`The recording's encoder page did not open. ${message}`, { cause });
++    }
++  };
++
+   const startRecording = (tab: ServerTab): Promise<Recording> => {
+     const started = withCaptureLock(tab, async () => {
+       if (tab.recording) return tab.recording;
+-      const encoder = await contexts.scratchPage();
++      // Plutonium: a capture like any other, so every shell shows it and can
++      // stop it, and the recording switch refuses it.
++      const key = { threadId: tab.threadId, tabId: tab.tabId };
++      const capture = tab.desktop !== null;
++      if (capture) {
++        const refused = await runPromise(desktopChannel.recordingCapture(key));
++        if (refused !== null) {
++          throw new ServerBrowserPage.ServerBrowserOperationError(
++            "PreviewAutomationExecutionError",
++            `Plutonium refused the recording: ${refused}`,
++          );
++        }
++      }
++      const endCapture = () =>
++        capture ? runPromise(desktopChannel.recordingCaptureStop(key)) : Promise.resolve();
++      let encoderOpened: Awaited<ReturnType<typeof encoderPage>>;
++      try {
++        encoderOpened = await encoderPage(tab);
++      } catch (cause) {
++        await endCapture().catch(constVoid);
++        throw cause;
++      }
++      const { page: encoder, close: closeEncoder } = encoderOpened;
+       let session: CDPSession | null = null;
+       try {
+         await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate));
+@@ -1732,14 +1896,17 @@ const make = Effect.gen(function* () {
+         if (tab.closing) throw new Error("The tab closed while the recording started.");
+         const recording: Recording = {
+           encoder,
++          closeEncoder,
+           session: opened,
+           startedAt: new Date().toISOString(),
+           framesInFlight,
++          capture,
+         };
+         tab.recording = recording;
+         return recording;
+       } catch (cause) {
+-        await encoder.close().catch(constVoid);
++        await closeEncoder().catch(constVoid);
++        await endCapture().catch(constVoid);
+         await session?.detach().catch(constVoid);
+         throw cause;
+       }
+@@ -1806,17 +1973,27 @@ const make = Effect.gen(function* () {
+           chunks.push(Buffer.from(chunk, "base64"));
+         }
+       } finally {
+-        await recording.encoder.close().catch(constVoid);
++        await recording.closeEncoder().catch(constVoid);
+         tab.recording = null;
++        if (recording.capture) {
++          await runPromise(
++            desktopChannel.recordingCaptureStop({ threadId: tab.threadId, tabId: tab.tabId }),
++          ).catch(constVoid);
++        }
+       }
+-      const data = Buffer.concat(chunks);
+-      if (!mimeType || data.byteLength === 0) {
++      const raw = Buffer.concat(chunks);
++      if (!mimeType || raw.byteLength === 0) {
+         throw new ServerBrowserPage.ServerBrowserOperationError(
+           "PreviewAutomationExecutionError",
+           "The recording captured no frames.",
+         );
+       }
+-
++      // Plutonium: its length, which the encoder's streamed file lacks.
++      const data = withRecordingDuration(
++        raw,
++        mimeType,
++        Date.now() - Date.parse(recording.startedAt),
++      );
+       const extension = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+       const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${NodeCrypto.randomUUID()}-${extension}`;
+       const path = NodePath.join(config.attachmentsDir, `${pendingId}.${extension}`);
+@@ -1860,6 +2037,7 @@ const make = Effect.gen(function* () {
+           .catch(constVoid);
+       };
+       show("move");
++      if (phase === "track") return;
+       await sleepUntil(Date.now() + AGENT_CURSOR_MOVE_MS);
+       if (phase !== "click") return;
+       show("click");
+@@ -1933,10 +2111,52 @@ const make = Effect.gen(function* () {
+     }
+   };
+ 
++  /**
++   * An agent action holds its tab's queue until its timeout, plus a margin so
++   * its own timeout errors come first. Past that it is abandoned: the queue
++   * moves on and what it held down is let go.
++   */
++  const actionBounds = (
++    tab: ServerTab,
++    request: PreviewAutomationRequest,
++    receivedAt: number,
++  ): ActionBounds => ({
++    operation: request.operation,
++    deadline: receivedAt + request.timeoutMs + ACTION_ABANDON_MARGIN_MS,
++    onAbandon: () => ServerBrowserPage.abandonInput(tab.page),
++    timeoutError: (started) =>
++      new ServerBrowserPage.ServerBrowserOperationError(
++        "PreviewAutomationTimeoutError",
++        started
++          ? `${request.operation} didn't finish within ${Math.round(request.timeoutMs / 1000)} s and was abandoned; any held button or key was released. If the page isn't drawing (the display is off, or it isn't on screen), input and captures can't complete; preview_status shows a stuck action under busy.`
++          : `${request.operation} waited ${Math.round(request.timeoutMs / 1000)} s behind an earlier action on this tab and didn't run. preview_status shows what is busy.`,
++      ),
++  });
++
++  const busyStatus = (tab: ServerTab, fromRunningAction = false) => {
++    const { stuck } = tab.control.activity;
++    const running = fromRunningAction ? undefined : tab.control.activity.running;
++    const describe = (activity: ActionActivity) => ({
++      operation: activity.operation,
++      since: new Date(activity.since).toISOString(),
++      ...(activity.abandonedAt === undefined
++        ? {}
++        : { abandonedAt: new Date(activity.abandonedAt).toISOString() }),
++    });
++    if (!running && stuck.length === 0) return {};
++    return {
++      busy: {
++        ...(running ? { running: describe(running) } : {}),
++        ...(stuck.length === 0 ? {} : { stuck: stuck.map(describe) }),
++      },
++    };
++  };
++
+   const runOperation = async (
+     request: PreviewAutomationRequest,
+     deadlineMs: number,
+   ): Promise<unknown> => {
++    const receivedAt = Date.now();
+     const input = request.input;
+     switch (request.operation) {
+       case "status":
+@@ -2053,6 +2273,8 @@ const make = Effect.gen(function* () {
+                 .waitForLoadState("load", { timeout: navigationTimeout })
+                 .catch(constVoid);
+             }
++            // The panel opens a moment after the request; `visible` reports it.
++            if (reveal !== false) await awaitOnScreen(tab, 3000);
+             return statusWithTitle(tab, request.agentSessionId);
+           },
+           deadlineMs,
+@@ -2151,6 +2373,7 @@ const make = Effect.gen(function* () {
+         }
+       },
+       deadlineMs,
++      actionBounds(tab, request, receivedAt),
+     );
+   };
+ 
+@@ -2167,7 +2390,8 @@ const make = Effect.gen(function* () {
+             navigateInput.timeoutMs ?? request.timeoutMs,
+           ),
+         );
+-        return statusWithTitle(tab, request.agentSessionId);
++        // Answered from inside the action: it isn't busy with itself.
++        return statusWithTitle(tab, request.agentSessionId, true);
+       }
+       case "resize": {
+         const setting = resolvePreviewViewport(input as PreviewAutomationResizeInput);
+@@ -2178,7 +2402,9 @@ const make = Effect.gen(function* () {
+         return {
+           tabId: tab.tabId,
+           setting,
+-          viewport: tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT,
++          viewport: tab.desktop
++            ? await settledDesktopViewport(tab, fixedViewportSize(setting))
++            : (tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT),
+         };
+       }
+       case "setColorScheme": {
+@@ -2233,10 +2459,12 @@ const make = Effect.gen(function* () {
+           ServerBrowserPage.scroll(tab.page, input as PreviewAutomationScrollInput),
+         );
+       case "evaluate":
+-        return ServerBrowserPage.evaluate(
+-          tab.cdp,
+-          input as PreviewAutomationEvaluateInput,
+-          request.timeoutMs,
++        return recordAction(tab, "evaluate", () =>
++          ServerBrowserPage.evaluate(
++            tab.cdp,
++            input as PreviewAutomationEvaluateInput,
++            request.timeoutMs,
++          ),
+         );
+       case "waitFor":
+         return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput);
+@@ -2279,6 +2507,8 @@ const make = Effect.gen(function* () {
+ 
+   const mirrorManagerEvent = (event: PreviewEvent) =>
+     Effect.promise(async () => {
++      // Plutonium: a native window's tab has no page here (PlutoniumWindowTabs).
++      if (isPlutoniumWindowTab(event.tabId)) return;
+       if (event.type === "opened" && event.snapshot.runtime === "server") {
+         const key = tabKey(event.snapshot.threadId, event.snapshot.tabId);
+         if (event.snapshot.automationOwner === undefined || pendingTabs.has(key) || tabs.has(key))
+@@ -2288,6 +2518,10 @@ const make = Effect.gen(function* () {
+       const key = tabKey(event.threadId, event.tabId);
+       const tab = tabs.get(key);
+       if (event.type === "closed" && !tab && pendingTabs.has(key)) closedPendingTabs.add(key);
++      // Plutonium: a tab the helper opened for it closes with the session.
++      if (event.type === "closed") {
++        runFork(desktopChannel.close({ threadId: event.threadId, tabId: event.tabId }));
++      }
+       if (!tab) return;
+       if (event.type === "closed") {
+         closedSessions.add(key);
+@@ -2474,6 +2708,17 @@ const make = Effect.gen(function* () {
+   const attachViewer: ServerBrowser["Service"]["attachViewer"] = Effect.fn(
+     "ServerBrowser.attachViewer",
+   )(function* (input) {
++    // Plutonium: a native window streams from the helper, through the same viewer protocol.
++    const window = plutoniumWindowOfTab(input.tabId);
++    if (window !== null) {
++      return yield* PlutoniumWindowTabs.attachWindowViewer({ ...input, ...window }).pipe(
++        Effect.catchTag("PlutoniumWindowGoneError", () =>
++          Effect.fail(
++            new ServerBrowserTabNotFoundError({ threadId: input.threadId, tabId: input.tabId }),
++          ),
++        ),
++      );
++    }
+     const tab = yield* findTab(input.threadId, input.tabId);
+     const output = yield* Queue.make<ServerBrowserViewerOutput>({
+       capacity: VIEWER_OUTPUT_LIMIT,
+@@ -2728,6 +2973,19 @@ const make = Effect.gen(function* () {
+     Stream.runForEach((change) => desktopChannel.turn(change.threadId, change.active)),
+     Effect.forkScoped,
+   );
++  // Plutonium: a shell or the recording switch stopped a recording's capture.
++  // Its frames stop; preview_recording_stop still returns what was recorded.
++  yield* desktopChannel.recordingEnded.pipe(
++    Stream.runForEach(({ key }) =>
++      Effect.promise(async () => {
++        const recording = tabs.get(tabKey(key.threadId, key.tabId))?.recording;
++        if (!recording?.capture) return;
++        await recording.session.send("Page.stopScreencast").catch(constVoid);
++        await recording.session.detach().catch(constVoid);
++      }),
++    ),
++    Effect.forkScoped,
++  );
+   // Reconnect returned pages immediately so all clients keep receiving URL and title changes.
+   yield* desktopChannel.attached.pipe(
+     Stream.runForEach((key) =>
+@@ -2791,8 +3049,18 @@ const make = Effect.gen(function* () {
+       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
+     });
+ 
++  const plutoniumTabId: ServerBrowser["Service"]["plutoniumTabId"] = (input) =>
++    Effect.promise(async () => {
++      const tab =
++        input.tabId === undefined
++          ? latestThreadTab(input.threadId, input.agentSessionId)
++          : tabs.get(tabKey(input.threadId, input.tabId));
++      return (await tab?.desktop?.browserTabId().catch(() => null)) ?? null;
++    });
++
+   return ServerBrowser.of({
+     attachViewer,
++    plutoniumTabId,
+     clearProfile,
+     profileReporter,
+     openDownload,
+diff --git a/apps/server/src/preview/ServerBrowserPage.test.ts b/apps/server/src/preview/ServerBrowserPage.test.ts
+index 2c6d3a01bc..16e165c228 100644
+--- a/apps/server/src/preview/ServerBrowserPage.test.ts
++++ b/apps/server/src/preview/ServerBrowserPage.test.ts
+@@ -428,3 +428,108 @@ describe("server browser net errors", () => {
+     expect(ServerBrowserPage.parseNetError(errorText)).toEqual({ description, code });
+   });
+ });
++
++describe("Plutonium: path drags", () => {
++  let browser: Browser;
++  let context: BrowserContext;
++  let page: Page;
++
++  beforeAll(async () => {
++    browser = await chromium.launch({ headless: true });
++  });
++  afterAll(async () => {
++    await browser?.close();
++  });
++  beforeEach(async () => {
++    context = await browser.newContext();
++    page = await context.newPage();
++  });
++  afterEach(async () => {
++    await context.close();
++  });
++
++  it("draws a stroke along a path with the button and modifiers held", async () => {
++    await page.setViewportSize({ width: 400, height: 300 });
++    await page.setContent(`
++      <div id="pad" style="position:absolute;inset:0"></div>
++      <script>
++        window.strokes = [];
++        let stroke = null;
++        pad.onpointerdown = (e) => (stroke = { shift: e.shiftKey, trusted: e.isTrusted, points: [[e.clientX, e.clientY]] });
++        pad.onpointermove = (e) => stroke?.points.push([e.clientX, e.clientY]);
++        pad.onpointerup = (e) => { stroke.points.push([e.clientX, e.clientY]); strokes.push(stroke); stroke = null; };
++      </script>`);
++    const shown: Array<string> = [];
++    const pointer: ServerBrowserPage.PointerReporter = async ({ x, y }, phase) => {
++      shown.push(`${phase}@${x},${y}`);
++    };
++    await ServerBrowserPage.drag(
++      page,
++      {
++        path: [
++          { x: 20, y: 20 },
++          { x: 100, y: 20 },
++          { x: 100, y: 100 },
++        ],
++        modifiers: ["Shift"],
++      },
++      pointer,
++    );
++    const [stroke] = (await page.evaluate("window.strokes")) as Array<{
++      shift: boolean;
++      trusted: boolean;
++      points: Array<[number, number]>;
++    }>;
++    expect(stroke).toMatchObject({ shift: true, trusted: true });
++    expect(stroke!.points[0]).toEqual([20, 20]);
++    expect(stroke!.points.at(-1)).toEqual([100, 100]);
++    expect(stroke!.points).toContainEqual([100, 20]);
++    // Moves come in short steps, so a canvas sees a continuous line.
++    expect(stroke!.points.length).toBeGreaterThan(15);
++    expect(shown).toEqual(["move@20,20", "track@100,20", "track@100,100"]);
++    // Nothing stays held afterwards.
++    await page.mouse.move(150, 150);
++    expect(await page.evaluate("window.strokes.length")).toBe(1);
++    expect(await page.evaluate("new MouseEvent('x').shiftKey")).toBe(false);
++  });
++});
++
++describe("Plutonium: abandoned path drags", () => {
++  it("stops a stuck path drag when abandoned and lets go of the button and modifiers", async () => {
++    const sent: Array<string> = [];
++    let moves = 0;
++    // Only the calls a path drag makes. The page stops taking moves after three, as a tab
++    // that stopped drawing frames does.
++    const page = {
++      mouse: {
++        move: (x: number, y: number) => {
++          sent.push(`move ${x},${y}`);
++          return ++moves > 3 ? new Promise<void>(() => {}) : Promise.resolve();
++        },
++        down: async ({ button }: { button: string }) => void sent.push(`down ${button}`),
++        up: async ({ button }: { button: string }) => void sent.push(`up ${button}`),
++      },
++      keyboard: {
++        down: async (key: string) => void sent.push(`keydown ${key}`),
++        up: async (key: string) => void sent.push(`keyup ${key}`),
++      },
++    } as unknown as Page;
++    void ServerBrowserPage.drag(page, {
++      path: [
++        { x: 0, y: 0 },
++        { x: 40, y: 0 },
++      ],
++      button: "left",
++      modifiers: ["Shift"],
++    });
++    await new Promise((resolve) => setImmediate(resolve));
++    expect(sent.at(-1)).toBe("move 24,0");
++    ServerBrowserPage.abandonInput(page);
++    await new Promise((resolve) => setImmediate(resolve));
++    expect(sent.slice(-2)).toEqual(["up left", "keyup Shift"]);
++    // Nothing more is sent once it was abandoned, even if the stuck move ever returns.
++    const count = sent.length;
++    for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setImmediate(resolve));
++    expect(sent.length).toBe(count);
++  });
++});
+diff --git a/apps/server/src/preview/ServerBrowserPage.ts b/apps/server/src/preview/ServerBrowserPage.ts
+index f128bf445e..243b6224ce 100644
+--- a/apps/server/src/preview/ServerBrowserPage.ts
++++ b/apps/server/src/preview/ServerBrowserPage.ts
+@@ -129,7 +129,8 @@ const targetLocator = (
+ 
+ export type PointerReporter = (
+   point: { readonly x: number; readonly y: number },
+-  phase: "move" | "click",
++  /** "track" follows a pointer already on its way, with no glide. */
++  phase: "move" | "click" | "track",
+ ) => Promise<void>;
+ const noPointer: PointerReporter = async () => {};
+ 
+@@ -530,7 +531,12 @@ const capture = async (
+   const { renderScale, viewport } = await renderingOf(input);
+   // A late metrics reply must not begin a capture after viewers have resumed.
+   if (Date.now() >= deadline) throw tooBusy();
+-  const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * renderScale));
++  // Plutonium: one image pixel per viewport pixel, so points read off the
++  // image are click coordinates; a viewport wider than the cap is shrunk to it.
++  const scale = Math.min(
++    1,
++    Math.min(MAX_SCREENSHOT_WIDTH, viewport.width) / (viewport.width * renderScale),
++  );
+   const state = refsFor(input.page);
+   invalidateRefs(input.page);
+   const generation = state.generation;
+@@ -578,6 +584,9 @@ const capture = async (
+   const redacted = withoutTreeDataPayloads(tree);
+   const accessibilityTree = (dotted ? maskTree(redacted, dotted) : redacted)
+     .slice(0, MAX_VISIBLE_TEXT_LENGTH)
++    // Plutonium: Playwright's [active] is the element with keyboard focus,
++    // which agents took for a chosen option.
++    .replace(/ \[active\](?= \[|$)/gm, " [focused]")
+     .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
+       const ref = `t3-${generation}-${nativeRef}`;
+       state.refs.set(ref, nativeRef);
+@@ -596,6 +605,7 @@ const capture = async (
+       mimeType: "image/png",
+       data,
+       ...pngSize(data),
++      viewport: { width: viewport.width, height: viewport.height },
+     },
+   };
+ };
+@@ -693,7 +703,7 @@ const clickTarget = async (
+   const options = { button: input.button ?? "left", clickCount: input.clickCount ?? 1 } as const;
+   const clicked =
+     locator === null
+-      ? page.mouse.click(point.x, point.y, options)
++      ? delivered(page.mouse.click(point.x, point.y, options))
+       : locator.click({ ...options, timeout });
+   let onDialog = constVoid;
+   const dialogOpened = new Promise<"dialog">((resolve) => {
+@@ -777,7 +787,7 @@ export const hover = async (
+   const locator = targetLocator(page, input);
+   await pointer(await targetPoint(page, locator, input, timeout), "move");
+   if (locator === null) {
+-    await page.mouse.move(input.x ?? 0, input.y ?? 0);
++    await delivered(page.mouse.move(input.x ?? 0, input.y ?? 0));
+     return;
+   }
+   await locator.hover({ timeout });
+@@ -818,11 +828,18 @@ export const select = async (
+   return { selected: await locator.selectOption(values, { timeout }) };
+ };
+ 
++/** The longest single mouse move of a path drag, so pages see a continuous stroke. */
++const DRAG_STEP_PX = 8;
++
+ export const drag = async (
+   page: Page,
+   input: PreviewAutomationDragInput,
+   pointer: PointerReporter = noPointer,
+ ) => {
++  if (input.path) {
++    await dragPath(page, input.path, input, pointer);
++    return;
++  }
+   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+   const source = targetLocator(page, { locator: input.source })!;
+   const target = targetLocator(page, { locator: input.target })!;
+@@ -838,6 +855,112 @@ export const drag = async (
+   if (failure) throw failure.error;
+ };
+ 
++/** Real mouse input along viewport points: down at the first, up at the last. */
++const dragPath = async (
++  page: Page,
++  path: ReadonlyArray<{ readonly x: number; readonly y: number }>,
++  input: Pick<PreviewAutomationDragInput, "button" | "modifiers">,
++  pointer: PointerReporter,
++) => {
++  const button = input.button ?? "left";
++  const modifiers = input.modifiers ?? [];
++  const input_ = inputFor(page);
++  const generation = input_.generation;
++  // An abandoned drag sends nothing more, not even the rest of its path.
++  const send = (event: () => Promise<void>) => {
++    if (input_.generation !== generation)
++      throw new ServerBrowserOperationError(
++        "PreviewAutomationTimeoutError",
++        "The drag was abandoned after its timeout.",
++      );
++    return delivered(event());
++  };
++  const [first, ...rest] = path;
++  await pointer(first!, "move");
++  await send(() => page.mouse.move(first!.x, first!.y));
++  try {
++    for (const key of modifiers) {
++      input_.keys.add(key);
++      await send(() => page.keyboard.down(key));
++    }
++    input_.buttons.add(button);
++    await send(() => page.mouse.down({ button }));
++    let from = first!;
++    for (const to of rest) {
++      const steps = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / DRAG_STEP_PX));
++      for (let step = 1; step <= steps; step++) {
++        const x = from.x + ((to.x - from.x) * step) / steps;
++        const y = from.y + ((to.y - from.y) * step) / steps;
++        await send(() => page.mouse.move(x, y));
++      }
++      void pointer(to, "track");
++      from = to;
++    }
++    input_.buttons.delete(button);
++    await send(() => page.mouse.up({ button }));
++  } finally {
++    // A failed drag must not leave the button or a modifier held in the tab.
++    if (input_.generation === generation) releaseHeldInput(page);
++  }
++};
++
++/**
++ * How long one input event may wait for the page to take it. The page takes
++ * mouse moves with its next frame, so on a tab that isn't drawing (the display
++ * is off, or nothing keeps it painting) a move would otherwise wait forever.
++ */
++const INPUT_DELIVERY_MS = 5_000;
++
++const delivered = <A>(event: Promise<A>): Promise<A> => {
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  const stalled = new Promise<never>((_, reject) => {
++    timer = setTimeout(
++      () =>
++        reject(
++          new ServerBrowserOperationError(
++            "PreviewAutomationInputStalledError",
++            `The tab didn't take a mouse event within ${INPUT_DELIVERY_MS / 1000} s, so the action stopped and any held button was released. The tab isn't drawing frames: this happens while the display is off or switched to another session. Try again once it is back on screen.`,
++          ),
++        ),
++      INPUT_DELIVERY_MS,
++    );
++  });
++  return Promise.race([event, stalled]).finally(() => clearTimeout(timer));
++};
++
++/** Buttons and keys an action holds down in a page, so a stuck one can let go. */
++const heldInput = new WeakMap<
++  Page,
++  {
++    generation: number;
++    readonly buttons: Set<"left" | "right" | "middle">;
++    readonly keys: Set<string>;
++  }
++>();
++const inputFor = (page: Page) => {
++  let held = heldInput.get(page);
++  if (!held) {
++    held = { generation: 0, buttons: new Set(), keys: new Set() };
++    heldInput.set(page, held);
++  }
++  return held;
++};
++
++/** Lets go of what the page's actions hold, without waiting for the page to take it. */
++const releaseHeldInput = (page: Page) => {
++  const held = inputFor(page);
++  for (const button of held.buttons) void page.mouse.up({ button }).catch(constVoid);
++  for (const key of [...held.keys].toReversed()) void page.keyboard.up(key).catch(constVoid);
++  held.buttons.clear();
++  held.keys.clear();
++};
++
++/** Stops a stuck action's input: it sends nothing more, and what it held is let go. */
++export const abandonInput = (page: Page) => {
++  inputFor(page).generation++;
++  releaseHeldInput(page);
++};
++
+ export const setInputFiles = async (page: Page, input: PreviewAutomationUploadInput) => {
+   const locator = targetLocator(page, input);
+   if (locator === null) return false;
+@@ -1079,6 +1202,8 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) =>
+         const nextFrame = () => Promise.race([
+           new Promise(resolve => video.requestVideoFrameCallback(resolve)),
+           stopped,
++          // Plutonium: a page in no window never calls back, so each wait is bounded.
++          new Promise(resolve => setTimeout(resolve, 500)),
+         ]);
+         const initial = nextFrame();
+         void video.play().catch(() => {});
+diff --git a/apps/server/src/preview/ServerBrowserStream.test.ts b/apps/server/src/preview/ServerBrowserStream.test.ts
+index c4a709ed8a..439cf74f7f 100644
+--- a/apps/server/src/preview/ServerBrowserStream.test.ts
++++ b/apps/server/src/preview/ServerBrowserStream.test.ts
+@@ -89,6 +89,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: (input) =>
+@@ -164,6 +165,7 @@ it.effect("sends replies ahead of stale frames and only the newest frame after a
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: () => Effect.succeed({ output, input: () => Effect.void }),
+@@ -235,6 +237,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: () => {
+@@ -276,6 +279,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: (input) =>
+         Effect.sync(() => {
+           requests.push(input);
+@@ -324,6 +328,7 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: (input) =>
+         Effect.sync(() => {
+@@ -393,6 +398,7 @@ it.effect.each([
+     const browser = ServerBrowser.ServerBrowser.of({
+       clearProfile: () => Effect.void,
+       profileReporter: Effect.succeed(() => Effect.void),
++      plutoniumTabId: () => Effect.succeed(null),
+       openDownload: () => Effect.succeedNone,
+       answerFileChooser: () => Effect.succeed(false),
+       attachViewer: () => Effect.fail(new ServerBrowser.ServerBrowserLaunchError({ cause: error })),
+diff --git a/apps/server/src/preview/SessionControl.test.ts b/apps/server/src/preview/SessionControl.test.ts
+index f47be6319c..3a35efa815 100644
+--- a/apps/server/src/preview/SessionControl.test.ts
++++ b/apps/server/src/preview/SessionControl.test.ts
+@@ -1,3 +1,4 @@
++// @effect-diagnostics globalDate:off globalTimers:off - The queue under test runs on plain promises and timers.
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
+@@ -355,4 +356,62 @@ describe("SessionControl", () => {
+     await control.release("viewer-a");
+     await expect(control.agent("agent-b", async () => "acted")).resolves.toBe("acted");
+   });
++
++  it("abandons an action stuck past its deadline so later actions run, and lists it as stuck", async () => {
++    const control = new SessionControl("agent");
++    const abandoned: string[] = [];
++    const bounds = (operation: string, ms: number) => ({
++      operation,
++      deadline: Date.now() + ms,
++      timeoutError: (started: boolean) =>
++        new Error(`${operation} ${started ? "abandoned" : "skipped"}`),
++      onAbandon: () => abandoned.push(operation),
++    });
++    const stuck = control.agent(
++      "agent",
++      () => new Promise<never>(() => {}),
++      undefined,
++      bounds("drag", 50),
++    );
++    const next = control.agent(
++      "agent",
++      async () => "snapshot ran",
++      undefined,
++      bounds("snapshot", 5_000),
++    );
++    const stuckFailure = expect(stuck).rejects.toThrow("drag abandoned");
++    await new Promise((resolve) => setImmediate(resolve));
++    expect(control.activity.running?.operation).toBe("drag");
++    await stuckFailure;
++    expect(abandoned).toEqual(["drag"]);
++    await expect(next).resolves.toBe("snapshot ran");
++    expect(control.activity.running).toBeNull();
++    expect(control.activity.stuck).toEqual([
++      expect.objectContaining({ operation: "drag", abandonedAt: expect.any(Number) }),
++    ]);
++  });
++
++  it("does not start an action whose deadline passed while it waited", async () => {
++    const control = new SessionControl("agent");
++    const first = Promise.withResolvers<void>();
++    let ran = false;
++    const running = control.agent("agent", () => first.promise);
++    const late = control.agent(
++      "agent",
++      async () => {
++        ran = true;
++      },
++      undefined,
++      {
++        operation: "evaluate",
++        deadline: Date.now() + 20,
++        timeoutError: (started) => new Error(started ? "abandoned" : "skipped"),
++      },
++    );
++    await new Promise((resolve) => setTimeout(resolve, 40));
++    first.resolve();
++    await running;
++    await expect(late).rejects.toThrow("skipped");
++    expect(ran).toBe(false);
++  });
+ });
+diff --git a/apps/server/src/preview/SessionControl.ts b/apps/server/src/preview/SessionControl.ts
+index 57644e3be7..6bbc35c127 100644
+--- a/apps/server/src/preview/SessionControl.ts
++++ b/apps/server/src/preview/SessionControl.ts
+@@ -1,3 +1,4 @@
++// @effect-diagnostics globalDate:off globalTimers:off - The tab queue runs Playwright work outside the Effect runtime.
+ import type { PreviewAutomationControlReason } from "@t3tools/contracts";
+ 
+ export class BrowserControlInterrupted extends Error {
+@@ -17,6 +18,25 @@ const settle = (work: Promise<unknown>) =>
+     () => undefined,
+   );
+ 
++/** What an agent action is, for status, and how long it may hold the tab's queue. */
++export interface ActionBounds {
++  readonly operation: string;
++  /** Epoch ms. Past it, the action is abandoned and the queue moves on. */
++  readonly deadline: number;
++  /** Builds the caller's error for an abandoned (or never started) action. */
++  readonly timeoutError: (started: boolean) => Error;
++  /** Undoes what a stuck action may hold, such as a pressed mouse button. */
++  readonly onAbandon?: () => void;
++}
++
++export interface ActionActivity {
++  readonly operation: string;
++  /** Epoch ms. */
++  readonly since: number;
++  /** Epoch ms, when the action passed its deadline and the queue moved on without it. */
++  readonly abandonedAt?: number;
++}
++
+ /** Reserves control immediately, but drains running work before the new owner can act. */
+ export class SessionControl {
+   readonly agentId: string | null;
+@@ -31,6 +51,8 @@ export class SessionControl {
+   private owner: string | null = null;
+   private epoch = 0;
+   private closed = false;
++  private current: ActionActivity | null = null;
++  private readonly abandoned = new Set<ActionActivity>();
+ 
+   constructor(agentId: string | null, onGenerationChange: () => void = () => {}) {
+     this.agentId = agentId;
+@@ -45,6 +67,53 @@ export class SessionControl {
+     return this.epoch;
+   }
+ 
++  /** The bounded action running now, and abandoned ones that never finished. */
++  get activity(): {
++    readonly running: ActionActivity | null;
++    readonly stuck: ReadonlyArray<ActionActivity>;
++  } {
++    return { running: this.current, stuck: [...this.abandoned] };
++  }
++
++  /**
++   * Runs an action until its deadline. One that is still running then is
++   * abandoned: its caller fails, the queue moves on, and it is listed as stuck
++   * until it settles. One whose deadline passed while it waited never starts.
++   */
++  private bounded<A>(run: () => Promise<A>, bounds: ActionBounds): Promise<A> {
++    const remaining = bounds.deadline - Date.now();
++    if (remaining <= 0) return Promise.reject(bounds.timeoutError(false));
++    const entry: { -readonly [K in keyof ActionActivity]: ActionActivity[K] } = {
++      operation: bounds.operation,
++      since: Date.now(),
++    };
++    this.current = entry;
++    return new Promise<A>((resolve, reject) => {
++      const timer = setTimeout(() => {
++        entry.abandonedAt = Date.now();
++        if (this.current === entry) this.current = null;
++        this.abandoned.add(entry);
++        bounds.onAbandon?.();
++        reject(bounds.timeoutError(true));
++      }, remaining);
++      const settle = () => {
++        clearTimeout(timer);
++        if (this.current === entry) this.current = null;
++        this.abandoned.delete(entry);
++      };
++      run().then(
++        (value) => {
++          settle();
++          resolve(value);
++        },
++        (cause: unknown) => {
++          settle();
++          reject(cause);
++        },
++      );
++    });
++  }
++
+   private enqueue<A>(run: () => Promise<A>): Promise<A> {
+     this.latestHuman = null;
+     const result = this.tail.then(run);
+@@ -79,7 +148,12 @@ export class SessionControl {
+     this.onGenerationChange();
+   }
+ 
+-  private async action<A>(allowed: () => boolean, run: () => Promise<A>, deadlineMs?: number) {
++  private async action<A>(
++    allowed: () => boolean,
++    run: () => Promise<A>,
++    deadlineMs?: number,
++    bounds?: ActionBounds,
++  ) {
+     this.assertOpen();
+     if (!allowed()) throw new BrowserControlInterrupted("You do not control this browser tab.");
+     const epoch = this.epoch;
+@@ -92,7 +166,7 @@ export class SessionControl {
+           "TimeoutError",
+         );
+       }
+-      return run();
++      return bounds ? this.bounded(run, bounds) : run();
+     });
+   }
+ 
+@@ -100,7 +174,7 @@ export class SessionControl {
+     return this.agentId === null || this.agentId === agentId;
+   }
+ 
+-  agent<A>(agentId: string, run: () => Promise<A>, deadlineMs?: number) {
++  agent<A>(agentId: string, run: () => Promise<A>, deadlineMs?: number, bounds?: ActionBounds) {
+     if (!this.agentMayAct(agentId))
+       return Promise.reject(
+         new BrowserControlInterrupted("This tab belongs to another agent.", "agentMismatch"),
+@@ -109,7 +183,12 @@ export class SessionControl {
+       return Promise.reject(
+         new BrowserControlInterrupted("A human controls this tab.", "humanControl"),
+       );
+-    return this.action(() => this.agentMayAct(agentId) && this.owner === null, run, deadlineMs);
++    return this.action(
++      () => this.agentMayAct(agentId) && this.owner === null,
++      run,
++      deadlineMs,
++      bounds,
++    );
+   }
+ 
+   agentCanActNow(agentId: string) {
+diff --git a/apps/server/src/preview/recordingDuration.test.ts b/apps/server/src/preview/recordingDuration.test.ts
+new file mode 100644
+index 0000000000..4de985f82b
+--- /dev/null
++++ b/apps/server/src/preview/recordingDuration.test.ts
+@@ -0,0 +1,100 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { withRecordingDuration } from "./recordingDuration.ts";
++
++const element = (id: number[], body: Buffer, unknownSize = false) =>
++  Buffer.concat([
++    Buffer.from(id),
++    unknownSize
++      ? Buffer.from([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
++      : Buffer.from([0x80 | body.length]),
++    body,
++  ]);
++
++/** What MediaRecorder writes: a live Segment, an Info without a Duration, then clusters. */
++const webm = () =>
++  Buffer.concat([
++    element([0x1a, 0x45, 0xdf, 0xa3], element([0x42, 0x82], Buffer.from("webm"))),
++    element(
++      [0x18, 0x53, 0x80, 0x67],
++      Buffer.concat([
++        element(
++          [0x15, 0x49, 0xa9, 0x66],
++          Buffer.concat([
++            element([0x2a, 0xd7, 0xb1], Buffer.from([0x0f, 0x42, 0x40])),
++            element([0x4d, 0x80], Buffer.from("Chrome")),
++          ]),
++        ),
++        element([0x1f, 0x43, 0xb6, 0x75], Buffer.from([0xe7, 0x81, 0x00])),
++      ]),
++      true,
++    ),
++  ]);
++
++const box = (type: string, body: Buffer) => {
++  const header = Buffer.alloc(8);
++  header.writeUInt32BE(8 + body.length, 0);
++  header.write(type, 4, "latin1");
++  return Buffer.concat([header, body]);
++};
++
++/** A fragmented MP4's moov: every duration 0. */
++const mp4 = () => {
++  const mvhd = Buffer.alloc(100);
++  mvhd.writeUInt32BE(1000, 12);
++  const tkhd = Buffer.alloc(84);
++  const mdhd = Buffer.alloc(24);
++  mdhd.writeUInt32BE(90000, 12);
++  return Buffer.concat([
++    box("ftyp", Buffer.from("isom")),
++    box(
++      "moov",
++      Buffer.concat([
++        box("mvhd", mvhd),
++        box("trak", Buffer.concat([box("tkhd", tkhd), box("mdia", box("mdhd", mdhd))])),
++        box("mvex", box("mehd", Buffer.alloc(8))),
++      ]),
++    ),
++    box("moof", Buffer.alloc(8)),
++  ]);
++};
++
++describe("withRecordingDuration", () => {
++  it("adds a Duration to a WebM's Info", () => {
++    const original = webm();
++    const result = withRecordingDuration(original, "video/webm;codecs=vp9", 2500);
++    expect(result.length).toBe(original.length + 11);
++    const at = result.indexOf(Buffer.from([0x44, 0x89, 0x88]));
++    expect(at).toBeGreaterThan(0);
++    // In ticks of the timecode scale (1 ms here).
++    expect(result.readDoubleBE(at + 3)).toBe(2500);
++    // The Info's size grew by the element; the cluster follows it.
++    const info = result.indexOf(Buffer.from([0x15, 0x49, 0xa9, 0x66]));
++    expect(result[info + 4]! & 0x7f).toBe(original[info + 4]! - 0x80 + 11);
++    expect(result.indexOf(Buffer.from([0x1f, 0x43, 0xb6, 0x75]))).toBe(
++      info + 5 + (result[info + 4]! & 0x7f),
++    );
++  });
++
++  it("leaves a WebM that has a Duration, or isn't one, as it is", () => {
++    const once = withRecordingDuration(webm(), "video/webm", 2500);
++    expect(withRecordingDuration(once, "video/webm", 4000)).toEqual(once);
++    const junk = Buffer.from("not a video");
++    expect(withRecordingDuration(junk, "video/webm", 1000)).toEqual(junk);
++  });
++
++  it("sets an MP4's movie, track, media and fragment durations", () => {
++    const original = mp4();
++    const result = withRecordingDuration(original, "video/mp4;codecs=avc1.640033", 2500);
++    expect(result.length).toBe(original.length);
++    const mvhd = result.indexOf("mvhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mvhd + 16)).toBe(2500);
++    const tkhd = result.indexOf("tkhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(tkhd + 20)).toBe(2500);
++    const mdhd = result.indexOf("mdhd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mdhd + 16)).toBe(225000);
++    const mehd = result.indexOf("mehd", 0, "latin1") + 4;
++    expect(result.readUInt32BE(mehd + 4)).toBe(2500);
++    expect(original.readUInt32BE(mvhd + 16)).toBe(0);
++  });
++});
+diff --git a/apps/server/src/preview/recordingDuration.ts b/apps/server/src/preview/recordingDuration.ts
+new file mode 100644
+index 0000000000..b59dd7c2a5
+--- /dev/null
++++ b/apps/server/src/preview/recordingDuration.ts
+@@ -0,0 +1,209 @@
++/**
++ * Plutonium: a recording's length, written into its header. MediaRecorder
++ * streams its file as it goes, so it never knows the length: a WebM has no
++ * Duration in its Info, an MP4 a duration of 0, and players can't show or
++ * seek well. Without ffmpeg (NixOS has none on the server's PATH), the
++ * length is written in place.
++ */
++
++// EBML element ids (Matroska).
++const SEGMENT = 0x18538067;
++const INFO = 0x1549a966;
++const TIMECODE_SCALE = 0x2ad7b1;
++const DURATION = 0x4489;
++const CLUSTER = 0x1f43b675;
++
++interface Element {
++  readonly id: number;
++  /** Where the element starts, its size field starts, and its data starts. */
++  readonly start: number;
++  readonly sizeAt: number;
++  readonly dataAt: number;
++  /** The size field's length in bytes. */
++  readonly sizeLength: number;
++  /** The data's size, or null for "unknown" (a live stream's Segment). */
++  readonly size: number | null;
++}
++
++const readElement = (data: Buffer, at: number): Element | null => {
++  if (at >= data.length) return null;
++  const first = data[at]!;
++  const idLength = Math.clz32(first) - 23;
++  if (idLength < 1 || idLength > 4 || at + idLength >= data.length) return null;
++  const id = data.readUIntBE(at, idLength);
++  const sizeAt = at + idLength;
++  const sizeFirst = data[sizeAt]!;
++  const sizeLength = Math.clz32(sizeFirst) - 23;
++  if (sizeLength < 1 || sizeLength > 8 || sizeAt + sizeLength > data.length) return null;
++  let size = sizeFirst & (0xff >> sizeLength);
++  let unknown = size === 0xff >> sizeLength;
++  for (let index = 1; index < sizeLength; index += 1) {
++    const byte = data[sizeAt + index]!;
++    if (byte !== 0xff) unknown = false;
++    size = size * 256 + byte;
++  }
++  return {
++    id,
++    start: at,
++    sizeAt,
++    dataAt: sizeAt + sizeLength,
++    sizeLength,
++    size: unknown ? null : size,
++  };
++};
++
++/** `size` as a size field `length` bytes long, or null if it doesn't fit. */
++const encodeSize = (size: number, length: number): Buffer | null => {
++  if (size >= 2 ** (7 * length) - 1) return null;
++  const field = Buffer.alloc(length);
++  let rest = size;
++  for (let index = length - 1; index >= 0; index -= 1) {
++    field[index] = rest % 256;
++    rest = Math.floor(rest / 256);
++  }
++  field[0]! |= 0x80 >> (length - 1);
++  return field;
++};
++
++const withWebmDuration = (data: Buffer, durationMs: number): Buffer => {
++  const segment = findTopLevel(data, SEGMENT);
++  if (!segment) return data;
++  const segmentEnd = segment.size === null ? data.length : segment.dataAt + segment.size;
++  let info: Element | null = null;
++  for (let at = segment.dataAt; at < segmentEnd;) {
++    const element = readElement(data, at);
++    if (!element || element.size === null) return data;
++    if (element.id === INFO) {
++      info = element;
++      break;
++    }
++    if (element.id === CLUSTER) return data;
++    at = element.dataAt + element.size;
++  }
++  if (!info || info.size === null) return data;
++  // Durations count in the timecode scale (ns per tick, 1 ms by default).
++  let scale = 1_000_000;
++  const infoEnd = info.dataAt + info.size;
++  for (let at = info.dataAt; at < infoEnd;) {
++    const element = readElement(data, at);
++    if (!element || element.size === null) return data;
++    if (element.id === DURATION) return data;
++    if (element.id === TIMECODE_SCALE && element.size <= 6) {
++      scale = data.readUIntBE(element.dataAt, element.size) || scale;
++    }
++    at = element.dataAt + element.size;
++  }
++  const duration = Buffer.alloc(11);
++  duration.writeUInt16BE(DURATION, 0);
++  duration[2] = 0x88;
++  duration.writeDoubleBE((durationMs * 1_000_000) / scale, 3);
++  const infoSize = encodeSize(info.size + duration.length, info.sizeLength);
++  if (!infoSize) return data;
++  let segmentSize: Buffer | null = null;
++  if (segment.size !== null) {
++    segmentSize = encodeSize(segment.size + duration.length, segment.sizeLength);
++    if (!segmentSize) return data;
++  }
++  const result = Buffer.concat([data.subarray(0, infoEnd), duration, data.subarray(infoEnd)]);
++  infoSize.copy(result, info.sizeAt);
++  segmentSize?.copy(result, segment.sizeAt);
++  return result;
++};
++
++const findTopLevel = (data: Buffer, id: number): Element | null => {
++  for (let at = 0; at < data.length;) {
++    const element = readElement(data, at);
++    if (!element) return null;
++    if (element.id === id) return element;
++    if (element.size === null) return null;
++    at = element.dataAt + element.size;
++  }
++  return null;
++};
++
++/** MP4 boxes in [start, end): type, where it starts, its header's end, its end. */
++const boxes = (data: Buffer, start: number, end: number) => {
++  const found: Array<{ type: string; start: number; body: number; end: number }> = [];
++  for (let at = start; at + 8 <= end;) {
++    let size = data.readUInt32BE(at);
++    let body = at + 8;
++    if (size === 1) {
++      if (at + 16 > end) break;
++      size = Number(data.readBigUInt64BE(at + 8));
++      body = at + 16;
++    } else if (size === 0) {
++      size = end - at;
++    }
++    if (size < body - at || at + size > end) break;
++    found.push({ type: data.toString("latin1", at + 4, at + 8), start: at, body, end: at + size });
++    at += size;
++  }
++  return found;
++};
++
++/**
++ * Sets a full box's duration (mvhd, tkhd, mdhd) where it is 0, in its own
++ * timescale or, for tkhd, the movie's. Returns the box's timescale, if it has one.
++ */
++const setBoxDuration = (
++  data: Buffer,
++  box: { type: string; body: number; end: number },
++  durationMs: number,
++  movieTimescale: number,
++): number | undefined => {
++  const version = data[box.body]!;
++  // After version and flags: creation and modification times, then (except
++  // tkhd) the timescale, then (tkhd) the track id and a reserved field.
++  const times = version === 1 ? 16 : 8;
++  const timescaleAt = box.body + 4 + times;
++  const timescale = box.type === "tkhd" ? movieTimescale : data.readUInt32BE(timescaleAt);
++  const durationAt = box.type === "tkhd" ? timescaleAt + 8 : timescaleAt + 4;
++  if (durationAt + (version === 1 ? 8 : 4) > box.end || !timescale) return undefined;
++  const duration = Math.round((durationMs * timescale) / 1000);
++  if (version === 1) {
++    if (data.readBigUInt64BE(durationAt) === 0n)
++      data.writeBigUInt64BE(BigInt(duration), durationAt);
++  } else if (data.readUInt32BE(durationAt) === 0 && duration < 2 ** 32) {
++    data.writeUInt32BE(duration, durationAt);
++  }
++  return box.type === "tkhd" ? undefined : timescale;
++};
++
++const withMp4Duration = (data: Buffer, durationMs: number): Buffer => {
++  const moov = boxes(data, 0, data.length).find((box) => box.type === "moov");
++  if (!moov) return data;
++  const result = Buffer.from(data);
++  const children = boxes(result, moov.body, moov.end);
++  const mvhd = children.find((box) => box.type === "mvhd");
++  if (!mvhd) return data;
++  const movieTimescale = setBoxDuration(result, mvhd, durationMs, 0) ?? 0;
++  for (const trak of children.filter((box) => box.type === "trak")) {
++    for (const box of boxes(result, trak.body, trak.end)) {
++      if (box.type === "tkhd") setBoxDuration(result, box, durationMs, movieTimescale);
++      if (box.type === "mdia") {
++        const mdhd = boxes(result, box.body, box.end).find((child) => child.type === "mdhd");
++        if (mdhd) setBoxDuration(result, mdhd, durationMs, movieTimescale);
++      }
++    }
++  }
++  const mvex = children.find((box) => box.type === "mvex");
++  const mehd = mvex && boxes(result, mvex.body, mvex.end).find((box) => box.type === "mehd");
++  if (mehd && movieTimescale) {
++    const duration = Math.round((durationMs * movieTimescale) / 1000);
++    if (result[mehd.body] === 1) result.writeBigUInt64BE(BigInt(duration), mehd.body + 4);
++    else if (duration < 2 ** 32) result.writeUInt32BE(duration, mehd.body + 4);
++  }
++  return result;
++};
++
++/** The recording with its length in its header; as it was if it can't tell where. */
++export const withRecordingDuration = (data: Buffer, mimeType: string, durationMs: number) => {
++  if (!(durationMs > 0)) return data;
++  try {
++    return mimeType.startsWith("video/mp4")
++      ? withMp4Duration(data, durationMs)
++      : withWebmDuration(data, durationMs);
++  } catch {
++    return data;
++  }
++};

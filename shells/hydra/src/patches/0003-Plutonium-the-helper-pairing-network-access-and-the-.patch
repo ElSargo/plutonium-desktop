@@ -1,0 +1,559 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:48 +1300
+Subject: [PATCH 03/10] Plutonium: the helper, pairing, network access and the
+ boot error
+
+Folded from:
+- use the Plutonium helper and its agent bridge
+- the shell pairs with the launcher's token only when it needs to
+- pair from a browser over the addresses the server reports
+- network access from the shell's settings
+- the boot error reloads by itself once the server answers
+- the app is Hydra
+---
+ .../settings/ConnectionsSettings.tsx          | 92 +++++++++++++++----
+ apps/web/src/lib/bootError.test.ts            | 36 ++++++++
+ apps/web/src/lib/bootError.ts                 | 47 +++++++++-
+ apps/web/src/main.tsx                         |  7 ++
+ apps/web/src/plutonium/directEndpoints.ts     | 56 +++++++++++
+ apps/web/src/plutonium/helperOrigin.ts        | 23 +++++
+ apps/web/src/plutonium/networkAccess.ts       | 68 ++++++++++++++
+ apps/web/src/plutonium/pairing.ts             | 35 +++++++
+ 8 files changed, 346 insertions(+), 18 deletions(-)
+ create mode 100644 apps/web/src/plutonium/directEndpoints.ts
+ create mode 100644 apps/web/src/plutonium/helperOrigin.ts
+ create mode 100644 apps/web/src/plutonium/networkAccess.ts
+ create mode 100644 apps/web/src/plutonium/pairing.ts
+
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 5409f6ec53..3b8c248196 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -1,4 +1,9 @@
+ import { SessionPermissions } from "./SessionPermissions";
++import { serverDirectAdvertisedEndpoints } from "../../plutonium/directEndpoints";
++import {
++  setPlutoniumNetworkAccess,
++  usePlutoniumNetworkAccess,
++} from "../../plutonium/networkAccess";
+ import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
+ import { useAtomValue } from "@effect/atom-react";
+ import { useState } from "react";
+@@ -310,9 +315,31 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+   const desktopWslState = desktopWsl.data;
+   const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
+   const isLoadingWslState = desktopWsl.isPending && desktopWsl.data === null;
+-  const desktopServerExposureState = desktopNetworkAccess.data?.serverExposureState ?? null;
++  // Plutonium: the shell is a browser page; its server's launcher switches
++  // network access as the desktop app does (plutonium/networkAccess.ts).
++  const plutoniumNetworkAccess = usePlutoniumNetworkAccess(canManageLocalBackend && !desktopBridge);
++  const plutoniumExposureMode = plutoniumNetworkAccess.state?.switchable
++    ? plutoniumNetworkAccess.state.mode
++    : null;
++  const plutoniumServerExposureState =
++    plutoniumExposureMode === null
++      ? null
++      : {
++          mode: plutoniumExposureMode,
++          endpointUrl: null,
++          advertisedHost: null,
++          tailscaleServeEnabled: false,
++          tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
++        };
++  const desktopServerExposureState =
++    desktopNetworkAccess.data?.serverExposureState ?? plutoniumServerExposureState;
++  // Plutonium: a browser has no desktop endpoints; it pairs over the addresses
++  // the server reports.
++  const browserAdvertisedEndpoints = desktopBridge
++    ? EMPTY_ADVERTISED_ENDPOINTS
++    : serverDirectAdvertisedEndpoints(primaryEnvironment?.serverConfig?.directEndpoints);
+   const desktopAdvertisedEndpoints =
+-    desktopNetworkAccess.data?.advertisedEndpoints ?? EMPTY_ADVERTISED_ENDPOINTS;
++    desktopNetworkAccess.data?.advertisedEndpoints ?? browserAdvertisedEndpoints;
+   const desktopServerExposureError =
+     desktopServerExposureMutationError ?? desktopNetworkAccess.error;
+   const desktopAccessManagementError =
+@@ -337,9 +364,10 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+       ),
+     );
+   })();
+-  const isLocalBackendNetworkAccessible = desktopBridge
+-    ? desktopServerExposureState?.mode === "network-accessible"
+-    : currentAuthPolicy === "remote-reachable";
++  const isLocalBackendNetworkAccessible =
++    desktopBridge || plutoniumServerExposureState
++      ? desktopServerExposureState?.mode === "network-accessible"
++      : currentAuthPolicy === "remote-reachable";
+   const trimmedTailscaleServePortInput = tailscaleServePortInput.trim();
+   const parsedTailscaleServePort = Number(trimmedTailscaleServePortInput);
+   const isTailscaleServePortValid =
+@@ -355,6 +383,28 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+   );
+ 
+   const handleDesktopServerExposureChange = async (checked: boolean) => {
++    if (!desktopBridge && plutoniumServerExposureState !== null) {
++      setIsUpdatingDesktopServerExposure(true);
++      setDesktopServerExposureMutationError(null);
++      try {
++        await setPlutoniumNetworkAccess(checked ? "network-accessible" : "local-only");
++      } catch (error) {
++        const message =
++          error instanceof Error ? error.message : "Failed to update network exposure.";
++        setDesktopServerExposureMutationError(message);
++        toastManager.add(
++          stackedThreadToast({
++            type: "error",
++            title: "Could not update network access",
++            description: message,
++          }),
++        );
++      }
++      plutoniumNetworkAccess.refresh();
++      setPendingDesktopServerExposureMode(null);
++      setIsUpdatingDesktopServerExposure(false);
++      return;
++    }
+     if (
+       !desktopBridge ||
+       primaryEnvironmentId === null ||
+@@ -885,7 +935,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+         {desktopWslState.enabled ? (
+           <SettingsRow
+             title="WSL only"
+-            description="Run only the WSL backend. T3 Code restarts when this changes."
++            description="Run only the WSL backend. Hydra restarts when this changes."
+             className="bg-muted/20 pl-7 sm:pl-8"
+             control={
+               <Switch
+@@ -1005,7 +1055,9 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+           : currentAuthPolicy === "remote-reachable"
+             ? "Remote access is already configured. Change network exposure where the server starts."
+             : currentAuthPolicy === "loopback-browser"
+-              ? "Only this machine can connect. Restart with a non-loopback host for remote pairing."
++              ? tailscaleHttpsEndpoint
++                ? `Other devices on your tailnet can connect through Tailscale HTTPS (${tailscaleHttpsEndpoint.httpBaseUrl}). Restart with a non-loopback host for LAN pairing.`
++                : "Only this machine can connect. Restart with a non-loopback host, or with Tailscale Serve, for remote pairing."
+               : "Network exposure information is unavailable."
+       }
+       control={
+@@ -1136,6 +1188,14 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
+                 ) : null}
+               </>
++            ) : canManageLocalBackend && plutoniumServerExposureState ? (
++              <>
++                {renderNetworkAccessRow()}
++                {renderEndpointRows()}
++                {canReadRelay || canManageRelay ? (
++                  <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
++                ) : null}
++              </>
+             ) : canManageLocalBackend ? (
+               <>
+                 {renderDisabledNetworkAccessRow()}
+@@ -1224,8 +1284,8 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+                 </AlertDialogTitle>
+                 <AlertDialogDescription>
+                   {pendingDesktopServerExposureMode === "network-accessible"
+-                    ? "Let your other devices connect to T3 Code over the network. Pair devices to give them access. T3 Code will restart."
+-                    : "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. T3 Code will restart."}
++                    ? "Let your other devices connect to Hydra over the network. Pair devices to give them access. Hydra will restart."
++                    : "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. Hydra will restart."}
+                 </AlertDialogDescription>
+               </AlertDialogHeader>
+               <AlertDialogFooter>
+@@ -1281,15 +1341,15 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+                 <AlertDialogDescription>
+                   {pendingWslChange?.kind === "disable"
+                     ? pendingWslChange.wasWslOnly
+-                      ? "T3 Code will restart on the Windows backend. Threads and projects opened against WSL stay safe inside the distro and become available again when you re-enable WSL."
+-                      : "The WSL backend will stop. Threads and projects opened against WSL stay safe inside the distro, but they'll be unavailable in T3 Code until you re-enable WSL."
++                      ? "Hydra will restart on the Windows backend. Threads and projects opened against WSL stay safe inside the distro and become available again when you re-enable WSL."
++                      : "The WSL backend will stop. Threads and projects opened against WSL stay safe inside the distro, but they'll be unavailable in Hydra until you re-enable WSL."
+                     : pendingWslChange?.kind === "distro"
+-                      ? "T3 Code will restart the WSL backend on the new distro. Sessions still running on the current distro will be interrupted."
++                      ? "Hydra will restart the WSL backend on the new distro. Sessions still running on the current distro will be interrupted."
+                       : pendingWslChange?.kind === "enable"
+                         ? "Run the WSL backend alongside the Windows one, or stop the Windows backend and use only WSL? You can change this later from Settings."
+                         : pendingWslChange?.nextValue
+-                          ? "T3 Code will restart and start only the WSL backend. Your Windows-side projects won't be accessible until you turn this off again."
+-                          : "T3 Code will restart and bring the Windows backend back up alongside WSL."}
++                          ? "Hydra will restart and start only the WSL backend. Your Windows-side projects won't be accessible until you turn this off again."
++                          : "Hydra will restart and bring the Windows backend back up alongside WSL."}
+                 </AlertDialogDescription>
+               </AlertDialogHeader>
+               <AlertDialogFooter>
+@@ -1375,7 +1435,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+               <AlertDialogHeader>
+                 <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
+                 <AlertDialogDescription>
+-                  T3 Code will restart the local backend without Tailscale Serve.
++                  Hydra will restart the local backend without Tailscale Serve.
+                 </AlertDialogDescription>
+               </AlertDialogHeader>
+               <AlertDialogFooter>
+@@ -1413,7 +1473,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" |
+               <DialogHeader>
+                 <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
+                 <DialogDescription>
+-                  T3 Code will restart the local backend with Tailscale Serve enabled and ask
++                  Hydra will restart the local backend with Tailscale Serve enabled and ask
+                   Tailscale to proxy HTTPS traffic to this backend.
+                 </DialogDescription>
+               </DialogHeader>
+diff --git a/apps/web/src/lib/bootError.test.ts b/apps/web/src/lib/bootError.test.ts
+index e04e8bef2c..f3ff9d8cca 100644
+--- a/apps/web/src/lib/bootError.test.ts
++++ b/apps/web/src/lib/bootError.test.ts
+@@ -5,6 +5,7 @@ import {
+   type BootErrorEnvironment,
+   buildErrorReport,
+   resolveTriageCommand,
++  retryBootWhenServerAnswers,
+   updateActionFor,
+ } from "./bootError";
+ 
+@@ -131,3 +132,38 @@ describe("updateActionFor", () => {
+     expect(updateActionFor(undefined)).toBeNull();
+   });
+ });
++
++describe("retryBootWhenServerAnswers", () => {
++  it("reloads by itself once the server answers, a few times per streak", async () => {
++    vi.useFakeTimers();
++    const storage = new Map<string, string>();
++    const reload = vi.fn();
++    vi.stubGlobal("window", {
++      location: { reload },
++      setTimeout,
++      sessionStorage: {
++        getItem: (key: string) => storage.get(key) ?? null,
++        setItem: (key: string, value: string) => storage.set(key, value),
++      },
++    });
++    const fetch = vi
++      .fn()
++      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
++      .mockResolvedValue({ ok: true });
++    vi.stubGlobal("fetch", fetch);
++
++    retryBootWhenServerAnswers();
++    await vi.advanceTimersByTimeAsync(1000);
++    expect(reload).not.toHaveBeenCalled();
++    await vi.advanceTimersByTimeAsync(1000);
++    expect(reload).toHaveBeenCalledOnce();
++
++    storage.set("t3code:boot-retries", "5");
++    reload.mockClear();
++    retryBootWhenServerAnswers();
++    await vi.advanceTimersByTimeAsync(60_000);
++    expect(reload).not.toHaveBeenCalled();
++    vi.useRealTimers();
++    vi.unstubAllGlobals();
++  });
++});
+diff --git a/apps/web/src/lib/bootError.ts b/apps/web/src/lib/bootError.ts
+index 3e0b05a016..56b4fddaf5 100644
+--- a/apps/web/src/lib/bootError.ts
++++ b/apps/web/src/lib/bootError.ts
+@@ -255,7 +255,7 @@ function mountUpdateButton(
+ }
+ 
+ export function showBootError(error: unknown) {
+-  console.error("T3 Code failed to start.", error);
++  console.error("Hydra failed to start.", error);
+   const bootShell = document.getElementById("boot-shell");
+   if (!bootShell) return;
+ 
+@@ -274,7 +274,7 @@ export function showBootError(error: unknown) {
+   };
+ 
+   const message = element("div", {}, [
+-    element("h1", { textContent: "T3 Code failed to start" }),
++    element("h1", { textContent: "Hydra failed to start" }),
+     element("p", {
+       textContent: offline
+         ? "This browser appears to be offline. Check the connection, then reload."
+@@ -392,4 +392,47 @@ export function showBootError(error: unknown) {
+       status,
+     ]),
+   );
++  retryBootWhenServerAnswers();
++}
++
++// Plutonium: the shell can open the page while T3's server is still starting
++// or restarting, and a chunk it asks for then fails, which left the page on
++// this error until reloaded by hand. Reload by itself once the server answers
++// again, a few times per failure streak (a successful boot clears it), so a
++// real startup bug still stops here.
++const BOOT_RETRY_KEY = "t3code:boot-retries";
++const BOOT_RETRY_LIMIT = 5;
++
++export function retryBootWhenServerAnswers() {
++  let retries: number;
++  try {
++    retries = Number(window.sessionStorage.getItem(BOOT_RETRY_KEY) ?? 0);
++    if (retries >= BOOT_RETRY_LIMIT) return;
++    window.sessionStorage.setItem(BOOT_RETRY_KEY, String(retries + 1));
++  } catch {
++    // Without storage a persistent failure would reload forever.
++    return;
++  }
++  const poll = async () => {
++    try {
++      const response = await fetch("/", { cache: "no-store" });
++      if (response.ok) {
++        window.location.reload();
++        return;
++      }
++    } catch {
++      // Not listening yet.
++    }
++    window.setTimeout(poll, 1000);
++  };
++  window.setTimeout(poll, 1000 * (retries + 1));
++}
++
++/** After a boot that rendered: the next failure gets its own retries. */
++export function clearBootRetries() {
++  try {
++    window.sessionStorage.removeItem(BOOT_RETRY_KEY);
++  } catch {
++    // Blocked storage never held the count.
++  }
+ }
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index d6cf4ce77b..5cec4864be 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -7,9 +7,15 @@ import "./index.css";
+ import { hasCloudPublicConfig } from "./cloud/publicConfig";
+ import { isElectron } from "./env";
+ import { startAppServices } from "./appInit";
++import { rememberPlutoniumHelper } from "./plutonium/helperOrigin";
++import { offerPlutoniumPairing } from "./plutonium/pairing";
+ import { AppRoot } from "./AppRoot";
+ import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
++import { clearBootRetries } from "./lib/bootError";
+ 
++// Plutonium: before T3 reads the address, which may carry the launcher's pairing token.
++rememberPlutoniumHelper();
++await offerPlutoniumPairing();
+ const router = startAppServices();
+ 
+ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
+@@ -42,6 +48,7 @@ export const startup = Promise.all([
+     // Route chunk failures resolve router.load() and surface later through the error boundary.
+     if (reloadScheduled) return;
+     if (!chunkLoadFailed) clearChunkReloadGuard();
++    clearBootRetries();
+     ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+       <React.StrictMode>
+         {ManagedAuthShell && clerkPublishableKey ? (
+diff --git a/apps/web/src/plutonium/directEndpoints.ts b/apps/web/src/plutonium/directEndpoints.ts
+new file mode 100644
+index 0000000000..ae69c8fc68
+--- /dev/null
++++ b/apps/web/src/plutonium/directEndpoints.ts
+@@ -0,0 +1,56 @@
++/**
++ * Pairing endpoints for a browser client, from the addresses the server
++ * reports (ServerConfig.directEndpoints).
++ *
++ * T3's pairing QR only lists the desktop app's own endpoints, so a browser on
++ * loopback (the Plutonium shell) had nothing to put in it. The server lists
++ * its LAN and tailnet addresses, and its Tailscale Serve name once that answers,
++ * which is what another device can dial.
++ */
++import type { AdvertisedEndpoint, ServerDirectEndpoint } from "@t3tools/contracts";
++import { createAdvertisedEndpoint } from "@t3tools/shared/advertisedEndpoint";
++
++const SERVER_ENDPOINT_PROVIDER = {
++  id: "server",
++  label: "Server",
++  kind: "private-network",
++  isAddon: false,
++} as const;
++
++const TAILSCALE_ENDPOINT_PROVIDER = {
++  id: "tailscale",
++  label: "Tailscale",
++  kind: "private-network",
++  isAddon: true,
++} as const;
++
++export function serverDirectAdvertisedEndpoints(
++  directEndpoints: ReadonlyArray<ServerDirectEndpoint> | undefined,
++): ReadonlyArray<AdvertisedEndpoint> {
++  return (directEndpoints ?? []).map((endpoint) => {
++    const https = endpoint.httpBaseUrl.startsWith("https:");
++    if (endpoint.kind === "tailnet" && https) {
++      // The id prefix is the one T3 gives the desktop app's Tailscale Serve
++      // endpoint, so the page shows it as it does there.
++      return createAdvertisedEndpoint({
++        provider: TAILSCALE_ENDPOINT_PROVIDER,
++        source: "server",
++        id: `tailscale-magicdns:${endpoint.httpBaseUrl}`,
++        label: "Tailscale HTTPS",
++        httpBaseUrl: endpoint.httpBaseUrl,
++        reachability: "private-network",
++        hostedHttpsCompatibility: "compatible",
++        description: "HTTPS endpoint served by Tailscale Serve.",
++      });
++    }
++    return createAdvertisedEndpoint({
++      provider:
++        endpoint.kind === "tailnet" ? TAILSCALE_ENDPOINT_PROVIDER : SERVER_ENDPOINT_PROVIDER,
++      source: "server",
++      id: `server-${endpoint.kind}:${endpoint.httpBaseUrl}`,
++      label: endpoint.kind === "tailnet" ? "Tailscale IP" : "Local network",
++      httpBaseUrl: endpoint.httpBaseUrl,
++      reachability: endpoint.kind === "tailnet" ? "private-network" : "lan",
++    });
++  });
++}
+diff --git a/apps/web/src/plutonium/helperOrigin.ts b/apps/web/src/plutonium/helperOrigin.ts
+new file mode 100644
+index 0000000000..7450e43574
+--- /dev/null
++++ b/apps/web/src/plutonium/helperOrigin.ts
+@@ -0,0 +1,23 @@
++// Plutonium: where the helper serves the shell library. The launcher passes a
++// non-default helper as ?plutoniumHelper=<origin>; it is read at boot, before
++// any redirect (e.g. pairing) drops the query, and remembered.
++const STORAGE_KEY = "t3code:plutonium-helper";
++const DEFAULT_HELPER = "http://127.0.0.1:3780";
++
++export function rememberPlutoniumHelper(): void {
++  const fromUrl = new URLSearchParams(window.location.search).get("plutoniumHelper");
++  if (!fromUrl) return;
++  try {
++    localStorage.setItem(STORAGE_KEY, fromUrl);
++  } catch {
++    // Not persisted; the default applies after the next navigation.
++  }
++}
++
++export function plutoniumHelperOrigin(): string {
++  try {
++    return localStorage.getItem(STORAGE_KEY) ?? DEFAULT_HELPER;
++  } catch {
++    return DEFAULT_HELPER;
++  }
++}
+diff --git a/apps/web/src/plutonium/networkAccess.ts b/apps/web/src/plutonium/networkAccess.ts
+new file mode 100644
+index 0000000000..ecd2fd6847
+--- /dev/null
++++ b/apps/web/src/plutonium/networkAccess.ts
+@@ -0,0 +1,68 @@
++/**
++ * Network access for the server this page is served by, in a Plutonium
++ * session (the server's plutonium/networkAccess.ts): the Settings switch the
++ * desktop app has, for the shell, which is a browser page. Switching restarts
++ * the server on the other host, as in the desktop app.
++ */
++import type { DesktopServerExposureMode } from "@t3tools/contracts";
++import { useCallback, useEffect, useState } from "react";
++
++const ROUTE = "/api/plutonium/network-access";
++
++export interface PlutoniumNetworkAccess {
++  readonly mode: DesktopServerExposureMode;
++  /** False when T3_HOST pins the host, or the server isn't supervised. */
++  readonly switchable: boolean;
++  readonly pinned: boolean;
++}
++
++async function request(
++  init?: RequestInit,
++): Promise<PlutoniumNetworkAccess & { restarting?: boolean }> {
++  // Never from the cache, and never for long: a request that reaches the
++  // server while it restarts may get no answer at all, and Chrome would hold
++  // every later one for the same URL behind it.
++  const response = await fetch(ROUTE, {
++    credentials: "same-origin",
++    cache: "no-store",
++    signal: AbortSignal.timeout(init?.method === "POST" ? 10_000 : 3_000),
++    ...init,
++  });
++  if (!response.ok) throw new Error((await response.text()) || response.statusText);
++  return response.json();
++}
++
++/** The server's state, or null where it isn't a Plutonium server (or not yet known). */
++export function usePlutoniumNetworkAccess(enabled: boolean) {
++  const [state, setState] = useState<PlutoniumNetworkAccess | null>(null);
++  const refresh = useCallback(() => {
++    if (!enabled) return;
++    request()
++      .then(setState)
++      .catch(() => setState(null));
++  }, [enabled]);
++  useEffect(refresh, [refresh]);
++  return { state, refresh };
++}
++
++/** Saves |mode| and restarts the server; resolves once it answers again. */
++export async function setPlutoniumNetworkAccess(mode: DesktopServerExposureMode): Promise<void> {
++  const result = await request({
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ mode }),
++  });
++  if (!result.restarting) return;
++  // It stops within a moment, and starts again in a few seconds.
++  await new Promise((resolve) => setTimeout(resolve, 1000));
++  const deadline = Date.now() + 60_000;
++  while (Date.now() < deadline) {
++    try {
++      if ((await request()).mode === mode) return;
++    } catch {
++      // Not up yet.
++    }
++    await new Promise((resolve) => setTimeout(resolve, 500));
++  }
++  throw new Error("The server didn't come back within a minute.");
++}
+diff --git a/apps/web/src/plutonium/pairing.ts b/apps/web/src/plutonium/pairing.ts
+new file mode 100644
+index 0000000000..9c9b452240
+--- /dev/null
++++ b/apps/web/src/plutonium/pairing.ts
+@@ -0,0 +1,35 @@
++// Plutonium: the launcher offers the shell a one-time pairing token as
++// #plutoniumPair=<token> on every start. It becomes T3's own #token= only when
++// this browser isn't paired yet, or its session lacks some of the scopes the
++// token brings (each pairing is another session in Settings, Connections). The
++// shell's token has the desktop app's scopes, including pairing other devices.
++import { AuthStandardClientScopes } from "@t3tools/contracts";
++
++export async function offerPlutoniumPairing(): Promise<void> {
++  const url = new URL(window.location.href);
++  const params = new URLSearchParams(url.hash.slice(1));
++  const token = params.get("plutoniumPair");
++  if (!token) return;
++  params.delete("plutoniumPair");
++  let paired = false;
++  try {
++    const response = await fetch("/api/auth/session", { credentials: "include" });
++    const session = response.ok
++      ? ((await response.json()) as {
++          authenticated?: boolean;
++          scopes?: readonly string[];
++          permissions?: readonly string[];
++        })
++      : null;
++    // `permissions` is the whole grant; `scopes` only what older clients know.
++    const granted = session?.permissions ?? session?.scopes ?? [];
++    paired =
++      session?.authenticated === true &&
++      AuthStandardClientScopes.every((scope) => granted.includes(scope));
++  } catch {
++    // Unknown: pair, as T3 would with the token.
++  }
++  if (!paired) params.set("token", token);
++  url.hash = params.toString();
++  window.history.replaceState(window.history.state, "", url);
++}

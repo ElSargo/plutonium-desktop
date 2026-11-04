@@ -1,68 +1,53 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Fri, 30 Oct 2026 10:15:17 +1300
-Subject: [PATCH 44/56] Plutonium: the app is Hydra
+Date: Thu, 5 Nov 2026 09:18:48 +1300
+Subject: [PATCH 02/10] Plutonium: the app is Hydra
 
-In Plutonium, T3 Code's web app is the Hydra shell. It names itself Hydra
-(the page title, the sidebar, the welcome wizard, messages it sends, the
-default theme, and settings and errors that mean this app), and it has a
-mark of its own (three heads on one body) in place of T3's wordmark and
-icons. Text about T3 Code itself keeps T3 Code's name: its desktop and
-mobile apps, T3 Connect, the `t3` CLI, the theme file format, versions,
-and its privacy and license notices.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Folded from:
+- the app is Hydra
+- the computer serving the app can't be unchecked in setup
 ---
- apps/web/index.html                           |   6 +++---
+ apps/web/index.html                           |   6 ++--
  apps/web/public/apple-touch-icon.png          | Bin 113787 -> 6000 bytes
  apps/web/public/favicon-16x16.png             | Bin 2126 -> 700 bytes
  apps/web/public/favicon-32x32.png             | Bin 5661 -> 1152 bytes
  apps/web/public/favicon.ico                   | Bin 283825 -> 15086 bytes
- apps/web/src/bootstrap.test.ts                |   4 ++--
- apps/web/src/branding.test.ts                 |   4 ++--
  apps/web/src/branding.ts                      |   2 +-
- apps/web/src/cloud/linkEnvironment.ts         |   4 ++--
- apps/web/src/components/HydraMark.tsx         |  18 ++++++++++++++++
- apps/web/src/components/T3Wordmark.tsx        |  12 -----------
- .../components/chat/MessagesTimeline.test.tsx |   2 +-
- .../src/components/chat/MessagesTimeline.tsx  |   8 +++----
- .../src/components/chat/V2LifecycleRow.tsx    |   4 ++--
- .../cloud/RelayClientInstallDialog.tsx        |   8 +++----
+ apps/web/src/cloud/linkEnvironment.ts         |   4 +--
+ apps/web/src/components/HydraMark.tsx         |  18 +++++++++++
+ apps/web/src/components/T3Wordmark.tsx        |  12 --------
+ .../src/components/chat/V2LifecycleRow.tsx    |   4 +--
+ .../cloud/RelayClientInstallDialog.tsx        |   8 ++---
  .../DesktopAppActivationCoordinator.tsx       |   2 +-
- .../desktop/SshPasswordPromptDialog.tsx       |   2 +-
  .../components/onboarding/FirstRunGate.tsx    |   2 +-
- .../components/onboarding/WelcomeWizard.tsx   |  12 +++++------
+ .../WelcomeWizard.import.browser.test.tsx     |  15 +++++++++
+ .../components/onboarding/WelcomeWizard.tsx   |  29 ++++++++++++------
  .../promptLinks/NewThreadLinkView.tsx         |   2 +-
  .../components/promptLinks/linkedPrompt.ts    |   2 +-
- .../settings/BrowserImportWizard.tsx          |   8 +++----
- .../settings/CaptureShortcutConfig.tsx        |  13 ++++++------
- .../components/settings/CodexSetupSection.tsx |   8 +++----
- .../settings/ConnectionsSettings.tsx          |  20 +++++++++---------
- .../settings/IntegrationsSettings.tsx         |  10 ++++-----
- .../settings/KeybindingsSettings.tsx          |   4 ++--
- .../settings/LocalEnvironmentSetting.tsx      |   6 +++---
+ .../settings/BrowserImportWizard.tsx          |   8 ++---
+ .../settings/CaptureShortcutConfig.tsx        |  11 +++----
+ .../components/settings/CodexSetupSection.tsx |   8 ++---
+ .../settings/IntegrationsSettings.tsx         |   8 ++---
+ .../settings/KeybindingsSettings.tsx          |   2 +-
+ .../settings/LocalEnvironmentSetting.tsx      |   6 ++--
  .../settings/NotificationSettings.tsx         |   2 +-
- .../settings/SettingsPanels.logic.test.ts     |   2 +-
  .../settings/SettingsPanels.logic.ts          |   2 +-
- .../components/settings/SnapShotSettings.tsx  |   4 ++--
+ .../components/settings/SnapShotSettings.tsx  |   2 +-
  .../settings/ThemePreviewCircles.tsx          |   2 +-
  .../src/components/settings/providerStatus.ts |   2 +-
  .../src/components/settings/settingsSearch.ts |   2 +-
- .../src/components/sidebar/SidebarChrome.tsx  |   6 +++---
- apps/web/src/components/threadSidebarWidth.ts |   2 +-
  apps/web/src/connection/clientMetadata.ts     |   2 +-
- apps/web/src/desktopAppActivation.ts          |   6 +++---
- apps/web/src/lib/bootError.ts                 |   4 ++--
- 40 files changed, 102 insertions(+), 97 deletions(-)
+ apps/web/src/desktopAppActivation.ts          |   6 ++--
+ 31 files changed, 100 insertions(+), 69 deletions(-)
  create mode 100644 apps/web/src/components/HydraMark.tsx
  delete mode 100644 apps/web/src/components/T3Wordmark.tsx
 
 diff --git a/apps/web/index.html b/apps/web/index.html
-index bd4a3d6d5f..49cf860021 100644
+index a7a5e7450b..6dab5c091a 100644
 --- a/apps/web/index.html
 +++ b/apps/web/index.html
-@@ -477,13 +477,13 @@
-         cursor: pointer;
+@@ -668,13 +668,13 @@
+         white-space: nowrap;
        }
      </style>
 -    <title>T3 Code (Beta)</title>
@@ -8491,52 +8476,8 @@ zx-3teCtlGu@6G%0cZTol&)m>ApP&9-{`tk|H~*933w9g)w|$lP<wf#0?ZxZOz57jm
 zy!kkP_HsGNTkB0WKYOtD%%A-+m;Q9Ro1Yb*U7s0OQ7y4o&nolHWBbH?x6jPHHF<u;
 u`RaSWq}TsD@Fg^8>GQksf5d+LXILGieoMggX+8r31B0ilpUXO@geCxbXAp}3
 
-diff --git a/apps/web/src/bootstrap.test.ts b/apps/web/src/bootstrap.test.ts
-index 1707c48a09..e3d6111d92 100644
---- a/apps/web/src/bootstrap.test.ts
-+++ b/apps/web/src/bootstrap.test.ts
-@@ -64,7 +64,7 @@ describe("app startup failures", () => {
-     await import("./bootstrap");
-     await vi.dynamicImportSettled();
- 
--    expect(bootShell?.text).toContain("T3 Code could not load.");
-+    expect(bootShell?.text).toContain("Hydra could not load.");
-     const reloadButton = bootShell?.children[0]?.children.find(
-       (element) => element.tagName === "button",
-     );
-@@ -78,7 +78,7 @@ describe("app startup failures", () => {
- 
-     showBootError(new Error("internal module path"));
- 
--    expect(bootShell?.text).toContain("T3 Code could not load.");
-+    expect(bootShell?.text).toContain("Hydra could not load.");
-     expect(bootShell?.text.includes("internal module path")).toBe(dev);
-   });
- 
-diff --git a/apps/web/src/branding.test.ts b/apps/web/src/branding.test.ts
-index e1c87bcf05..7ef41f673d 100644
---- a/apps/web/src/branding.test.ts
-+++ b/apps/web/src/branding.test.ts
-@@ -47,7 +47,7 @@ describe("branding", () => {
-     expect(branding.HOSTED_APP_CHANNEL).toBe("nightly");
-     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Nightly");
-     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
--    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code (Nightly)");
-+    expect(branding.APP_DISPLAY_NAME).toBe("Hydra (Nightly)");
-   });
- 
-   it("does not label the latest hosted app channel", async () => {
-@@ -58,7 +58,7 @@ describe("branding", () => {
-     expect(branding.HOSTED_APP_CHANNEL).toBe("latest");
-     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Latest");
-     expect(branding.APP_STAGE_LABEL).toBe("Latest");
--    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code");
-+    expect(branding.APP_DISPLAY_NAME).toBe("Hydra");
-   });
- 
-   it("ignores unknown hosted app channels", async () => {
 diff --git a/apps/web/src/branding.ts b/apps/web/src/branding.ts
-index 528609d36e..18750a3074 100644
+index 05b4fa6a8f..a2c1d4a18b 100644
 --- a/apps/web/src/branding.ts
 +++ b/apps/web/src/branding.ts
 @@ -16,7 +16,7 @@ export const HOSTED_APP_CHANNEL =
@@ -8549,10 +8490,10 @@ index 528609d36e..18750a3074 100644
    injectedDesktopAppBranding?.stageLabel ??
    HOSTED_APP_CHANNEL_LABEL ??
 diff --git a/apps/web/src/cloud/linkEnvironment.ts b/apps/web/src/cloud/linkEnvironment.ts
-index 4e1fba7040..c0fbda19a3 100644
+index e6e42dc921..511fe43f19 100644
 --- a/apps/web/src/cloud/linkEnvironment.ts
 +++ b/apps/web/src/cloud/linkEnvironment.ts
-@@ -59,7 +59,7 @@ function ensureRelayClientAvailable(
+@@ -59,7 +59,7 @@ const ensureRelayClientAvailable = Effect.fn("linkEnvironment.ensureRelayClientA
      if (status.status === "available") return;
      if (status.status === "unsupported") {
        return yield* new CloudEnvironmentLinkError({
@@ -8561,7 +8502,7 @@ index 4e1fba7040..c0fbda19a3 100644
        });
      }
  
-@@ -95,7 +95,7 @@ function ensureRelayClientAvailable(
+@@ -95,7 +95,7 @@ const ensureRelayClientAvailable = Effect.fn("linkEnvironment.ensureRelayClientA
        return yield* new CloudEnvironmentLinkError({
          message:
            installedStatus.status === "unsupported"
@@ -8612,73 +8553,20 @@ index d0882a5dd6..0000000000
 -    </svg>
 -  );
 -}
-diff --git a/apps/web/src/components/chat/MessagesTimeline.test.tsx b/apps/web/src/components/chat/MessagesTimeline.test.tsx
-index 01857ac000..3e9dc1f2ae 100644
---- a/apps/web/src/components/chat/MessagesTimeline.test.tsx
-+++ b/apps/web/src/components/chat/MessagesTimeline.test.tsx
-@@ -2587,7 +2587,7 @@ describe("MessagesTimeline", () => {
-     );
- 
-     // The T3 wordmark replaces the generic tool icon for T3 MCP calls.
--    expect(markup).toContain('viewBox="15.5309 37 94.3941 56.96"');
-+    expect(markup).toContain('viewBox="2.3 2.3 19.4 19.9"');
-     expect(markup).toContain("Read a T3 thread");
-     expect(markup).not.toContain("mcp__t3-code__t3_thread_read");
-   });
-diff --git a/apps/web/src/components/chat/MessagesTimeline.tsx b/apps/web/src/components/chat/MessagesTimeline.tsx
-index 99cf502959..d575cda14a 100644
---- a/apps/web/src/components/chat/MessagesTimeline.tsx
-+++ b/apps/web/src/components/chat/MessagesTimeline.tsx
-@@ -119,7 +119,7 @@ import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
- import ReactMarkdown from "react-markdown";
- import remarkGfm from "remark-gfm";
- import type { Root, RootContent } from "mdast";
--import { T3Wordmark } from "../T3Wordmark";
-+import { HydraMark } from "../HydraMark";
- import { ThreadContextChip } from "../ThreadContextChip";
- import {
-   BotIcon,
-@@ -2506,7 +2506,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message"
-           className="me-1 text-2xs text-muted-foreground/70"
-           data-user-message-attribution="t3code"
-         >
--          Sent by T3 Code
-+          Sent by Hydra
-         </p>
-       ) : userMessage.attribution === "agent" ? (
-         <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
-@@ -2881,7 +2881,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
-   return (
-     <>
-       <div className="relative min-w-0 px-1 py-0.5">
--        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
-+        <MessageAuthorHeading>Hydra</MessageAuthorHeading>
-         <div data-thread-find-text="true">
-           <AssistantCitationSource
-             messageId={row.message.id}
-@@ -5280,7 +5280,7 @@ function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className
-     case "device":
-       return <SmartphoneIcon className={className} aria-hidden />;
-     case "t3-code":
--      return <T3Wordmark className={className} aria-hidden />;
-+      return <HydraMark className={className} aria-hidden />;
-     case "check":
-       return <CheckIcon className={className} aria-hidden />;
-     case "circle-alert":
 diff --git a/apps/web/src/components/chat/V2LifecycleRow.tsx b/apps/web/src/components/chat/V2LifecycleRow.tsx
-index 5206d33acd..e107e7de05 100644
+index c0dd0e0900..d479d9c355 100644
 --- a/apps/web/src/components/chat/V2LifecycleRow.tsx
 +++ b/apps/web/src/components/chat/V2LifecycleRow.tsx
-@@ -48,7 +48,7 @@ import { ProviderInstanceIcon, providerTextColor } from "./ProviderInstanceIcon"
- import { cn } from "~/lib/utils";
+@@ -62,7 +62,7 @@ import { cn } from "~/lib/utils";
  import { TimelineSystemDivider } from "./TimelineSystemDivider";
+ import { subagentResumedSince } from "./V2LifecycleRow.logic";
  import { Button, InlineButton } from "../ui/button";
 -import { T3Wordmark } from "../T3Wordmark";
 +import { HydraMark } from "../HydraMark";
  
- const LIFECYCLE_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
-   "run_interrupt_request",
-@@ -170,7 +170,7 @@ export function V2LifecycleRow(props: {
+ export type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
+ 
+@@ -131,7 +131,7 @@ export function V2LifecycleRow(props: {
      return (
        <WorkLogRow
          data-v2-item-type={item.type}
@@ -8720,10 +8608,10 @@ index 78282f6591..67be0d4e61 100644
                </p>
              </div>
 diff --git a/apps/web/src/components/desktop/DesktopAppActivationCoordinator.tsx b/apps/web/src/components/desktop/DesktopAppActivationCoordinator.tsx
-index 3e941e69dd..3759bebc1b 100644
+index f344179893..e5dbc71bd3 100644
 --- a/apps/web/src/components/desktop/DesktopAppActivationCoordinator.tsx
 +++ b/apps/web/src/components/desktop/DesktopAppActivationCoordinator.tsx
-@@ -63,7 +63,7 @@ export function DesktopAppActivationCoordinator() {
+@@ -68,7 +68,7 @@ export function DesktopAppActivationCoordinator() {
          });
          if (result._tag === "Failure") {
            const error = squashAtomCommandFailure(result);
@@ -8732,24 +8620,11 @@ index 3e941e69dd..3759bebc1b 100644
          }
          return projectId;
        },
-diff --git a/apps/web/src/components/desktop/SshPasswordPromptDialog.tsx b/apps/web/src/components/desktop/SshPasswordPromptDialog.tsx
-index d3727ae210..5df09db95d 100644
---- a/apps/web/src/components/desktop/SshPasswordPromptDialog.tsx
-+++ b/apps/web/src/components/desktop/SshPasswordPromptDialog.tsx
-@@ -161,7 +161,7 @@ function ActiveSshPasswordPrompt({
-           <DialogTitle>SSH Password Required</DialogTitle>
-           <DialogDescription>
-             T3 needs your SSH password to connect to <code>{target}</code>. The password is passed
--            to the local SSH process for this connection attempt and is not saved by T3 Code.
-+            to the local SSH process for this connection attempt and is not saved by Hydra.
-           </DialogDescription>
-         </DialogHeader>
-         <DialogPanel scrollFade={false}>
 diff --git a/apps/web/src/components/onboarding/FirstRunGate.tsx b/apps/web/src/components/onboarding/FirstRunGate.tsx
-index 15187b90de..4197a20b5f 100644
+index 8aa16fe030..fd6c4d3452 100644
 --- a/apps/web/src/components/onboarding/FirstRunGate.tsx
 +++ b/apps/web/src/components/onboarding/FirstRunGate.tsx
-@@ -214,7 +214,7 @@ function FirstRunRecovery({
+@@ -197,7 +197,7 @@ function FirstRunRecovery({
          <p className="mt-2 text-sm text-muted-foreground">
            {settingsReadFailed
              ? "Your saved settings could not be loaded."
@@ -8758,11 +8633,37 @@ index 15187b90de..4197a20b5f 100644
          </p>
          <Button
            className="mt-5"
+diff --git a/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx b/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
+index c55691d9ca..142a84c225 100644
+--- a/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
++++ b/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
+@@ -292,6 +292,21 @@ function setup() {
+   return now;
+ }
+ 
++it("keeps the computer serving the app selected", async () => {
++  using _now = setup();
++  state.selectedEnvironment = "primary";
++  await using _screen = await render(
++    <RegistryContext.Provider value={appAtomRegistry}>
++      <WelcomeWizard localAvailable onDone={state.onDone} />
++    </RegistryContext.Provider>,
++  );
++  const checkbox = document.querySelector<HTMLElement>('[role="checkbox"]');
++  expect(checkbox?.getAttribute("aria-checked")).toBe("true");
++  expect(checkbox?.hasAttribute("data-disabled")).toBe(true);
++  await act(async () => checkbox!.click());
++  expect(checkbox?.getAttribute("aria-checked")).toBe("true");
++});
++
+ it("keeps the project selection after going back a stage", async () => {
+   using _now = setup();
+   await using _screen = await mountImport();
 diff --git a/apps/web/src/components/onboarding/WelcomeWizard.tsx b/apps/web/src/components/onboarding/WelcomeWizard.tsx
-index 2f7c942bed..1a1e178768 100644
+index 2eb6bcd673..362d15af9b 100644
 --- a/apps/web/src/components/onboarding/WelcomeWizard.tsx
 +++ b/apps/web/src/components/onboarding/WelcomeWizard.tsx
-@@ -84,7 +84,7 @@ import { TerminalViewport } from "../ThreadTerminalDrawer";
+@@ -91,7 +91,7 @@ import { TerminalViewport } from "../ThreadTerminalDrawer";
  import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
  import { presentSavedCloudEnvironmentConnection } from "../cloud/cloudEnvironmentConnectionPresentation";
  import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -8771,7 +8672,19 @@ index 2f7c942bed..1a1e178768 100644
  import { Alert, AlertDescription } from "../ui/alert";
  import { Button } from "../ui/button";
  import { CommandBlock } from "../CommandBlock";
-@@ -233,12 +233,12 @@ export function WelcomeWizard({
+@@ -156,8 +156,9 @@ export function WelcomeWizard({
+         ]),
+     );
+   }, [autoSelectedComputers, environments]);
+-  const selectedIds =
+-    selection ?? new Set(primaryEnvironment ? [primaryEnvironment.environmentId] : []);
++  // The computer serving this app is always set up: it's the one the user is on.
++  const primaryId = primaryEnvironment?.environmentId ?? null;
++  const selectedIds = new Set([...(selection ?? []), ...(primaryId ? [primaryId] : [])]);
+   const scans = useProjectScans(step === "import" ? setupIds : NO_ENVIRONMENTS);
+   const isLoadingProjects =
+     step === "import" &&
+@@ -239,12 +240,12 @@ export function WelcomeWizard({
          initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
        >
          <WizardHeader
@@ -8788,7 +8701,50 @@ index 2f7c942bed..1a1e178768 100644
                </span>
              </div>
            }
-@@ -530,7 +530,7 @@ function ConnectAccountOption({
+@@ -265,6 +266,7 @@ export function WelcomeWizard({
+             <ConnectionStep
+               expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}
+               selectedIds={selectedIds}
++              primaryEnvironmentId={primaryId}
+               autoSelectedComputers={autoSelectedComputers}
+               onSelectionChange={setSelection}
+               onToggleEnvironment={(environmentId, checked) =>
+@@ -305,6 +307,7 @@ function ConnectionStep({
+   autoSelectedComputers,
+   expandPairingInitially,
+   selectedIds,
++  primaryEnvironmentId,
+   onSelectionChange,
+   onToggleEnvironment,
+   onContinue,
+@@ -313,6 +316,8 @@ function ConnectionStep({
+   readonly autoSelectedComputers: Set<EnvironmentId>;
+   readonly expandPairingInitially: boolean;
+   readonly selectedIds: ReadonlySet<EnvironmentId>;
++  /** The computer serving this app: always selected, its box can't be cleared. */
++  readonly primaryEnvironmentId: EnvironmentId | null;
+   readonly onSelectionChange: (ids: ReadonlySet<EnvironmentId>) => void;
+   readonly onToggleEnvironment: (environmentId: EnvironmentId, checked: boolean) => void;
+   readonly onContinue: () => void;
+@@ -355,10 +360,16 @@ function ConnectionStep({
+           {directEnvironments.map((environment) => (
+             <label
+               key={environment.environmentId}
+-              className="flex cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-3 py-3"
++              className={cn(
++                "flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-3",
++                environment.environmentId === primaryEnvironmentId
++                  ? "cursor-default"
++                  : "cursor-pointer",
++              )}
+             >
+               <Checkbox
+                 checked={selectedIds.has(environment.environmentId)}
++                disabled={environment.environmentId === primaryEnvironmentId}
+                 onCheckedChange={(checked) => {
+                   const next = new Set(selectedIds);
+                   if (checked) next.add(environment.environmentId);
+@@ -543,7 +554,7 @@ function ConnectAccountOption({
              </p>
              <CommandBlock command="npx t3 connect" className="mt-3" />
              <p className="mt-3 text-xs text-muted-foreground">
@@ -8798,10 +8754,10 @@ index 2f7c942bed..1a1e178768 100644
            </div>
          </CollapsiblePanel>
 diff --git a/apps/web/src/components/promptLinks/NewThreadLinkView.tsx b/apps/web/src/components/promptLinks/NewThreadLinkView.tsx
-index ab7cbc4b18..d6920f08a5 100644
+index f8e76b565d..2684dbbcc1 100644
 --- a/apps/web/src/components/promptLinks/NewThreadLinkView.tsx
 +++ b/apps/web/src/components/promptLinks/NewThreadLinkView.tsx
-@@ -99,7 +99,7 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
+@@ -137,7 +137,7 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
        replace: true,
      }).catch(() => null);
      if (opened === null) {
@@ -8811,10 +8767,10 @@ index ab7cbc4b18..d6920f08a5 100644
      }
      setState({ status: "opened" });
 diff --git a/apps/web/src/components/promptLinks/linkedPrompt.ts b/apps/web/src/components/promptLinks/linkedPrompt.ts
-index 7334f59118..ba16bfe8c1 100644
+index 5e6a61ff3c..1bcbb15a17 100644
 --- a/apps/web/src/components/promptLinks/linkedPrompt.ts
 +++ b/apps/web/src/components/promptLinks/linkedPrompt.ts
-@@ -10,7 +10,7 @@ export function warnAboutHiddenCharacters(prompt: LinkedPrompt): void {
+@@ -9,7 +9,7 @@ export function warnAboutHiddenCharacters(prompt: LinkedPrompt): void {
    toastManager.add({
      type: "warning",
      title: "This prompt had hidden characters, it may be malicious",
@@ -8824,10 +8780,10 @@ index 7334f59118..ba16bfe8c1 100644
    });
  }
 diff --git a/apps/web/src/components/settings/BrowserImportWizard.tsx b/apps/web/src/components/settings/BrowserImportWizard.tsx
-index acf464d493..13a40759ef 100644
+index b12696ce89..a253304f16 100644
 --- a/apps/web/src/components/settings/BrowserImportWizard.tsx
 +++ b/apps/web/src/components/settings/BrowserImportWizard.tsx
-@@ -285,9 +285,9 @@ function FullDiskAccessStep({
+@@ -263,9 +263,9 @@ function FullDiskAccessStep({
    return (
      <>
        <DialogHeader>
@@ -8836,10 +8792,10 @@ index acf464d493..13a40759ef 100644
          <DialogDescription>
 -          To import cookies from {source.name}, T3 Code needs Full Disk Access. Turn it on in System
 +          To import cookies from {source.name}, Hydra needs Full Disk Access. Turn it on in System
-           Settings, then come back to finish the import — you can revoke it again once the import is
+           Settings, then come back to finish the import. You can revoke it again once the import is
            done.
          </DialogDescription>
-@@ -319,8 +319,8 @@ function FullDiskAccessStep({
+@@ -297,8 +297,8 @@ function FullDiskAccessStep({
          {!permission.isReady(["fullDiskAccess"]) ? (
            <p className="mt-3 text-xs text-muted-foreground">
              {stillRequired
@@ -8851,10 +8807,10 @@ index acf464d493..13a40759ef 100644
          ) : null}
        </DialogPanel>
 diff --git a/apps/web/src/components/settings/CaptureShortcutConfig.tsx b/apps/web/src/components/settings/CaptureShortcutConfig.tsx
-index 892bf13c7c..a578b7907c 100644
+index aca16a0f51..1cdf8d2aa9 100644
 --- a/apps/web/src/components/settings/CaptureShortcutConfig.tsx
 +++ b/apps/web/src/components/settings/CaptureShortcutConfig.tsx
-@@ -217,8 +217,7 @@ export function CaptureShortcutConfig({
+@@ -218,8 +218,7 @@ export function CaptureShortcutConfig({
        ) : (
          <>
            <p className="text-muted-foreground">
@@ -8863,17 +8819,8 @@ index 892bf13c7c..a578b7907c 100644
 +            Allow Hydra to read your desktop settings. You'll review any changes here before saving.
            </p>
            <Button
-             disabled={actionBusy || !supported}
-@@ -229,7 +228,7 @@ export function CaptureShortcutConfig({
-           </Button>
-           {!supported ? (
-             <p className="text-xs text-muted-foreground">
--              Update T3 Code to finish setting up your shortcut.
-+              Update Hydra to finish setting up your shortcut.
-             </p>
-           ) : null}
-         </>
-@@ -243,7 +242,7 @@ export function CaptureShortcutConfig({
+             disabled={actionBusy || !bridge}
+@@ -239,7 +238,7 @@ export function CaptureShortcutConfig({
          <p role="status" className="text-muted-foreground">
            {state.shortcutPending
              ? "Connecting to your desktop…"
@@ -8882,7 +8829,7 @@ index 892bf13c7c..a578b7907c 100644
          </p>
        ) : null}
        <details className="text-xs text-muted-foreground">
-@@ -262,7 +261,7 @@ export function CaptureShortcutConfig({
+@@ -258,7 +257,7 @@ export function CaptureShortcutConfig({
                  state.shortcutConfigPath ??
                  (niri ? "~/.config/niri/config.kdl" : "~/.config/hypr/hyprland.conf")}
              </p>
@@ -8891,7 +8838,7 @@ index 892bf13c7c..a578b7907c 100644
              {preview && preview.resolvedPath !== preview.path ? (
                <p className="break-all">Linked to {preview.resolvedPath}. The link will be kept.</p>
              ) : null}
-@@ -323,8 +322,8 @@ export function CaptureShortcutConfig({
+@@ -319,8 +318,8 @@ export function CaptureShortcutConfig({
              {isCopied ? "Copied" : "Copy shortcut"}
            </Button>
            <p>
@@ -8903,10 +8850,10 @@ index 892bf13c7c..a578b7907c 100644
            {state.shortcutActionRegistered === false ? (
              <p role="status">{state.shortcutMessage}</p>
 diff --git a/apps/web/src/components/settings/CodexSetupSection.tsx b/apps/web/src/components/settings/CodexSetupSection.tsx
-index 9a37edf095..3e67cb80e0 100644
+index 0dfd68dcdc..9045d1cd31 100644
 --- a/apps/web/src/components/settings/CodexSetupSection.tsx
 +++ b/apps/web/src/components/settings/CodexSetupSection.tsx
-@@ -577,8 +577,8 @@ function ManagedCodexSetup({
+@@ -606,8 +606,8 @@ function ManagedCodexSetup({
          : installation?.phase === "verifying"
            ? "Checking Codex."
            : installed
@@ -8917,7 +8864,7 @@ index 9a37edf095..3e67cb80e0 100644
    const accountDescription = finishingSignIn ? (
      "Finishing sign-in..."
    ) : installActive ? (
-@@ -655,7 +655,7 @@ function ManagedCodexSetup({
+@@ -684,7 +684,7 @@ function ManagedCodexSetup({
    const callbackCompletion =
      !handoff && auth?.phase === "waiting" && url ? (
        <div className="flex w-full flex-col gap-3 text-xs leading-relaxed text-muted-foreground">
@@ -8926,7 +8873,7 @@ index 9a37edf095..3e67cb80e0 100644
          <form
            className="flex flex-col gap-2 sm:flex-row sm:items-center"
            onSubmit={(event) => {
-@@ -1032,7 +1032,7 @@ export function CodexManagedRuntimeFields({
+@@ -1069,7 +1069,7 @@ export function CodexManagedRuntimeFields({
      <>
        <SettingsRow
          title="Binary path"
@@ -8935,83 +8882,11 @@ index 9a37edf095..3e67cb80e0 100644
          control={
            <div className="w-full sm:w-80">
              <Input
-diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
-index a5861edfcb..d18ac63702 100644
---- a/apps/web/src/components/settings/ConnectionsSettings.tsx
-+++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
-@@ -3544,7 +3544,7 @@ export function ConnectionsSettings() {
-         {desktopWslState.enabled ? (
-           <SettingsRow
-             title="WSL only"
--            description="Run only the WSL backend. T3 Code restarts when this changes."
-+            description="Run only the WSL backend. Hydra restarts when this changes."
-             className="bg-muted/20 pl-7 sm:pl-8"
-             control={
-               <Switch
-@@ -3879,8 +3879,8 @@ export function ConnectionsSettings() {
-                 </AlertDialogTitle>
-                 <AlertDialogDescription>
-                   {pendingDesktopServerExposureMode === "network-accessible"
--                    ? "Let your other devices connect to T3 Code over the network. Pair devices to give them access. T3 Code will restart."
--                    : "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. T3 Code will restart."}
-+                    ? "Let your other devices connect to Hydra over the network. Pair devices to give them access. Hydra will restart."
-+                    : "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. Hydra will restart."}
-                 </AlertDialogDescription>
-               </AlertDialogHeader>
-               <AlertDialogFooter>
-@@ -3936,15 +3936,15 @@ export function ConnectionsSettings() {
-                 <AlertDialogDescription>
-                   {pendingWslChange?.kind === "disable"
-                     ? pendingWslChange.wasWslOnly
--                      ? "T3 Code will restart on the Windows backend. Threads and projects opened against WSL stay safe inside the distro and become available again when you re-enable WSL."
--                      : "The WSL backend will stop. Threads and projects opened against WSL stay safe inside the distro, but they'll be unavailable in T3 Code until you re-enable WSL."
-+                      ? "Hydra will restart on the Windows backend. Threads and projects opened against WSL stay safe inside the distro and become available again when you re-enable WSL."
-+                      : "The WSL backend will stop. Threads and projects opened against WSL stay safe inside the distro, but they'll be unavailable in Hydra until you re-enable WSL."
-                     : pendingWslChange?.kind === "distro"
--                      ? "T3 Code will restart the WSL backend on the new distro. Sessions still running on the current distro will be interrupted."
-+                      ? "Hydra will restart the WSL backend on the new distro. Sessions still running on the current distro will be interrupted."
-                       : pendingWslChange?.kind === "enable"
-                         ? "Run the WSL backend alongside the Windows one, or stop the Windows backend and use only WSL? You can change this later from Settings."
-                         : pendingWslChange?.nextValue
--                          ? "T3 Code will restart and start only the WSL backend. Your Windows-side projects won't be accessible until you turn this off again."
--                          : "T3 Code will restart and bring the Windows backend back up alongside WSL."}
-+                          ? "Hydra will restart and start only the WSL backend. Your Windows-side projects won't be accessible until you turn this off again."
-+                          : "Hydra will restart and bring the Windows backend back up alongside WSL."}
-                 </AlertDialogDescription>
-               </AlertDialogHeader>
-               <AlertDialogFooter>
-@@ -4030,7 +4030,7 @@ export function ConnectionsSettings() {
-               <AlertDialogHeader>
-                 <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
-                 <AlertDialogDescription>
--                  T3 Code will restart the local backend without Tailscale Serve.
-+                  Hydra will restart the local backend without Tailscale Serve.
-                 </AlertDialogDescription>
-               </AlertDialogHeader>
-               <AlertDialogFooter>
-@@ -4068,7 +4068,7 @@ export function ConnectionsSettings() {
-               <DialogHeader>
-                 <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
-                 <DialogDescription>
--                  T3 Code will restart the local backend with Tailscale Serve enabled and ask
-+                  Hydra will restart the local backend with Tailscale Serve enabled and ask
-                   Tailscale to proxy HTTPS traffic to this backend.
-                 </DialogDescription>
-               </DialogHeader>
 diff --git a/apps/web/src/components/settings/IntegrationsSettings.tsx b/apps/web/src/components/settings/IntegrationsSettings.tsx
-index c375ee910a..ae2ec35b58 100644
+index b64e35db95..25ac2b34f9 100644
 --- a/apps/web/src/components/settings/IntegrationsSettings.tsx
 +++ b/apps/web/src/components/settings/IntegrationsSettings.tsx
-@@ -4,7 +4,7 @@ import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings"
- import { ScopedSwitch } from "./ScopedSwitch";
- import { DeviceHostsSettings } from "./DeviceHostsSettings";
- /**
-- * Integrations settings - preferences for surfaces T3 Code embeds rather than
-+ * Integrations settings - preferences for surfaces Hydra embeds rather than
-  * owns. Browser is the first section: the defaults a preview tab opens at,
-  * applied to both hand-opened tabs and agent `preview_open` calls that don't
-  * state their own size.
-@@ -577,7 +577,7 @@ function BrowserRecordingFrameRateSetting({ disabled }: { readonly disabled: boo
+@@ -642,7 +642,7 @@ function BrowserRecordingFrameRateSetting({ disabled }: { readonly disabled: boo
  
  const LINK_TARGET_LABELS: Readonly<Record<BrowserLinkTarget, string>> = {
    system: "Your default browser",
@@ -9020,12 +8895,12 @@ index c375ee910a..ae2ec35b58 100644
  };
  
  function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) {
-@@ -629,11 +629,11 @@ function PullRequestLinksOpenInAppSetting() {
+@@ -779,11 +779,11 @@ export function PullRequestLinksOpenInAppSetting() {
    return (
      <SettingsRow
        {...searchableSetting("pull-request-links-open-in-app")}
--      description="Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on GitHub or your git host."
-+      description="Clicking a pull request link opens it in Hydra. Turn off to open pull request links like any other link, on GitHub or your git host."
+-      description="Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on your git host."
++      description="Clicking a pull request link opens it in Hydra. Turn off to open pull request links like any other link, on your git host."
        resetAction={
          openInApp ? null : (
            <SettingResetButton
@@ -9034,7 +8909,7 @@ index c375ee910a..ae2ec35b58 100644
              onClick={() => updateSettings({ pullRequestLinksOpenInApp: true })}
            />
          )
-@@ -644,7 +644,7 @@ function PullRequestLinksOpenInAppSetting() {
+@@ -794,7 +794,7 @@ export function PullRequestLinksOpenInAppSetting() {
            onCheckedChange={(checked) =>
              updateSettings({ pullRequestLinksOpenInApp: Boolean(checked) })
            }
@@ -9044,10 +8919,10 @@ index c375ee910a..ae2ec35b58 100644
        }
      />
 diff --git a/apps/web/src/components/settings/KeybindingsSettings.tsx b/apps/web/src/components/settings/KeybindingsSettings.tsx
-index cc2fc85f94..f2a8ad9abe 100644
+index cb00bca7e9..4b4234f7c7 100644
 --- a/apps/web/src/components/settings/KeybindingsSettings.tsx
 +++ b/apps/web/src/components/settings/KeybindingsSettings.tsx
-@@ -257,7 +257,7 @@ function UnknownWhenVariableWarning({
+@@ -253,7 +253,7 @@ function UnknownWhenVariableWarning({
  
    return (
      <WarningTooltipIcon label={label} focusable={focusable} className="size-4.5">
@@ -9056,20 +8931,11 @@ index cc2fc85f94..f2a8ad9abe 100644
        unless the runtime provides it.
      </WarningTooltipIcon>
    );
-@@ -1282,7 +1282,7 @@ function BrowserKeybindingNotice() {
- export function KeybindingsSettingsPanel() {
-   // The representative environment supplies the displayed bindings; edits
-   // fan out to every connected environment in the selection, so one
--  // shortcut change reaches each machine the user runs T3 Code on.
-+  // shortcut change reaches each machine the user runs Hydra on.
-   const { environment: primaryEnvironment, connectedEnvironments } = useSettingsScope();
-   const canOpenKeybindingsFile = useEnvironmentScope(
-     primaryEnvironment?.environmentId ?? null,
 diff --git a/apps/web/src/components/settings/LocalEnvironmentSetting.tsx b/apps/web/src/components/settings/LocalEnvironmentSetting.tsx
-index d8fb2e894b..8f1c3de1a5 100644
+index fa79df9112..755fa1b22a 100644
 --- a/apps/web/src/components/settings/LocalEnvironmentSetting.tsx
 +++ b/apps/web/src/components/settings/LocalEnvironmentSetting.tsx
-@@ -43,7 +43,7 @@ export function LocalEnvironmentSetting() {
+@@ -42,7 +42,7 @@ export function LocalEnvironmentSetting() {
          {...searchableSetting("local-environment")}
          description={
            enabled
@@ -9078,7 +8944,7 @@ index d8fb2e894b..8f1c3de1a5 100644
              : "Turned off. Agents only run in remote environments."
          }
          control={
-@@ -70,8 +70,8 @@ export function LocalEnvironmentSetting() {
+@@ -69,8 +69,8 @@ export function LocalEnvironmentSetting() {
              </AlertDialogTitle>
              <AlertDialogDescription>
                {enabled
@@ -9090,10 +8956,10 @@ index d8fb2e894b..8f1c3de1a5 100644
            </AlertDialogHeader>
            {error ? <p className="px-6 pb-4 text-sm text-destructive">{error}</p> : null}
 diff --git a/apps/web/src/components/settings/NotificationSettings.tsx b/apps/web/src/components/settings/NotificationSettings.tsx
-index 5af5f0a852..e17be4bcad 100644
+index 5724a4de96..14789a51f8 100644
 --- a/apps/web/src/components/settings/NotificationSettings.tsx
 +++ b/apps/web/src/components/settings/NotificationSettings.tsx
-@@ -22,7 +22,7 @@ export function NotificationSettings() {
+@@ -23,7 +23,7 @@ export function NotificationSettings() {
        {...searchableSetting("thread-notifications")}
        description={
          permissionMessage ??
@@ -9102,24 +8968,11 @@ index 5af5f0a852..e17be4bcad 100644
        }
        control={
          <Select
-diff --git a/apps/web/src/components/settings/SettingsPanels.logic.test.ts b/apps/web/src/components/settings/SettingsPanels.logic.test.ts
-index f790b47ac4..05d509869c 100644
---- a/apps/web/src/components/settings/SettingsPanels.logic.test.ts
-+++ b/apps/web/src/components/settings/SettingsPanels.logic.test.ts
-@@ -253,7 +253,7 @@ describe("getChangedBrowserSettingLabels", () => {
-       "Recording mouse presses",
-       "Open links in",
-       "Floating preview",
--      "Open pull requests in T3 Code",
-+      "Open pull requests in Hydra",
-     ]);
-   });
- });
 diff --git a/apps/web/src/components/settings/SettingsPanels.logic.ts b/apps/web/src/components/settings/SettingsPanels.logic.ts
-index f24f040c29..26d36ce9ce 100644
+index 3901226e8b..6a112c1e56 100644
 --- a/apps/web/src/components/settings/SettingsPanels.logic.ts
 +++ b/apps/web/src/components/settings/SettingsPanels.logic.ts
-@@ -168,7 +168,7 @@ export function getChangedBrowserSettingLabels(settings: BrowserDefaultSettings)
+@@ -163,7 +163,7 @@ export function getChangedBrowserSettingLabels(settings: BrowserDefaultSettings)
        ? ["Floating preview"]
        : []),
      ...(settings.pullRequestLinksOpenInApp !== DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp
@@ -9129,10 +8982,10 @@ index f24f040c29..26d36ce9ce 100644
    ];
  }
 diff --git a/apps/web/src/components/settings/SnapShotSettings.tsx b/apps/web/src/components/settings/SnapShotSettings.tsx
-index 286d065b44..cf7ee98bfe 100644
+index c69f1e7869..3a9e14b448 100644
 --- a/apps/web/src/components/settings/SnapShotSettings.tsx
 +++ b/apps/web/src/components/settings/SnapShotSettings.tsx
-@@ -263,7 +263,7 @@ export function SnapShotSettings() {
+@@ -255,7 +255,7 @@ export function SnapShotSettings() {
    const shortcutStatus = recording
      ? "Press your shortcut. Esc cancels."
      : candidateConflict
@@ -9141,17 +8994,8 @@ index 286d065b44..cf7ee98bfe 100644
        : shortcutCheck.status === "checking"
          ? "Checking shortcut…"
          : shortcutCheck.availability
-@@ -315,7 +315,7 @@ export function SnapShotSettings() {
-     try {
-       if (state?.macPermissions) {
-         saveSnapShotSetupResume(wizard?.wasEnabled ?? settings.snapShotEnabled);
--        if (!bridge?.setupSnapShot) throw new Error("Restart T3 Code to finish capture setup.");
-+        if (!bridge?.setupSnapShot) throw new Error("Restart Hydra to finish capture setup.");
-         await bridge.setupSnapShot("test-mac-capture");
-       }
-       if (state?.mode === "direct")
 diff --git a/apps/web/src/components/settings/ThemePreviewCircles.tsx b/apps/web/src/components/settings/ThemePreviewCircles.tsx
-index efaa1c7680..53954d263d 100644
+index d8dab05079..db626ac9d6 100644
 --- a/apps/web/src/components/settings/ThemePreviewCircles.tsx
 +++ b/apps/web/src/components/settings/ThemePreviewCircles.tsx
 @@ -58,7 +58,7 @@ const STANDARD_THEME_PREVIEW_COLORS: Record<
@@ -9164,10 +9008,10 @@ index efaa1c7680..53954d263d 100644
        mode,
        colors: STANDARD_THEME_PREVIEW_COLORS[mode],
 diff --git a/apps/web/src/components/settings/providerStatus.ts b/apps/web/src/components/settings/providerStatus.ts
-index ad8494fac5..795cd206b5 100644
+index a4db548906..5260704283 100644
 --- a/apps/web/src/components/settings/providerStatus.ts
 +++ b/apps/web/src/components/settings/providerStatus.ts
-@@ -44,7 +44,7 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
+@@ -55,7 +55,7 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
      return {
        headline: "Disabled",
        detail:
@@ -9177,63 +9021,20 @@ index ad8494fac5..795cd206b5 100644
    }
    if (!provider.installed) {
 diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 5747fc59d9..f0388bba3e 100644
+index e61a064431..03a02d8f9e 100644
 --- a/apps/web/src/components/settings/settingsSearch.ts
 +++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -780,7 +780,7 @@ export const SETTINGS_SEARCH_ITEMS = [
+@@ -932,7 +932,7 @@ export const SETTINGS_SEARCH_ITEMS = [
    },
    {
      id: "pull-request-links-open-in-app",
 -    title: "Open pull requests in T3 Code",
 +    title: "Open pull requests in Hydra",
-     to: "/settings/integrations",
-     searchTerms: ["pr links github browser external click default pull request view panel"],
-   },
-diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
-index 7200a6bda2..d4c18c465e 100644
---- a/apps/web/src/components/sidebar/SidebarChrome.tsx
-+++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
-@@ -6,7 +6,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
- import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
- import { cn } from "../../lib/utils";
- import { usePullRequestsSupported } from "../../state/environments";
--import { T3Wordmark } from "../T3Wordmark";
-+import { HydraMark } from "../HydraMark";
- import {
-   resolveEnvironmentIdentificationPillLabel,
-   resolveSidebarStageBackdropVariant,
-@@ -131,14 +131,14 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
-     // Center the visible capitals, without the font's ascender/descender space.
-     // Padding keeps ascenders and round-letter overshoot inside the truncation clip.
-     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
--      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
-+      <HydraMark aria-hidden className="h-[1cap] w-auto shrink-0" />
-       <span
-         className={cn(
-           "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-           onBackdrop ? "text-white/70" : "text-muted-foreground",
-         )}
-       >
--        Code
-+        Hydra
-       </span>
-     </span>
-   );
-diff --git a/apps/web/src/components/threadSidebarWidth.ts b/apps/web/src/components/threadSidebarWidth.ts
-index ea9967c1f0..1415e71649 100644
---- a/apps/web/src/components/threadSidebarWidth.ts
-+++ b/apps/web/src/components/threadSidebarWidth.ts
-@@ -3,7 +3,7 @@ const THREAD_SIDEBAR_DEFAULT_WIDTH = 16 * 16;
- export const THREAD_SIDEBAR_MIN_WIDTH = 13 * 16;
- export const THREAD_MAIN_CONTENT_MIN_WIDTH = 40 * 16;
- 
--// The brand's measured width can raise the minimum so "T3 Code" never clips.
-+// The brand's measured width can raise the minimum so "Hydra" never clips.
- export function resolveThreadSidebarMinimumWidth(brandWidth: number): number {
-   return Math.max(THREAD_SIDEBAR_MIN_WIDTH, Math.ceil(brandWidth));
- }
+     to: "/settings/diffs",
+     searchTerms: [
+       `pr commit links ${SOURCE_CONTROL_HOST_LABELS} browser external click default pull request view panel`,
 diff --git a/apps/web/src/connection/clientMetadata.ts b/apps/web/src/connection/clientMetadata.ts
-index 8e1b75eb0a..651a82be16 100644
+index cdb7c9ab2d..94079ba6ee 100644
 --- a/apps/web/src/connection/clientMetadata.ts
 +++ b/apps/web/src/connection/clientMetadata.ts
 @@ -86,7 +86,7 @@ export function clientPresentationMetadata(input: {
@@ -9276,24 +9077,3 @@ index d291e7ed54..56921fabd8 100644
      );
    }
  }
-diff --git a/apps/web/src/lib/bootError.ts b/apps/web/src/lib/bootError.ts
-index f2ed07bb51..f01f7259d8 100644
---- a/apps/web/src/lib/bootError.ts
-+++ b/apps/web/src/lib/bootError.ts
-@@ -1,6 +1,6 @@
- /** Shows startup failures before React can replace the boot splash. */
- export function showBootError(error: unknown) {
--  console.error("T3 Code failed to start.", error);
-+  console.error("Hydra failed to start.", error);
-   const bootShell = document.getElementById("boot-shell");
-   if (!bootShell) return;
- 
-@@ -9,7 +9,7 @@ export function showBootError(error: unknown) {
-   content.setAttribute("role", "alert");
- 
-   const message = document.createElement("p");
--  message.textContent = "T3 Code could not load.";
-+  message.textContent = "Hydra could not load.";
-   content.append(message);
- 
-   if (import.meta.env.DEV && error instanceof Error) {

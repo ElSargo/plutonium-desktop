@@ -1,0 +1,564 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 09:18:50 +1300
+Subject: [PATCH 08/10] Plutonium: the server's thread environment, auth and
+ network access
+
+Folded from:
+- list agent-launched native windows under their thread
+- apps in the right panel, terminal tagging, pop out
+- use the Plutonium helper and its agent bridge
+- what the user starts comes to the front; a toast for the rest
+- network access from the shell's settings
+- agents drive windows and tabs
+- auth session issue --runtime-mode-ceiling, for MCP clients that launch threads
+- an archived or deleted thread's permission grants are forgotten
+- remote clients see native windows
+- native windows are their threads' server tabs
+---
+ apps/server/src/auth/EnvironmentAuth.ts       |   4 +
+ apps/server/src/auth/utils.ts                 |  13 ++-
+ apps/server/src/cli/auth.ts                   |  13 ++-
+ .../Adapters/ClaudeAdapterV2.ts               |   4 +-
+ .../Adapters/CodexAdapterV2.ts                |   3 +
+ apps/server/src/plutonium/networkAccess.ts    | 108 ++++++++++++++++++
+ .../src/plutonium/threadPermissions.test.ts   |  78 +++++++++++++
+ .../server/src/plutonium/threadPermissions.ts |  90 +++++++++++++++
+ apps/server/src/server.ts                     |  10 ++
+ apps/server/src/terminal/Manager.ts           |  10 ++
+ apps/server/src/ws.ts                         |  13 ++-
+ 11 files changed, 336 insertions(+), 10 deletions(-)
+ create mode 100644 apps/server/src/plutonium/networkAccess.ts
+ create mode 100644 apps/server/src/plutonium/threadPermissions.test.ts
+ create mode 100644 apps/server/src/plutonium/threadPermissions.ts
+
+diff --git a/apps/server/src/auth/EnvironmentAuth.ts b/apps/server/src/auth/EnvironmentAuth.ts
+index 39a333d611..966981ec62 100644
+--- a/apps/server/src/auth/EnvironmentAuth.ts
++++ b/apps/server/src/auth/EnvironmentAuth.ts
+@@ -22,6 +22,7 @@ import {
+   DpopFailureReason,
+   type DpopFailureReason as DpopFailureReasonType,
+   mcpClientScopes,
++  type RuntimeMode,
+ } from "@t3tools/contracts";
+ import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
+ import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+@@ -511,6 +512,8 @@ export class EnvironmentAuth extends Context.Service<
+       readonly subject?: string;
+       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+       readonly label?: string;
++      /** For an `mcp-client` session: the highest runtime mode its threads may use. */
++      readonly runtimeModeCeiling?: RuntimeMode;
+     }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
+     readonly listSessions: () => Effect.Effect<
+       ReadonlyArray<AuthClientSession>,
+@@ -1093,6 +1096,7 @@ export const make = Effect.gen(function* () {
+           deviceType: "bot",
+         },
+         ...(input?.ttl ? { ttl: input.ttl } : {}),
++        ...(input?.runtimeModeCeiling ? { runtimeModeCeiling: input.runtimeModeCeiling } : {}),
+       })
+       .pipe(
+         Effect.map(
+diff --git a/apps/server/src/auth/utils.ts b/apps/server/src/auth/utils.ts
+index 77235946ca..dab452ece7 100644
+--- a/apps/server/src/auth/utils.ts
++++ b/apps/server/src/auth/utils.ts
+@@ -26,16 +26,17 @@ export function resolveSessionCookieName(input: {
+     return `${SESSION_COOKIE_NAME}_${input.port}`;
+   }
+ 
++  // Plutonium: the shell's Network access switch restarts the server on
++  // another host (plutonium/networkAccess.ts). The name stays the loopback
++  // one either way, so the shell's session survives the switch.
++  const remote =
++    !input.development && isRemoteReachableHost(input.host) && !process.env.PLUTONIUM_T3;
+   const instanceHash = NodeCrypto.createHash("sha256")
+-    .update(
+-      !input.development && isRemoteReachableHost(input.host)
+-        ? input.environmentId
+-        : input.instanceKey,
+-    )
++    .update(remote ? input.environmentId : input.instanceKey)
+     .digest("hex")
+     .slice(0, 12);
+ 
+-  if (!input.development && isRemoteReachableHost(input.host)) {
++  if (remote) {
+     return `${SESSION_COOKIE_NAME}_${instanceHash}`;
+   }
+ 
+diff --git a/apps/server/src/cli/auth.ts b/apps/server/src/cli/auth.ts
+index b75fba88bd..12c99be3c5 100644
+--- a/apps/server/src/cli/auth.ts
++++ b/apps/server/src/cli/auth.ts
+@@ -1,4 +1,4 @@
+-import { AuthSessionId, AuthStandardClientScopes } from "@t3tools/contracts";
++import { AuthSessionId, AuthStandardClientScopes, RuntimeMode } from "@t3tools/contracts";
+ import * as Console from "effect/Console";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+@@ -68,6 +68,13 @@ const subjectFlag = Flag.String("subject").pipe(
+   Flag.optional,
+ );
+ 
++const runtimeModeCeilingFlag = Flag.Literals("runtime-mode-ceiling", RuntimeMode.literals).pipe(
++  Flag.withDescription(
++    "With `--subject mcp-client`: the highest runtime mode its threads may use (default approval-required).",
++  ),
++  Flag.optional,
++);
++
+ const baseUrlFlag = Flag.String("base-url").pipe(
+   Flag.withSchema(
+     Schema.URLFromString.pipe(
+@@ -172,6 +179,7 @@ const sessionIssueCommand = Command.make("issue", {
+   ttl: ttlFlag,
+   label: labelFlag,
+   subject: subjectFlag,
++  runtimeModeCeiling: runtimeModeCeilingFlag,
+   tokenOnly: tokenOnlyFlag,
+   json: jsonFlag,
+ }).pipe(
+@@ -186,6 +194,9 @@ const sessionIssueCommand = Command.make("issue", {
+             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
+             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
+             ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),
++            ...(Option.isSome(flags.runtimeModeCeiling)
++              ? { runtimeModeCeiling: flags.runtimeModeCeiling.value }
++              : {}),
+           });
+           yield* Console.log(
+             formatIssuedSession(issued, {
+diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+index d2ae14545d..142803e2fc 100644
+--- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+@@ -71,6 +71,7 @@ import { fromLenientJson } from "@t3tools/shared/schemaJson";
+ import { AgentScope } from "@t3tools/shared/AgentScope";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
++import { withPlutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
+ import {
+   CLAUDE_RESUME_COMPACTION_COMPACT_ANSWER,
+   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
+@@ -998,7 +999,8 @@ export const layerQueryRunner: Layer.Layer<
+           const queryOptions = {
+             ...sdkOptions,
+             env: {
+-              ...(sdkOptions.env ?? hostEnvironment),
++              // Plutonium: tag the agent's processes with its thread (no-op unless enabled).
++              ...withPlutoniumAgentEnvironment(sdkOptions.env ?? hostEnvironment, input.threadId),
+               [PortScanner.AGENT_THREAD_ENV]: input.threadId,
+             },
+           };
+diff --git a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
+index 69fc35aa39..d9f2b8f478 100644
+--- a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
+@@ -50,6 +50,7 @@ import {
+ import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@t3tools/shared/model";
+ import { appendGeneratedImageEmbeds } from "@t3tools/shared/generatedImageMarkdown";
+ import { resolveSpawnCommand } from "@t3tools/shared/shell";
++import { plutoniumAgentEnvironment } from "@t3tools/shared/plutonium";
+ import type {
+   ChatAttachment,
+   OrchestrationV2AppThread,
+@@ -1574,6 +1575,8 @@ export const layerAppServerClientFactory: Layer.Layer<
+         const environment = {
+           ...codexAppServerEnvironment(input.environment),
+           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
++          // Plutonium: tag the agent's processes with its thread (no-op unless enabled).
++          ...plutoniumAgentEnvironment(input.threadId),
+         };
+         const command = yield* makeCodexAppServerSpawnCommand({
+           command: input.settings.binaryPath || "codex",
+diff --git a/apps/server/src/plutonium/networkAccess.ts b/apps/server/src/plutonium/networkAccess.ts
+new file mode 100644
+index 0000000000..c3a2bfd040
+--- /dev/null
++++ b/apps/server/src/plutonium/networkAccess.ts
+@@ -0,0 +1,108 @@
++/**
++ * Plutonium: network access from Settings, Connections in the shell.
++ *
++ * T3's desktop app switches "Network access" by restarting its backend on
++ * another host. In a Plutonium session the shell is a browser page, and the
++ * server is started by Plutonium's launcher, which runs it under a supervisor
++ * (PLUTONIUM_T3_SUPERVISED): the supervisor binds it to 0.0.0.0 or 127.0.0.1
++ * from the file this route writes, and starts it again when the file changes
++ * while it runs. So switching saves the choice and stops the server, and the
++ * supervisor starts it on the new host. T3_HOST in Plutonium's settings pins
++ * the host (PLUTONIUM_T3_HOST_PINNED): then this only reports it.
++ *
++ *   GET  /api/plutonium/network-access  {mode, switchable}
++ *   POST /api/plutonium/network-access  {mode}: environment:maintain, as the
++ *        desktop app's switch.
++ */
++import { AuthEnvironmentMaintainScope, type DesktopServerExposureMode } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Path from "effect/Path";
++import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
++
++import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
++import { isRemoteReachableHost } from "../auth/utils.ts";
++import * as ServerConfig from "../config.ts";
++
++export const PLUTONIUM_NETWORK_ACCESS_ROUTE = "/api/plutonium/network-access";
++/** In T3's home; the launcher's supervisor reads it. */
++export const PLUTONIUM_NETWORK_ACCESS_FILE = "plutonium-network-access";
++
++/** Long enough for the response to reach the page before the server stops. */
++const RESTART_DELAY_MS = 300;
++const NO_STORE = { "cache-control": "no-store" };
++
++const isSupervised = () => process.env.PLUTONIUM_T3_SUPERVISED === "1";
++const isHostPinned = () => process.env.PLUTONIUM_T3_HOST_PINNED === "1";
++
++const currentMode = (host: string | undefined): DesktopServerExposureMode =>
++  isRemoteReachableHost(host) ? "network-accessible" : "local-only";
++
++const handler = Effect.gen(function* () {
++  const request = yield* HttpServerRequest.HttpServerRequest;
++  const config = yield* ServerConfig.ServerConfig;
++  const switchable = isSupervised() && !isHostPinned();
++  const state = { mode: currentMode(config.host), switchable, pinned: isHostPinned() };
++  if (request.method === "GET") return HttpServerResponse.jsonUnsafe(state, { headers: NO_STORE });
++  if (request.method !== "POST")
++    return HttpServerResponse.text("Method Not Allowed", { status: 405 });
++
++  // A form can't send JSON across origins without a preflight, which this
++  // route doesn't answer; the session cookie is SameSite=Lax besides.
++  if (!request.headers["content-type"]?.startsWith("application/json")) {
++    return HttpServerResponse.text("Expected application/json.", { status: 415 });
++  }
++  const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
++  const session = yield* serverAuth
++    .authenticateHttpRequest(request)
++    .pipe(Effect.orElseSucceed(() => null));
++  if (session === null) return HttpServerResponse.text("Unauthorized", { status: 401 });
++  if (!session.scopes.includes(AuthEnvironmentMaintainScope)) {
++    return HttpServerResponse.text(`Requires ${AuthEnvironmentMaintainScope}.`, { status: 403 });
++  }
++  if (!switchable) {
++    return HttpServerResponse.text(
++      isHostPinned()
++        ? "T3_HOST in Plutonium's settings sets the server's host."
++        : "This server wasn't started by Plutonium's launcher.",
++      { status: 409 },
++    );
++  }
++  const body = yield* request.json.pipe(Effect.orElseSucceed(() => null));
++  const mode = (body as { mode?: unknown } | null)?.mode;
++  if (mode !== "network-accessible" && mode !== "local-only") {
++    return HttpServerResponse.text('mode is "network-accessible" or "local-only".', {
++      status: 400,
++    });
++  }
++  if (mode === state.mode)
++    return HttpServerResponse.jsonUnsafe({ ...state, restarting: false }, { headers: NO_STORE });
++
++  const fileSystem = yield* FileSystem.FileSystem;
++  const path = yield* Path.Path;
++  const failed = yield* fileSystem
++    .writeFileString(path.join(config.baseDir, PLUTONIUM_NETWORK_ACCESS_FILE), `${mode}\n`)
++    .pipe(
++      Effect.as(false),
++      Effect.catch((error) =>
++        Effect.logError("plutonium: couldn't save network access", { cause: error }).pipe(
++          Effect.as(true),
++        ),
++      ),
++    );
++  if (failed) {
++    return HttpServerResponse.text("Couldn't save the setting.", { status: 500 });
++  }
++  yield* Effect.logInfo(`plutonium: network access ${mode}; restarting`);
++  // The supervisor starts it again on the new host.
++  yield* Effect.sleep(RESTART_DELAY_MS).pipe(
++    Effect.andThen(Effect.sync(() => process.kill(process.pid, "SIGTERM"))),
++    Effect.forkDetach,
++  );
++  return HttpServerResponse.jsonUnsafe({ ...state, mode, restarting: true }, { headers: NO_STORE });
++});
++
++export const layer = process.env.PLUTONIUM_T3
++  ? HttpRouter.add("*", PLUTONIUM_NETWORK_ACCESS_ROUTE, handler)
++  : Layer.empty;
+diff --git a/apps/server/src/plutonium/threadPermissions.test.ts b/apps/server/src/plutonium/threadPermissions.test.ts
+new file mode 100644
+index 0000000000..e0599d2e6f
+--- /dev/null
++++ b/apps/server/src/plutonium/threadPermissions.test.ts
+@@ -0,0 +1,78 @@
++// @effect-diagnostics nodeBuiltinImport:off - a fake Plutonium helper on a Unix socket
++import { expect, it } from "@effect/vitest";
++import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Stream from "effect/Stream";
++import * as NodeFS from "node:fs";
++import * as NodeHttp from "node:http";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++
++import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
++import * as ThreadPermissions from "./threadPermissions.ts";
++
++/** A helper that records the paths it was asked for. */
++const fakeHelper = Effect.acquireRelease(
++  Effect.promise(async () => {
++    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-plutonium-permissions-"));
++    const socketPath = NodePath.join(dir, "helper.sock");
++    const calls: string[] = [];
++    const server = NodeHttp.createServer((request, response) => {
++      calls.push(`${request.method} ${request.url}`);
++      response.setHeader("Content-Type", "application/json");
++      response.end('{"revoked":1}');
++    });
++    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
++    return { dir, server, socketPath, calls };
++  }),
++  ({ dir, server }) =>
++    Effect.promise(
++      () =>
++        new Promise<void>((resolve) =>
++          server.close(() => {
++            NodeFS.rmSync(dir, { recursive: true, force: true });
++            resolve();
++          }),
++        ),
++    ),
++);
++
++const withHelper = (socketPath: string) =>
++  Effect.acquireRelease(
++    Effect.sync(() => {
++      const previous = process.env.PLUTONIUM_HELPER;
++      process.env.PLUTONIUM_HELPER = socketPath;
++      return previous;
++    }),
++    (previous) =>
++      Effect.sync(() => {
++        if (previous === undefined) delete process.env.PLUTONIUM_HELPER;
++        else process.env.PLUTONIUM_HELPER = previous;
++      }),
++  );
++
++const event = (type: string, threadId: string) =>
++  ({ type, threadId }) as unknown as OrchestrationV2DomainEvent;
++
++it.live("forgets an archived or deleted thread's grants, not a settled one's", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const helper = yield* fakeHelper;
++      yield* withHelper(helper.socketPath);
++      const orchestrator = Layer.succeed(Orchestrator.OrchestratorV2, {
++        streamDomainEvents: Stream.make(
++          event("thread.archived", "a"),
++          event("thread.settled", "b"),
++          event("thread.deleted", "c"),
++        ),
++      } as unknown as Orchestrator.OrchestratorV2["Service"]);
++      yield* Layer.build(ThreadPermissions.layer.pipe(Layer.provide(orchestrator)));
++      for (let i = 0; i < 100 && helper.calls.length < 2; i++) yield* Effect.sleep("10 millis");
++      expect(helper.calls).toEqual([
++        "POST /v1/threads/t3%3Athread%2Fa/permissions/forget",
++        "POST /v1/threads/t3%3Athread%2Fc/permissions/forget",
++      ]);
++    }),
++  ),
++);
+diff --git a/apps/server/src/plutonium/threadPermissions.ts b/apps/server/src/plutonium/threadPermissions.ts
+new file mode 100644
+index 0000000000..1e4c790112
+--- /dev/null
++++ b/apps/server/src/plutonium/threadPermissions.ts
+@@ -0,0 +1,90 @@
++// @effect-diagnostics nodeBuiltinImport:off - requests go to the Plutonium helper's Unix socket
++/**
++ * Plutonium: an archived or deleted thread loses its permission grants.
++ *
++ * Plutonium's browser keeps a thread's permission decisions (camera,
++ * notifications, ...) per thread tag until a shell revokes them; it doesn't
++ * know about threads' lifecycles. So whenever a thread is archived or deleted,
++ * by the user or an agent, this server tells the helper
++ * (POST /v1/threads/:tag/permissions/forget), which has a shell page do it
++ * (`shell.forgetThreadPermissions`), or the next page to connect.
++ */
++import { plutoniumHelperSocket, plutoniumThreadTag } from "@t3tools/shared/plutonium";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Schema from "effect/Schema";
++import * as Stream from "effect/Stream";
++import * as NodeHttp from "node:http";
++
++import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
++import { forkParked } from "../serverActivation.ts";
++
++const REQUEST_TIMEOUT_MS = 10_000;
++
++export class PlutoniumForgetPermissionsError extends Schema.TaggedError<PlutoniumForgetPermissionsError>()(
++  "PlutoniumForgetPermissionsError",
++  { message: Schema.String },
++) {}
++
++/** Asks the helper on `socketPath` to forget `threadId`'s grants. */
++export const forgetThreadPermissions = (socketPath: string, threadId: string) =>
++  Effect.tryPromise({
++    try: () =>
++      new Promise<number>((resolve, reject) => {
++        const tag = encodeURIComponent(plutoniumThreadTag(threadId));
++        const request = NodeHttp.request(
++          {
++            socketPath,
++            method: "POST",
++            path: `/v1/threads/${tag}/permissions/forget`,
++            timeout: REQUEST_TIMEOUT_MS,
++          },
++          (response) => {
++            response.resume();
++            response.on("end", () => resolve(response.statusCode ?? 500));
++          },
++        );
++        request.on("timeout", () => request.destroy(new Error("timed out")));
++        request.on("error", reject);
++        request.end();
++      }),
++    catch: (cause) =>
++      new PlutoniumForgetPermissionsError({
++        message: cause instanceof Error ? cause.message : String(cause),
++      }),
++  }).pipe(
++    Effect.flatMap((status) =>
++      status < 400
++        ? Effect.void
++        : Effect.fail(
++            new PlutoniumForgetPermissionsError({ message: `The helper said ${status}.` }),
++          ),
++    ),
++  );
++
++export const layer = Layer.effectDiscard(
++  Effect.gen(function* () {
++    const socketPath = plutoniumHelperSocket();
++    if (socketPath === undefined) return;
++    const engine = yield* Orchestrator.OrchestratorV2;
++    yield* forkParked(
++      Stream.runForEach(engine.streamDomainEvents, (event) =>
++        event.type === "thread.archived" || event.type === "thread.deleted"
++          ? forgetThreadPermissions(socketPath, event.threadId).pipe(
++              // An older helper has no such route (404); the grants stay.
++              Effect.catch((error) =>
++                Effect.logWarning("Plutonium: couldn't forget a thread's permissions", {
++                  threadId: event.threadId,
++                  message: error.message,
++                }),
++              ),
++            )
++          : Effect.void,
++      ).pipe(
++        Effect.catchCause((cause) =>
++          Effect.logWarning("Plutonium: the thread permission reactor stopped", { cause }),
++        ),
++      ),
++    );
++  }),
++);
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 395afcf566..e87268d687 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -35,6 +35,10 @@ import {
+ } from "./httpResponseErrorGuard.ts";
+ import { fixPath } from "./os-jank.ts";
+ import * as Ws from "./ws.ts";
++import * as PlutoniumNetworkAccess from "./plutonium/networkAccess.ts";
++import * as PlutoniumWindowStream from "./plutonium/windowStream.ts";
++import * as PlutoniumWindowTabs from "./plutonium/windowTabs.ts";
++import * as PlutoniumThreadPermissions from "./plutonium/threadPermissions.ts";
+ import * as AgentScopeLive from "./process/agentScope.ts";
+ import * as ExternalLauncher from "./process/externalLauncher.ts";
+ import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
+@@ -658,6 +662,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
+     }),
+   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+   ProviderUsageLimitsIngestion.layer,
++  // Plutonium: an archived or deleted thread's permission grants are forgotten.
++  PlutoniumThreadPermissions.layer,
++  // Plutonium: native windows are their threads' server tabs, for every client.
++  PlutoniumWindowTabs.layer,
+   layerProviderInstallationRefresh,
+   ReplayMarkers.layer,
+   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
+@@ -772,6 +780,8 @@ const layerMakeRoutes = Layer.mergeAll(
+     ServerHttp.layerAttachmentUploadRoute,
+     GuestHttp.layer,
+     DeviceHubProxy.layer,
++    PlutoniumNetworkAccess.layer,
++    PlutoniumWindowStream.routeLayer,
+     ServerBrowserStream.routeLayer,
+     ServerHttp.layerStaticAndDevRoute,
+     Ws.layer,
+diff --git a/apps/server/src/terminal/Manager.ts b/apps/server/src/terminal/Manager.ts
+index 6a661db4e0..bcda1f30cd 100644
+--- a/apps/server/src/terminal/Manager.ts
++++ b/apps/server/src/terminal/Manager.ts
+@@ -71,6 +71,7 @@ import * as ServerSettings from "../serverSettings.ts";
+ import { increment, terminalSessionsTotal } from "../observability/Metrics.ts";
+ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+ import * as ProcessRunner from "../processRunner.ts";
++import { plutoniumTerminalEnvironment } from "@t3tools/shared/plutonium";
+ import * as PortScanner from "../preview/PortScanner.ts";
+ import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
+ import { terminalOutputStream } from "./OutputProtocol.ts";
+@@ -2475,6 +2476,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
+                 }
+               }
+             }
++            // Plutonium: GUI apps started from the terminal belong to its thread,
++            // and are shown, except from the project's setup and settle scripts,
++            // which run by themselves (ProjectSetupScriptRunner's terminal ids).
++            Object.assign(
++              terminalEnv,
++              plutoniumTerminalEnvironment(session.threadId, {
++                userStarted: !/^(setup|settle)-/.test(session.terminalId),
++              }),
++            );
+             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+             ptyProcess = spawnResult.process;
+             startedShell = spawnResult.shellLabel;
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 2bd0acc22b..fa3fc5d730 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -193,6 +193,8 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
+ import * as DeviceService from "./device/DeviceService.ts";
+ import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
+ import * as PreviewManager from "./preview/Manager.ts";
++import * as PlutoniumWindowTabs from "./plutonium/windowTabs.ts";
++import { plutoniumWindowOfTab } from "@t3tools/shared/plutoniumWindowTabs";
+ import { issueAssetUrl } from "./assets/AssetAccess.ts";
+ import {
+   attachmentRelativePath,
+@@ -3152,8 +3154,15 @@ export const layerWsRpc = (
+         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
+         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
+         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
+-        [WS_METHODS.previewClose]: (input) => previewManager.close(input),
+-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
++        // Plutonium: closing a native window's tab asks its app to close it.
++        [WS_METHODS.previewClose]: (input) => {
++          const window = input.tabId === undefined ? null : plutoniumWindowOfTab(input.tabId);
++          return window === null
++            ? previewManager.close(input)
++            : PlutoniumWindowTabs.closeWindow(window);
++        },
++        // Plutonium: clients list native windows with the thread's tabs.
++        [WS_METHODS.previewList]: (input) => previewManager.listForClients(input),
+         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
+         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
+         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
