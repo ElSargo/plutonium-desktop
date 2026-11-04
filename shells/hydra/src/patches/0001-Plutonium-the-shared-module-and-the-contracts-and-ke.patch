@@ -26,15 +26,15 @@ Folded from:
 ---
  packages/contracts/src/desktopBrowser.ts      |  40 ++++++
  packages/contracts/src/ipc.ts                 |   2 +
- packages/contracts/src/keybindings.ts         |  61 +++++++++
+ packages/contracts/src/keybindings.ts         |  63 +++++++++
  packages/contracts/src/orchestratorMcp.ts     |  16 +++
  packages/contracts/src/previewAutomation.ts   |  92 ++++++++++++-
  .../provider-core/src/server/mcpSession.ts    |  12 +-
  packages/shared/package.json                  |   8 ++
- packages/shared/src/keybindings.ts            |  32 +++++
+ packages/shared/src/keybindings.ts            |  35 +++++
  packages/shared/src/plutonium.ts              | 124 ++++++++++++++++++
  packages/shared/src/plutoniumWindowTabs.ts    |  25 ++++
- 10 files changed, 405 insertions(+), 7 deletions(-)
+ 10 files changed, 410 insertions(+), 7 deletions(-)
  create mode 100644 packages/shared/src/plutonium.ts
  create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
 
@@ -109,7 +109,7 @@ index 5aa9acf277..0ebd7d50cf 100644
  
  export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
 diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
-index 714e0a1d48..cc1dabf864 100644
+index 714e0a1d48..472054181b 100644
 --- a/packages/contracts/src/keybindings.ts
 +++ b/packages/contracts/src/keybindings.ts
 @@ -34,6 +34,58 @@ export const MODEL_PICKER_JUMP_KEYBINDING_COMMANDS = [
@@ -185,12 +185,14 @@ index 714e0a1d48..cc1dabf864 100644
    "pullRequest.copyNumber",
    "diff.toggle",
    "preview.toggle",
-@@ -79,6 +138,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
+@@ -79,6 +138,10 @@ export const STATIC_KEYBINDING_COMMANDS = [
    "preview.zoomIn",
    "preview.zoomOut",
    "preview.resetZoom",
 +  "preview.newTab",
 +  "appLauncher.toggle",
++  "files.toggle",
++  "files.carry",
    "commandPalette.toggle",
    "filePicker.toggle",
    "projectSearch.toggle",
@@ -418,7 +420,7 @@ index 19542c4459..82baedba2a 100644
    },
    "scripts": {
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index 32292c0f9e..fc0ad6f75d 100644
+index 32292c0f9e..5eb390d8c2 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
 @@ -5,6 +5,10 @@ import {
@@ -432,7 +434,7 @@ index 32292c0f9e..fc0ad6f75d 100644
    type ResolvedKeybindingRule,
    type ResolvedKeybindingsConfig,
    THREAD_JUMP_KEYBINDING_COMMANDS,
-@@ -157,6 +161,34 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -157,6 +161,37 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "mod+alt+b", command: "rightPanel.toggle" },
    { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
    { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
@@ -446,6 +448,9 @@ index 32292c0f9e..fc0ad6f75d 100644
 +  { key: "ctrl+shift+tab", command: "rightPanel.previousTab" },
 +  { key: "mod+t", command: "preview.newTab" },
 +  { key: "meta+space", command: "appLauncher.toggle" },
++  { key: "mod+e", command: "files.toggle", when: "!terminalFocus" },
++  { key: "meta+e", command: "files.toggle" },
++  { key: "meta+o", command: "files.carry" },
 +  // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
 +  // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
 +  ...DOCK_SLOT_KEYBINDING_COMMANDS.map((command, index) => ({

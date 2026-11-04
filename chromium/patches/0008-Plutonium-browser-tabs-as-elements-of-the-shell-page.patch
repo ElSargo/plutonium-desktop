@@ -33,8 +33,8 @@ and the parts in these files of:
 - printing in tabs goes to the shell
 - only the shell window is held fullscreen
 ---
- chrome/browser/plutonium_tab_requests.cc      |  298 +++
- chrome/browser/plutonium_tab_requests.h       |  172 ++
+ chrome/browser/plutonium_tab_requests.cc      |  302 +++
+ chrome/browser/plutonium_tab_requests.h       |  173 ++
  chrome/browser/plutonium_tabs.cc              | 1644 +++++++++++++++++
  chrome/browser/plutonium_tabs.h               |  317 ++++
  .../plutonium_tab_presenter.cc                |  101 +
@@ -49,7 +49,7 @@ and the parts in these files of:
  ...chrome_web_contents_view_delegate_views.cc |    7 +
  .../performance_manager_tab_helper.cc         |   14 +-
  .../browser/web_contents/web_contents_impl.cc |    6 +
- 16 files changed, 2883 insertions(+), 10 deletions(-)
+ 16 files changed, 2888 insertions(+), 10 deletions(-)
  create mode 100644 chrome/browser/plutonium_tab_requests.cc
  create mode 100644 chrome/browser/plutonium_tab_requests.h
  create mode 100644 chrome/browser/plutonium_tabs.cc
@@ -61,10 +61,10 @@ and the parts in these files of:
 
 diff --git a/chrome/browser/plutonium_tab_requests.cc b/chrome/browser/plutonium_tab_requests.cc
 new file mode 100644
-index 0000000000..d391a9b783
+index 0000000000..d01cc6f634
 --- /dev/null
 +++ b/chrome/browser/plutonium_tab_requests.cc
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,302 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -143,13 +143,17 @@ index 0000000000..d391a9b783
 +    Params params) {
 +  std::optional<PlutoniumTabs::TabInfo> tab =
 +      PlutoniumTabs::Get()->GetTabFor(contents);
-+  if (!tab) {
++  // A shell page asks about itself: no tab (0), and it answers itself.
++  const bool own_page =
++      !tab && plutonium_shell::IsShellWindowContents(contents);
++  if (!tab && !own_page) {
 +    return nullptr;
 +  }
++  const int32_t tab_id = tab ? tab->id : 0;
 +  auto request = std::make_unique<Request>();
 +  const int32_t id = next_id_++;
 +  request->id = id;
-+  request->tab_id = tab->id;
++  request->tab_id = tab_id;
 +  request->kind = std::move(params.kind);
 +  request->detail = std::move(params.detail);
 +  request->on_answer = std::move(params.on_answer);
@@ -157,15 +161,15 @@ index 0000000000..d391a9b783
 +
 +  auto mojo_request = blink::mojom::TabRequest::New();
 +  mojo_request->id = id;
-+  mojo_request->tab_id = tab->id;
++  mojo_request->tab_id = tab_id;
 +  mojo_request->kind = request->kind;
 +  base::JSONWriter::Write(request->detail, &mojo_request->detail_json);
 +  VLOG(1) << "EXO-TAB-FEATURES request #" << id << " (" << request->kind
-+          << ") for tab #" << tab->id;
++          << ") for tab #" << tab_id;
 +  requests_[id] = std::move(request);
-+  UpdatePending(tab->id);
++  UpdatePending(tab_id);
 +
-+  content::WebContents* shell = ShellFor(contents);
++  content::WebContents* shell = own_page ? contents : ShellFor(contents);
 +  const bool asked =
 +      shell && plutonium_shell::SendTabRequest(
 +                   shell, std::move(mojo_request),
@@ -365,10 +369,10 @@ index 0000000000..d391a9b783
 +}
 diff --git a/chrome/browser/plutonium_tab_requests.h b/chrome/browser/plutonium_tab_requests.h
 new file mode 100644
-index 0000000000..9f0793270e
+index 0000000000..114095bf4e
 --- /dev/null
 +++ b/chrome/browser/plutonium_tab_requests.h
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,173 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -468,8 +472,9 @@ index 0000000000..9f0793270e
 +  PlutoniumTabRequests(const PlutoniumTabRequests&) = delete;
 +  PlutoniumTabRequests& operator=(const PlutoniumTabRequests&) = delete;
 +
-+  // Asks about tab |contents|. Null if |contents| isn't one of the registry's
-+  // tabs: then nothing was sent and no callback will run. Callbacks never
++  // Asks about tab |contents|, or a shell page about itself (the request's
++  // tab id is then 0, and it has no pending state). Null if |contents| is
++  // neither: then nothing was sent and no callback will run. Callbacks never
 +  // run from inside Start().
 +  std::unique_ptr<Handle> Start(content::WebContents* contents,
 +                                Params params);

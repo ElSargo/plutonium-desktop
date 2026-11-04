@@ -22,6 +22,7 @@
 - [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording (design, not built)
 - [features/PASSWORDS.md](features/PASSWORDS.md): a password manager adapter for apps, tabs and agents (design, not built)
 - [features/TAB_FEATURES.md](features/TAB_FEATURES.md): find, zoom, printing, permission prompts, downloads, file pickers for tabs, through the shell (built; autofill not)
+- [features/FILE_MANAGER.md](features/FILE_MANAGER.md): Hydra's file manager and picker: tree, columns and grid, Yazi's keys, fuzzy finding, drag and drop in and out, and carrying files with no mouse.
 - [features/REMOTE_WINDOWS.md](features/REMOTE_WINDOWS.md): native windows for Hydra (T3 Code) clients away from the desktop, streamed by the server
 - [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them (design, not built)
 

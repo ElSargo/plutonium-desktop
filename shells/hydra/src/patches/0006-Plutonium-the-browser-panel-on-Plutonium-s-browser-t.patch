@@ -21,7 +21,7 @@ Folded from:
 - a dock slot holds one window or tab
 - native windows are their threads' server tabs
 ---
- apps/web/src/AppRoot.tsx                      |   2 +
+ apps/web/src/AppRoot.tsx                      |   4 +
  apps/web/src/browser/desktopTabLifetime.ts    |   2 +
  apps/web/src/browser/previewRuntime.ts        |   7 +-
  .../preview/ThreadPreviewMiniPlayer.tsx       |  35 +-
@@ -32,28 +32,30 @@ Folded from:
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 11 files changed, 1203 insertions(+), 12 deletions(-)
+ 11 files changed, 1205 insertions(+), 12 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
  create mode 100644 apps/web/src/plutonium/previewBridge.ts
 
 diff --git a/apps/web/src/AppRoot.tsx b/apps/web/src/AppRoot.tsx
-index 2491e9a813..fea21da78d 100644
+index 2491e9a813..06ca9ac947 100644
 --- a/apps/web/src/AppRoot.tsx
 +++ b/apps/web/src/AppRoot.tsx
-@@ -2,6 +2,7 @@ import { RouterProvider } from "@tanstack/react-router";
+@@ -2,6 +2,8 @@ import { RouterProvider } from "@tanstack/react-router";
  
  import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
  import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
++import { PlutoniumFilePicker } from "./plutonium/files/FilePicker";
 +import { PlutoniumBrowserHost } from "./plutonium/PlutoniumBrowserHost";
  import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
  import type { AppRouter } from "./router";
  
-@@ -11,6 +12,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
+@@ -11,6 +13,8 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
      <AppAtomRegistryProvider>
        <RouterProvider router={router} />
        <ElectronBrowserHost />
 +      <PlutoniumBrowserHost />
++      <PlutoniumFilePicker />
        <QuitHoldOverlay />
      </AppAtomRegistryProvider>
    );

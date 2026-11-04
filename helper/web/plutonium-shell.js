@@ -696,6 +696,39 @@ export class PlutoniumShell extends EventTarget {
   }
 
   /**
+   * Takes the keyboard from a tab or app this page shows, for what's about to take focus here:
+   * element.focus() alone leaves the keys going to the tab.
+   */
+  focusPage() {
+    this.broker?.focusPage?.();
+  }
+
+  /**
+   * A File for the host file `path` (docs/features/FILE_MANAGER.md): add it to a "dragstart"'s
+   * dataTransfer.items and the drag carries the real file, to tabs and native apps alike.
+   * Null without the browser's support.
+   */
+  fileForPath(path) {
+    return this.broker?.fileForPath?.(path) ?? null;
+  }
+
+  /** The host path of a File that has one (a drop's), else "". */
+  pathForFile(file) {
+    return this.broker?.pathForFile?.(file) ?? "";
+  }
+
+  /**
+   * Picks up the host files `paths` with no button held: they ride on the pointer until a
+   * click or Enter drops them, or Escape cancels; hjkl and the arrows move the pointer.
+   * `imagePng`: a drag image, as base64. Resolves with "copy", "move", "link" or "none" once
+   * it's over.
+   */
+  startFileDrag(paths, { imagePng = "" } = {}) {
+    if (typeof this.broker?.startFileDrag !== "function") return Promise.resolve("none");
+    return this.broker.startFileDrag(paths, imagePng);
+  }
+
+  /**
    * Starts dragging a window (`{ windowId }`) or a tab (`{ tabId }`) from a "dragstart"
    * `event`, so that another shell (on any display) can take it: see itemFromDrop().
    */
@@ -2900,6 +2933,8 @@ class FileChooser {
     this.place();
     this.onResize = () => this.place();
     window.addEventListener("resize", this.onResize);
+    // Over a tab the keys are the tab's until the page takes them.
+    this.shell.focusPage();
     if (this.isSave) {
       this.nameInput.focus({ preventScroll: true });
       // The name, without its extension, ready to type over.

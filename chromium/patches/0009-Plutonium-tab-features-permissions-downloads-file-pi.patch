@@ -36,8 +36,8 @@ and the parts in these files of:
  chrome/browser/plutonium_context_menu.h       |   46 +
  chrome/browser/plutonium_downloads.cc         |  431 +++++++
  chrome/browser/plutonium_downloads.h          |  166 +++
- chrome/browser/plutonium_file_chooser.cc      |  372 ++++++
- chrome/browser/plutonium_file_chooser.h       |   68 ++
+ chrome/browser/plutonium_file_chooser.cc      |  381 ++++++
+ chrome/browser/plutonium_file_chooser.h       |   69 ++
  chrome/browser/plutonium_find.cc              |  383 ++++++
  chrome/browser/plutonium_find.h               |  131 +++
  chrome/browser/plutonium_permissions.cc       | 1034 +++++++++++++++++
@@ -74,7 +74,7 @@ and the parts in these files of:
  content/browser/speech/tts_platform_impl.cc   |   12 +-
  content/browser/speech/tts_platform_impl.h    |    2 +-
  .../browser/media_keys_listener_manager.cc    |    7 +-
- 45 files changed, 4140 insertions(+), 82 deletions(-)
+ 45 files changed, 4150 insertions(+), 82 deletions(-)
  create mode 100644 chrome/browser/plutonium_context_menu.cc
  create mode 100644 chrome/browser/plutonium_context_menu.h
  create mode 100644 chrome/browser/plutonium_downloads.cc
@@ -1335,10 +1335,10 @@ index 0000000000..65258468ee
 +#endif  // CHROME_BROWSER_PLUTONIUM_DOWNLOADS_H_
 diff --git a/chrome/browser/plutonium_file_chooser.cc b/chrome/browser/plutonium_file_chooser.cc
 new file mode 100644
-index 0000000000..50cc5192ab
+index 0000000000..3a99dfe6e0
 --- /dev/null
 +++ b/chrome/browser/plutonium_file_chooser.cc
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,381 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1362,6 +1362,7 @@ index 0000000000..50cc5192ab
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/values.h"
 +#include "chrome/browser/plutonium_tab_requests.h"
++#include "chrome/browser/plutonium_shell.h"
 +#include "chrome/browser/plutonium_tabs.h"
 +#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
 +#include "content/public/browser/web_contents.h"
@@ -1403,7 +1404,7 @@ index 0000000000..50cc5192ab
 +  return "open";
 +}
 +
-+// A tab's picker: asks the shell (a "fileChooser" tab request), and opens
++// A tab's or a shell page's picker: asks the shell (a "fileChooser" request), and opens
 +// the fallback factory's picker if no shell takes it.
 +class PlutoniumSelectFileDialog : public ui::SelectFileDialog {
 + public:
@@ -1623,7 +1624,12 @@ index 0000000000..50cc5192ab
 +    if (!listener_) {
 +      return;
 +    }
-+    if (!fallback_factory_ || !contents_) {
++    // A shell page's own picker when that shell went away: the page that asked
++    // is what's gone (a reload), so there is no one to pick for.
++    const bool own_page_gone =
++        reason == PlutoniumTabRequests::FallbackReason::kShellGone && contents_ &&
++        !PlutoniumTabs::Get()->IsTab(contents_.get());
++    if (!fallback_factory_ || !contents_ || own_page_gone) {
 +      Notify({}, 0);
 +      return;
 +    }
@@ -1687,7 +1693,10 @@ index 0000000000..50cc5192ab
 +    std::unique_ptr<ui::SelectFilePolicy> policy) {
 +  content::WebContents* contents =
 +      ChromeSelectFilePolicy::GetSourceContents(policy.get());
-+  if (contents && PlutoniumTabs::Get()->IsTab(contents)) {
++  // A tab's picker, or the shell page's own (an <input type=file> in it): the
++  // page is the shell, so it is asked about itself, with tab id 0.
++  if (contents && (PlutoniumTabs::Get()->IsTab(contents) ||
++                   plutonium_shell::IsShellWindowContents(contents))) {
 +    return new PlutoniumSelectFileDialog(listener, std::move(policy), contents,
 +                                         fallback_.get());
 +  }
@@ -1713,10 +1722,10 @@ index 0000000000..50cc5192ab
 +}
 diff --git a/chrome/browser/plutonium_file_chooser.h b/chrome/browser/plutonium_file_chooser.h
 new file mode 100644
-index 0000000000..fdf98400b5
+index 0000000000..ea6b86e086
 --- /dev/null
 +++ b/chrome/browser/plutonium_file_chooser.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,69 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1737,9 +1746,10 @@ index 0000000000..fdf98400b5
 +}
 +
 +// EXO-TAB-FEATURES (docs/features/TAB_FEATURES.md, "File pickers"): every
-+// file picker a registry tab opens (<input type=file> through
++// file picker a registry tab or a shell page opens (<input type=file> through
 +// FileSelectHelper, the File System Access pickers, a download's Save As)
-+// asks the shell, as a "fileChooser" tab request (PlutoniumTabRequests):
++// asks the shell, as a "fileChooser" tab request (PlutoniumTabRequests; tab
++// id 0 for the shell page's own):
 +//
 +//   detail: {mode: "open" | "open-multiple" | "folder" | "save", upload,
 +//            title, origin, filters: [{name, patterns: ["*.png", ...]}],
