@@ -49,36 +49,40 @@ Folded from:
  .../src/components/chat/guestMessageStyle.tsx |    2 +-
  .../src/components/files/FilePreviewPanel.tsx |    2 +-
  .../pullRequest/PullRequestsPage.tsx          |    2 +
+ .../settings/KeybindingsSettings.logic.ts     |    1 +
  .../web/src/components/ui/standalone-page.tsx |    6 +-
- apps/web/src/keybindings.ts                   |    6 +
+ apps/web/src/keybindings.ts                   |   20 +
  apps/web/src/plutonium/AppLauncher.tsx        |  237 ++++
- apps/web/src/plutonium/PlutoniumWindows.tsx   |  555 +++++++++
- apps/web/src/plutonium/RemoteWindowView.tsx   |  218 ++++
- apps/web/src/plutonium/files/FileManager.tsx  | 1046 +++++++++++++++++
- apps/web/src/plutonium/files/FilePicker.tsx   |  327 ++++++
- .../src/plutonium/files/HydraFilesPanel.tsx   |   55 +
- .../plutonium/files/PlutoniumFilesDrawer.tsx  |   90 ++
- .../src/plutonium/files/PlutoniumFilesRow.tsx |   52 +
- apps/web/src/plutonium/files/filesCore.ts     |  139 +++
- apps/web/src/plutonium/files/filesStore.ts    |  208 ++++
- apps/web/src/plutonium/files/ownsKey.test.ts  |   27 +
+ apps/web/src/plutonium/PlutoniumWindows.tsx   |  555 ++++++++
+ apps/web/src/plutonium/RemoteWindowView.tsx   |  218 +++
+ apps/web/src/plutonium/files/FileManager.tsx  | 1226 +++++++++++++++++
+ apps/web/src/plutonium/files/FilePicker.tsx   |  313 +++++
+ .../src/plutonium/files/HydraFilesPanel.tsx   |   56 +
+ .../plutonium/files/PlutoniumFilesDrawer.tsx  |   93 ++
+ .../src/plutonium/files/PlutoniumFilesRow.tsx |   50 +
+ apps/web/src/plutonium/files/carry.ts         |   55 +
+ apps/web/src/plutonium/files/fileKeys.test.ts |   74 +
+ apps/web/src/plutonium/files/fileKeys.ts      |   47 +
+ apps/web/src/plutonium/files/filesCore.ts     |  139 ++
+ apps/web/src/plutonium/files/filesStore.ts    |  233 ++++
+ apps/web/src/plutonium/files/ownsKey.test.ts  |   17 +
  apps/web/src/plutonium/files/ownsKey.ts       |   16 +
- .../web/src/plutonium/files/useFileManager.ts |  863 ++++++++++++++
+ .../web/src/plutonium/files/useFileManager.ts |  852 ++++++++++++
  apps/web/src/plutonium/files/useFilesHome.ts  |   20 +
- apps/web/src/plutonium/importTab.ts           |   67 ++
+ apps/web/src/plutonium/importTab.ts           |   67 +
  apps/web/src/plutonium/openedItems.test.ts    |  176 +++
  apps/web/src/plutonium/openedItems.ts         |  255 ++++
- apps/web/src/plutonium/panelKeys.ts           |  303 +++++
+ apps/web/src/plutonium/panelKeys.ts           |  302 ++++
  apps/web/src/plutonium/remoteWindows.test.ts  |   64 +
  apps/web/src/plutonium/remoteWindows.ts       |  187 +++
  apps/web/src/plutonium/threadTag.ts           |   41 +
  apps/web/src/plutonium/useThreadPlutonium.ts  |  188 +++
- apps/web/src/plutonium/windowStore.ts         |  380 ++++++
+ apps/web/src/plutonium/windowStore.ts         |  380 +++++
  apps/web/src/reopenClosedView.ts              |    3 +
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 47 files changed, 5908 insertions(+), 53 deletions(-)
+ 51 files changed, 6270 insertions(+), 53 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
@@ -87,6 +91,9 @@ Folded from:
  create mode 100644 apps/web/src/plutonium/files/HydraFilesPanel.tsx
  create mode 100644 apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
  create mode 100644 apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
+ create mode 100644 apps/web/src/plutonium/files/carry.ts
+ create mode 100644 apps/web/src/plutonium/files/fileKeys.test.ts
+ create mode 100644 apps/web/src/plutonium/files/fileKeys.ts
  create mode 100644 apps/web/src/plutonium/files/filesCore.ts
  create mode 100644 apps/web/src/plutonium/files/filesStore.ts
  create mode 100644 apps/web/src/plutonium/files/ownsKey.test.ts
@@ -1010,6 +1017,18 @@ index 1b3d1bc74c..fdc95ed053 100644
              browserAvailable={false}
              terminalAvailable={false}
              diffAvailable={false}
+diff --git a/apps/web/src/components/settings/KeybindingsSettings.logic.ts b/apps/web/src/components/settings/KeybindingsSettings.logic.ts
+index fe9b47b4dc..82d0175074 100644
+--- a/apps/web/src/components/settings/KeybindingsSettings.logic.ts
++++ b/apps/web/src/components/settings/KeybindingsSettings.logic.ts
+@@ -216,6 +216,7 @@ const KEYBINDING_GROUPS = [
+   { id: "threads", title: "Threads", prefixes: ["thread", "chat", "pullRequest"] },
+   { id: "composer", title: "Composer", prefixes: ["composer", "modelPicker"] },
+   { id: "terminal", title: "Terminal", prefixes: ["terminal"] },
++  { id: "files", title: "File manager", prefixes: ["files"] },
+   { id: "preview", title: "Preview & diff", prefixes: ["preview", "diff"] },
+   { id: "appearance", title: "Appearance", prefixes: ["theme", "appearance", "themeEditor"] },
+   { id: "scripts", title: "Project scripts", prefixes: ["script"] },
 diff --git a/apps/web/src/components/ui/standalone-page.tsx b/apps/web/src/components/ui/standalone-page.tsx
 index 0881b84c52..da50c294c2 100644
 --- a/apps/web/src/components/ui/standalone-page.tsx
@@ -1034,11 +1053,11 @@ index 0881b84c52..da50c294c2 100644
          </span>
          {context ? <span className="text-sm">{context}</span> : null}
 diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
-index fc96aa1f85..3c6ae603e4 100644
+index fc96aa1f85..438c865d71 100644
 --- a/apps/web/src/keybindings.ts
 +++ b/apps/web/src/keybindings.ts
 @@ -1,3 +1,4 @@
-+import { plutoniumFilesOwnsKey } from "./plutonium/files/ownsKey";
++import { isFileManagerBinding, plutoniumFilesFocused } from "./plutonium/files/ownsKey";
  import {
    type KeybindingCommand,
    type KeybindingShortcut,
@@ -1060,14 +1079,35 @@ index fc96aa1f85..3c6ae603e4 100644
      ...options?.context,
    };
  }
-@@ -180,6 +185,7 @@ export function resolveShortcutCommand(
+@@ -180,6 +185,17 @@ export function resolveShortcutCommand(
    keybindings: ResolvedKeybindingsConfig,
    options?: ShortcutMatchOptions,
  ): KeybindingCommand | null {
-+  if (plutoniumFilesOwnsKey(event)) return null;
++  // The file manager's keys are its own while it has the keyboard (Ctrl+D isn't the diff).
++  if (
++    plutoniumFilesFocused() &&
++    keybindings.some(
++      (binding) =>
++        isFileManagerBinding(binding) &&
++        matchesKeybindingShortcut(event, binding.shortcut, resolvePlatform(options)),
++    )
++  ) {
++    return null;
++  }
    const platform = resolvePlatform(options);
    const context = resolveContext(options);
    if (options?.context?.editableFocus === undefined && typeof document !== "undefined") {
+@@ -228,6 +244,10 @@ export function formatShortcutLabel(
+   shortcut: KeybindingShortcut,
+   platform = navigator.platform,
+ ): string {
++  if (shortcut.prefix) {
++    const { prefix, ...rest } = shortcut;
++    return `${formatShortcutKeyLabel(prefix)} ${formatShortcutLabel(rest, platform)}`;
++  }
+   const keyLabel = formatShortcutKeyLabel(shortcut.key);
+   const useMetaForMod = isMacPlatform(platform);
+   const showMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
 diff --git a/apps/web/src/plutonium/AppLauncher.tsx b/apps/web/src/plutonium/AppLauncher.tsx
 new file mode 100644
 index 0000000000..4de12eccd3
@@ -2098,44 +2138,63 @@ index 0000000000..ce66d4b17f
 +}
 diff --git a/apps/web/src/plutonium/files/FileManager.tsx b/apps/web/src/plutonium/files/FileManager.tsx
 new file mode 100644
-index 0000000000..f0dea6093e
+index 0000000000..d2edf7d493
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/FileManager.tsx
-@@ -0,0 +1,1046 @@
+@@ -0,0 +1,1226 @@
 +// Plutonium: the file manager (docs/features/FILE_MANAGER.md): a tree, Yazi's three
-+// columns or a grid, with a fuzzy finder, driven by the mouse or by Yazi's keys. The
-+// drawer, the Files panel and the picker are this with different surroundings.
++// columns or a grid, with a fuzzy finder, driven by the mouse or by keys from Hydra's
++// keybindings. The drawer, the Files panel and the picker are this in different
++// surroundings, and each keeps its own view.
 +import {
-+  ArchiveIcon,
 +  ArrowLeftIcon,
 +  ArrowRightIcon,
 +  ArrowUpIcon,
 +  ChevronRightIcon,
 +  ColumnsIcon,
++  DownloadIcon,
 +  EyeIcon,
 +  EyeOffIcon,
-+  FileAudioIcon,
-+  FileIcon,
 +  FileTextIcon,
-+  FileVideoIcon,
-+  FolderIcon,
++  FilmIcon,
++  HardDriveIcon,
++  HouseIcon,
 +  ImageIcon,
 +  KeyboardIcon,
 +  LayoutGridIcon,
 +  ListTreeIcon,
 +  type LucideIcon,
++  MonitorIcon,
++  MusicIcon,
 +  PanelRightIcon,
 +  SearchIcon,
++  SplitIcon,
 +  XIcon,
 +} from "lucide-react";
-+import { memo, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
++import {
++  lazy,
++  memo,
++  Suspense,
++  useEffect,
++  useImperativeHandle,
++  useLayoutEffect,
++  useRef,
++  useState,
++} from "react";
++import { maskMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
 +
++import { PierreEntryIcon } from "~/components/chat/PierreEntryIcon";
++import { DelimitedTablePreview } from "~/components/files/DelimitedTablePreview";
 +import { Button } from "~/components/ui/button";
++import { useRenderedAppearance } from "~/hooks/useTheme";
++import { formatShortcutLabel } from "~/keybindings";
 +import { observeResize } from "~/lib/observeResize";
 +import { cn } from "~/lib/utils";
 +
++import { isFileManagerBinding } from "./ownsKey";
 +import type { FileEntry, FilesClient, FilesCore, FuzzyResult } from "./filesCore";
 +import { type FileView, jobLabel, useFilesStore } from "./filesStore";
++import { carryFiles } from "./carry";
 +import {
 +  type FileManagerOptions,
 +  type FileManagerState,
@@ -2144,19 +2203,41 @@ index 0000000000..f0dea6093e
 +  useFileManager,
 +} from "./useFileManager";
 +
-+const KIND_ICONS: Record<string, LucideIcon> = {
-+  image: ImageIcon,
-+  video: FileVideoIcon,
-+  audio: FileAudioIcon,
-+  archive: ArchiveIcon,
-+  document: FileTextIcon,
-+  file: FileIcon,
-+};
++const ChatMarkdown = lazy(() => import("~/components/ChatMarkdown"));
++const ReadOnlySourcePreview = lazy(() => import("~/components/files/ReadOnlySourcePreview"));
 +
-+function EntryIcon({ entry, core }: { entry: FileEntry; core: FilesCore }) {
-+  if (entry.kind === "dir") return <FolderIcon className="size-3.5 shrink-0 text-primary/80" />;
-+  const Icon = KIND_ICONS[core.fileKind(entry.name)] ?? FileIcon;
-+  return <Icon className="size-3.5 shrink-0 text-muted-foreground" />;
++/** A folder, in two tones, for lists and the grid. */
++function FolderGlyph({ className }: { className?: string }) {
++  return (
++    <svg
++      viewBox="0 0 24 24"
++      aria-hidden="true"
++      className={cn("size-4 shrink-0 text-primary", className)}
++    >
++      <path
++        fill="currentColor"
++        opacity="0.55"
++        d="M2.5 6.75A2.75 2.75 0 0 1 5.25 4h3.4c.73 0 1.43.29 1.94.8L12 6.2h6.75a2.75 2.75 0 0 1 2.75 2.75V10h-19z"
++      />
++      <path
++        fill="currentColor"
++        d="M2.5 10.25C2.5 9.01 3.51 8 4.75 8h14.5c1.24 0 2.25 1.01 2.25 2.25v7A2.75 2.75 0 0 1 18.75 20H5.25A2.75 2.75 0 0 1 2.5 17.25z"
++      />
++    </svg>
++  );
++}
++
++function EntryIcon({ entry, className }: { entry: FileEntry; className?: string }) {
++  const theme = useRenderedAppearance();
++  if (entry.kind === "dir") return <FolderGlyph {...(className ? { className } : {})} />;
++  return (
++    <PierreEntryIcon
++      pathValue={entry.name}
++      kind="file"
++      theme={theme}
++      {...(className ? { className } : {})}
++    />
++  );
 +}
 +
 +function rowHandlers(state: FileManagerState, entry: FileEntry) {
@@ -2182,22 +2263,24 @@ index 0000000000..f0dea6093e
 +
 +function rowClass(state: FileManagerState, entry: FileEntry, isCursor: boolean) {
 +  const cut = state.clipboard?.cut && state.clipboard.paths.includes(entry.path);
++  const selected = state.selected.has(entry.path);
 +  return cn(
-+    "cursor-default select-none",
-+    state.selected.has(entry.path)
-+      ? "bg-primary/20 text-foreground"
++    "cursor-default rounded-md transition-colors select-none",
++    selected
++      ? "bg-primary/15 text-foreground"
 +      : isCursor
 +        ? "bg-accent text-accent-foreground"
 +        : "hover:bg-accent/50",
-+    isCursor && state.selected.has(entry.path) && "ring-1 ring-inset ring-primary/60",
-+    state.dropTarget === entry.path && "ring-1 ring-inset ring-primary",
-+    (entry.hidden || cut) && "opacity-60",
++    isCursor && selected && "ring-1 ring-inset ring-primary/50",
++    state.dropTarget === entry.path && "bg-primary/20 ring-1 ring-inset ring-primary",
++    entry.hidden && "text-muted-foreground",
++    cut && "opacity-50",
 +  );
 +}
 +
 +/** Keeps the cursor's row in view. */
 +function useCursorInView(index: number, list: React.RefObject<HTMLElement | null>) {
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolling is the DOM's, outside React
 +  useLayoutEffect(() => {
 +    list.current
 +      ?.querySelector('[data-cursor="true"]')
@@ -2226,10 +2309,13 @@ index 0000000000..f0dea6093e
 +      aria-expanded={entry.kind === "dir" ? open : undefined}
 +      data-cursor={isCursor}
 +      data-path={entry.path}
-+      className={cn("flex items-center gap-1 pr-2 text-xs", rowClass(state, entry, isCursor))}
++      className={cn(
++        "mx-1 flex items-center gap-1.5 pr-2 text-sm",
++        rowClass(state, entry, isCursor),
++      )}
 +      style={{
 +        height: ROW_HEIGHT,
-+        paddingLeft: 6 + depth * 14,
++        paddingLeft: 4 + depth * 16,
 +        contentVisibility: "auto",
 +        containIntrinsicHeight: ROW_HEIGHT,
 +      }}
@@ -2240,22 +2326,22 @@ index 0000000000..f0dea6093e
 +          type="button"
 +          tabIndex={-1}
 +          aria-label={open ? "Fold" : "Unfold"}
-+          className="flex size-4 shrink-0 items-center justify-center text-muted-foreground"
++          className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
 +          onClick={(event) => {
 +            event.stopPropagation();
 +            state.fold(entry.path, !open);
 +          }}
 +          onDoubleClick={(event) => event.stopPropagation()}
 +        >
-+          <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
++          <ChevronRightIcon className={cn("size-3.5 transition-transform", open && "rotate-90")} />
 +        </button>
 +      ) : (
 +        <span className="size-4 shrink-0" />
 +      )}
-+      <EntryIcon entry={entry} core={core} />
++      <EntryIcon entry={entry} />
 +      <span className={cn("min-w-0 flex-1 truncate", entry.link && "italic")}>{entry.name}</span>
 +      {entry.kind === "file" ? (
-+        <span className="shrink-0 tabular-nums text-muted-foreground">
++        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
 +          {core.formatSize(entry.size)}
 +        </span>
 +      ) : null}
@@ -2263,11 +2349,21 @@ index 0000000000..f0dea6093e
 +  );
 +});
 +
++function EmptyNote({ state }: { state: FileManagerState }) {
++  if (state.rows.length > 0) return null;
++  return (
++    <div className="flex flex-col items-center gap-2 px-3 py-10 text-center text-sm text-muted-foreground">
++      <FolderGlyph className="size-9 opacity-40" />
++      {state.error ?? (state.filter ? "Nothing matches that filter" : "This folder is empty")}
++    </div>
++  );
++}
++
 +function TreeView({ state, core }: { state: FileManagerState; core: FilesCore }) {
 +  const list = useRef<HTMLDivElement>(null);
 +  useCursorInView(state.cursorIndex, list);
 +  return (
-+    <div ref={list} role="tree" className="min-h-0 flex-1 overflow-auto py-0.5">
++    <div ref={list} role="tree" className="min-h-0 flex-1 overflow-auto py-1">
 +      {state.rows.map((row, index) => (
 +        <TreeRow
 +          key={row.entry.path}
@@ -2282,24 +2378,13 @@ index 0000000000..f0dea6093e
 +  );
 +}
 +
-+function EmptyNote({ state }: { state: FileManagerState }) {
-+  if (state.rows.length > 0) return null;
-+  return (
-+    <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-+      {state.error ?? (state.filter ? "Nothing matches" : "This folder is empty")}
-+    </div>
-+  );
-+}
-+
 +function PlainList({
 +  entries,
 +  highlight,
-+  core,
 +  onPick,
 +}: {
 +  entries: readonly FileEntry[];
 +  highlight?: string;
-+  core: FilesCore;
 +  onPick: (entry: FileEntry) => void;
 +}) {
 +  const list = useRef<HTMLDivElement>(null);
@@ -2308,19 +2393,19 @@ index 0000000000..f0dea6093e
 +    list,
 +  );
 +  return (
-+    <div ref={list} className="min-h-0 flex-1 overflow-auto py-0.5">
++    <div ref={list} className="min-h-0 flex-1 overflow-auto py-1">
 +      {entries.map((entry) => (
 +        <div
 +          key={entry.path}
 +          data-cursor={entry.path === highlight}
 +          className={cn(
-+            "flex items-center gap-1.5 px-2 text-xs select-none",
-+            entry.path === highlight ? "bg-accent/70" : "hover:bg-accent/40",
++            "mx-1 flex items-center gap-2 rounded-md px-2 text-sm select-none",
++            entry.path === highlight ? "bg-accent/70" : "text-muted-foreground hover:bg-accent/40",
 +          )}
 +          style={{ height: ROW_HEIGHT }}
 +          onClick={() => onPick(entry)}
 +        >
-+          <EntryIcon entry={entry} core={core} />
++          <EntryIcon entry={entry} />
 +          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
 +        </div>
 +      ))}
@@ -2332,7 +2417,7 @@ index 0000000000..f0dea6093e
 +  const list = useRef<HTMLDivElement>(null);
 +  useCursorInView(state.cursorIndex, list);
 +  return (
-+    <div ref={list} role="listbox" className="min-h-0 flex-1 overflow-auto py-0.5">
++    <div ref={list} role="listbox" className="min-h-0 flex-1 overflow-auto py-1">
 +      {state.rows.map(({ entry }, index) => (
 +        <div
 +          key={entry.path}
@@ -2341,7 +2426,7 @@ index 0000000000..f0dea6093e
 +          data-cursor={index === state.cursorIndex}
 +          data-path={entry.path}
 +          className={cn(
-+            "flex items-center gap-1.5 px-2 text-xs",
++            "mx-1 flex items-center gap-2 px-2 text-sm",
 +            rowClass(state, entry, index === state.cursorIndex),
 +          )}
 +          style={{
@@ -2351,13 +2436,15 @@ index 0000000000..f0dea6093e
 +          }}
 +          {...rowHandlers(state, entry)}
 +        >
-+          <EntryIcon entry={entry} core={core} />
++          <EntryIcon entry={entry} />
 +          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
 +          {entry.kind === "file" ? (
-+            <span className="shrink-0 tabular-nums text-muted-foreground">
++            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
 +              {core.formatSize(entry.size)}
 +            </span>
-+          ) : null}
++          ) : (
++            <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
++          )}
 +        </div>
 +      ))}
 +      <EmptyNote state={state} />
@@ -2375,12 +2462,11 @@ index 0000000000..f0dea6093e
 +  client: FilesClient;
 +}) {
 +  return (
-+    <div className="grid min-h-0 flex-1 grid-cols-[1fr_1.5fr_2fr] divide-x divide-border/70">
-+      <div className="flex min-h-0 min-w-0 flex-col">
++    <div className="grid min-h-0 flex-1 grid-cols-[1fr_1.4fr_2fr] divide-x divide-border/60">
++      <div className="flex min-h-0 min-w-0 flex-col bg-muted/20">
 +        <PlainList
 +          entries={state.parentRows}
 +          highlight={state.dir}
-+          core={core}
 +          onPick={(entry) =>
 +            entry.kind === "dir" ? state.goTo(entry.path) : state.reveal(entry.path)
 +          }
@@ -2408,7 +2494,7 @@ index 0000000000..f0dea6093e
 +  const list = useRef<HTMLDivElement>(null);
 +  useCursorInView(state.cursorIndex, list);
 +  const { setGridColumns } = state;
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the grid's columns are the DOM's
 +  useLayoutEffect(() => {
 +    const element = list.current;
 +    if (!element) return;
@@ -2424,7 +2510,7 @@ index 0000000000..f0dea6093e
 +      <div
 +        ref={list}
 +        role="grid"
-+        className="grid auto-rows-min grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-1 p-1.5"
++        className="grid auto-rows-min grid-cols-[repeat(auto-fill,minmax(116px,1fr))] gap-1.5 p-2.5"
 +      >
 +        {state.rows.map(({ entry }, index) => {
 +          const isCursor = index === state.cursorIndex;
@@ -2432,8 +2518,6 @@ index 0000000000..f0dea6093e
 +            entry.kind === "file" &&
 +            core.fileKind(entry.name) === "image" &&
 +            core.hasRawPreview(entry.name);
-+          const Icon =
-+            entry.kind === "dir" ? FolderIcon : (KIND_ICONS[core.fileKind(entry.name)] ?? FileIcon);
 +          return (
 +            <div
 +              key={entry.path}
@@ -2443,13 +2527,13 @@ index 0000000000..f0dea6093e
 +              data-path={entry.path}
 +              aria-label={entry.name}
 +              className={cn(
-+                "flex flex-col items-center gap-1 rounded-md p-1.5",
++                "flex flex-col items-center gap-1.5 p-2",
 +                rowClass(state, entry, isCursor),
 +              )}
-+              style={{ contentVisibility: "auto", containIntrinsicHeight: 104 }}
++              style={{ contentVisibility: "auto", containIntrinsicHeight: 120 }}
 +              {...rowHandlers(state, entry)}
 +            >
-+              <div className="flex size-16 items-center justify-center overflow-hidden rounded-sm">
++              <div className="flex size-18 items-center justify-center">
 +                {thumbnail ? (
 +                  <img
 +                    src={client.rawUrl(entry.path)}
@@ -2458,19 +2542,13 @@ index 0000000000..f0dea6093e
 +                    decoding="async"
 +                    draggable={false}
 +                    alt=""
-+                    className="max-h-full max-w-full object-contain"
++                    className="max-h-full max-w-full rounded-md object-contain shadow-sm ring-1 ring-border/60"
 +                  />
 +                ) : (
-+                  <Icon
-+                    className={cn(
-+                      "size-11",
-+                      entry.kind === "dir" ? "text-primary/80" : "text-muted-foreground",
-+                    )}
-+                    strokeWidth={1.25}
-+                  />
++                  <EntryIcon entry={entry} className="size-14" />
 +                )}
 +              </div>
-+              <span className="line-clamp-2 w-full text-center text-2xs leading-tight break-words">
++              <span className="line-clamp-2 w-full text-center text-xs leading-snug break-words">
 +                {entry.name}
 +              </span>
 +            </div>
@@ -2479,6 +2557,72 @@ index 0000000000..f0dea6093e
 +      </div>
 +      <EmptyNote state={state} />
 +    </div>
++  );
++}
++
++function PreviewHeader({
++  entry,
++  core,
++  note,
++}: {
++  entry: FileEntry;
++  core: FilesCore;
++  note?: string;
++}) {
++  return (
++    <div className="flex shrink-0 items-center gap-2.5 border-b border-border/60 px-3 py-2">
++      <EntryIcon entry={entry} className="size-5" />
++      <div className="min-w-0 flex-1">
++        <div className="truncate text-sm font-medium">{entry.name}</div>
++        {entry.modified ? (
++          <div className="truncate text-xs text-muted-foreground">
++            {entry.kind === "file" ? `${core.formatSize(entry.size)} · ` : ""}
++            {new Date(entry.modified).toLocaleString()}
++            {note ? ` · ${note}` : ""}
++          </div>
++        ) : null}
++      </div>
++    </div>
++  );
++}
++
++function PreviewNote({ children }: { children: React.ReactNode }) {
++  return (
++    <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground">
++      {children}
++    </div>
++  );
++}
++
++function TextPreview({ entry, text, dir }: { entry: FileEntry; text: string; dir: string }) {
++  const extension = entry.name.split(".").pop()?.toLowerCase();
++  if (extension === "md" || extension === "markdown") {
++    return (
++      <div className="min-h-0 flex-1 overflow-auto">
++        <Suspense fallback={null}>
++          <ChatMarkdown
++            text={maskMarkdownFrontmatter(text)}
++            cwd={dir}
++            imageBaseDir={dir}
++            className="px-4 py-3"
++          />
++        </Suspense>
++      </div>
++    );
++  }
++  if (extension === "csv" || extension === "tsv") {
++    return (
++      <DelimitedTablePreview
++        name={entry.name}
++        text={text}
++        delimiter={extension === "csv" ? "," : "\t"}
++      />
++    );
++  }
++  return (
++    <Suspense fallback={null}>
++      <ReadOnlySourcePreview key={entry.path} name={entry.name} text={text} wordWrap={false} />
++    </Suspense>
 +  );
 +}
 +
@@ -2497,19 +2641,18 @@ index 0000000000..f0dea6093e
 +  const [folder, setFolder] = useState<{ path: string; entries: readonly FileEntry[] } | null>(
 +    null,
 +  );
-+  const hidden = useFilesStore((store) => store.settings.hidden);
 +  const path = entry?.path;
 +  const kind = entry?.kind;
 +  const raw = entry ? entry.kind === "file" && core.hasRawPreview(entry.name) : false;
 +
 +  // After a moment, so holding j doesn't read every file it passes.
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the file from the helper, outside React
 +  useEffect(() => {
 +    if (!path) return;
 +    let live = true;
 +    const timer = setTimeout(() => {
 +      if (kind === "dir") {
-+        void client.list(path, { hidden }).then(
++        void client.list(path).then(
 +          (listing) => live && setFolder({ path, entries: core.sortEntries(listing.entries) }),
 +          () => live && setFolder({ path, entries: [] }),
 +        );
@@ -2520,9 +2663,13 @@ index 0000000000..f0dea6093e
 +            setText({
 +              path,
 +              body: result.text,
-+              note: result.binary ? "Binary file" : result.truncated ? "…" : "",
++              note: result.binary
++                ? "No preview for this file"
++                : result.truncated
++                  ? "First part only"
++                  : "",
 +            }),
-+          () => live && setText({ path, body: "", note: "Can't read it" }),
++          () => live && setText({ path, body: "", note: "This file can't be read" }),
 +        );
 +      }
 +    }, 70);
@@ -2530,32 +2677,30 @@ index 0000000000..f0dea6093e
 +      live = false;
 +      clearTimeout(timer);
 +    };
-+  }, [client, core, hidden, kind, path, raw]);
++  }, [client, core, kind, path, raw]);
 +
-+  if (!entry) return null;
++  if (!entry) return <PreviewNote>Nothing selected</PreviewNote>;
 +  if (entry.kind === "dir") {
 +    return folder?.path === entry.path ? (
-+      <PlainList
-+        entries={folder.entries}
-+        core={core}
-+        onPick={(picked) =>
-+          picked.kind === "dir" ? state?.goTo(picked.path) : state?.reveal(picked.path)
-+        }
-+      />
++      folder.entries.length > 0 ? (
++        <PlainList
++          entries={folder.entries}
++          onPick={(picked) =>
++            picked.kind === "dir" ? state?.goTo(picked.path) : state?.reveal(picked.path)
++          }
++        />
++      ) : (
++        <PreviewNote>This folder is empty</PreviewNote>
++      )
 +    ) : null;
 +  }
-+  // The fuzzy finder's entries are only paths: nothing to say about them.
-+  const size = entry.modified ? (
-+    <div className="shrink-0 border-t border-border/60 px-2 py-1 text-2xs text-muted-foreground">
-+      {core.formatSize(entry.size)} · {new Date(entry.modified).toLocaleString()}
-+    </div>
-+  ) : null;
 +  if (raw) {
 +    const kindOf = core.fileKind(entry.name);
 +    const url = client.rawUrl(entry.path);
 +    return (
 +      <>
-+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
++        <PreviewHeader entry={entry} core={core} />
++        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/20 p-3">
 +          {kindOf === "image" ? (
 +            <img
 +              key={url}
@@ -2563,7 +2708,7 @@ index 0000000000..f0dea6093e
 +              crossOrigin="anonymous"
 +              alt=""
 +              draggable={false}
-+              className="max-h-full max-w-full object-contain"
++              className="max-h-full max-w-full rounded-md object-contain shadow-sm"
 +            />
 +          ) : kindOf === "video" ? (
 +            <video
@@ -2571,45 +2716,51 @@ index 0000000000..f0dea6093e
 +              src={url}
 +              crossOrigin="anonymous"
 +              controls
-+              className="max-h-full max-w-full"
++              className="max-h-full max-w-full rounded-md"
 +            />
 +          ) : kindOf === "audio" ? (
 +            <audio key={url} src={url} crossOrigin="anonymous" controls className="w-full" />
 +          ) : (
-+            <FileTextIcon className="size-12 text-muted-foreground" strokeWidth={1.25} />
++            <EntryIcon entry={entry} className="size-16" />
 +          )}
 +        </div>
-+        {size}
 +      </>
 +    );
 +  }
++  const loaded = text?.path === entry.path ? text : null;
 +  return (
 +    <>
-+      {text?.path === entry.path && text.body ? (
-+        <pre className="min-h-0 flex-1 overflow-auto p-2 font-mono text-2xs leading-snug whitespace-pre">
-+          {text.body}
-+          {text.note}
-+        </pre>
-+      ) : (
-+        <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-muted-foreground">
-+          {text?.path === entry.path ? text.note || "Empty file" : ""}
-+        </div>
-+      )}
-+      {size}
++      <PreviewHeader
++        entry={entry}
++        core={core}
++        {...(loaded?.body && loaded.note ? { note: loaded.note } : {})}
++      />
++      {loaded?.body ? (
++        <TextPreview entry={entry} text={loaded.body} dir={core.parentOf(entry.path) ?? "/"} />
++      ) : loaded ? (
++        <PreviewNote>{loaded.note || "This file is empty"}</PreviewNote>
++      ) : null}
 +    </>
 +  );
 +}
 +
-+function Highlighted({ text, positions }: { text: string; positions: readonly number[] }) {
-+  const hits = new Set(positions);
++function Highlighted({
++  text,
++  offset,
++  positions,
++}: {
++  text: string;
++  offset: number;
++  positions: ReadonlySet<number>;
++}) {
 +  return (
 +    <>
 +      {[...text].map((character, index) =>
-+        hits.has(index) ? (
++        positions.has(index + offset) ? (
 +          // oxlint-disable-next-line react/no-array-index-key -- a position is all these have: they never move
-+          <span key={index} className="font-semibold text-primary">
++          <mark key={index} className="bg-transparent font-semibold text-primary">
 +            {character}
-+          </span>
++          </mark>
 +        ) : (
 +          character
 +        ),
@@ -2618,7 +2769,18 @@ index 0000000000..f0dea6093e
 +  );
 +}
 +
-+/** Telescope's layout: the list and the query on the left, a preview on the right. */
++function KeyHint({ keys, children }: { keys: string; children: React.ReactNode }) {
++  return (
++    <span className="flex items-center gap-1">
++      <kbd className="rounded border border-border/70 bg-muted/60 px-1 font-sans text-2xs">
++        {keys}
++      </kbd>
++      {children}
++    </span>
++  );
++}
++
++/** Telescope's layout: search and results on the left, a preview on the right. */
 +function FuzzyFinder({
 +  state,
 +  core,
@@ -2636,7 +2798,7 @@ index 0000000000..f0dea6093e
 +  const hidden = state.settings.hidden;
 +  const { dir } = state;
 +
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the helper's index of this folder
 +  useEffect(() => {
 +    let live = true;
 +    void client.index(dir, { hidden }).then(
@@ -2667,6 +2829,9 @@ index 0000000000..f0dea6093e
 +      hidden: false,
 +    };
 +  };
++  /** A result, or everything marked if it's one of those. */
++  const pathsFor = (relative: string) =>
++    marked.has(relative) ? [...marked].map(absolute) : [absolute(relative)];
 +  const list = useRef<HTMLDivElement>(null);
 +  useCursorInView(index, list);
 +
@@ -2695,6 +2860,9 @@ index 0000000000..f0dea6093e
 +      if (marked.size > 0 && state.pickAll) state.pickAll([...marked].map(absolute));
 +      else if (event.ctrlKey || entry.kind === "dir") state.reveal(entry.path);
 +      else state.activate(entry);
++    } else if (event.ctrlKey && event.key === "b" && chosen && !state.picking) {
++      close();
++      void carryFiles(pathsFor(chosen.path));
 +    } else if (event.key === "Escape") {
 +      close();
 +    } else {
@@ -2706,123 +2874,106 @@ index 0000000000..f0dea6093e
 +  };
 +
 +  return (
-+    <div className="absolute inset-0 z-20 grid grid-cols-[1fr_1fr] divide-x divide-border/70 bg-background">
-+      <div className="flex min-h-0 min-w-0 flex-col">
-+        <div ref={list} className="min-h-0 flex-1 overflow-auto py-0.5">
-+          {results.map((result, position) => (
-+            <div
-+              key={result.path}
-+              data-cursor={position === index}
-+              className={cn(
-+                "flex items-center gap-1.5 truncate px-2 font-mono text-2xs select-none",
-+                position === index ? "bg-accent text-accent-foreground" : "hover:bg-accent/40",
-+                marked.has(result.path) && "bg-primary/20",
-+              )}
-+              style={{ height: ROW_HEIGHT }}
-+              onClick={() => setIndex(position)}
-+              onDoubleClick={() => {
-+                close();
-+                state.activate(entryOf(result.path));
-+              }}
-+            >
-+              <span className="truncate">
-+                <Highlighted text={result.path} positions={result.positions} />
-+              </span>
-+            </div>
-+          ))}
-+        </div>
-+        <div className="flex shrink-0 items-center gap-2 border-t border-border/70 px-2 py-1">
-+          <SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
-+          <input
-+            autoFocus
-+            value={query}
-+            aria-label="Fuzzy find"
-+            placeholder={paths ? `Find under ${dir}` : "Listing…"}
-+            spellCheck={false}
-+            className="min-w-0 flex-1 bg-transparent font-mono text-xs outline-none"
-+            onChange={(event) => {
-+              setQuery(event.target.value);
-+              setIndex(0);
-+            }}
-+            onKeyDown={onKeyDown}
-+          />
-+          <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-+            {results.length}/{paths?.length ?? 0}
-+            {truncated ? "+" : ""}
-+          </span>
-+        </div>
-+      </div>
-+      <div className="flex min-h-0 min-w-0 flex-col">
-+        {chosen ? <Preview entry={entryOf(chosen.path)} core={core} client={client} /> : null}
-+      </div>
-+    </div>
-+  );
-+}
-+
-+/** "gh goHome" lines, "gh -" to unbind, as the settings' [keys, command] pairs. */
-+function parseKeyOverrides(text: string): [string, string | null][] {
-+  return text.split("\n").flatMap((line): [string, string | null][] => {
-+    const [keys, command] = line.trim().split(/\s+/);
-+    return keys && command ? [[keys, command === "-" ? null : command]] : [];
-+  });
-+}
-+
-+function FileSettings({ state }: { state: FileManagerState }) {
-+  const { settings, setSettings } = state;
-+  const [keys, setKeys] = useState(() =>
-+    settings.keys.map(([sequence, command]) => `${sequence} ${command ?? "-"}`).join("\n"),
-+  );
-+  return (
-+    <div className="mb-3 flex flex-col gap-2 border-b border-border/70 pb-3 text-xs">
-+      <label className="flex items-center gap-2">
-+        <span className="text-muted-foreground">The files key opens it in</span>
-+        <select
-+          value={settings.placement}
-+          aria-label="Where the files key opens the file manager"
-+          className="rounded-md border border-input bg-background px-1.5 py-0.5"
-+          onChange={(event) =>
-+            setSettings({ placement: event.target.value === "right" ? "right" : "bottom" })
-+          }
-+        >
-+          <option value="bottom">the bottom drawer</option>
-+          <option value="right">the right panel</option>
-+        </select>
-+        <span className="text-muted-foreground">
-+          (the keys themselves are in Settings, Keybindings: files.toggle, files.carry)
-+        </span>
-+      </label>
-+      <label className="flex flex-col gap-1">
-+        <span className="text-muted-foreground">
-+          Your own keys, one per line: keys command, or keys - to unbind
-+        </span>
-+        <textarea
-+          value={keys}
-+          rows={3}
++    <div className="absolute inset-0 z-20 flex flex-col bg-background">
++      <div className="flex shrink-0 items-center gap-2.5 border-b border-border/70 px-3.5 py-2.5">
++        <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
++        <input
++          autoFocus
++          value={query}
++          aria-label="Fuzzy find"
++          placeholder={paths ? `Search in ${dir.split("/").pop() || "/"}…` : "Listing…"}
 +          spellCheck={false}
-+          aria-label="Key overrides"
-+          placeholder={"J bottom\ngh -"}
-+          className="rounded-md border border-input bg-transparent px-2 py-1 font-mono outline-none focus:border-ring"
-+          onChange={(event) => setKeys(event.target.value)}
-+          onBlur={() => setSettings({ keys: parseKeyOverrides(keys) })}
-+          onKeyDown={(event) => event.stopPropagation()}
++          className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
++          onChange={(event) => {
++            setQuery(event.target.value);
++            setIndex(0);
++          }}
++          onKeyDown={onKeyDown}
 +        />
-+      </label>
++        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
++          {results.length.toLocaleString()} of {(paths?.length ?? 0).toLocaleString()}
++          {truncated ? "+" : ""}
++        </span>
++      </div>
++      <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-border/60">
++        <div ref={list} className="min-h-0 min-w-0 overflow-auto py-1">
++          {results.map((result, position) => {
++            const entry = entryOf(result.path);
++            const bare = result.path.replace(/\/$/, "");
++            const nameAt = bare.lastIndexOf("/") + 1;
++            const hits = new Set(result.positions);
++            return (
++              <div
++                key={result.path}
++                data-cursor={position === index}
++                draggable
++                className={cn(
++                  "mx-1 flex items-center gap-2 rounded-md px-2 text-sm select-none",
++                  position === index ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
++                  marked.has(result.path) && "bg-primary/15",
++                )}
++                style={{ height: ROW_HEIGHT + 4 }}
++                onClick={() => setIndex(position)}
++                onDoubleClick={() => {
++                  close();
++                  state.activate(entry);
++                }}
++                onPointerDown={() => state.armPaths(pathsFor(result.path))}
++                onDragStart={(event) => state.startFilesDrag(event, pathsFor(result.path))}
++              >
++                <EntryIcon entry={entry} />
++                <span className="shrink-0 truncate">
++                  <Highlighted text={bare.slice(nameAt)} offset={nameAt} positions={hits} />
++                </span>
++                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
++                  <Highlighted
++                    text={bare.slice(0, Math.max(0, nameAt - 1))}
++                    offset={0}
++                    positions={hits}
++                  />
++                </span>
++              </div>
++            );
++          })}
++          {paths && results.length === 0 ? (
++            <div className="px-3 py-10 text-center text-sm text-muted-foreground">
++              Nothing matches
++            </div>
++          ) : null}
++        </div>
++        <div className="flex min-h-0 min-w-0 flex-col">
++          {chosen ? <Preview entry={entryOf(chosen.path)} core={core} client={client} /> : null}
++        </div>
++      </div>
++      <div className="flex shrink-0 items-center gap-4 border-t border-border/70 px-3.5 py-1.5 text-xs text-muted-foreground">
++        <KeyHint keys="Enter">open</KeyHint>
++        <KeyHint keys="Tab">mark</KeyHint>
++        <KeyHint keys="Ctrl+Enter">go to</KeyHint>
++        {state.picking ? null : <KeyHint keys="Ctrl+B">pick up</KeyHint>}
++        <span className="ml-auto">Drag a result to use it anywhere</span>
++      </div>
 +    </div>
 +  );
 +}
 +
 +function KeyHelp({ state }: { state: FileManagerState }) {
-+  const keys = state.keymap?.help() ?? [];
-+  const byCommand = new Map<string, { keys: string[]; description: string }>();
-+  for (const [sequence, command, description] of keys) {
-+    const entry = byCommand.get(command) ?? { keys: [], description };
-+    entry.keys.push(sequence);
-+    byCommand.set(command, entry);
++  const byCommand = new Map<string, string[]>();
++  for (const rule of state.keybindings) {
++    if (!isFileManagerBinding(rule)) continue;
++    const command = String(rule.command).slice("files.".length);
++    byCommand.set(command, [...(byCommand.get(command) ?? []), formatShortcutLabel(rule.shortcut)]);
 +  }
++  const label = (command: string) =>
++    command.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (first) => first.toUpperCase());
 +  return (
-+    <div className="absolute inset-0 z-30 overflow-auto bg-background/95 p-3">
-+      <div className="mb-2 flex items-center justify-between text-xs font-medium">
-+        Keys
++    <div className="absolute inset-0 z-30 overflow-auto bg-background/97 p-4">
++      <div className="mb-3 flex items-start justify-between gap-4">
++        <div>
++          <div className="text-sm font-medium">Keys</div>
++          <div className="text-xs text-muted-foreground">
++            Change them in Settings, Keybindings, under File manager.
++          </div>
++        </div>
 +        <Button
 +          size="icon-xs"
 +          variant="ghost"
@@ -2832,12 +2983,20 @@ index 0000000000..f0dea6093e
 +          <XIcon />
 +        </Button>
 +      </div>
-+      <FileSettings state={state} />
-+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-x-6 gap-y-0.5 text-xs">
-+        {[...byCommand.values()].map((entry) => (
-+          <div key={entry.description} className="flex items-baseline justify-between gap-3">
-+            <span className="truncate text-muted-foreground">{entry.description}</span>
-+            <kbd className="shrink-0 font-mono text-2xs">{entry.keys.slice(0, 2).join(" ")}</kbd>
++      <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-x-8 gap-y-1 text-sm">
++        {[...byCommand].map(([command, keys]) => (
++          <div key={command} className="flex items-baseline justify-between gap-3">
++            <span className="truncate text-muted-foreground">{label(command)}</span>
++            <span className="flex shrink-0 gap-1">
++              {keys.slice(0, 2).map((keyLabel) => (
++                <kbd
++                  key={keyLabel}
++                  className="rounded border border-border/70 bg-muted/60 px-1.5 font-sans text-xs"
++                >
++                  {keyLabel}
++                </kbd>
++              ))}
++            </span>
 +          </div>
 +        ))}
 +      </div>
@@ -2845,16 +3004,16 @@ index 0000000000..f0dea6093e
 +  );
 +}
 +
-+const VIEWS: readonly { view: FileView; icon: LucideIcon; label: string }[] = [
-+  { view: "tree", icon: ListTreeIcon, label: "Tree" },
-+  { view: "columns", icon: ColumnsIcon, label: "Three columns" },
-+  { view: "grid", icon: LayoutGridIcon, label: "Grid" },
++const VIEWS: readonly { view: FileView; command: string; icon: LucideIcon; label: string }[] = [
++  { view: "tree", command: "viewTree", icon: ListTreeIcon, label: "Tree" },
++  { view: "columns", command: "viewColumns", icon: ColumnsIcon, label: "Columns" },
++  { view: "grid", command: "viewGrid", icon: LayoutGridIcon, label: "Grid" },
 +];
 +
 +function Breadcrumbs({ state }: { state: FileManagerState }) {
 +  const parts = state.dir.split("/").filter(Boolean);
 +  const list = useRef<HTMLDivElement>(null);
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolling is the DOM's, outside React
 +  useLayoutEffect(() => {
 +    if (list.current) list.current.scrollLeft = list.current.scrollWidth;
 +    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- it runs again when these change, though it doesn't read them
@@ -2862,26 +3021,33 @@ index 0000000000..f0dea6093e
 +  return (
 +    <div
 +      ref={list}
-+      className="flex min-w-0 flex-1 items-center overflow-x-auto text-xs whitespace-nowrap [scrollbar-width:none]"
++      className="flex min-w-0 flex-1 items-center overflow-x-auto text-sm whitespace-nowrap [scrollbar-width:none]"
 +      onDoubleClick={() => state.run("goPath")}
 +    >
 +      <button
 +        type="button"
 +        tabIndex={-1}
-+        className="px-1 hover:underline"
++        aria-label="Root"
++        className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
 +        onClick={() => state.goTo("/")}
 +      >
-+        /
++        <HardDriveIcon className="size-3.5" />
 +      </button>
 +      {parts.map((part, index) => {
 +        const path = `/${parts.slice(0, index + 1).join("/")}`;
++        const last = index === parts.length - 1;
 +        return (
 +          <span key={path} className="flex items-center">
-+            {index > 0 ? <span className="text-muted-foreground">/</span> : null}
++            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/60" />
 +            <button
 +              type="button"
 +              tabIndex={-1}
-+              className={cn("px-0.5 hover:underline", index === parts.length - 1 && "font-medium")}
++              className={cn(
++                "rounded px-1 py-0.5 hover:bg-accent",
++                last
++                  ? "font-medium text-foreground"
++                  : "text-muted-foreground hover:text-foreground",
++              )}
 +              onClick={() => state.goTo(path)}
 +            >
 +              {part}
@@ -2917,64 +3083,112 @@ index 0000000000..f0dea6093e
 +    </Button>
 +  );
 +  return (
-+    <div className="flex shrink-0 items-center gap-0.5 border-b border-border/70 px-1 py-0.5">
++    <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 px-1.5">
 +      {tool("Back", ArrowLeftIcon, "back", false, !state.canGoBack)}
 +      {tool("Forward", ArrowRightIcon, "forward", false, !state.canGoForward)}
 +      {tool("Parent folder", ArrowUpIcon, "parent", false, state.dir === "/")}
 +      <Breadcrumbs state={state} />
-+      {tool("Fuzzy find", SearchIcon, "fuzzy")}
-+      {VIEWS.map(({ view, icon, label }) => (
-+        <span key={view}>
-+          {tool(
-+            label,
-+            icon,
-+            `view${view[0]?.toUpperCase()}${view.slice(1)}`,
-+            settings.view === view,
-+          )}
-+        </span>
-+      ))}
++      <button
++        type="button"
++        tabIndex={-1}
++        className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-muted/30 px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
++        onClick={() => state.run("fuzzy")}
++      >
++        <SearchIcon className="size-3.5" />
++        Search
++      </button>
++      <div
++        className="flex shrink-0 items-center rounded-md bg-muted/50 p-0.5"
++        role="group"
++        aria-label="View"
++      >
++        {VIEWS.map(({ view, command, icon: Icon, label }) => (
++          <button
++            key={view}
++            type="button"
++            tabIndex={-1}
++            aria-label={label}
++            aria-pressed={settings.view === view}
++            className={cn(
++              "flex size-6 items-center justify-center rounded transition-colors",
++              settings.view === view
++                ? "bg-background text-foreground shadow-sm"
++                : "text-muted-foreground hover:text-foreground",
++            )}
++            onClick={() => {
++              state.run(command);
++              state.focusRoot();
++            }}
++          >
++            <Icon className="size-3.5" />
++          </button>
++        ))}
++      </div>
 +      {tool(
 +        settings.hidden ? "Hide dot files" : "Show dot files",
 +        settings.hidden ? EyeIcon : EyeOffIcon,
 +        "toggleHidden",
 +        settings.hidden,
 +      )}
-+      {tool("Preview", PanelRightIcon, "togglePreview", settings.preview)}
++      {settings.view === "columns" || state.compact
++        ? null
++        : tool("Preview", PanelRightIcon, "togglePreview", settings.preview)}
++      {state.canSplit ? tool("Open another beside this", SplitIcon, "split") : null}
 +      {tool("Keys", KeyboardIcon, "help")}
 +    </div>
 +  );
 +}
 +
++const PLACE_ICONS: Record<string, LucideIcon> = {
++  home: HouseIcon,
++  desktop: MonitorIcon,
++  documents: FileTextIcon,
++  downloads: DownloadIcon,
++  music: MusicIcon,
++  pictures: ImageIcon,
++  videos: FilmIcon,
++  root: HardDriveIcon,
++};
++
 +function Places({ state }: { state: FileManagerState }) {
 +  return (
-+    <nav aria-label="Places" className="w-32 shrink-0 overflow-auto border-r border-border/70 py-1">
-+      {state.places.map((place) => (
-+        <button
-+          key={place.path}
-+          type="button"
-+          tabIndex={-1}
-+          className={cn(
-+            "block w-full truncate px-2 py-0.5 text-left text-xs hover:bg-accent/50",
-+            place.path === state.dir && "bg-accent text-accent-foreground",
-+          )}
-+          onClick={() => state.goTo(place.path)}
-+          onDragOver={(event) => state.onDragOver(event, place.path)}
-+          onDragLeave={() => state.setDropTarget(null)}
-+          onDrop={(event) => void state.onDrop(event, place.path)}
-+        >
-+          {place.name}
-+        </button>
-+      ))}
++    <nav
++      aria-label="Places"
++      className="flex w-44 shrink-0 flex-col gap-0.5 overflow-auto border-r border-border/70 bg-muted/20 p-2"
++    >
++      <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">Places</div>
++      {state.places.map((place) => {
++        const Icon = PLACE_ICONS[place.kind] ?? HardDriveIcon;
++        return (
++          <button
++            key={place.path}
++            type="button"
++            tabIndex={-1}
++            className={cn(
++              "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors",
++              place.path === state.dir ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
++              state.dropTarget === place.path && "ring-1 ring-inset ring-primary",
++            )}
++            onClick={() => state.goTo(place.path)}
++            onDragOver={(event) => state.onDragOver(event, place.path)}
++            onDragLeave={() => state.setDropTarget(null)}
++            onDrop={(event) => void state.onDrop(event, place.path)}
++          >
++            <Icon className="size-4 shrink-0 text-muted-foreground" />
++            <span className="truncate">{place.name}</span>
++          </button>
++        );
++      })}
 +    </nav>
 +  );
 +}
 +
 +const PROMPT_LABELS: Record<string, string> = {
-+  filter: "Filter:",
-+  find: "Find:",
-+  create: "New (end with / for a folder):",
-+  rename: "Rename:",
-+  goto: "Go to:",
++  filter: "Filter",
++  find: "Find",
++  create: "New file (end with / for a folder)",
++  rename: "Rename",
++  goto: "Go to",
 +};
 +
 +function PromptBar({ state }: { state: FileManagerState }) {
@@ -2985,7 +3199,7 @@ index 0000000000..f0dea6093e
 +      <div
 +        tabIndex={0}
 +        ref={(element) => element?.focus()}
-+        className="flex shrink-0 items-center gap-2 border-t border-destructive/50 bg-destructive/10 px-2 py-1 text-xs outline-none"
++        className="flex shrink-0 items-center gap-2 border-t border-destructive/40 bg-destructive/10 px-3 py-1.5 text-sm outline-none"
 +        onKeyDown={(event) => {
 +          event.preventDefault();
 +          event.stopPropagation();
@@ -2993,20 +3207,27 @@ index 0000000000..f0dea6093e
 +          else state.cancelPrompt();
 +        }}
 +      >
-+        Delete {prompt.paths.length === 1 ? prompt.paths[0] : `${prompt.paths.length} items`} for
-+        good? y / n
++        <span className="min-w-0 flex-1 truncate">
++          Delete{" "}
++          {prompt.paths.length === 1
++            ? prompt.paths[0]?.split("/").pop()
++            : `${prompt.paths.length} items`}{" "}
++          for good?
++        </span>
++        <KeyHint keys="Y">delete</KeyHint>
++        <KeyHint keys="Esc">keep</KeyHint>
 +      </div>
 +    );
 +  }
 +  return (
-+    <div className="flex shrink-0 items-center gap-2 border-t border-border/70 px-2 py-1 text-xs">
++    <div className="flex shrink-0 items-center gap-2 border-t border-border/70 px-3 py-1.5 text-sm">
 +      <span className="shrink-0 text-muted-foreground">{PROMPT_LABELS[prompt.kind]}</span>
 +      <input
 +        autoFocus
 +        value={prompt.value}
 +        spellCheck={false}
 +        aria-label={PROMPT_LABELS[prompt.kind]}
-+        className="min-w-0 flex-1 bg-transparent font-mono outline-none"
++        className="min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 py-0.5 outline-none focus:border-ring"
 +        onFocus={(event) => {
 +          // A rename selects the name, not its extension.
 +          if (prompt.kind !== "rename") return;
@@ -3026,31 +3247,36 @@ index 0000000000..f0dea6093e
 +
 +function StatusBar({ state, core }: { state: FileManagerState; core: FilesCore }) {
 +  const jobs = useFilesStore((store) => store.jobs);
-+  const { settings, clipboard } = state;
++  const { clipboard } = state;
++  const items = state.rows.length;
 +  return (
-+    <div className="flex shrink-0 items-center gap-3 border-t border-border/70 px-2 py-0.5 text-2xs text-muted-foreground">
++    <div className="flex h-6 shrink-0 items-center gap-3 border-t border-border/70 px-3 text-xs text-muted-foreground">
 +      <span className="tabular-nums">
-+        {state.rows.length > 0 ? state.cursorIndex + 1 : 0}/{state.rows.length}
++        {state.selected.size > 0
++          ? `${state.selected.size} of ${items} selected`
++          : `${items} ${items === 1 ? "item" : "items"}`}
 +      </span>
-+      {state.selected.size > 0 ? (
-+        <span className="text-foreground">{state.selected.size} selected</span>
-+      ) : null}
 +      {clipboard ? (
 +        <span className="text-foreground">
-+          {clipboard.paths.length} {clipboard.cut ? "cut" : "copied"}
++          {clipboard.paths.length} {clipboard.cut ? "to move" : "to copy"}
 +        </span>
 +      ) : null}
-+      {state.filter ? <span>filter: {state.filter}</span> : null}
-+      {state.pending ? <kbd className="font-mono text-foreground">{state.pending}</kbd> : null}
-+      <span className="min-w-0 flex-1 truncate">
-+        {state.current?.kind === "file"
-+          ? `${core.formatSize(state.current.size)} · ${new Date(state.current.modified).toLocaleString()}`
-+          : ""}
++      {state.filter ? <span>Filter: {state.filter}</span> : null}
++      {state.pending ? <kbd className="font-sans text-foreground">{state.pending}</kbd> : null}
++      <span className="min-w-0 flex-1 truncate text-right">
++        {state.current?.kind === "file" ? core.formatSize(state.current.size) : ""}
 +      </span>
 +      {jobs.map((job) => (
-+        <span key={job.id} className="flex items-center gap-1 text-foreground">
++        <span key={job.id} className="flex items-center gap-1.5 text-foreground">
 +          {jobLabel(job)}
-+          {job.total > 0 ? ` ${Math.round((job.done / job.total) * 100)}%` : ""}
++          {job.total > 0 ? (
++            <span className="h-1 w-16 overflow-hidden rounded-full bg-muted">
++              <span
++                className="block h-full rounded-full bg-primary transition-[width]"
++                style={{ width: `${Math.round((job.done / job.total) * 100)}%` }}
++              />
++            </span>
++          ) : null}
 +          <button
 +            type="button"
 +            tabIndex={-1}
@@ -3061,10 +3287,6 @@ index 0000000000..f0dea6093e
 +          </button>
 +        </span>
 +      ))}
-+      <span>
-+        {settings.sort}
-+        {settings.reverse ? " ↑" : ""}
-+      </span>
 +    </div>
 +  );
 +}
@@ -3075,8 +3297,6 @@ index 0000000000..f0dea6093e
 +  readonly showPlaces?: boolean;
 +  /** Takes the keyboard when it appears. */
 +  readonly autoFocus?: boolean;
-+  /** No preview beside the list: the panel's own file view is there. */
-+  readonly compact?: boolean;
 +  /** Reports the state, for a picker's footer. */
 +  readonly stateRef?: React.RefObject<FileManagerState | null>;
 +}
@@ -3088,7 +3308,7 @@ index 0000000000..f0dea6093e
 +  const { setRoot, takeRootKeyboard } = state;
 +  const { autoFocus } = props;
 +  const ready = Boolean(loaded);
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the keyboard is the browser's, outside React
 +  useEffect(() => {
 +    if (autoFocus && ready) takeRootKeyboard();
 +  }, [autoFocus, ready, takeRootKeyboard]);
@@ -3103,7 +3323,7 @@ index 0000000000..f0dea6093e
 +      aria-label="Files"
 +      data-plutonium-files=""
 +      className={cn(
-+        "relative flex min-h-0 min-w-0 flex-col bg-background text-foreground outline-none",
++        "group/files relative flex min-h-0 min-w-0 flex-col bg-background text-foreground outline-none",
 +        props.className,
 +      )}
 +      onKeyDown={state.onKeyDown}
@@ -3150,10 +3370,10 @@ index 0000000000..f0dea6093e
 +}
 diff --git a/apps/web/src/plutonium/files/FilePicker.tsx b/apps/web/src/plutonium/files/FilePicker.tsx
 new file mode 100644
-index 0000000000..c07b29bff3
+index 0000000000..a52dd2e451
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/FilePicker.tsx
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,313 @@
 +// Plutonium: the floating picker: what a tab, an app (the FileChooser portal), this
 +// page's own <input type=file> and the carry key ask (docs/features/FILE_MANAGER.md).
 +import { useEffect, useRef, useState } from "react";
@@ -3171,7 +3391,7 @@ index 0000000000..c07b29bff3
 +  type PickerRequest,
 +  useFilesStore,
 +} from "./filesStore";
-+import { carryFiles, type FileManagerState, takeKeyboard } from "./useFileManager";
++import { type FileManagerState, takeKeyboard } from "./useFileManager";
 +
 +const TITLES: Record<string, string> = {
 +  open: "Open a file",
@@ -3283,7 +3503,7 @@ index 0000000000..c07b29bff3
 +
 +  return (
 +    <div
-+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/30 p-4"
++      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4 backdrop-blur-xs"
 +      onPointerDown={(event) => {
 +        if (event.target === event.currentTarget) finish(null);
 +      }}
@@ -3292,9 +3512,9 @@ index 0000000000..c07b29bff3
 +        role="dialog"
 +        aria-modal="true"
 +        aria-label={detail.title || TITLES[mode]}
-+        className="flex h-[min(620px,calc(100vh-32px))] w-[min(980px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-border bg-background shadow-xl"
++        className="flex h-[min(680px,calc(100vh-32px))] w-[min(1080px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
 +      >
-+        <div className="flex shrink-0 items-baseline gap-2 border-b border-border/70 px-3 py-2">
++        <div className="flex shrink-0 items-baseline gap-2 border-b border-border/70 px-4 py-2.5">
 +          <span className="text-sm font-medium">{detail.title || TITLES[mode]}</span>
 +          {request.asker ? (
 +            <span className="truncate text-xs text-muted-foreground">{request.asker}</span>
@@ -3302,6 +3522,7 @@ index 0000000000..c07b29bff3
 +        </div>
 +        {home ? (
 +          <FileManager
++            instance="picker"
 +            className="flex-1"
 +            initialDir={home}
 +            // A save starts with the name; everything else with the list.
@@ -3318,7 +3539,7 @@ index 0000000000..c07b29bff3
 +        ) : (
 +          <div className="flex-1" />
 +        )}
-+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border/70 px-3 py-2 text-xs">
++        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border/70 px-4 py-2.5 text-sm">
 +          {mode === "save" ? (
 +            <input
 +              ref={(input) => takeKeyboard(input)}
@@ -3385,19 +3606,19 @@ index 0000000000..c07b29bff3
 +          </span>
 +          {confirm ? (
 +            <>
-+              <Button size="xs" variant="ghost" onClick={() => setConfirm(null)}>
++              <Button size="sm" variant="ghost" onClick={() => setConfirm(null)}>
 +                No
 +              </Button>
-+              <Button size="xs" onClick={() => finish(confirm.paths)}>
++              <Button size="sm" onClick={() => finish(confirm.paths)}>
 +                Yes
 +              </Button>
 +            </>
 +          ) : (
 +            <>
-+              <Button size="xs" variant="ghost" onClick={() => finish(null)}>
++              <Button size="sm" variant="ghost" onClick={() => finish(null)}>
 +                Cancel
 +              </Button>
-+              <Button size="xs" onClick={() => stateRef.current?.accept()}>
++              <Button size="sm" onClick={() => stateRef.current?.accept()}>
 +                {detail.acceptLabel || ACCEPT[mode]}
 +              </Button>
 +            </>
@@ -3421,7 +3642,7 @@ index 0000000000..c07b29bff3
 +    <>
 +      {picker ? <PickerDialog key={picker.id} request={picker} /> : null}
 +      {carrying ? (
-+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-[95] flex justify-center">
++        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-[210] flex justify-center">
 +          <div className="rounded-full border border-border bg-popover px-3 py-1 text-xs text-popover-foreground shadow-lg">
 +            Carrying{" "}
 +            {carrying.length === 1 ? carrying[0]?.split("/").pop() : `${carrying.length} items`}
@@ -3466,27 +3687,12 @@ index 0000000000..c07b29bff3
 +  });
 +  return true;
 +}
-+
-+/** The carry key: pick something, and it rides on the pointer. */
-+export function pickAndCarry() {
-+  const store = useFilesStore.getState();
-+  if (store.picker) return;
-+  store.setPicker({
-+    id: nextRequest++,
-+    detail: { mode: "open-multiple", title: "Pick up", acceptLabel: "Pick up" },
-+    asker: "",
-+    answer: (answer) => {
-+      // After the dialog has gone, so the pointer is over what's under it.
-+      if (answer?.paths.length) requestAnimationFrame(() => void carryFiles(answer.paths));
-+    },
-+  });
-+}
 diff --git a/apps/web/src/plutonium/files/HydraFilesPanel.tsx b/apps/web/src/plutonium/files/HydraFilesPanel.tsx
 new file mode 100644
-index 0000000000..03f90b8725
+index 0000000000..0ab2d853ca
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/HydraFilesPanel.tsx
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,56 @@
 +// Plutonium: the right panel's Files tab. The file manager when the project is on this
 +// computer (the helper can list it); T3's own tree for a remote environment's, whose
 +// files only its server can reach.
@@ -3525,6 +3731,7 @@ index 0000000000..03f90b8725
 +  if (local === null) return null;
 +  return (
 +    <FileManager
++      instance="panel"
 +      className="h-full"
 +      initialDir={cwd}
 +      project={cwd}
@@ -3544,12 +3751,13 @@ index 0000000000..03f90b8725
 +}
 diff --git a/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx b/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
 new file mode 100644
-index 0000000000..0f6370244d
+index 0000000000..7742c5d18c
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,93 @@
 +// Plutonium: the file manager in a thread's bottom drawer (files.toggle), beside its
-+// terminals when they're open, so anything to the side is a drop away.
++// terminals when they're open, so anything to the side is a drop away. It can hold
++// several side by side (files.split), each with its own view.
 +import { useRef, useState } from "react";
 +
 +import { FileManager } from "./FileManager";
@@ -3560,9 +3768,9 @@ index 0000000000..0f6370244d
 +
 +function storedHeight() {
 +  try {
-+    return Number(localStorage.getItem(HEIGHT_KEY)) || 300;
++    return Number(localStorage.getItem(HEIGHT_KEY)) || 320;
 +  } catch {
-+    return 300;
++    return 320;
 +  }
 +}
 +
@@ -3576,10 +3784,9 @@ index 0000000000..0f6370244d
 +  readonly onAddToChat?: (path: string) => void;
 +}) {
 +  const { threadKey, projectFolder, besideTerminal } = props;
-+  const open = useFilesStore(
-+    (state) => Boolean(threadKey) && state.openDrawers.includes(threadKey ?? ""),
-+  );
-+  const toggleDrawer = useFilesStore((state) => state.toggleDrawer);
++  const panes = useFilesStore((state) => (threadKey ? state.drawers[threadKey] : undefined));
++  const splitDrawer = useFilesStore((state) => state.splitDrawer);
++  const closePane = useFilesStore((state) => state.closePane);
 +  const home = useFilesHome(projectFolder);
 +  const [height, setHeight] = useState(storedHeight);
 +  const drag = useRef<{ startY: number; startHeight: number } | null>(null);
@@ -3588,7 +3795,7 @@ index 0000000000..0f6370244d
 +    if (!drag.current) return;
 +    setHeight(
 +      Math.max(
-+        140,
++        160,
 +        Math.min(
 +          window.innerHeight - 160,
 +          drag.current.startHeight + drag.current.startY - event.clientY,
@@ -3597,11 +3804,11 @@ index 0000000000..0f6370244d
 +    );
 +  };
 +
-+  if (!open || !home) return null;
++  if (!panes || !home || !threadKey) return null;
 +  return (
 +    <aside
 +      data-plutonium-files-drawer=""
-+      className="relative z-45 flex min-w-0 shrink-0 flex-col overflow-hidden border-t border-border/80 data-[beside]:border-r data-[beside]:[contain:size]"
++      className="relative z-45 flex min-w-0 shrink-0 overflow-hidden border-t border-border/80 data-[beside]:border-r data-[beside]:[contain:size]"
 +      data-beside={besideTerminal ? "" : undefined}
 +      style={besideTerminal ? undefined : { height }}
 +    >
@@ -3623,27 +3830,30 @@ index 0000000000..0f6370244d
 +          }}
 +        />
 +      )}
-+      <FileManager
-+        className="flex-1"
-+        initialDir={home}
-+        project={projectFolder}
-+        thread={props.threadId}
-+        autoFocus
-+        onOpenFile={props.onOpenFile}
-+        onAddToChat={props.onAddToChat}
-+        onClose={() => {
-+          if (threadKey) toggleDrawer(threadKey);
-+        }}
-+      />
++      {panes.map((pane, index) => (
++        <FileManager
++          key={pane.slot}
++          instance={`drawer:${pane.slot}`}
++          className={index > 0 ? "flex-1 border-l border-border/80" : "flex-1"}
++          initialDir={pane.dir ?? home}
++          project={projectFolder}
++          thread={props.threadId}
++          autoFocus
++          onOpenFile={props.onOpenFile}
++          onAddToChat={props.onAddToChat}
++          onSplit={(dir) => splitDrawer(threadKey, dir)}
++          onClose={() => closePane(threadKey, pane.slot)}
++        />
++      ))}
 +    </aside>
 +  );
 +}
 diff --git a/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx b/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
 new file mode 100644
-index 0000000000..59902ef929
+index 0000000000..8405ee4a31
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,50 @@
 +// Plutonium: what ChatView puts around its terminal drawers: the file manager's
 +// bottom drawer, side by side with the terminals when both are open.
 +import { scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -3667,9 +3877,7 @@ index 0000000000..59902ef929
 +}) {
 +  const { threadRef } = props;
 +  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
-+  const open = useFilesStore(
-+    (state) => threadKey !== null && state.openDrawers.includes(threadKey),
-+  );
++  const open = useFilesStore((state) => threadKey !== null && Boolean(state.drawers[threadKey]));
 +  const composer = useComposerHandleContext();
 +  const beside = open && props.terminalOpen && !props.terminalFills;
 +  return (
@@ -3695,6 +3903,200 @@ index 0000000000..59902ef929
 +      {props.children}
 +    </div>
 +  );
++}
+diff --git a/apps/web/src/plutonium/files/carry.ts b/apps/web/src/plutonium/files/carry.ts
+new file mode 100644
+index 0000000000..4b2f117ce5
+--- /dev/null
++++ b/apps/web/src/plutonium/files/carry.ts
+@@ -0,0 +1,55 @@
++// Plutonium: carrying files with no mouse: they ride on the pointer until they're
++// dropped (docs/features/FILE_MANAGER.md, "With no mouse"), and the key that picks them.
++import { plutoniumShell } from "../windowStore";
++import { useFilesStore } from "./filesStore";
++
++function pixels(paths: readonly string[]): string {
++  // A small label for what rides on the pointer, as a PNG in base64.
++  const canvas = document.createElement("canvas");
++  const context = canvas.getContext("2d");
++  if (!context) return "";
++  const label = paths.length === 1 ? (paths[0]?.split("/").pop() ?? "") : `${paths.length} items`;
++  context.font = "13px system-ui, sans-serif";
++  const width = Math.min(280, Math.ceil(context.measureText(label).width) + 24);
++  canvas.width = width;
++  canvas.height = 28;
++  context.fillStyle = "rgba(30, 30, 34, 0.92)";
++  context.beginPath();
++  context.roundRect(0, 0, width, 28, 7);
++  context.fill();
++  context.font = "13px system-ui, sans-serif";
++  context.fillStyle = "#fff";
++  context.textBaseline = "middle";
++  context.fillText(label, 12, 14, width - 24);
++  return canvas.toDataURL("image/png").split(",")[1] ?? "";
++}
++
++/** Rides `paths` on the pointer (a keyboard drag), with the hint up until it's over. */
++export async function carryFiles(paths: readonly string[]): Promise<void> {
++  const shell = await plutoniumShell();
++  if (!shell?.startFileDrag || paths.length === 0) return;
++  const store = useFilesStore.getState();
++  store.setCarrying(paths);
++  try {
++    await shell.startFileDrag(paths, { imagePng: pixels(paths) });
++  } finally {
++    store.setCarrying(null);
++  }
++}
++
++let nextCarry = 1_000_000;
++
++/** The carry key: pick something, and it rides on the pointer. */
++export function pickAndCarry() {
++  const store = useFilesStore.getState();
++  if (store.picker) return;
++  store.setPicker({
++    id: nextCarry++,
++    detail: { mode: "open-multiple", title: "Pick up", acceptLabel: "Pick up" },
++    asker: "",
++    answer: (answer) => {
++      // After the dialog has gone, so the pointer is over what's under it.
++      if (answer?.paths.length) requestAnimationFrame(() => void carryFiles(answer.paths));
++    },
++  });
++}
+diff --git a/apps/web/src/plutonium/files/fileKeys.test.ts b/apps/web/src/plutonium/files/fileKeys.test.ts
+new file mode 100644
+index 0000000000..c8ec46d46e
+--- /dev/null
++++ b/apps/web/src/plutonium/files/fileKeys.test.ts
+@@ -0,0 +1,74 @@
++import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
++import type { ResolvedKeybindingsConfig } from "@t3tools/contracts";
++import { describe, expect, it } from "vite-plus/test";
++
++import { resolveFileKey } from "./fileKeys";
++
++const rule = (key: string, command: string) => ({
++  command,
++  shortcut: parseKeybindingShortcut(key)!,
++});
++const rules = [
++  rule("j", "files.down"),
++  rule("g g", "files.top"),
++  rule("g h", "files.goHome"),
++  rule("shift+g", "files.bottom"),
++  rule("ctrl+d", "files.halfPageDown"),
++  rule("mod+j", "terminal.toggle"),
++  rule("meta+e", "files.toggle"),
++] as unknown as ResolvedKeybindingsConfig;
++
++const press = (
++  key: string,
++  modifiers: Partial<Record<"ctrlKey" | "shiftKey" | "altKey" | "metaKey", boolean>> = {},
++) => ({
++  key,
++  ctrlKey: false,
++  shiftKey: false,
++  altKey: false,
++  metaKey: false,
++  ...modifiers,
++});
++const linux = "Linux x86_64";
++
++describe("resolveFileKey", () => {
++  it("parses a sequence", () => {
++    expect(parseKeybindingShortcut("g g")).toMatchObject({ key: "g", prefix: "g" });
++    expect(parseKeybindingShortcut(", m")).toMatchObject({ key: "m", prefix: "," });
++    expect(parseKeybindingShortcut("space")?.prefix).toBeUndefined();
++  });
++
++  it("single keys, with their modifiers", () => {
++    expect(resolveFileKey(press("j"), rules, "", linux).command).toBe("down");
++    expect(resolveFileKey(press("G", { shiftKey: true }), rules, "", linux).command).toBe("bottom");
++    expect(resolveFileKey(press("d", { ctrlKey: true }), rules, "", linux).command).toBe(
++      "halfPageDown",
++    );
++  });
++
++  it("a sequence waits for its second key; a wrong one is used up", () => {
++    expect(resolveFileKey(press("g"), rules, "", linux)).toEqual({
++      command: null,
++      pending: "g",
++      handled: true,
++    });
++    expect(resolveFileKey(press("g"), rules, "g", linux).command).toBe("top");
++    expect(resolveFileKey(press("h"), rules, "g", linux).command).toBe("goHome");
++    expect(resolveFileKey(press("q"), rules, "g", linux)).toEqual({
++      command: null,
++      pending: "",
++      handled: true,
++    });
++  });
++
++  it("leaves what isn't its own to the page, and a held modifier alone", () => {
++    expect(resolveFileKey(press("q"), rules, "", linux).handled).toBe(false);
++    expect(resolveFileKey(press("j", { ctrlKey: true }), rules, "", linux).handled).toBe(false);
++    expect(resolveFileKey(press("e", { metaKey: true }), rules, "", linux).handled).toBe(false);
++    expect(resolveFileKey(press("Shift", { shiftKey: true }), rules, "g", linux)).toEqual({
++      command: null,
++      pending: "g",
++      handled: false,
++    });
++  });
++});
+diff --git a/apps/web/src/plutonium/files/fileKeys.ts b/apps/web/src/plutonium/files/fileKeys.ts
+new file mode 100644
+index 0000000000..5a5d478cf8
+--- /dev/null
++++ b/apps/web/src/plutonium/files/fileKeys.ts
+@@ -0,0 +1,47 @@
++// Plutonium: the file manager's keys, from Hydra's own keybindings (Settings,
++// Keybindings): the rules for `files.*` with "when": "filesFocus". "g g" is a sequence
++// (the shortcut's `prefix`), which only this reads.
++import type { ResolvedKeybindingsConfig } from "@t3tools/contracts";
++import { matchesKeybindingShortcut } from "@t3tools/shared/keybindings";
++
++import { isFileManagerBinding } from "./ownsKey";
++
++export interface FileKeyEvent {
++  readonly key: string;
++  readonly code?: string;
++  readonly metaKey: boolean;
++  readonly ctrlKey: boolean;
++  readonly shiftKey: boolean;
++  readonly altKey: boolean;
++  getModifierState?(key: string): boolean;
++}
++
++const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock", "Dead"]);
++
++/**
++ * What a key press means after `pending` (a sequence's first key, or ""). `command` is the
++ * file manager's own name ("down"); `handled` is false for a key that means nothing here.
++ */
++export function resolveFileKey(
++  event: FileKeyEvent,
++  keybindings: ResolvedKeybindingsConfig,
++  pending: string,
++  platform = navigator.platform,
++): { command: string | null; pending: string; handled: boolean } {
++  if (MODIFIERS.has(event.key)) return { command: null, pending, handled: false };
++  const rules = keybindings.filter(isFileManagerBinding);
++  for (let index = rules.length - 1; index >= 0; index -= 1) {
++    const rule = rules[index];
++    if (!rule || (rule.shortcut.prefix ?? "") !== pending) continue;
++    if (matchesKeybindingShortcut(event as never, rule.shortcut, platform)) {
++      return { command: String(rule.command).slice("files.".length), pending: "", handled: true };
++    }
++  }
++  const plain = !event.ctrlKey && !event.altKey && !event.metaKey;
++  const key = event.key.toLowerCase();
++  if (!pending && plain && rules.some((rule) => rule.shortcut.prefix === key)) {
++    return { command: null, pending: key, handled: true };
++  }
++  // A wrong second key ends the sequence, and is used up by it.
++  return { command: null, pending: "", handled: pending !== "" };
 +}
 diff --git a/apps/web/src/plutonium/files/filesCore.ts b/apps/web/src/plutonium/files/filesCore.ts
 new file mode 100644
@@ -3843,10 +4245,10 @@ index 0000000000..c54ae1ea43
 +}
 diff --git a/apps/web/src/plutonium/files/filesStore.ts b/apps/web/src/plutonium/files/filesStore.ts
 new file mode 100644
-index 0000000000..aeb1c08943
+index 0000000000..5872518963
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/filesStore.ts
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,233 @@
 +// Plutonium: what every file manager in the page shares: the settings, what's
 +// copied or cut, running jobs and undo, the open drawers, and the picker a page,
 +// tab or app is waiting on (docs/features/FILE_MANAGER.md).
@@ -3863,38 +4265,43 @@ index 0000000000..aeb1c08943
 +} from "./filesCore";
 +
 +export type FileView = "tree" | "columns" | "grid";
-+export type FilesPlacement = "bottom" | "right";
 +
-+export interface FilesSettings {
++/** What each file manager keeps for itself: two side by side can show different views. */
++export interface FileViewSettings {
 +  readonly view: FileView;
 +  readonly sort: SortKey;
 +  readonly reverse: boolean;
 +  readonly hidden: boolean;
 +  readonly preview: boolean;
-+  /** Where files.toggle opens the file manager. */
-+  readonly placement: FilesPlacement;
-+  /** Key overrides on the core's keymap: [keys, command], a null command unbinds. */
-+  readonly keys: readonly [string, string | null][];
 +}
 +
-+const SETTINGS_KEY = "plutonium:file-manager";
-+const DEFAULT_SETTINGS: FilesSettings = {
++const DEFAULT_VIEW: FileViewSettings = {
 +  view: "tree",
 +  sort: "name",
 +  reverse: false,
 +  hidden: false,
 +  preview: true,
-+  placement: "bottom",
-+  keys: [],
 +};
 +
-+function loadSettings(): FilesSettings {
++const SETTINGS_KEY = "plutonium:file-manager-views";
++
++type StoredViews = Readonly<Record<string, Partial<FileViewSettings>>>;
++
++function loadViews(): StoredViews {
 +  try {
-+    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") };
++    return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as StoredViews;
 +  } catch {
-+    return DEFAULT_SETTINGS;
++    return {};
 +  }
 +}
++
++/** A file manager in a thread's drawer: `slot` names its settings, `dir` where it opens. */
++export interface DrawerPane {
++  readonly slot: number;
++  readonly dir: string | null;
++}
++
++const MAX_DRAWER_PANES = 4;
 +
 +/** A filter as a picker's request gives it. */
 +export interface PickerFilter {
@@ -3942,18 +4349,20 @@ index 0000000000..aeb1c08943
 +}
 +
 +interface FilesState {
-+  readonly settings: FilesSettings;
++  readonly views: StoredViews;
 +  readonly clipboard: FileClipboard | null;
 +  readonly jobs: readonly FileJob[];
 +  readonly undo: readonly (FileJobRequest | FileJobRequest[] | RenameUndo)[];
-+  /** Thread keys whose bottom drawer is open. */
-+  readonly openDrawers: readonly string[];
++  /** Each thread's open drawer, by thread key: its panes, left to right. */
++  readonly drawers: Readonly<Record<string, readonly DrawerPane[]>>;
 +  readonly picker: PickerRequest | null;
 +  /** What's riding on the pointer, for the hint. */
 +  readonly carrying: readonly string[] | null;
-+  setSettings(change: Partial<FilesSettings>): void;
++  setView(instance: string, change: Partial<FileViewSettings>): void;
 +  setClipboard(clipboard: FileClipboard | null): void;
-+  toggleDrawer(threadKey: string): boolean;
++  toggleDrawer(threadKey: string): void;
++  splitDrawer(threadKey: string, dir: string): void;
++  closePane(threadKey: string, slot: number): void;
 +  setPicker(picker: PickerRequest | null): void;
 +  setCarrying(paths: readonly string[] | null): void;
 +  pushUndo(entry: RenameUndo): void;
@@ -3977,32 +4386,43 @@ index 0000000000..aeb1c08943
 +export const jobLabel = (job: FileJob) => LABELS[job.op] ?? job.op;
 +
 +export const useFilesStore = create<FilesState>((set, get) => ({
-+  settings: loadSettings(),
++  views: loadViews(),
 +  clipboard: null,
 +  jobs: [],
 +  undo: [],
-+  openDrawers: [],
++  drawers: {},
 +  picker: null,
 +  carrying: null,
-+  setSettings: (change) => {
-+    const settings = { ...get().settings, ...change };
++  setView: (instance, change) => {
++    const views = { ...get().views, [instance]: { ...get().views[instance], ...change } };
 +    try {
-+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
++      localStorage.setItem(SETTINGS_KEY, JSON.stringify(views));
 +    } catch {
 +      // A private window: they last this session.
 +    }
-+    set({ settings });
++    set({ views });
 +  },
 +  setClipboard: (clipboard) => set({ clipboard }),
-+  toggleDrawer: (threadKey) => {
-+    const open = get().openDrawers.includes(threadKey);
-+    set((state) => ({
-+      openDrawers: open
-+        ? state.openDrawers.filter((key) => key !== threadKey)
-+        : [...state.openDrawers, threadKey],
-+    }));
-+    return !open;
-+  },
++  toggleDrawer: (threadKey) =>
++    set((state) => {
++      const { [threadKey]: open, ...others } = state.drawers;
++      return { drawers: open ? others : { ...others, [threadKey]: [{ slot: 0, dir: null }] } };
++    }),
++  splitDrawer: (threadKey, dir) =>
++    set((state) => {
++      const panes = state.drawers[threadKey] ?? [];
++      if (panes.length >= MAX_DRAWER_PANES) return state;
++      const used = new Set(panes.map((pane) => pane.slot));
++      let slot = 0;
++      while (used.has(slot)) slot += 1;
++      return { drawers: { ...state.drawers, [threadKey]: [...panes, { slot, dir }] } };
++    }),
++  closePane: (threadKey, slot) =>
++    set((state) => {
++      const { [threadKey]: panes = [], ...others } = state.drawers;
++      const left = panes.filter((pane) => pane.slot !== slot);
++      return { drawers: left.length > 0 ? { ...others, [threadKey]: left } : others };
++    }),
 +  setPicker: (picker) => set({ picker }),
 +  setCarrying: (carrying) => set({ carrying }),
 +  pushUndo: (entry) => set((state) => ({ undo: [...state.undo, entry].slice(-50) })),
@@ -4053,73 +4473,71 @@ index 0000000000..aeb1c08943
 +  },
 +}));
 +
++/** One file manager's settings. A second pane starts as Yazi's columns, beside the tree. */
++export function useFileViewSettings(instance: string): FileViewSettings {
++  const stored = useFilesStore((state) => state.views[instance]);
++  const start = /^drawer:[1-9]/.test(instance) ? { view: "columns" as const } : {};
++  return { ...DEFAULT_VIEW, ...start, ...stored };
++}
++
 +/** The folder picker opens in when nothing says otherwise, per asker: where it last chose. */
 +export const lastPickerFolder = { current: "" };
 diff --git a/apps/web/src/plutonium/files/ownsKey.test.ts b/apps/web/src/plutonium/files/ownsKey.test.ts
 new file mode 100644
-index 0000000000..0799a24860
+index 0000000000..7b23ceebf9
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/ownsKey.test.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,17 @@
 +import { describe, expect, it } from "vite-plus/test";
 +
-+import { plutoniumFilesOwnsKey } from "./ownsKey";
++import { isFileManagerBinding, plutoniumFilesFocused } from "./ownsKey";
 +
-+const key = (
-+  key: string,
-+  modifiers: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {},
-+) => ({
-+  key,
-+  ctrlKey: false,
-+  metaKey: false,
-+  shiftKey: false,
-+  altKey: false,
-+  ...modifiers,
-+});
-+
-+describe("plutoniumFilesOwnsKey", () => {
-+  it("leaves every key alone when the file manager hasn't the keyboard", () => {
-+    expect(plutoniumFilesOwnsKey(key("d", { ctrlKey: true }))).toBe(false);
++describe("the file manager's keys", () => {
++  it("are its own only while it has the keyboard", () => {
++    expect(plutoniumFilesFocused()).toBe(false);
 +  });
 +
-+  it("never takes plain keys, other modifiers, or Ctrl keys Yazi doesn't use", () => {
-+    expect(plutoniumFilesOwnsKey(key("d"))).toBe(false);
-+    expect(plutoniumFilesOwnsKey(key("d", { ctrlKey: true, shiftKey: true }))).toBe(false);
-+    expect(plutoniumFilesOwnsKey(key("j", { ctrlKey: true }))).toBe(false);
++  it("leaves out the rules that open it from anywhere", () => {
++    expect(isFileManagerBinding({ command: "files.down" })).toBe(true);
++    expect(isFileManagerBinding({ command: "files.toggle" })).toBe(false);
++    expect(isFileManagerBinding({ command: "files.toggleRight" })).toBe(false);
++    expect(isFileManagerBinding({ command: "files.carry" })).toBe(false);
++    expect(isFileManagerBinding({ command: "filePicker.toggle" })).toBe(false);
 +  });
 +});
 diff --git a/apps/web/src/plutonium/files/ownsKey.ts b/apps/web/src/plutonium/files/ownsKey.ts
 new file mode 100644
-index 0000000000..ecd8f873c7
+index 0000000000..cfec9493f4
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/ownsKey.ts
 @@ -0,0 +1,16 @@
-+// Plutonium: the file manager's Ctrl keys (Yazi's) mean something else to the page
-+// (Ctrl+D is the diff). While it has the keyboard they're its own.
-+const OWN_CTRL_KEYS = new Set(["a", "b", "d", "f", "r", "u"]);
-+
-+export function plutoniumFilesOwnsKey(event: {
-+  readonly key: string;
-+  readonly ctrlKey: boolean;
-+  readonly metaKey: boolean;
-+  readonly shiftKey: boolean;
-+  readonly altKey: boolean;
-+}): boolean {
-+  if (!event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return false;
-+  if (!OWN_CTRL_KEYS.has(event.key.toLowerCase())) return false;
++// Plutonium: while the file manager has the keyboard its keys are its own, whatever
++// else they mean to the page.
++export function plutoniumFilesFocused(): boolean {
 +  const active = typeof document === "undefined" ? null : document.activeElement;
 +  return active?.hasAttribute?.("data-plutonium-files") === true;
 +}
++
++/** A rule for inside the file manager, not one that opens it from anywhere. */
++export function isFileManagerBinding(binding: { readonly command: string }): boolean {
++  return (
++    binding.command.startsWith("files.") &&
++    binding.command !== "files.toggle" &&
++    binding.command !== "files.toggleRight" &&
++    binding.command !== "files.carry"
++  );
++}
 diff --git a/apps/web/src/plutonium/files/useFileManager.ts b/apps/web/src/plutonium/files/useFileManager.ts
 new file mode 100644
-index 0000000000..ed3c31620e
+index 0000000000..bc33cf8371
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/useFileManager.ts
-@@ -0,0 +1,863 @@
+@@ -0,0 +1,852 @@
 +// Plutonium: one file manager's state and commands: the folder, the cursor and
 +// selection, the keys, the clipboard, dragging in and out, and picking. The three
 +// views, the drawer, the Files panel and the picker all sit on this
 +// (docs/features/FILE_MANAGER.md).
++import { useAtomValue } from "@effect/atom-react";
 +import { useEffect, useRef, useState } from "react";
 +import type { DragEvent, KeyboardEvent, MouseEvent } from "react";
 +
@@ -4130,16 +4548,25 @@ index 0000000000..ed3c31620e
 +import { toastManager } from "~/components/ui/toast";
 +import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 +import { readLocalApi } from "~/localApi";
++import { primaryServerKeybindingsAtom } from "~/state/server";
 +
 +import { plutoniumShell } from "../windowStore";
-+import type { FileEntry, Keymap, Place, SortKey } from "./filesCore";
++import { carryFiles } from "./carry";
++import { resolveFileKey } from "./fileKeys";
++import type { FileEntry, Place, SortKey } from "./filesCore";
 +import { useFilesCore } from "./filesCore";
-+import { type FileView, type PickerDetail, useFilesStore } from "./filesStore";
++import {
++  type FileView,
++  type FileViewSettings,
++  type PickerDetail,
++  useFilesStore,
++  useFileViewSettings,
++} from "./filesStore";
 +
 +/** What a drag between file managers carries: the paths, as JSON. */
 +const PATHS_DRAG_TYPE = "application/x-plutonium-paths";
 +
-+export const ROW_HEIGHT = 24;
++export const ROW_HEIGHT = 28;
 +
 +export interface FileRow {
 +  readonly entry: FileEntry;
@@ -4152,6 +4579,8 @@ index 0000000000..ed3c31620e
 +  | { readonly kind: "delete"; readonly paths: readonly string[] };
 +
 +export interface FileManagerOptions {
++  /** Whose view, sort and such these are: each file manager has its own. */
++  readonly instance: string;
 +  readonly initialDir: string;
 +  /** The thread's project: the place `gp` goes, and what a thread's files open in. */
 +  readonly project?: string | null;
@@ -4168,8 +4597,12 @@ index 0000000000..ed3c31620e
 +  readonly onOpenFile?: ((path: string) => void) | undefined;
 +  /** Escape with nothing left to clear. */
 +  readonly onClose?: (() => void) | undefined;
++  /** Opens another file manager beside this one, at `dir`. */
++  readonly onSplit?: ((dir: string) => void) | undefined;
 +  /** Puts a mention of `path` in the composer, if this thread has one. */
 +  readonly onAddToChat?: ((path: string) => void) | undefined;
++  /** No preview beside the list: the panel's own file view is there. */
++  readonly compact?: boolean;
 +  /** One click opens a file, as the Files panel always has. */
 +  readonly singleClickOpens?: boolean;
 +}
@@ -4177,40 +4610,6 @@ index 0000000000..ed3c31620e
 +const fileUrl = (path: string) => `file://${path.split("/").map(encodeURIComponent).join("/")}`;
 +
 +const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
-+
-+function pixels(paths: readonly string[]): string {
-+  // A small label for what rides on the pointer, as a PNG in base64.
-+  const canvas = document.createElement("canvas");
-+  const context = canvas.getContext("2d");
-+  if (!context) return "";
-+  const label = paths.length === 1 ? (paths[0]?.split("/").pop() ?? "") : `${paths.length} items`;
-+  context.font = "13px system-ui, sans-serif";
-+  const width = Math.min(280, Math.ceil(context.measureText(label).width) + 24);
-+  canvas.width = width;
-+  canvas.height = 28;
-+  context.fillStyle = "rgba(30, 30, 34, 0.92)";
-+  context.beginPath();
-+  context.roundRect(0, 0, width, 28, 7);
-+  context.fill();
-+  context.font = "13px system-ui, sans-serif";
-+  context.fillStyle = "#fff";
-+  context.textBaseline = "middle";
-+  context.fillText(label, 12, 14, width - 24);
-+  return canvas.toDataURL("image/png").split(",")[1] ?? "";
-+}
-+
-+/** Rides `paths` on the pointer (a keyboard drag), with the hint up until it's over. */
-+export async function carryFiles(paths: readonly string[]): Promise<void> {
-+  const shell = await plutoniumShell();
-+  if (!shell?.startFileDrag || paths.length === 0) return;
-+  const store = useFilesStore.getState();
-+  store.setCarrying(paths);
-+  try {
-+    await shell.startFileDrag(paths, { imagePng: pixels(paths) });
-+  } finally {
-+    store.setCarrying(null);
-+  }
-+}
 +
 +/** Gives `element` the keyboard, even from a tab or app that has it now. */
 +export function takeKeyboard(element: HTMLElement | null): void {
@@ -4225,8 +4624,11 @@ index 0000000000..ed3c31620e
 +  const loaded = useFilesCore();
 +  const core = loaded?.core;
 +  const client = loaded?.helper;
-+  const settings = useFilesStore((state) => state.settings);
-+  const setSettings = useFilesStore((state) => state.setSettings);
++  const { instance } = options;
++  const settings = useFileViewSettings(instance);
++  const setView = useFilesStore((state) => state.setView);
++  const setSettings = (change: Partial<FileViewSettings>) => setView(instance, change);
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
 +  const clipboard = useFilesStore((state) => state.clipboard);
 +  const setClipboard = useFilesStore((state) => state.setClipboard);
 +  const runJob = useFilesStore((state) => state.run);
@@ -4256,7 +4658,6 @@ index 0000000000..ed3c31620e
 +    readonly back: readonly string[];
 +    readonly forward: readonly string[];
 +  }>({ back: [], forward: [] });
-+  const [keymap, setKeymap] = useState<Keymap | null>(null);
 +  const rootRef = useRef<HTMLDivElement | null>(null);
 +  const setRoot = (element: HTMLDivElement | null) => {
 +    rootRef.current = element;
@@ -4271,12 +4672,6 @@ index 0000000000..ed3c31620e
 +      shell.current = value;
 +    });
 +  }, []);
-+
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
-+  useEffect(() => {
-+    // oxlint-disable-next-line react/set-state-in-effect -- what the helper or the page says, set once it has answered
-+    if (core) setKeymap(new core.Keymap(settings.keys));
-+  }, [core, settings.keys]);
 +
 +  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
 +  useEffect(() => {
@@ -4467,7 +4862,7 @@ index 0000000000..ed3c31620e
 +    if (clipboard.cut) setClipboard(null);
 +  };
 +
-+  const setView = (next: FileView) => setSettings({ view: next });
++  const showView = (next: FileView) => setSettings({ view: next });
 +  const sortBy = (next: SortKey) => setSettings({ sort: next });
 +
 +  const findStep = (query: string, step: number, from = cursorIndex) => {
@@ -4690,20 +5085,26 @@ index 0000000000..ed3c31620e
 +        setSettings({ reverse: !reverse });
 +        break;
 +      case "viewTree":
-+        setView("tree");
++        showView("tree");
 +        break;
 +      case "viewColumns":
-+        setView("columns");
++        showView("columns");
 +        break;
 +      case "viewGrid":
-+        setView("grid");
++        showView("grid");
 +        break;
 +      case "togglePreview":
 +        setSettings({ preview: !settings.preview });
 +        break;
-+      case "carry":
++      case "carrySelection":
 +        // A picker is an app's, and hands the file over itself.
 +        if (!pick) void carryFiles(targets());
++        break;
++      case "split":
++        options.onSplit?.(dir);
++        break;
++      case "closePane":
++        options.onClose?.();
 +        break;
 +      case "help":
 +        setHelpOpen((open) => !open);
@@ -4726,14 +5127,7 @@ index 0000000000..ed3c31620e
 +    }
 +    // Keys for the page and the desktop: the drawer's own toggle, Super's.
 +    if (event.metaKey) return;
-+    const result = keymap?.feed({
-+      key: event.key,
-+      ctrl: event.ctrlKey,
-+      alt: event.altKey,
-+      shift: event.shiftKey,
-+      meta: event.metaKey,
-+    });
-+    if (!result) return;
++    const result = resolveFileKey(event, keybindings, pending);
 +    setPending(result.pending);
 +    if (result.handled) {
 +      event.preventDefault();
@@ -4861,8 +5255,7 @@ index 0000000000..ed3c31620e
 +    for (const path of paths) shell.current?.fileForPath?.(path);
 +  };
 +
-+  const onRowDragStart = (event: DragEvent, entry: FileEntry) => {
-+    const paths = selected.has(entry.path) ? [...selected] : [entry.path];
++  const startFilesDrag = (event: DragEvent, paths: readonly string[]) => {
 +    const data = event.dataTransfer;
 +    data.effectAllowed = "all";
 +    data.setData(PATHS_DRAG_TYPE, JSON.stringify(paths));
@@ -4874,6 +5267,14 @@ index 0000000000..ed3c31620e
 +      const file = shell.current?.fileForPath?.(path);
 +      if (file) data.items.add(file);
 +    }
++  };
++
++  const onRowDragStart = (event: DragEvent, entry: FileEntry) =>
++    startFilesDrag(event, selected.has(entry.path) ? [...selected] : [entry.path]);
++
++  /** Read access ahead of a drag, which can't wait for it. */
++  const armPaths = (paths: readonly string[]) => {
++    for (const path of paths) shell.current?.fileForPath?.(path);
 +  };
 +
 +  // Dropping in: on a folder, or on the view for the folder it shows.
@@ -4948,7 +5349,6 @@ index 0000000000..ed3c31620e
 +    setRoot,
 +    focusRoot,
 +    takeRootKeyboard,
-+    keymap,
 +    setGridColumns,
 +    goTo,
 +    reveal,
@@ -4959,6 +5359,12 @@ index 0000000000..ed3c31620e
 +    onKeyDown,
 +    submitPrompt,
 +    onPromptChange,
++    startFilesDrag,
++    armPaths,
++    canSplit: Boolean(options.onSplit),
++    picking: Boolean(pick),
++    compact: Boolean(options.compact),
++    keybindings,
 +    cancelPrompt,
 +    onRowClick,
 +    onRowContextMenu,
@@ -5523,10 +5929,10 @@ index 0000000000..720579de8a
 +}
 diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
 new file mode 100644
-index 0000000000..729b5eb0f1
+index 0000000000..8ea02ec27d
 --- /dev/null
 +++ b/apps/web/src/plutonium/panelKeys.ts
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,302 @@
 +// Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
 +// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
 +// dock.ts), and moving keyboard focus into a tab's content (an app's window,
@@ -5561,7 +5967,7 @@ index 0000000000..729b5eb0f1
 +  runDockSlot,
 +  toggleDockLayout,
 +} from "./dock";
-+import { pickAndCarry } from "./files/FilePicker";
++import { pickAndCarry } from "./files/carry";
 +import { useFilesStore } from "./files/filesStore";
 +import { plutoniumShell } from "./windowStore";
 +
@@ -5578,6 +5984,7 @@ index 0000000000..729b5eb0f1
 +  "preview.newTab",
 +  "appLauncher.toggle",
 +  "files.toggle",
++  "files.toggleRight",
 +  "files.carry",
 +  ...DOCK_SLOT,
 +  ...DOCK_SLOT_OTHER,
@@ -5643,7 +6050,7 @@ index 0000000000..729b5eb0f1
 +      keybindings
 +        .filter((rule) => SHELL_COMMANDS.has(rule.command))
 +        // Ctrl+E stays with what has the keyboard: only Super reaches past a tab or an app.
-+        .filter((rule) => !rule.command.startsWith("files.") || rule.shortcut.metaKey)
++        .filter((rule) => !String(rule.command).startsWith("files.") || rule.shortcut.metaKey)
 +        .flatMap((rule) => toShellShortcut(rule.shortcut) ?? []),
 +    ),
 +  ];
@@ -5711,18 +6118,6 @@ index 0000000000..729b5eb0f1
 +  }
 +}
 +
-+/** The file manager, where the settings put it: the bottom drawer, or the panel's Files tab. */
-+function toggleFiles(threadRef: ScopedThreadRef): void {
-+  const files = useFilesStore.getState();
-+  if (files.settings.placement === "bottom") {
-+    files.toggleDrawer(scopedThreadKey(threadRef));
-+    return;
-+  }
-+  const panel = useRightPanelStore.getState();
-+  panel.openFile(threadRef, ".");
-+  panel.show(threadRef);
-+}
-+
 +/** Opens app window `window` as a tab in `threadRef`'s panel and gives it the keyboard. */
 +export function openAndFocusApp(
 +  threadRef: ScopedThreadRef,
@@ -5774,12 +6169,22 @@ index 0000000000..729b5eb0f1
 +        activate(surface);
 +        void focusRightPanelSurface(surface);
 +      };
-+      if (command === "files.toggle" || command === "files.carry") {
++      if (
++        command === "files.toggle" ||
++        command === "files.toggleRight" ||
++        command === "files.carry"
++      ) {
 +        event.preventDefault();
 +        event.stopPropagation();
 +        if (event.repeat) return;
 +        if (command === "files.carry") pickAndCarry();
-+        else toggleFiles(threadRef);
++        else if (command === "files.toggle") {
++          useFilesStore.getState().toggleDrawer(scopedThreadKey(threadRef));
++        } else {
++          const panel = useRightPanelStore.getState();
++          panel.openFile(threadRef, ".");
++          panel.show(threadRef);
++        }
 +        return;
 +      }
 +      const dock = latest.current.dock;

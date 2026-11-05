@@ -67,6 +67,23 @@ describe("ShellRelay", () => {
     assert.equal(relay.reply(request!.id!, "application/json", json({ ok: true })), false);
   });
 
+  test("a request for one page goes to that page, whichever was shown last", async () => {
+    const relay = new ShellRelay();
+    const first = attach(relay, "display-1");
+    const second = attach(relay, "display-2");
+    assert.deepEqual(relay.pages(), [
+      { key: "display-1", visible: true },
+      { key: "display-2", visible: true },
+    ]);
+    const answer = relay.requestPage("display-1", "file_chooser", { handle: "h" }, 1_000);
+    assert.equal(second.requests().length, 0);
+    const [request] = first.requests();
+    assert.equal(request?.op, "file_chooser");
+    relay.reply(request!.id!, "application/json", json({ ok: true, value: { paths: [] } }));
+    assert.equal((await answer).kind, "json");
+    await assert.rejects(relay.requestPage("gone", "file_chooser"), (error: unknown) => error instanceof RelayError);
+  });
+
   test("a refusal, a malformed reply and an image", async () => {
     const relay = new ShellRelay();
     const stream = attach(relay, "page-1");

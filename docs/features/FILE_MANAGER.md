@@ -6,25 +6,31 @@ Hydra is a desktop, so there may be no other file manager to fall back on. Its o
 
 ## What it does
 
-- **Three views**, switched with `1`, `2`, `3` or the toolbar: a tree, Yazi's three columns (parent, folder, preview) and a grid with image thumbnails. The choice is remembered.
-- **Keys:** Yazi's defaults, in `helper/web/ui/files.js` (`DEFAULT_KEYMAP`); `~` or `?` lists them. `hjkl`, `gg`, `G`, `<C-d>`, `<C-u>`, `space`, `v`, `y`, `x`, `p`, `P`, `d` (trash), `D` (delete, asks first), `a` (a trailing `/` makes a folder), `r`, `u` (undo), `.`, `f`, `/`, `n`, `N`, `,n`, `,m`, `,s`, `,e`, `,r`, `gh`, `gd`, `gp`, `g/`, `gl`, `H`, `L`, `o`, `c`, `i`. `b` picks the selection up (below). The grid reads `hjkl` as moves through its cells, so `Enter` opens a folder there and `Backspace` goes up.
+- **Three views**, switched with `1`, `2`, `3` or the toolbar: a tree, Yazi's three columns (parent, folder, preview) and a grid with image thumbnails. Each file manager keeps its own view, sort, dot files and preview, so a tree and three columns can sit side by side.
+- **Several at once:** `s` opens another beside this one in the drawer (up to four), `q` closes it. The Files panel and the picker are separate again.
+- **Previews** are Hydra's: its syntax-highlighted source viewer, its markdown and table rendering, images, video and audio.
+- **Keys:** Yazi's defaults, as real rules in Hydra's keybindings (`when: filesFocus`): Settings, Keybindings, under File manager, where they can be changed like any other. A sequence such as `gg` is written `g g` in `keybindings.json`; the settings' recorder takes single keys, so a new sequence goes in that file. `~` or `?` lists the current keys. The core's `DEFAULT_KEYMAP` (`helper/web/ui/files.js`) is the same set, for other shells. `hjkl`, `gg`, `G`, `<C-d>`, `<C-u>`, `space`, `v`, `y`, `x`, `p`, `P`, `d` (trash), `D` (delete, asks first), `a` (a trailing `/` makes a folder), `r`, `u` (undo), `.`, `f`, `/`, `n`, `N`, `,n`, `,m`, `,s`, `,e`, `,r`, `gh`, `gd`, `gp`, `g/`, `gl`, `H`, `L`, `o`, `c`, `i`. `b` picks the selection up (below). The grid reads `hjkl` as moves through its cells, so `Enter` opens a folder there and `Backspace` goes up.
 - **The mouse:** click, Ctrl-click and Shift-click select, a double click opens, a right click gives the menu, and everything in the keymap has a toolbar button or a menu item where it makes sense.
-- **The fuzzy finder** (`z`): Telescope's layout, the list and query on the left, a preview on the right. It searches everything under the folder: `fd`'s list if `fd` is installed (it honours `.gitignore`), else a walk that skips `.git`, `node_modules` and the like. Words are separate terms. `Ctrl+J`/`Ctrl+K` move, `Tab` marks several for a picker, `Enter` opens or chooses, `Ctrl+Enter` goes to the file instead.
+- **The fuzzy finder** (`z`): Telescope's layout, the list and query on the left, a preview on the right. It searches everything under the folder: `fd`'s list if `fd` is installed (it honours `.gitignore`), else a walk that skips `.git`, `node_modules` and the like. Words are separate terms. `Ctrl+J`/`Ctrl+K` move, `Tab` marks several, `Enter` opens or chooses, `Ctrl+Enter` goes to the file instead. A result can be dragged anywhere, or picked up with `Ctrl+B`; marked results go together.
 - **File operations** run as jobs in the helper, shown in the status bar with a cancel button. Copies use reflinks where the disk can. A taken name gets a number (`note (2).txt`); `P` replaces it. `d` is the freedesktop trash (`$XDG_DATA_HOME/Trash`), so Dolphin and others see it too. `u` undoes a copy (to the trash), a move, a rename or a trash. A delete, or a paste that replaced something, can't be undone.
 
 ## Where it opens
 
 | | |
 |---|---|
-| `Ctrl+E` (`Super+E` from a tab or app) | The drawer at the bottom of the thread, beside the terminals if they are open, so whatever is on the side is a drop away. `Esc` with nothing left to clear closes it. It is `files.toggle` in Settings, Keybindings, and the file manager's `~` overlay switches it to the right panel. Ctrl+E is only bound outside terminals, and doesn't reach past a tab or an app, where it means something else. |
+| `Ctrl+E` (`Super+E` from a tab or app) | The drawer at the bottom of the thread, beside the terminals if they are open, so whatever is on the side is a drop away. `Esc` with nothing left to clear closes it. It is `files.toggle`; `files.toggleRight` (`Super+Shift+E`) opens the panel's Files tab instead, so which one you use is a matter of keys. Ctrl+E is only bound outside terminals, and doesn't reach past a tab or an app, where it means something else. |
 | The right panel's Files tab | The same file manager, for a project on this computer (the helper can list it). A remote environment's project keeps T3's own tree: only that server can reach its files. |
 | A picker | A floating dialog over whatever asked. |
 
-The `~` overlay also takes key overrides, one per line: `keys command`, or `keys -` to unbind. Settings live in the page's `localStorage` (`plutonium:file-manager`), per browser profile.
+Views live in the page's `localStorage` (`plutonium:file-manager-views`), per browser profile.
 
 ## Pickers
 
 Every file picker on the desktop reaches `connect({ fileChooser })`: a tab's `<input type=file>`, File System Access pickers, a download's Save As, a native app's through the FileChooser portal, and, new here, **the shell page's own**, which is what Hydra's composer attach button is. The browser used to send those to the Files app's picker, because `PlutoniumSelectFileDialogFactory` only asked about tabs. A shell page now asks itself, as a request with tab id 0 and no pending state; every shell's picker gets this. If that shell goes away (a reload), the page that asked is gone too, so the request is cancelled rather than falling back.
+
+With a shell on each display several pages are visible, and an app's dialog has to reach the one in front of the user: the helper asks the visible pages (`page_state`) and takes the one showing the app's window, else the one with the keyboard, else the one on the focused display. Before that it took the page shown last, so a picker could open on the other monitor while the app sat waiting for it.
+
+Apps get `GTK_USE_PORTAL=1` and `GDK_DEBUG=portals` from their thread's environment, so GTK's portal-aware chooser and Firefox come here, and Chromium does by itself. **An app that draws its own `GtkFileChooserDialog` keeps it, whatever the environment says:** LibreOffice's GTK 3 plugin and GIMP do.
 
 A picker keeps filters, choices, the save name and the overwrite and folder-upload confirmations. Only one is open at a time; a second asker is cancelled. A name typed in a save dialog may be a whole path.
 
@@ -69,7 +75,9 @@ On X11 in a worktree's slot, with `xdotool`'s real input through Ash (2026-11-05
 | Carrying: dropped by key or click (a click six times in a row), `Esc` cancels, onto a folder row, onto the composer (attaches) | ✓ |
 | A row dragged to a page target, to a folder (moves), to Dolphin; a carry to Dolphin; a file from Dolphin to a folder row (`WAYLAND_DEBUG` shows the offer, `finish()` and Dolphin's menu) | ✓ |
 
-**Not tried:** any of it on DRM (a real session, with real keyboard and pointer); a real app's portal picker (X11 sessions leave the portal alone; the request is the shape `_appDialog` gives, read but not run); a carry across displays.
+Through a real portal (`tools/portal-bus.sh`, two displays, 2026-11-05): `OpenFile` opens the picker on the display with the keyboard, four times of four, alternating; Chromium 147's Ctrl+O and zenity (GTK 4) reach it; LibreOffice opens its own dialog.
+
+**Not tried:** a carry across displays; these portal checks on DRM.
 
 **On Xvfb a queued release:** xdotool's last button event can sit undispatched in Ash's nested drag loop until the next X event arrives, so a test's drag can seem to hang; nudge the pointer. Plain Chromium drags do the same. It's why a sticky drag drops on the press.
 

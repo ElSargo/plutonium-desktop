@@ -26,15 +26,15 @@ Folded from:
 ---
  packages/contracts/src/desktopBrowser.ts      |  40 ++++++
  packages/contracts/src/ipc.ts                 |   2 +
- packages/contracts/src/keybindings.ts         |  63 +++++++++
+ packages/contracts/src/keybindings.ts         | 122 +++++++++++++++++
  packages/contracts/src/orchestratorMcp.ts     |  16 +++
  packages/contracts/src/previewAutomation.ts   |  92 ++++++++++++-
  .../provider-core/src/server/mcpSession.ts    |  12 +-
  packages/shared/package.json                  |   8 ++
- packages/shared/src/keybindings.ts            |  35 +++++
+ packages/shared/src/keybindings.ts            | 107 +++++++++++++++
  packages/shared/src/plutonium.ts              | 124 ++++++++++++++++++
  packages/shared/src/plutoniumWindowTabs.ts    |  25 ++++
- 10 files changed, 410 insertions(+), 7 deletions(-)
+ 10 files changed, 541 insertions(+), 7 deletions(-)
  create mode 100644 packages/shared/src/plutonium.ts
  create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
 
@@ -109,7 +109,7 @@ index 5aa9acf277..0ebd7d50cf 100644
  
  export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
 diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
-index 714e0a1d48..472054181b 100644
+index 714e0a1d48..df55888a00 100644
 --- a/packages/contracts/src/keybindings.ts
 +++ b/packages/contracts/src/keybindings.ts
 @@ -34,6 +34,58 @@ export const MODEL_PICKER_JUMP_KEYBINDING_COMMANDS = [
@@ -185,17 +185,83 @@ index 714e0a1d48..472054181b 100644
    "pullRequest.copyNumber",
    "diff.toggle",
    "preview.toggle",
-@@ -79,6 +138,10 @@ export const STATIC_KEYBINDING_COMMANDS = [
+@@ -79,6 +138,67 @@ export const STATIC_KEYBINDING_COMMANDS = [
    "preview.zoomIn",
    "preview.zoomOut",
    "preview.resetZoom",
 +  "preview.newTab",
 +  "appLauncher.toggle",
 +  "files.toggle",
++  "files.toggleRight",
 +  "files.carry",
++  "files.down",
++  "files.up",
++  "files.left",
++  "files.right",
++  "files.parent",
++  "files.activate",
++  "files.open",
++  "files.top",
++  "files.bottom",
++  "files.halfPageUp",
++  "files.halfPageDown",
++  "files.pageUp",
++  "files.pageDown",
++  "files.goHome",
++  "files.goDownloads",
++  "files.goProject",
++  "files.goRoot",
++  "files.goPath",
++  "files.back",
++  "files.forward",
++  "files.toggleSelect",
++  "files.visual",
++  "files.selectAll",
++  "files.invertSelection",
++  "files.escape",
++  "files.yank",
++  "files.cut",
++  "files.paste",
++  "files.pasteOverwrite",
++  "files.pasteLink",
++  "files.clearYank",
++  "files.copyPath",
++  "files.trash",
++  "files.delete",
++  "files.create",
++  "files.rename",
++  "files.undo",
++  "files.toggleHidden",
++  "files.filter",
++  "files.find",
++  "files.findNext",
++  "files.findPrevious",
++  "files.fuzzy",
++  "files.sortName",
++  "files.sortModified",
++  "files.sortSize",
++  "files.sortExtension",
++  "files.sortReverse",
++  "files.viewTree",
++  "files.viewColumns",
++  "files.viewGrid",
++  "files.togglePreview",
++  "files.carrySelection",
++  "files.help",
++  "files.split",
++  "files.closePane",
    "commandPalette.toggle",
    "filePicker.toggle",
    "projectSearch.toggle",
+@@ -153,6 +273,8 @@ export type KeybindingsConfig = typeof KeybindingsConfig.Type;
+ 
+ export const KeybindingShortcut = Schema.Struct({
+   key: KeybindingValue,
++  /** Plutonium: a plain key pressed first ("g" in "g g"): only the file manager reads these. */
++  prefix: Schema.optional(KeybindingValue),
+   metaKey: Schema.Boolean,
+   ctrlKey: Schema.Boolean,
+   shiftKey: Schema.Boolean,
 diff --git a/packages/contracts/src/orchestratorMcp.ts b/packages/contracts/src/orchestratorMcp.ts
 index 1d6d7f3d67..2d4b57d8a6 100644
 --- a/packages/contracts/src/orchestratorMcp.ts
@@ -420,7 +486,7 @@ index 19542c4459..82baedba2a 100644
    },
    "scripts": {
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index 32292c0f9e..5eb390d8c2 100644
+index 32292c0f9e..3526c7c42b 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
 @@ -5,6 +5,10 @@ import {
@@ -434,7 +500,7 @@ index 32292c0f9e..5eb390d8c2 100644
    type ResolvedKeybindingRule,
    type ResolvedKeybindingsConfig,
    THREAD_JUMP_KEYBINDING_COMMANDS,
-@@ -157,6 +161,37 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -157,6 +161,103 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "mod+alt+b", command: "rightPanel.toggle" },
    { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
    { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
@@ -450,7 +516,73 @@ index 32292c0f9e..5eb390d8c2 100644
 +  { key: "meta+space", command: "appLauncher.toggle" },
 +  { key: "mod+e", command: "files.toggle", when: "!terminalFocus" },
 +  { key: "meta+e", command: "files.toggle" },
++  { key: "meta+shift+e", command: "files.toggleRight" },
 +  { key: "meta+o", command: "files.carry" },
++  // The file manager's keys: Yazi's, while it has the keyboard. "g g" is a sequence.
++  { key: "j", command: "files.down", when: "filesFocus" },
++  { key: "arrowdown", command: "files.down", when: "filesFocus" },
++  { key: "k", command: "files.up", when: "filesFocus" },
++  { key: "arrowup", command: "files.up", when: "filesFocus" },
++  { key: "h", command: "files.left", when: "filesFocus" },
++  { key: "arrowleft", command: "files.left", when: "filesFocus" },
++  { key: "l", command: "files.right", when: "filesFocus" },
++  { key: "arrowright", command: "files.right", when: "filesFocus" },
++  { key: "backspace", command: "files.parent", when: "filesFocus" },
++  { key: "enter", command: "files.activate", when: "filesFocus" },
++  { key: "o", command: "files.open", when: "filesFocus" },
++  { key: "g g", command: "files.top", when: "filesFocus" },
++  { key: "shift+g", command: "files.bottom", when: "filesFocus" },
++  { key: "ctrl+u", command: "files.halfPageUp", when: "filesFocus" },
++  { key: "ctrl+d", command: "files.halfPageDown", when: "filesFocus" },
++  { key: "ctrl+b", command: "files.pageUp", when: "filesFocus" },
++  { key: "ctrl+f", command: "files.pageDown", when: "filesFocus" },
++  { key: "pageup", command: "files.pageUp", when: "filesFocus" },
++  { key: "pagedown", command: "files.pageDown", when: "filesFocus" },
++  { key: "g h", command: "files.goHome", when: "filesFocus" },
++  { key: "g d", command: "files.goDownloads", when: "filesFocus" },
++  { key: "g p", command: "files.goProject", when: "filesFocus" },
++  { key: "g /", command: "files.goRoot", when: "filesFocus" },
++  { key: "g l", command: "files.goPath", when: "filesFocus" },
++  { key: "shift+h", command: "files.back", when: "filesFocus" },
++  { key: "shift+l", command: "files.forward", when: "filesFocus" },
++  { key: "space", command: "files.toggleSelect", when: "filesFocus" },
++  { key: "v", command: "files.visual", when: "filesFocus" },
++  { key: "ctrl+a", command: "files.selectAll", when: "filesFocus" },
++  { key: "ctrl+r", command: "files.invertSelection", when: "filesFocus" },
++  { key: "escape", command: "files.escape", when: "filesFocus" },
++  { key: "y", command: "files.yank", when: "filesFocus" },
++  { key: "x", command: "files.cut", when: "filesFocus" },
++  { key: "p", command: "files.paste", when: "filesFocus" },
++  { key: "shift+p", command: "files.pasteOverwrite", when: "filesFocus" },
++  { key: "-", command: "files.pasteLink", when: "filesFocus" },
++  { key: "shift+y", command: "files.clearYank", when: "filesFocus" },
++  { key: "shift+x", command: "files.clearYank", when: "filesFocus" },
++  { key: "c", command: "files.copyPath", when: "filesFocus" },
++  { key: "d", command: "files.trash", when: "filesFocus" },
++  { key: "shift+d", command: "files.delete", when: "filesFocus" },
++  { key: "a", command: "files.create", when: "filesFocus" },
++  { key: "r", command: "files.rename", when: "filesFocus" },
++  { key: "u", command: "files.undo", when: "filesFocus" },
++  { key: ".", command: "files.toggleHidden", when: "filesFocus" },
++  { key: "f", command: "files.filter", when: "filesFocus" },
++  { key: "/", command: "files.find", when: "filesFocus" },
++  { key: "n", command: "files.findNext", when: "filesFocus" },
++  { key: "shift+n", command: "files.findPrevious", when: "filesFocus" },
++  { key: "z", command: "files.fuzzy", when: "filesFocus" },
++  { key: ", n", command: "files.sortName", when: "filesFocus" },
++  { key: ", m", command: "files.sortModified", when: "filesFocus" },
++  { key: ", s", command: "files.sortSize", when: "filesFocus" },
++  { key: ", e", command: "files.sortExtension", when: "filesFocus" },
++  { key: ", r", command: "files.sortReverse", when: "filesFocus" },
++  { key: "1", command: "files.viewTree", when: "filesFocus" },
++  { key: "2", command: "files.viewColumns", when: "filesFocus" },
++  { key: "3", command: "files.viewGrid", when: "filesFocus" },
++  { key: "i", command: "files.togglePreview", when: "filesFocus" },
++  { key: "b", command: "files.carrySelection", when: "filesFocus" },
++  { key: "shift+~", command: "files.help", when: "filesFocus" },
++  { key: "shift+?", command: "files.help", when: "filesFocus" },
++  { key: "s", command: "files.split", when: "filesFocus" },
++  { key: "q", command: "files.closePane", when: "filesFocus" },
 +  // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
 +  // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
 +  ...DOCK_SLOT_KEYBINDING_COMMANDS.map((command, index) => ({
@@ -472,6 +604,19 @@ index 32292c0f9e..5eb390d8c2 100644
    { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
    { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
    { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
+@@ -245,6 +346,12 @@ function normalizeKeyToken(token: string): string {
+ }
+ 
+ export function parseKeybindingShortcut(value: string): KeybindingShortcut | null {
++  // Plutonium: "g g" is a sequence: one plain key, then the shortcut.
++  const sequence = /^(\S)\s+(\S.*)$/u.exec(value.trim());
++  if (sequence) {
++    const rest = parseKeybindingShortcut(sequence[2] ?? "");
++    return rest ? { ...rest, prefix: (sequence[1] ?? "").toLowerCase() } : null;
++  }
+   const rawTokens = value
+     .toLowerCase()
+     .split("+")
 diff --git a/packages/shared/src/plutonium.ts b/packages/shared/src/plutonium.ts
 new file mode 100644
 index 0000000000..1b9f679371
