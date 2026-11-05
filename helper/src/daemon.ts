@@ -50,7 +50,8 @@ import {
   type NativeWindowEntry,
 } from "./relay.ts";
 import { countFiles, FilesError, listDirectory, makeFolder, places, recentFiles } from "./files.ts";
-import { fileIndex, type FileJobRequest, FileJobs, makeFile, previewText, rawFile, renamePath, uploadTarget, watchFolder } from "./fileOps.ts";
+import { FileFinders } from "./fileFinder.ts";
+import { type FileJobRequest, FileJobs, makeFile, previewText, rawFile, renamePath, uploadTarget, watchFolder } from "./fileOps.ts";
 import { comboKeys, commitRuns, typingRuns } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
@@ -385,6 +386,7 @@ export class Daemon {
   readonly apps = new DesktopApps();
   readonly siteIcons = new SiteIcons();
   readonly fileJobs = new FileJobs();
+  readonly fileFinders = new FileFinders();
   /** EXO-LOCK: the lock screen and idle (services/session.ts). */
   readonly session: SessionService;
   readonly terminals: Terminals;
@@ -2205,9 +2207,21 @@ export class Daemon {
           if (!found) throw new HttpError(404, "No such job.");
           return sendJson(response, 200, found);
         }
-        if (method === "GET" && path === "/v1/files/index") {
-          const hidden = url.searchParams.get("hidden") === "1";
-          return sendJson(response, 200, await fileIndex(url.searchParams.get("dir"), { hidden }));
+        if (method === "GET" && path === "/v1/files/find") {
+          return sendJson(
+            response,
+            200,
+            await this.fileFinders.find(url.searchParams.get("dir"), {
+              query: url.searchParams.get("q") ?? "",
+              hidden: url.searchParams.get("hidden") === "1",
+            }),
+          );
+        }
+        if (method === "POST" && path === "/v1/files/find/opened") {
+          const { dir, query, path: chosen } = await readJson(request);
+          if (typeof dir !== "string" || typeof chosen !== "string") throw new HttpError(400, "dir and path are required.");
+          await this.fileFinders.opened(dir, typeof query === "string" ? query : "", chosen);
+          return sendJson(response, 200, {});
         }
         if (method === "GET" && path === "/v1/files/preview") {
           return sendJson(response, 200, await previewText(url.searchParams.get("path")));

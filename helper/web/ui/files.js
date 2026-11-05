@@ -267,6 +267,15 @@ export function fuzzyFilter(query, paths, limit = 200) {
   return found.sort((a, b) => b.score - a.score || a.path.length - b.path.length).slice(0, limit);
 }
 
+/** Where `query`'s terms match `path`, for highlighting a result found elsewhere. */
+export function fuzzyPositions(query, path) {
+  const positions = new Set();
+  for (const term of query.trim().split(/\s+/).filter(Boolean)) {
+    for (const position of fuzzyMatch(term, path)?.positions ?? []) positions.add(position);
+  }
+  return positions;
+}
+
 // --- Lists --------------------------------------------------------------------------
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -393,8 +402,14 @@ export class FilesClient {
     return this._json("/v1/files/places");
   }
 
-  index(dir, { hidden = false } = {}) {
-    return this._json(`/v1/files/index?dir=${encodeURIComponent(dir)}${hidden ? "&hidden=1" : ""}`);
+  /** The best matches under `dir`, from the helper's index: `{paths, matched, total, scanning}`. */
+  find(dir, query, { hidden = false } = {}) {
+    return this._json(`/v1/files/find?dir=${encodeURIComponent(dir)}&q=${encodeURIComponent(query)}${hidden ? "&hidden=1" : ""}`);
+  }
+
+  /** `path` (relative to `dir`) was chosen for `query`: it ranks higher next time. */
+  findOpened(dir, query, path) {
+    return this._post("/v1/files/find/opened", { dir, query, path });
   }
 
   preview(path) {

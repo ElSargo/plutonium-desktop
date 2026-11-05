@@ -11,14 +11,15 @@ Hydra is a desktop, so there may be no other file manager to fall back on. Its o
 - **Previews** are Hydra's: its syntax-highlighted source viewer, its markdown and table rendering, images, video and audio.
 - **Keys:** Yazi's defaults, as real rules in Hydra's keybindings (`when: filesFocus`): Settings, Keybindings, under File manager, where they can be changed like any other. A sequence such as `gg` is written `g g` in `keybindings.json`; the settings' recorder takes single keys, so a new sequence goes in that file. `~` or `?` lists the current keys. The core's `DEFAULT_KEYMAP` (`helper/web/ui/files.js`) is the same set, for other shells. `hjkl`, `gg`, `G`, `<C-d>`, `<C-u>`, `space`, `v`, `y`, `x`, `p`, `P`, `d` (trash), `D` (delete, asks first), `a` (a trailing `/` makes a folder), `r`, `u` (undo), `.`, `f`, `/`, `n`, `N`, `,n`, `,m`, `,s`, `,e`, `,r`, `gh`, `gd`, `gp`, `g/`, `gl`, `H`, `L`, `o`, `c`, `i`. `b` picks the selection up (below). The grid reads `hjkl` as moves through its cells, so `Enter` opens a folder there and `Backspace` goes up.
 - **The mouse:** click, Ctrl-click and Shift-click select, a double click opens, a right click gives the menu, and everything in the keymap has a toolbar button or a menu item where it makes sense.
-- **The fuzzy finder** (`z`): Telescope's layout, the list and query on the left, a preview on the right. It searches everything under the folder: `fd`'s list if `fd` is installed (it honours `.gitignore`), else a walk that skips `.git`, `node_modules` and the like. Words are separate terms. `Ctrl+J`/`Ctrl+K` move, `Tab` marks several, `Enter` opens or chooses, `Ctrl+Enter` goes to the file instead. A result can be dragged anywhere, or picked up with `Ctrl+B`; marked results go together.
+- **Resizing:** the handles between columns, a list and its preview, Places and panes drag; a double click puts them back. Sizes are each file manager's own.
+- **The fuzzy finder** (`z`): search on top, results on the left, a preview on the right ("The fuzzy finder" below). Words are separate terms. `Ctrl+J`/`Ctrl+K` move, `Tab` marks several, `Enter` opens or chooses, `Ctrl+Enter` goes to the file instead. A result can be dragged anywhere, or picked up with `Ctrl+B`; marked results go together.
 - **File operations** run as jobs in the helper, shown in the status bar with a cancel button. Copies use reflinks where the disk can. A taken name gets a number (`note (2).txt`); `P` replaces it. `d` is the freedesktop trash (`$XDG_DATA_HOME/Trash`), so Dolphin and others see it too. `u` undoes a copy (to the trash), a move, a rename or a trash. A delete, or a paste that replaced something, can't be undone.
 
 ## Where it opens
 
 | | |
 |---|---|
-| `Ctrl+E` (`Super+E` from a tab or app) | The drawer at the bottom of the thread, beside the terminals if they are open, so whatever is on the side is a drop away. `Esc` with nothing left to clear closes it. It is `files.toggle`; `files.toggleRight` (`Super+Shift+E`) opens the panel's Files tab instead, so which one you use is a matter of keys. Ctrl+E is only bound outside terminals, and doesn't reach past a tab or an app, where it means something else. |
+| `Ctrl+E` (`Super+E` from a tab, app or terminal) | The drawer at the bottom of the thread, so whatever is on the side is a drop away. It takes the terminal's place, one at a time: `Ctrl+J` brings the terminal back, and the switch above them goes either way. Both stay as they were while they're away. The switch's button puts them side by side instead. `Esc` with nothing left to clear puts the drawer away. It is `files.toggle`; `files.toggleRight` (`Super+Shift+E`) opens the panel's Files tab instead, so which one you use is a matter of keys. Ctrl+E is only bound outside terminals, and doesn't reach past a tab or an app, where it means something else. |
 | The right panel's Files tab | The same file manager, for a project on this computer (the helper can list it). A remote environment's project keeps T3's own tree: only that server can reach its files. |
 | A picker | A floating dialog over whatever asked. |
 
@@ -33,6 +34,16 @@ With a shell on each display several pages are visible, and an app's dialog has 
 Apps get `GTK_USE_PORTAL=1` and `GDK_DEBUG=portals` from their thread's environment, so GTK's portal-aware chooser and Firefox come here, and Chromium does by itself. **An app that draws its own `GtkFileChooserDialog` keeps it, whatever the environment says:** LibreOffice's GTK 3 plugin and GIMP do.
 
 A picker keeps filters, choices, the save name and the overwrite and folder-upload confirmations. Only one is open at a time; a second asker is cancelled. A name typed in a save dialog may be a whole path.
+
+## The fuzzy finder
+
+A home folder can hold millions of files. The page never sees them: `GET /v1/files/find` returns the best few hundred, and the search is `fff`'s ([fff.nvim](https://github.com/dmtrKovalenko/fff.nvim), `@ff-labs/fff-node`, the library T3 Code's own workspace search uses), which indexes a folder and searches it in native code. It also learns from what's chosen (`/v1/files/find/opened`, frecency in `$XDG_DATA_HOME/plutonium/fff`).
+
+- **Measured** on a home of 4 million paths: a scan of about 6 s, during which results already come back and grow; 120 to 300 ms a search; one 103 ms long task in the page over a whole scan and search. The JS matcher this replaced took up to 2.5 s a keystroke in the page, on the first 200,000 paths.
+- **A process of its own** (`fileFinderWorker.ts`). `fff`'s calls block, so they can't be on the helper's thread, and ending a worker thread with it loaded crashes the whole process (seen: SIGSEGV), so not a worker thread either. If the process dies, that search fails and the next starts another.
+- **Memory:** about 1 GB for those 4 million paths. An index that hasn't been searched for 3 minutes goes; with none left the process ends, which gives it all back. So the next search there scans again. There's no file watching (a home folder is too many files to watch): a new index is the way to see new files.
+- **Typing outruns a search**, so a query waits for the one running and a newer one replaces it (it answers `superseded`).
+- **Dot files:** `fff` never indexes them. With dot files shown the finder uses the fallback, a walk of up to 200,000 paths matched by `files.js`, off the helper's thread, as it does if `fff` can't load.
 
 ## Drag and drop
 
@@ -54,7 +65,7 @@ How: `startFileDrag(paths, {imagePng})` asks the broker, which runs Ash's `DragD
 
 ## The parts
 
-- **Helper** (`helper/src/fileOps.ts`, `files.ts`): `/v1/files/{jobs,rename,file,index,preview,raw,open,upload,watch}`, beside the picker's listing, with the same rule: only a shell page gets there (its origin, and the socket's peer uid). The root, the home folder and what holds it can't be moved or removed. `raw` serves only media types: no SVG or HTML, which could run in the page that opens them.
+- **Helper** (`helper/src/fileOps.ts`, `files.ts`, `fileFinder.ts`): `/v1/files/{jobs,rename,file,find,preview,raw,open,upload,watch}`, beside the picker's listing, with the same rule: only a shell page gets there (its origin, and the socket's peer uid). The root, the home folder and what holds it can't be moved or removed. `raw` serves only media types: no SVG or HTML, which could run in the page that opens them.
 - **The core** (`helper/web/ui/files.js`, served at `/v1/ui/files.js`): no UI. The API client, the keymap, the fuzzy matcher, sorting, filters and undo. Another shell draws on this.
 - **The shell library:** `fileForPath`, `pathForFile`, `startFileDrag`, `focusPage`.
 - **Hydra** (`apps/web/src/plutonium/files/`): `useFileManager.ts` is the state and commands; `FileManager.tsx` the views; `FilePicker.tsx`, `PlutoniumFilesDrawer.tsx` and `HydraFilesPanel.tsx` the three places it appears.
@@ -76,6 +87,8 @@ On X11 in a worktree's slot, with `xdotool`'s real input through Ash (2026-11-05
 | A row dragged to a page target, to a folder (moves), to Dolphin; a carry to Dolphin; a file from Dolphin to a folder row (`WAYLAND_DEBUG` shows the offer, `finish()` and Dolphin's menu) | ✓ |
 
 Through a real portal (`tools/portal-bus.sh`, two displays, 2026-11-05): `OpenFile` opens the picker on the display with the keyboard, four times of four, alternating; Chromium 147's Ctrl+O and zenity (GTK 4) reach it; LibreOffice opens its own dialog.
+
+With the terminal (2026-11-05): `Ctrl+E`, `Ctrl+J` and `Super+E` hand the bottom over each way, the keyboard following; `Esc` and `Super+E` put it away and bring it back as it was; side by side still works. A column handle dragged 120 px moves 120 px, the next one stays, and it's remembered.
 
 **Not tried:** a carry across displays; these portal checks on DRM.
 
