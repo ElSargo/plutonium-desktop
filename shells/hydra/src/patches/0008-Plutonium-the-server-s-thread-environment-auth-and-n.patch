@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:50 +1300
-Subject: [PATCH 08/11] Plutonium: the server's thread environment, auth and
+Subject: [PATCH 08/12] Plutonium: the server's thread environment, auth and
  network access
 
 Folded from:

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:47 +1300
-Subject: [PATCH 01/11] Plutonium: the shared module, and the contracts and
+Subject: [PATCH 01/12] Plutonium: the shared module, and the contracts and
  keybindings it adds
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

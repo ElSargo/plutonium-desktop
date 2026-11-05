@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:51 +1300
-Subject: [PATCH 10/11] Plutonium: agents drive windows and tabs
+Subject: [PATCH 10/12] Plutonium: agents drive windows and tabs
 
 Folded from:
 - agents drive windows and tabs
