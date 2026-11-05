@@ -61,10 +61,10 @@ index c310a8b0d8..bc98cf6cf5 100644
          })),
        });
 diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
-index 438c865d71..bc5f5406dc 100644
+index 4be11d671e..cbd0ec46c6 100644
 --- a/apps/web/src/keybindings.ts
 +++ b/apps/web/src/keybindings.ts
-@@ -180,11 +180,19 @@ function matchesCommandShortcut(
+@@ -184,11 +184,19 @@ function matchesCommandShortcut(
    return resolveShortcutCommand(event, keybindings, options) === command;
  }
  
@@ -81,9 +81,9 @@ index 438c865d71..bc5f5406dc 100644
  ): KeybindingCommand | null {
 +  // Plutonium: a field recording a shortcut (a dock slot's key) gets every key.
 +  if (isRecordingShortcut()) return null;
+   if (plutoniumFuzzyOwnsKey(event)) return null;
    // The file manager's keys are its own while it has the keyboard (Ctrl+D isn't the diff).
    if (
-     plutoniumFilesFocused() &&
 diff --git a/apps/web/src/plutonium/PlutoniumDock.browser.test.tsx b/apps/web/src/plutonium/PlutoniumDock.browser.test.tsx
 new file mode 100644
 index 0000000000..1dbce10539
@@ -1089,7 +1089,7 @@ index a6be2de39b..e117b96368 100644
      timeout: 3000,
    });
 diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
-index df55888a00..d6d8f2103e 100644
+index cd422343c1..a296d63eea 100644
 --- a/packages/contracts/src/keybindings.ts
 +++ b/packages/contracts/src/keybindings.ts
 @@ -49,42 +49,26 @@ export const RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS = [
@@ -1153,10 +1153,10 @@ index df55888a00..d6d8f2103e 100644
  const THREAD_KEYBINDING_COMMANDS = [
    "thread.stop",
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index 3526c7c42b..b45f9cf04a 100644
+index ec2f968ae0..9e73ef110b 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
-@@ -242,17 +242,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -246,17 +246,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "q", command: "files.closePane", when: "filesFocus" },
    // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
    // with Shift to put what has the keyboard there; Super+Up split ↔ fold.

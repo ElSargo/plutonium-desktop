@@ -402,7 +402,7 @@ export class FilesClient {
     return this._json("/v1/files/places");
   }
 
-  /** The best matches under `dir`, from the helper's index: `{paths, matched, total, scanning}`. */
+  /** The best matches under `dir`, from the helper's index: `{paths, matched, total, scanning, indexed}`. */
   find(dir, query, { hidden = false } = {}) {
     return this._json(`/v1/files/find?dir=${encodeURIComponent(dir)}&q=${encodeURIComponent(query)}${hidden ? "&hidden=1" : ""}`);
   }
