@@ -74,6 +74,11 @@ describe("the fuzzy matcher", () => {
     assert.equal(core.fuzzyFilter("  ", paths).length, 3);
   });
 
+  test("positions for highlighting a result found elsewhere", () => {
+    assert.deepEqual([...core.fuzzyPositions("fb ar", "foo/bar")].sort(), [0, 4, 5, 6]);
+    assert.equal(core.fuzzyPositions("zzz", "foo").size, 0);
+  });
+
   test("two hundred thousand paths in a moment", () => {
     const paths = Array.from({ length: 200_000 }, (_, n) => `some/folder/${n % 100}/file-${n}.ts`);
     const start = performance.now();
