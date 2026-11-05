@@ -251,6 +251,10 @@ export class Threads {
       GDK_BACKEND: "wayland",
       QT_QPA_PLATFORM: "wayland",
       MOZ_ENABLE_WAYLAND: "1",
+      // Apps' file dialogs through the portal, so the desktop's picker: GTK 3 and
+      // Firefox, GTK 4. An app that draws its own GtkFileChooserDialog keeps it.
+      GTK_USE_PORTAL: "1",
+      GDK_DEBUG: "portals",
       // Electron apps run on Wayland too: on the thread's own X server, an
       // app's screen capture (Discord's) would only see that server's windows.
       // Electron 38 and later ignore the hint and go by the session type.

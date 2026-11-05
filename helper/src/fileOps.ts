@@ -410,7 +410,7 @@ export async function fileIndex(
 /** The start of `path`, for the preview pane: its text, or that it's binary. */
 export async function previewText(
   path: unknown,
-  limit = 64 * 1024,
+  limit = 1024 * 1024,
 ): Promise<{ path: string; size: number; binary: boolean; text: string; truncated: boolean }> {
   const file = absolute(path);
   try {

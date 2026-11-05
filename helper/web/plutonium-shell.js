@@ -1839,6 +1839,13 @@ export class PlutoniumShell extends EventTarget {
         if (typeof option === "function") return option(args);
         return new ShortcutBinder(this, args).ask();
       }
+      case "page_state":
+        // Which of several visible pages an app's dialog belongs on (the helper's pageFor).
+        return {
+          showsWindow: !!this.shownWindowElement(args.windowId),
+          hasFocus: document.hasFocus(),
+          displayFocused: !!this.display?.focused,
+        };
       case "file_chooser": {
         // A native app's file picker (the FileChooser portal): the same picker as tabs'
         // (the "fileChooser" option: false leaves the app without one).

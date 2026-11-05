@@ -1202,6 +1202,29 @@ export class Daemon {
   }
 
   /**
+   * The page an app's dialog belongs on. With a shell on each display several pages are
+   * visible, and "the one shown last" can be on the other monitor, where nobody sees the
+   * dialog the app is waiting for: the page showing the app's window, else the one with
+   * the keyboard, else the one on the focused display. Undefined leaves it to the relay.
+   */
+  private async pageFor(windowId: unknown): Promise<string | undefined> {
+    const pages = this.relay.pages().filter(({ visible }) => visible);
+    if (pages.length < 2) return undefined;
+    const states = await Promise.all(
+      pages.map(async ({ key }) => {
+        const reply = await this.relay.requestPage(key, "page_state", { windowId }, 800).catch(() => null);
+        const state = reply?.kind === "json" ? (reply.value as Record<string, unknown> | null) : null;
+        return { key, state };
+      }),
+    );
+    for (const wanted of ["showsWindow", "hasFocus", "displayFocused"]) {
+      const found = states.find(({ state }) => state?.[wanted] === true);
+      if (found) return found.key;
+    }
+    return undefined;
+  }
+
+  /**
    * Opens a downloaded file (or with `show`, its folder) in `thread`, with
    * the thread's environment (its xdg-open goes through the opener). Not
    * FileManager1.ShowItems: D-Bus would start the file manager outside the
@@ -2921,7 +2944,10 @@ export class Daemon {
         apps: this.apps,
         threadForPid,
         askShell: async (op, args, timeoutMs) => {
-          const reply = await this.relay.request(op, args, timeoutMs);
+          const page = await this.pageFor((args.source as { windowId?: unknown } | undefined)?.windowId);
+          const reply = page
+            ? await this.relay.requestPage(page, op, args, timeoutMs)
+            : await this.relay.request(op, args, timeoutMs);
           return reply.kind === "json" ? reply.value : null;
         },
         notifyShells: (op, args) => this.relay.notifyAll(op, args),

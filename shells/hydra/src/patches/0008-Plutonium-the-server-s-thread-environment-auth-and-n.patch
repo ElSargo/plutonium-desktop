@@ -19,6 +19,7 @@ Folded from:
  apps/server/src/auth/EnvironmentAuth.ts       |   4 +
  apps/server/src/auth/utils.ts                 |  13 ++-
  apps/server/src/cli/auth.ts                   |  13 ++-
+ apps/server/src/keybindings.ts                |   3 +-
  .../Adapters/ClaudeAdapterV2.ts               |   4 +-
  .../Adapters/CodexAdapterV2.ts                |   3 +
  apps/server/src/plutonium/networkAccess.ts    | 108 ++++++++++++++++++
@@ -27,7 +28,7 @@ Folded from:
  apps/server/src/server.ts                     |  10 ++
  apps/server/src/terminal/Manager.ts           |  10 ++
  apps/server/src/ws.ts                         |  13 ++-
- 11 files changed, 336 insertions(+), 10 deletions(-)
+ 12 files changed, 338 insertions(+), 11 deletions(-)
  create mode 100644 apps/server/src/plutonium/networkAccess.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.test.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.ts
@@ -131,6 +132,20 @@ index b75fba88bd..12c99be3c5 100644
            });
            yield* Console.log(
              formatIssuedSession(issued, {
+diff --git a/apps/server/src/keybindings.ts b/apps/server/src/keybindings.ts
+index 0a5bfdd424..406b8c3d3f 100644
+--- a/apps/server/src/keybindings.ts
++++ b/apps/server/src/keybindings.ts
+@@ -152,7 +152,8 @@ function encodeShortcut(shortcut: KeybindingShortcut): string | null {
+   if (!shortcut.key) return null;
+   if (shortcut.key !== "+" && shortcut.key.includes("+")) return null;
+   const key = shortcut.key === " " ? "space" : shortcut.key;
+-  return [...modifiers, key].join("+");
++  const encoded = [...modifiers, key].join("+");
++  return shortcut.prefix ? `${shortcut.prefix} ${encoded}` : encoded;
+ }
+ 
+ function encodeWhenAst(node: KeybindingWhenNode): string {
 diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
 index d2ae14545d..142803e2fc 100644
 --- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts

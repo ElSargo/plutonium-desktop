@@ -192,6 +192,11 @@ export class ShellRelay {
     this.connections.get(key)?.response.write(`data: ${JSON.stringify({ op, args })}\n\n`);
   }
 
+  /** The connected pages, for choosing one (`requestPage`). */
+  pages(): { key: string; visible: boolean }[] {
+    return [...this.connections.values()].map(({ key, visible }) => ({ key, visible }));
+  }
+
   private pick(shellId?: string): Connection | undefined {
     let best: Connection | undefined;
     const candidates = [...this.connections.values()];
@@ -215,7 +220,20 @@ export class ShellRelay {
     timeoutMs = 5_000,
     shellId?: string,
   ): Promise<RelayReply> {
-    const connection = this.pick(shellId);
+    return this.send(this.pick(shellId), op, args, timeoutMs);
+  }
+
+  /** Sends `op` to page `key`, whichever shell and display it is on. */
+  requestPage(key: string, op: string, args: Record<string, unknown> = {}, timeoutMs = 5_000): Promise<RelayReply> {
+    return this.send(this.connections.get(key), op, args, timeoutMs);
+  }
+
+  private send(
+    connection: Connection | undefined,
+    op: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<RelayReply> {
     if (!connection) {
       return Promise.reject(new RelayError(503, "No Plutonium shell is connected to the helper."));
     }
