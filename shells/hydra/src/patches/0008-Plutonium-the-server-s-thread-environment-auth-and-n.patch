@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:50 +1300
-Subject: [PATCH 08/10] Plutonium: the server's thread environment, auth and
+Subject: [PATCH 08/11] Plutonium: the server's thread environment, auth and
  network access
 
 Folded from:
@@ -27,8 +27,8 @@ Folded from:
  .../server/src/plutonium/threadPermissions.ts |  90 +++++++++++++++
  apps/server/src/server.ts                     |  10 ++
  apps/server/src/terminal/Manager.ts           |  10 ++
- apps/server/src/ws.ts                         |  13 ++-
- 12 files changed, 338 insertions(+), 11 deletions(-)
+ apps/server/src/ws.ts                         |  38 ++----
+ 12 files changed, 338 insertions(+), 36 deletions(-)
  create mode 100644 apps/server/src/plutonium/networkAccess.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.test.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.ts
@@ -547,7 +547,7 @@ index 6a661db4e0..bcda1f30cd 100644
              ptyProcess = spawnResult.process;
              startedShell = spawnResult.shellLabel;
 diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
-index 2bd0acc22b..fa3fc5d730 100644
+index 2bd0acc22b..085b35a52e 100644
 --- a/apps/server/src/ws.ts
 +++ b/apps/server/src/ws.ts
 @@ -193,6 +193,8 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -559,7 +559,52 @@ index 2bd0acc22b..fa3fc5d730 100644
  import { issueAssetUrl } from "./assets/AssetAccess.ts";
  import {
    attachmentRelativePath,
-@@ -3152,8 +3154,15 @@ export const layerWsRpc = (
+@@ -238,7 +240,6 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+ import * as HostResources from "./resourceTelemetry/HostResources.ts";
+ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+ import { commandFeatureUsage, featureUsage } from "./telemetry/FeatureUsage.ts";
+-import type { TelemetryOwner } from "./telemetry/Identify.ts";
+ import * as UsageService from "./usage/UsageService.ts";
+ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+ import * as TriageService from "./triage/TriageService.ts";
+@@ -262,7 +263,6 @@ import * as SessionStore from "./auth/SessionStore.ts";
+ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
+ import { isNetworkPath } from "@t3tools/shared/path";
+ import * as RelayClient from "@t3tools/shared/relayClient";
+-import { isTelemetryIdHash } from "@t3tools/shared/telemetryId";
+ import {
+   sameUsageLimitCommandCoverage,
+   withUsageLimitsCommands,
+@@ -754,28 +754,6 @@ function readClientAnalyticsProps(request: HttpServerRequest.HttpServerRequest)
+   };
+ }
+ 
+-/**
+- * Owners a connecting client reports: its hashed T3 Connect account and its
+- * hashed device id. Only hashes are accepted, so a raw id never reaches analytics.
+- */
+-function readClientOwners(
+-  request: HttpServerRequest.HttpServerRequest,
+-): ReadonlyArray<TelemetryOwner> {
+-  const url = requestUrl(request);
+-  if (Option.isNone(url)) {
+-    return [];
+-  }
+-  const params = url.value.searchParams;
+-  return (
+-    [
+-      ["connect", params.get("clientOwner")],
+-      ["device", params.get("clientDevice")],
+-    ] as const
+-  ).flatMap(([source, ownerId]) =>
+-    ownerId !== null && isTelemetryIdHash(ownerId) ? [{ source, ownerId }] : [],
+-  );
+-}
+-
+ const canReplayPersistedRange = Effect.fnUntraced(function* (
+   afterSequence: number,
+   headSequence: number,
+@@ -3152,8 +3130,15 @@ export const layerWsRpc = (
          [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
          [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
          [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
@@ -577,3 +622,11 @@ index 2bd0acc22b..fa3fc5d730 100644
          [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
          [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
          [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
+@@ -3455,7 +3440,6 @@ export const layer = Layer.unwrap(
+           ),
+         );
+         const clientAnalyticsProps = readClientAnalyticsProps(request);
+-        yield* analytics.recordOwners(readClientOwners(request), "client");
+         const reportProfiles = yield* serverBrowser.profileReporter;
+         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
+           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
