@@ -1,8 +1,8 @@
 # The dock in Hydra
 
-**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope"). Since 2026-11-01 a slot holds one window or tab, not every one that looks like it ("Identity-based slots", T3 patch 0048).
+**Status:** design agreed 2026-10-27. Step 1 is T3 patch 0031 and the sidebar's dock 0032 ("Step 1 as built", "The dock in the sidebar", below); sites kept per project or everywhere are 0034 ("Sites in a scope"). Since 2026-11-01 a slot holds one window or tab, not every one that looks like it ("Identity-based slots", T3 patch 0048). Since 2026-11-05 the dock has four slots or more and scrolls, and a slot's editor sets its keys ("Any number of slots", Hydra patch 0012).
 
-Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is nine slots on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a status cluster at the title bar's right end, it makes Hydra a desktop without changing how its chat works.
+Hydra works well for agents, less well as the desktop you use all day: everything has to be in a thread, nothing is a key away, and there is no clock or tray. The dock is four slots or more (up to 24), the first nine on Super+1…9, each an app, a site or a group, each in a scope (one thread, the thread's project, or everywhere). With a status cluster at the title bar's right end, it makes Hydra a desktop without changing how its chat works.
 
 ## Slots
 
@@ -44,6 +44,8 @@ An app started for a slot runs with its scope's tag as `PLUTONIUM_THREAD_ID`, so
 | Super+1…9 | `dock.slot.N` | The slot, in its layout |
 | Super+Ctrl+1…9 | `dock.slotOther.N` | The slot, in the other layout this time |
 | Super+Shift+1…9 | `dock.assign.N` | Put the focused tab, app or terminal in slot N |
+
+N runs to 24. Slots 10 and up have no key until the slot's editor (or `keybindings.json`) gives them one.
 | Super+Up | `dock.toggleLayout` | Split ↔ fold for the slot you're in; the thread remembers it |
 
 Pressing a slot's key:
@@ -56,7 +58,7 @@ Just after switching threads, step 3 doesn't apply: the switch gave the composer
 
 A group slot raises its last-used member, and pressing again cycles. Super+Shift+Alt+N (to be decided) opens a fuzzy picker of the group, with its members not open yet and "add the current tab". The `"rest"` group is everything in its scope no other slot claims.
 
-They are all T3 keybinding commands, so `keybindings.json` can change them. They are shell shortcuts too: they reach Hydra while an app or tab has the keyboard. Alt+1…9 stays with apps (Firefox, terminals and editors use it).
+They are all T3 keybinding commands, so `keybindings.json` can change them, and so can the slot's editor (**Keys**, below). They are shell shortcuts too: they reach Hydra while an app or tab has the keyboard. Alt+1…9 stays with apps (Firefox, terminals and editors use it).
 
 ## Layouts
 
@@ -66,17 +68,17 @@ They are all T3 keybinding commands, so `keybindings.json` can change them. They
 
 ## The dock in the sidebar
 
-A row of nine buttons just above the sidebar's settings row, wrapping when the sidebar is narrow (all nine fit at its default width). Each shows the slot's icon (the terminal, the app's own icon, the site's own icon: an open tab's, then the one T3 remembers, then the one the helper fetches (`shell.siteIcon`: what the site's front page names with `<link rel="icon">`, else its `/favicon.ico`; the page can't load every site's itself, since some, like claude.ai, forbid other origins it); no third-party icon service) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
+Buttons just above the sidebar's settings row, four of them by default. They sit in rows of the same length: as many to a row as fit at 1.375rem each, at least four (narrower, they shrink), split evenly so the rows are full when the count allows (ten where eight fit: two rows of five; seven where six fit: four and three). A slot grows up to 1.75rem; past that the rows center. Past two rows the dock scrolls (snapping to rows, faded at the edge that has more) and brings the slot that shows into view. Each shows the slot's icon (the terminal, the app's own icon, the site's own icon: an open tab's, then the one T3 remembers, then the one the helper fetches (`shell.siteIcon`: what the site's front page names with `<link rel="icon">`, else its `/favicon.ico`; the page can't load every site's itself, since some, like claude.ai, forbid other origins it); no third-party icon service) and its number: faint when empty, dimmed when set but nothing of it runs in the thread's scope, normal when running, ringed when it shows. Hovering says the key, what it is, where it's kept and what a click does.
 
 - **Click:** what Super+N does. Clicking the one that shows goes back, or puts it away (panel hidden, drawer closed) when there's nowhere remembered to go back to. The click doesn't take the keyboard.
-- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (the address a new tab of it opens at), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere; the terminal is always the thread's); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; clear.
+- **Right click** (or a click on an empty slot): the slot editor, above the dock, each change applied as it's made. It opens a terminal, an app (a searchable list of installed apps) or a site (the address a new tab of it opens at), or takes the panel's tab; a name; where it's kept (this thread, this project, everywhere; the terminal is always the thread's); beside the chat or chat folded, saying when the thread has its own choice from Super+Up; its **Keys** (open, other layout, put here: a click records one, Escape cancels, Backspace goes back to the default or to none, a warning names what else has it; saved to the server's `keybindings.json` with `when: "plutoniumShell"`); **Add a slot** after it, **Remove slot** (down to four; what it held leaves it, and the slots after it move back one, their keys staying with the places); clear.
 - **Panel tabs** in the dock show their slot's number.
 
 ChatView publishes the active thread's context (`publishDockContext`) for the sidebar, which is outside it.
 
 ## Setting it up
 
-- Right-click a panel tab: **Dock ▸ Super+1…9**, **Dock scope ▸ thread / project / everywhere**, **Remove from dock**.
+- Right-click a panel tab: **Dock ▸** the dock's slots, by their keys, **Dock scope ▸ thread / project / everywhere**, **Remove from dock**.
 - Super+Shift+N assigns what has the keyboard.
 - The file (`~/.pluto/dock.json`, project overrides) is the source of truth once templates exist (step 2); step 1 keeps the slots in the page's storage.
 
@@ -162,7 +164,7 @@ Now a slot holds one thing:
 - **The id changes** when the slot names another app or site (another desktop entry, another host): then what it held anywhere loses the tag. The same site at another address (`github.com/a` to `github.com/a/pulls`), a new name, layout or scope keep it, so what it holds in other threads stays.
 - **Changing the scope** retags only what the slot holds here: it gets the new scope's tag, and loses a project's or `t3:global` (a thread's tag stays: the thread shows it, its agent reaches it). Copies in other threads of a slot kept per thread are no longer found.
 - **Clearing a slot** (the editor, **Remove from the dock**) takes its tag off everything.
-- **Stored slots** (`t3code:plutonium-dock:v1`, version 2) get an id and lose `match`. Nothing carries the new id, so the first press opens a fresh one, or Super+Shift+N binds what's open. Tags live in the browser, so a reload of the page keeps them; after a browser restart the press opens a fresh one.
+- **Stored slots** (`t3code:plutonium-dock:v1`, version 2) get an id and lose `match`. Version 3 adds the dock's count: as many as the last slot set, at least four. Nothing carries the new id, so the first press opens a fresh one, or Super+Shift+N binds what's open. Tags live in the browser, so a reload of the page keeps them; after a browser restart the press opens a fresh one.
 - **Gone:** the "Tabs start with" field, `siteMatchOf`, `match` on sites, cycling through copies. Groups and their rules (step 3) are still to come.
 - **Not done: dialogs following their window.** An app's dialog shown as its own panel tab isn't the slot's, so the button says "running" while it shows, and the key raises the main window (Exo then gives a modal dialog the focus). The shells don't see which window a dialog belongs to: Exo knows the parent (`xdg_toplevel.set_parent`, `xdg_wm_dialog_v1`), but the broker's window entry doesn't carry it. That needs a Chromium patch adding the parent to the entry; then the lookup can count a window's dialogs as part of it.
 
@@ -183,3 +185,12 @@ Verified on Xvfb (slot 35, its own T3 data, a scratch project, two draft threads
 | Super+Shift+5 on the foot window: slot 5 holds it, kept per project (its tags) | ✅ |
 | Reloading the page: the slots find what they held | ✅ |
 | On DRM, through Ash; an app's dialogs | not yet |
+
+## Any number of slots (2026-11-05, Hydra patch 0012)
+
+- `DOCK_MAX_SLOTS` (24) in the contracts: `dock.slot.N`, `dock.slotOther.N` and `dock.assign.N` for each; the defaults bind the first nine only.
+- The store keeps `count` (`insertSlot`, `removeSlot` move the later slots and threads' own layouts along; a slot set past the end, by a key from `keybindings.json`, grows the dock to it). `dockGrid` (PlutoniumDock.tsx) works out the rows from the dock's measured width.
+- Labels, toasts and the tab menu say a slot's key as it is bound now (`dockKeyLabel`, Super first), else "Slot N".
+- While a field recording a shortcut (`[data-keybinding-capture]`) has focus, `resolveShortcutCommand` answers nothing, so pressing a slot's current key there records it instead of running it.
+- Tested: unit tests for the grid, the count, moving slots and the labels; a browser test (`PlutoniumDock.browser.test.tsx`) for the rows, the scrolling, the editor's keys and adding and removing. Not yet tried in a running Hydra.
+

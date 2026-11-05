@@ -1,0 +1,1180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 16:04:09 +1300
+Subject: [PATCH 12/12] Plutonium: the dock scrolls, from four slots up, and a
+ slot's editor sets its keys
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Four slots by default, up to 24: the slot editor adds one after it or
+  removes it (the slots after it move along; keys stay with places).
+- Rows of the same length, at least four to a row, as many as fit the
+  sidebar, split evenly so rows are full when the count allows (ten where
+  eight fit: two rows of five). Past two rows the dock scrolls.
+- The editor's Keys: a slot's key, its other-layout key and its put-here
+  key, each recorded with a click and saved to keybindings.json. Slots past
+  the ninth have commands (dock.slot.10…24 and the rest) but no default key.
+- Labels and toasts say the slot's own key, not Super+N.
+- A field recording a shortcut gets every key: resolveShortcutCommand
+  answers nothing while one has focus.
+- Stored dock state version 3: a count, enough for the last slot set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/RightPanelTabs.tsx    |   7 +-
+ apps/web/src/keybindings.ts                   |   8 +
+ .../plutonium/PlutoniumDock.browser.test.tsx  |  81 +++++
+ apps/web/src/plutonium/PlutoniumDock.test.ts  |  31 +-
+ apps/web/src/plutonium/PlutoniumDock.tsx      | 321 ++++++++++++++++--
+ apps/web/src/plutonium/dock.test.ts           |  71 +++-
+ apps/web/src/plutonium/dock.ts                | 187 +++++++++-
+ packages/contracts/src/keybindings.ts         |  50 +--
+ packages/shared/src/keybindings.ts            |   7 +-
+ 9 files changed, 679 insertions(+), 84 deletions(-)
+ create mode 100644 apps/web/src/plutonium/PlutoniumDock.browser.test.tsx
+
+diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
+index c310a8b0d8..bc98cf6cf5 100644
+--- a/apps/web/src/components/RightPanelTabs.tsx
++++ b/apps/web/src/components/RightPanelTabs.tsx
+@@ -113,6 +113,7 @@ import {
+   assignDockSlot,
+   clearDockSlot,
+   DOCK_SLOT_NUMBERS,
++  dockKeyText,
+   type DockContext,
+   type DockScope,
+   type DockSlotNumber,
+@@ -1291,10 +1292,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+     if (dock && (surface.kind === "app" || (surface.kind === "preview" && surface.resourceId))) {
+       items.push({
+         id: "dock-assign-1",
+-        label: inSlot ? `In the dock (Super+${inSlot})` : "Add to the dock",
+-        children: DOCK_SLOT_NUMBERS.map((number) => ({
++        label: inSlot ? `In the dock (${dockKeyText(inSlot)})` : "Add to the dock",
++        children: DOCK_SLOT_NUMBERS.slice(0, useDockStore.getState().count).map((number) => ({
+           id: `dock-assign-${number}` as const,
+-          label: `Super+${number}: ${dockSlotLabel(currentDockSlots[number])}`,
++          label: `${dockKeyText(number)}: ${dockSlotLabel(currentDockSlots[number])}`,
+           checked: number === inSlot,
+         })),
+       });
+diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
+index 438c865d71..bc5f5406dc 100644
+--- a/apps/web/src/keybindings.ts
++++ b/apps/web/src/keybindings.ts
+@@ -180,11 +180,19 @@ function matchesCommandShortcut(
+   return resolveShortcutCommand(event, keybindings, options) === command;
+ }
+ 
++function isRecordingShortcut(): boolean {
++  if (typeof document === "undefined") return false;
++  const active = document.activeElement;
++  return active instanceof HTMLElement && active.closest("[data-keybinding-capture]") !== null;
++}
++
+ export function resolveShortcutCommand(
+   event: ShortcutEventLike,
+   keybindings: ResolvedKeybindingsConfig,
+   options?: ShortcutMatchOptions,
+ ): KeybindingCommand | null {
++  // Plutonium: a field recording a shortcut (a dock slot's key) gets every key.
++  if (isRecordingShortcut()) return null;
+   // The file manager's keys are its own while it has the keyboard (Ctrl+D isn't the diff).
+   if (
+     plutoniumFilesFocused() &&
+diff --git a/apps/web/src/plutonium/PlutoniumDock.browser.test.tsx b/apps/web/src/plutonium/PlutoniumDock.browser.test.tsx
+new file mode 100644
+index 0000000000..1dbce10539
+--- /dev/null
++++ b/apps/web/src/plutonium/PlutoniumDock.browser.test.tsx
+@@ -0,0 +1,81 @@
++import "../index.css";
++
++import { describe, expect, it, vi } from "vite-plus/test";
++import { page, userEvent } from "vite-plus/test/browser";
++
++import { render } from "../../test/render";
++
++// The Plutonium shell's page has the window broker (isPlutoniumShell), from
++// before the keybindings module reads it.
++vi.hoisted(() => {
++  Object.defineProperty(navigator, "windowBroker", { value: {}, configurable: true });
++});
++
++import { type DockSlot, useDockStore } from "./dock";
++import { PlutoniumDock } from "./PlutoniumDock";
++
++const terminal: DockSlot = {
++  id: "t",
++  target: { kind: "terminal" },
++  scope: "thread",
++  layout: "split",
++};
++
++/** The dock in a sidebar `width` pixels wide, holding `count` slots. */
++async function dockOf(width: number, count: number) {
++  useDockStore.setState({ slots: { 1: terminal }, count, layouts: {} });
++  const container = document.createElement("div");
++  container.style.width = `${width}px`;
++  container.style.padding = "8px 0";
++  container.style.background = "var(--sidebar, #111)";
++  return render(<PlutoniumDock />, { container, router: false });
++}
++
++/** The dock's buttons' rows: how many buttons share each top edge. */
++function rows(): number[] {
++  const tops = new Map<number, number>();
++  for (const button of document.querySelectorAll<HTMLElement>("[data-dock-slot]")) {
++    const top = Math.round(button.getBoundingClientRect().top);
++    tops.set(top, (tops.get(top) ?? 0) + 1);
++  }
++  return [...tops.values()];
++}
++
++describe("the dock", () => {
++  it("shows four slots in a row by default", async () => {
++    await using _screen = await dockOf(256, 4);
++    await expect.poll(rows).toEqual([4]);
++  });
++
++  it("splits ten slots into two full rows where eight fit", async () => {
++    // (190 + 2) / 24 = 8 to a row.
++    await using _screen = await dockOf(198, 10);
++    await expect.poll(rows).toEqual([5, 5]);
++  });
++
++  it("scrolls past two rows", async () => {
++    await using _screen = await dockOf(198, 24);
++    await expect.poll(rows).toEqual([8, 8, 8]);
++    const list = document.querySelector<HTMLElement>("[data-plutonium-dock]")!;
++    expect(list.scrollHeight).toBeGreaterThan(list.clientHeight);
++  });
++
++  it("adds and removes slots from a slot's editor, and shows its keys", async () => {
++    await using _screen = await dockOf(256, 4);
++    const slot = document.querySelector<HTMLElement>('[data-dock-slot="2"]')!;
++    await userEvent.click(slot);
++    await expect.element(page.getByText("Super+Shift+2")).toBeVisible();
++
++    // A click on a key records another; Escape leaves it as it was.
++    await userEvent.click(page.getByText("Super+Ctrl+2"));
++    const field = page.getByPlaceholder("Press keys · Esc cancels");
++    await expect.element(field).toHaveFocus();
++    await userEvent.keyboard("{Escape}");
++    await expect.element(page.getByText("Super+Ctrl+2")).toBeVisible();
++
++    await userEvent.click(page.getByText("Add a slot", { exact: true }));
++    expect(useDockStore.getState().count).toBe(5);
++    await userEvent.click(page.getByText("Remove slot"));
++    expect(useDockStore.getState().count).toBe(4);
++  });
++});
+diff --git a/apps/web/src/plutonium/PlutoniumDock.test.ts b/apps/web/src/plutonium/PlutoniumDock.test.ts
+index c41024bd83..9a4b972007 100644
+--- a/apps/web/src/plutonium/PlutoniumDock.test.ts
++++ b/apps/web/src/plutonium/PlutoniumDock.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect, it } from "vite-plus/test";
+ 
+-import { normalizeSiteUrl } from "./PlutoniumDock";
++import { dockGrid, normalizeSiteUrl } from "./PlutoniumDock";
+ 
+ describe("the dock editor's address", () => {
+   it("adds https to a bare address", () => {
+@@ -18,3 +18,32 @@ describe("the dock editor's address", () => {
+     expect(normalizeSiteUrl("not a url")).toBeNull();
+   });
+ });
++
++describe("the dock's grid", () => {
++  const rem = 16;
++  // 1.375rem slots with 0.125rem gaps: (width + 2) / 24 fit to a row.
++  const at = (fit: number) => fit * 24 - 2;
++
++  it("shows four to a row at least", () => {
++    expect(dockGrid(at(11), 4, rem)).toMatchObject({ columns: 4, rows: 1 });
++    expect(dockGrid(at(2), 4, rem)).toMatchObject({ columns: 4, rows: 1 });
++    expect(dockGrid(at(2), 6, rem)).toMatchObject({ columns: 4, rows: 2 });
++  });
++
++  it("puts every slot in one row while they fit", () => {
++    expect(dockGrid(at(11), 9, rem)).toMatchObject({ columns: 9, rows: 1 });
++  });
++
++  it("splits the rows evenly", () => {
++    expect(dockGrid(at(8), 10, rem)).toMatchObject({ columns: 5, rows: 2 });
++    expect(dockGrid(at(8), 12, rem)).toMatchObject({ columns: 6, rows: 2 });
++    expect(dockGrid(at(8), 24, rem)).toMatchObject({ columns: 8, rows: 3 });
++    // No even split: as even as it gets.
++    expect(dockGrid(at(6), 7, rem)).toMatchObject({ columns: 4, rows: 2 });
++  });
++
++  it("grows a slot up to 1.75rem, and shrinks it to fit four", () => {
++    expect(dockGrid(400, 4, rem).size).toBe(28);
++    expect(dockGrid(66, 4, rem).size).toBe(15);
++  });
++});
+diff --git a/apps/web/src/plutonium/PlutoniumDock.tsx b/apps/web/src/plutonium/PlutoniumDock.tsx
+index 16a6438c6b..e37a50b4f6 100644
+--- a/apps/web/src/plutonium/PlutoniumDock.tsx
++++ b/apps/web/src/plutonium/PlutoniumDock.tsx
+@@ -1,10 +1,13 @@
+ // Plutonium: the dock in the sidebar, above the settings row. One button per
+-// slot (Super+1…9), wrapping to the sidebar's width. A click runs the slot as
+-// its key does; a right click (or a click on an empty slot) opens its editor:
+-// what it is, where it's kept, how it's laid out (dock.ts).
++// slot, four or more, in rows of the same length that fill the sidebar's
++// width (at least four to a row), scrolling past two rows. A click runs the
++// slot as its key does; a right click (or a click on an empty slot) opens its
++// editor: what it is, where it's kept, how it's laid out, its keys, and slots
++// added or taken away (dock.ts).
++import { useAtomValue } from "@effect/atom-react";
+ import type { ScopedThreadRef } from "@t3tools/contracts";
+-import { AppWindowIcon, GlobeIcon, SquareTerminalIcon } from "lucide-react";
+-import { memo, useEffect, useId, useMemo, useState } from "react";
++import { AppWindowIcon, GlobeIcon, SquareTerminalIcon, TriangleAlertIcon } from "lucide-react";
++import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+ 
+ import { useFaviconForThreadUrl } from "~/browserFaviconStore";
+ import { FaviconImage } from "~/components/preview/PreviewFaviconIcon";
+@@ -18,6 +21,14 @@ import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
+ import { cn } from "~/lib/utils";
+ import { useTheme } from "~/hooks/useTheme";
+ import { useThreadPreviewState } from "~/previewStateStore";
++import {
++  buildKeybindingRows,
++  type KeybindingRow,
++  keybindingFromKeyboardEvent,
++} from "~/components/settings/KeybindingsSettings.logic";
++import { usePrimaryEnvironmentId } from "~/state/environments";
++import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
++import { useAtomCommand } from "~/state/use-atom-command";
+ 
+ import {
+   type ActiveDock,
+@@ -25,7 +36,11 @@ import {
+   assignActiveDockSlot,
+   clearDockSlot,
+   clickDockSlot,
++  DOCK_MIN_SLOTS,
+   DOCK_SLOT_NUMBERS,
++  type DockKeyAction,
++  dockKeyCommand,
++  dockKeyLabel,
+   type DockLayout,
+   type DockScope,
+   type DockSlot,
+@@ -35,6 +50,8 @@ import {
+   dockSlotLabel,
+   dockSlotState,
+   dockSlotTabHere,
++  formatDockShortcut,
++  removeDockSlot,
+   saveDockSlot,
+   setActiveDockSlotScope,
+   useActiveDockStore,
+@@ -42,6 +59,7 @@ import {
+   useDockWorld,
+ } from "./dock";
+ import { type DesktopApp, isPlutoniumShell, plutoniumShell } from "./windowStore";
++import { DOCK_MAX_SLOTS } from "@t3tools/contracts";
+ 
+ type SiteTarget = Extract<DockTarget, { kind: "site" }>;
+ type Kind = DockTarget["kind"];
+@@ -404,8 +422,142 @@ function scopeHintOf(kind: Kind | null, scope: DockScope): string {
+   return "Each thread starts its own.";
+ }
+ 
+-function DockSlotEditor({ number }: { number: DockSlotNumber }) {
++// --- Keys ----------------------------------------------------------------------
++
++const KEY_ROWS: readonly { action: DockKeyAction; label: string }[] = [
++  { action: "slot", label: "Open" },
++  { action: "other", label: "Other layout" },
++  { action: "assign", label: "Put here" },
++];
++
++/**
++ * One of slot `number`'s keys: what it is, a click to record another, back to
++ * the default (the first nine slots) or none (the others). Saved in the
++ * server's keybindings.json, as the settings page does.
++ */
++function DockKeyField(props: {
++  number: DockSlotNumber;
++  action: DockKeyAction;
++  label: string;
++  rows: readonly KeybindingRow[];
++}) {
++  const command = dockKeyCommand(props.number, props.action);
++  const current = props.rows.find((row) => row.command === command) ?? null;
++  const defaultKey = current?.defaultKey ?? null;
++  const [recording, setRecording] = useState(false);
++  const environmentId = usePrimaryEnvironmentId();
++  const upsert = useAtomCommand(serverEnvironment.upsertKeybinding);
++  const remove = useAtomCommand(serverEnvironment.removeKeybinding);
++  const replace = current
++    ? { command, key: current.key, ...(current.when ? { when: current.when } : {}) }
++    : null;
++
++  const save = (key: string) => {
++    setRecording(false);
++    if (!environmentId || key === current?.key) return;
++    void upsert({
++      environmentId,
++      input: { command, key, when: "plutoniumShell", ...(replace ? { replace } : {}) },
++    });
++  };
++  const clear = () => {
++    setRecording(false);
++    if (environmentId && replace) void remove({ environmentId, input: replace });
++  };
++
++  return (
++    <div className="flex flex-col gap-0.5">
++      <div className="flex items-center gap-2">
++        <span className="w-24 shrink-0 text-muted-foreground text-xs">{props.label}</span>
++        {recording ? (
++          <Input
++            data-keybinding-capture=""
++            autoFocus
++            size="sm"
++            font="mono"
++            className="min-w-0 flex-1"
++            placeholder="Press keys · Esc cancels"
++            value=""
++            readOnly
++            aria-label={`${props.label} key for slot ${props.number}`}
++            onBlur={() => setRecording(false)}
++            onKeyDown={(event) => {
++              if (event.key === "Tab") return;
++              event.preventDefault();
++              event.stopPropagation();
++              if (event.key === "Escape") return setRecording(false);
++              const bare = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
++              if (bare && (event.key === "Backspace" || event.key === "Delete")) {
++                if (defaultKey) save(defaultKey);
++                else clear();
++                return;
++              }
++              const key = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform, {
++                layoutCharacter: true,
++              });
++              if (key) save(key);
++            }}
++          />
++        ) : (
++          <button
++            type="button"
++            data-dock-key={props.action}
++            onClick={() => setRecording(true)}
++            className="min-w-0 flex-1 truncate rounded-md border border-border px-2 py-1 text-left font-mono text-xs hover:bg-accent"
++          >
++            {current ? (
++              formatDockShortcut(current.binding.shortcut)
++            ) : (
++              <span className="font-sans text-muted-foreground">None · click to choose</span>
++            )}
++          </button>
++        )}
++        {defaultKey && current?.key !== defaultKey ? (
++          <Button size="xs" variant="ghost" onClick={() => save(defaultKey)}>
++            Reset
++          </Button>
++        ) : !defaultKey && current ? (
++          <Button size="xs" variant="ghost" onClick={clear}>
++            None
++          </Button>
++        ) : null}
++      </div>
++      {current && current.conflicts.length > 0 ? (
++        <span className="flex items-center gap-1 pl-26 text-warning-foreground text-xs">
++          <TriangleAlertIcon className="size-3 shrink-0" />
++          <span className="min-w-0 truncate">Also {current.conflicts.join(", ")}</span>
++        </span>
++      ) : null}
++    </div>
++  );
++}
++
++function DockKeys({ number }: { number: DockSlotNumber }) {
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
++  const rows = useMemo(() => buildKeybindingRows(keybindings), [keybindings]);
++  return (
++    <Section
++      title="Keys"
++      hint="Keys with Super reach Hydra while an app or a page has the keyboard. Backspace while choosing: the default, or none."
++    >
++      {KEY_ROWS.map((row) => (
++        <DockKeyField
++          key={row.action}
++          number={number}
++          action={row.action}
++          label={row.label}
++          rows={rows}
++        />
++      ))}
++    </Section>
++  );
++}
++
++function DockSlotEditor({ number, onClose }: { number: DockSlotNumber; onClose: () => void }) {
+   const slot = useDockStore((state) => state.slots[number]);
++  const count = useDockStore((state) => state.count);
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
++  const key = dockKeyLabel(keybindings, number);
+   const active = useActiveDockStore((state) => state.active);
+   const threadLayout = useDockStore((state) =>
+     active ? state.layouts[active.threadKey]?.[number] : undefined,
+@@ -440,7 +592,8 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+             <span className="block truncate">{slot ? dockSlotLabel(slot) : "Empty slot"}</span>
+           </PopoverTitle>
+           <span className="text-muted-foreground text-xs">
+-            Super+{number} · other layout Super+Ctrl+{number}
++            Slot {number}
++            {key ? ` · ${key}` : " · no key"}
+           </span>
+         </div>
+       </div>
+@@ -572,11 +725,30 @@ function DockSlotEditor({ number }: { number: DockSlotNumber }) {
+         ) : null}
+       </Section>
+ 
+-      <div className="flex items-center justify-between gap-2 border-border border-t pt-3">
+-        <span className="text-muted-foreground text-xs">
+-          Super+Shift+{number} puts what has the keyboard here
+-        </span>
++      <DockKeys number={number} />
++
++      <div className="flex items-center gap-1 border-border border-t pt-3">
+         <Button
++          size="xs"
++          variant="ghost"
++          disabled={count >= DOCK_MAX_SLOTS}
++          onClick={() => useDockStore.getState().insertSlot(number + 1)}
++        >
++          Add a slot
++        </Button>
++        <Button
++          size="xs"
++          variant="ghost"
++          disabled={count <= DOCK_MIN_SLOTS}
++          onClick={() => {
++            removeDockSlot(number);
++            onClose();
++          }}
++        >
++          Remove slot
++        </Button>
++        <Button
++          className="ml-auto"
+           size="xs"
+           variant="ghost-destructive"
+           disabled={!slot}
+@@ -601,10 +773,13 @@ const DockButton = memo(function DockButton(props: {
+   state: DockSlotState;
+   active: ActiveDock | null;
+   liveIcon: string | null;
++  /** Its key ("Super+3"), or null if it has none. */
++  keyLabel: string | null;
+   onEdit: (number: DockSlotNumber, anchor: HTMLElement) => void;
+ }) {
+   const { number, slot, state } = props;
+   const name = dockSlotLabel(slot);
++  const title = props.keyLabel ?? `Slot ${number}`;
+   const detail = slot
+     ? slot.target.kind === "terminal"
+       ? "the thread's terminal"
+@@ -616,7 +791,7 @@ const DockButton = memo(function DockButton(props: {
+         render={
+           <button
+             type="button"
+-            aria-label={`Super+${number}: ${name}`}
++            aria-label={`${title}: ${name}`}
+             data-dock-slot={number}
+             data-dock-state={state}
+             // The click mustn't take the keyboard from what has it.
+@@ -629,7 +804,7 @@ const DockButton = memo(function DockButton(props: {
+               props.onEdit(number, event.currentTarget);
+             }}
+             className={cn(
+-              "relative flex aspect-square w-full items-center justify-center rounded-md text-sidebar-muted-foreground transition-colors",
++              "relative flex aspect-square w-full snap-start items-center justify-center rounded-md text-sidebar-muted-foreground transition-colors",
+               "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+               state === "empty" && "opacity-35",
+               state === "idle" && "opacity-60",
+@@ -654,13 +829,13 @@ const DockButton = memo(function DockButton(props: {
+       />
+       <TooltipPopup side="top">
+         <div className="font-medium">
+-          Super+{number}
++          {title}
+           {slot ? `: ${name}` : ""}
+         </div>
+         {detail ? <div className="text-muted-foreground">{detail}</div> : null}
+         <div className="text-muted-foreground">
+           {STATE_TEXT[state]}
+-          {slot ? "; right-click to change it" : ""}
++          {slot ? "; right-click to change it, its key, or the dock's slots" : ""}
+         </div>
+       </TooltipPopup>
+     </Tooltip>
+@@ -673,8 +848,54 @@ export const PlutoniumDock = memo(function PlutoniumDock() {
+   return <Dock />;
+ });
+ 
++/** How many rows of slots show before the dock scrolls. */
++const DOCK_VISIBLE_ROWS = 2;
++
++/**
++ * The dock's grid for `count` slots in `width` pixels (`rem` pixels to the
++ * rem): as many to a row as fit at 1.375rem each, but never fewer than four,
++ * and the rows split evenly, so every row is full when the count allows
++ * (ten slots where eight fit: two rows of five). A slot grows up to 1.75rem;
++ * past that the grid centers.
++ */
++export function dockGrid(
++  width: number,
++  count: number,
++  rem: number,
++): { columns: number; rows: number; size: number; gap: number } {
++  const gap = 0.125 * rem;
++  const fit = Math.max(DOCK_MIN_SLOTS, Math.floor((width + gap) / (1.375 * rem + gap)));
++  const rows = Math.max(1, Math.ceil(count / fit));
++  const columns = Math.max(DOCK_MIN_SLOTS, Math.ceil(count / rows));
++  const size = Math.max(0, Math.min(1.75 * rem, (width - gap * (columns - 1)) / columns));
++  return { columns, rows, size, gap };
++}
++
++/** The width of `ref`'s content box, kept up to date. */
++function useContentWidth(ref: React.RefObject<HTMLElement | null>): number {
++  const [width, setWidth] = useState(0);
++  useLayoutEffect(() => {
++    const element = ref.current;
++    if (!element) return;
++    setWidth(element.clientWidth);
++    const observer = new ResizeObserver(([entry]) => {
++      if (entry) setWidth(entry.contentRect.width);
++    });
++    observer.observe(element);
++    return () => observer.disconnect();
++  }, [ref]);
++  return width;
++}
++
++const rootRem = () =>
++  typeof document === "undefined"
++    ? 16
++    : Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
++
+ function Dock() {
+   const slots = useDockStore((state) => state.slots);
++  const count = useDockStore((state) => state.count);
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+   // The windows and the browser's tabs, which hold the slots' tags.
+   const world = useDockWorld();
+   const active = useActiveDockStore((state) => state.active);
+@@ -683,38 +904,78 @@ function Dock() {
+     number: DockSlotNumber;
+     anchor: HTMLElement;
+   } | null>(null);
++  const frame = useRef<HTMLDivElement>(null);
++  const list = useRef<HTMLDivElement>(null);
++  const width = useContentWidth(frame);
++  const grid = dockGrid(width || 224, count, rootRem());
++  const scrolls = grid.rows > DOCK_VISIBLE_ROWS;
++  const [edges, setEdges] = useState({ above: false, below: false });
++  const updateEdges = () => {
++    const element = list.current;
++    if (!element) return;
++    const above = element.scrollTop > 1;
++    const below = element.scrollTop + element.clientHeight < element.scrollHeight - 1;
++    setEdges((previous) =>
++      previous.above === above && previous.below === below ? previous : { above, below },
++    );
++  };
++  useLayoutEffect(updateEdges);
++
++  const numbers = DOCK_SLOT_NUMBERS.slice(0, count);
++  const states = numbers.map((number) => dockSlotState(slots[number], active, world));
++  // The slot showing here, scrolled to when it's out of sight.
++  const showing = numbers[states.indexOf("showing")] ?? null;
++  useEffect(() => {
++    if (showing === null || !scrolls) return;
++    list.current
++      ?.querySelector(`[data-dock-slot="${showing}"]`)
++      ?.scrollIntoView({ block: "nearest" });
++  }, [showing, scrolls]);
++
+   // A site slot's icon, from its tab when that shows here.
+   const liveIcons: Partial<Record<DockSlotNumber, string>> = {};
+-  for (const number of DOCK_SLOT_NUMBERS) {
++  for (const number of numbers) {
+     const tabId = dockSlotTabHere(slots[number], active, world);
+     const favicon = tabId ? preview.desktopByTabId[tabId]?.favicon : undefined;
+     if (favicon?.dataUrl) liveIcons[number] = favicon.dataUrl;
+   }
++  const fade =
++    (edges.above ? "transparent, black 0.5rem" : "black") +
++    (edges.below ? ", black calc(100% - 0.5rem), transparent" : "");
+   return (
+     <>
+-      {/* Square slots, packed: three rows of three, then one row of nine once
+-          each slot has 1.375rem (9 × 1.375rem + 8 gaps of 0.125rem = 13.375rem).
+-          A slot grows to fill the width up to 1.75rem; past that the grid
+-          centers, the room left over going to its outer edges. */}
+-      <div className="@container/dock px-1">
++      <div ref={frame} className="px-1">
+         <div
++          ref={list}
+           role="toolbar"
+           aria-label="Dock"
+           data-plutonium-dock
++          data-dock-count={count}
++          onScroll={updateEdges}
+           className={cn(
+-            "grid justify-center gap-0.5",
+-            "grid-cols-[repeat(3,min(1.75rem,calc((100cqw_-_0.25rem)/3)))]",
+-            "@[13.375rem]/dock:grid-cols-[repeat(9,min(1.75rem,calc((100cqw_-_1rem)/9)))]",
++            "grid justify-center [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
++            scrolls && "snap-y snap-mandatory overflow-y-auto overscroll-contain",
+           )}
++          style={{
++            gap: grid.gap,
++            gridTemplateColumns: `repeat(${grid.columns}, ${grid.size}px)`,
++            ...(scrolls
++              ? {
++                  maxHeight: DOCK_VISIBLE_ROWS * grid.size + (DOCK_VISIBLE_ROWS - 1) * grid.gap,
++                  maskImage: `linear-gradient(to bottom, ${fade})`,
++                }
++              : {}),
++          }}
+         >
+-          {DOCK_SLOT_NUMBERS.map((number) => (
++          {numbers.map((number, index) => (
+             <DockButton
+               key={number}
+               number={number}
+               slot={slots[number]}
+-              state={dockSlotState(slots[number], active, world)}
++              state={states[index]!}
+               active={active}
+               liveIcon={liveIcons[number] ?? null}
++              keyLabel={dockKeyLabel(keybindings, number)}
+               onEdit={(slot, anchor) => setEditing({ number: slot, anchor })}
+             />
+           ))}
+@@ -732,7 +993,13 @@ function Dock() {
+           width="md"
+           data-dock-editor
+         >
+-          {editing ? <DockSlotEditor key={editing.number} number={editing.number} /> : null}
++          {editing ? (
++            <DockSlotEditor
++              key={editing.number}
++              number={editing.number}
++              onClose={() => setEditing(null)}
++            />
++          ) : null}
+         </PopoverPopup>
+       </Popover>
+     </>
+diff --git a/apps/web/src/plutonium/dock.test.ts b/apps/web/src/plutonium/dock.test.ts
+index 7988f13d64..8ca1f5a716 100644
+--- a/apps/web/src/plutonium/dock.test.ts
++++ b/apps/web/src/plutonium/dock.test.ts
+@@ -6,6 +6,9 @@ import {
+   type ActiveDock,
+   type DockSlot,
+   type DockWorld,
++  dockCountFor,
++  dockKeyOfCommand,
++  dockShortcutLabel,
+   dockSlotOfSurface,
+   dockSlotState,
+   findDockThing,
+@@ -14,6 +17,7 @@ import {
+   sameApp,
+   scopeOfTags,
+   scopeOfWindow,
++  useDockStore,
+ } from "./dock";
+ import type { BrokerTab } from "./previewBridge";
+ import { dockSlotTag, isDockScopeTag, isDockSlotTag } from "./threadTag";
+@@ -125,7 +129,7 @@ describe("the dock", () => {
+         layout: "fold",
+       },
+       3: { id: "kept", target: { kind: "terminal" }, scope: "thread", layout: "split" },
+-      12: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
++      30: { target: { kind: "terminal" }, scope: "thread", layout: "split" },
+     });
+     expect(Object.keys(slots)).toEqual(["1", "2", "3"]);
+     expect(slots[1]!.id).toMatch(/^[0-9a-f]{12}$/);
+@@ -225,3 +229,68 @@ describe("the dock", () => {
+     ).toMatchObject({ entry: { id: 11 } });
+   });
+ });
++
++describe("the dock's slots", () => {
++  const terminal = (id: string): DockSlot => ({
++    id,
++    target: { kind: "terminal" },
++    scope: "thread",
++    layout: "split",
++  });
++
++  it("shows four slots, or as many as the last one set", () => {
++    expect(dockCountFor({})).toBe(4);
++    expect(dockCountFor({ 1: terminal("a"), 3: terminal("b") })).toBe(4);
++    expect(dockCountFor({ 1: terminal("a"), 7: terminal("b") })).toBe(7);
++  });
++
++  it("knows a slot's commands past the ninth", () => {
++    expect(dockKeyOfCommand("dock.slot.12")).toEqual({ number: 12, action: "slot" });
++    expect(dockKeyOfCommand("dock.slotOther.3")).toEqual({ number: 3, action: "other" });
++    expect(dockKeyOfCommand("dock.assign.24")).toEqual({ number: 24, action: "assign" });
++    expect(dockKeyOfCommand("dock.toggleLayout")).toBeNull();
++  });
++
++  it("moves the slots after one added or taken away, with threads' layouts", () => {
++    useDockStore.setState({
++      slots: { 1: terminal("a"), 2: terminal("b"), 4: terminal("d") },
++      count: 5,
++      layouts: { t: { 2: "fold", 4: "fold" } },
++    });
++    useDockStore.getState().insertSlot(2);
++    let state = useDockStore.getState();
++    expect(state.count).toBe(6);
++    expect(Object.fromEntries(Object.entries(state.slots).map(([n, s]) => [n, s!.id]))).toEqual({
++      1: "a",
++      3: "b",
++      5: "d",
++    });
++    expect(state.layouts.t).toEqual({ 3: "fold", 5: "fold" });
++
++    state.removeSlot(3);
++    state = useDockStore.getState();
++    expect(state.count).toBe(5);
++    expect(Object.fromEntries(Object.entries(state.slots).map(([n, s]) => [n, s!.id]))).toEqual({
++      1: "a",
++      4: "d",
++    });
++    expect(state.layouts.t).toEqual({ 4: "fold" });
++  });
++
++  it("keeps four slots at least, and grows to one set past the end", () => {
++    useDockStore.setState({ slots: {}, count: 4, layouts: {} });
++    useDockStore.getState().removeSlot(2);
++    expect(useDockStore.getState().count).toBe(4);
++    useDockStore.getState().setSlot(11, terminal("k"));
++    expect(useDockStore.getState().count).toBe(11);
++  });
++});
++
++describe("the dock's key labels", () => {
++  it("writes Super, first", () => {
++    expect(dockShortcutLabel("Shift+Meta+2")).toBe("Super+Shift+2");
++    expect(dockShortcutLabel("Ctrl+Meta+12")).toBe("Super+Ctrl+12");
++    expect(dockShortcutLabel("Meta++")).toBe("Super++");
++    expect(dockShortcutLabel("Ctrl+K")).toBe("Ctrl+K");
++  });
++});
+diff --git a/apps/web/src/plutonium/dock.ts b/apps/web/src/plutonium/dock.ts
+index a6be2de39b..e117b96368 100644
+--- a/apps/web/src/plutonium/dock.ts
++++ b/apps/web/src/plutonium/dock.ts
+@@ -1,5 +1,7 @@
+-// Plutonium: the dock. Nine slots on Super+1…9, each T3's terminal drawer, an
+-// app or a site, kept per thread, per project or everywhere. A slot's key
++// Plutonium: the dock. Four slots or more (up to DOCK_MAX_SLOTS), the first
++// nine on Super+1…9 and any on the key its editor gives it, each T3's
++// terminal drawer, an app or a site, kept per thread, per project or
++// everywhere. A slot's key
+ // starts what it names, shows it, gives it the keyboard, and goes back to
+ // where you were when pressed again (plutonium-desktop
+ // docs/features/HYDRA_DOCK.md).
+@@ -13,7 +15,17 @@
+ // tag as PLUTONIUM_THREAD_ID, so its windows carry it. A site's tab kept per
+ // project or everywhere moves to the thread whose key asks for it
+ // (previewBridge.ts).
+-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
++import {
++  DOCK_ASSIGN_KEYBINDING_COMMANDS,
++  DOCK_MAX_SLOTS,
++  DOCK_SLOT_KEYBINDING_COMMANDS,
++  DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  type EnvironmentId,
++  type KeybindingCommand,
++  type ResolvedKeybindingsConfig,
++  type ScopedThreadRef,
++  type ThreadId,
++} from "@t3tools/contracts";
+ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+ import { useSyncExternalStore } from "react";
+ import { create } from "zustand";
+@@ -21,9 +33,12 @@ import { createJSONStorage, persist } from "zustand/middleware";
+ 
+ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+ import { toastManager } from "~/components/ui/toast";
++import { formatShortcutLabel, shortcutLabelForCommand } from "~/keybindings";
+ import { randomUUID } from "~/lib/utils";
+ import { resolveStorage } from "~/lib/storage";
+ import { readThreadPreviewState } from "~/previewStateStore";
++import { appAtomRegistry } from "~/rpc/atomRegistry";
++import { primaryServerKeybindingsAtom } from "~/state/server";
+ import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+ 
+ import { focusRightPanelSurface } from "./panelKeys";
+@@ -37,8 +52,79 @@ import {
+   windowTags,
+ } from "./windowStore";
+ 
+-export const DOCK_SLOT_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+-export type DockSlotNumber = (typeof DOCK_SLOT_NUMBERS)[number];
++/** A slot's place in the dock, from 1. */
++export type DockSlotNumber = number;
++/** Every place a slot can have, 1…DOCK_MAX_SLOTS (the dock shows the first `count`). */
++export const DOCK_SLOT_NUMBERS: readonly DockSlotNumber[] = Array.from(
++  { length: DOCK_MAX_SLOTS },
++  (_, index) => index + 1,
++);
++/** The fewest slots the dock shows. */
++export const DOCK_MIN_SLOTS = 4;
++
++const isSlotNumber = (number: number): boolean =>
++  Number.isInteger(number) && number >= 1 && number <= DOCK_MAX_SLOTS;
++
++/** What a slot's keys do: run it, run it in the other layout, put what has the keyboard in it. */
++export type DockKeyAction = "slot" | "other" | "assign";
++
++const DOCK_KEY_COMMANDS: Record<DockKeyAction, readonly KeybindingCommand[]> = {
++  slot: DOCK_SLOT_KEYBINDING_COMMANDS,
++  other: DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS,
++  assign: DOCK_ASSIGN_KEYBINDING_COMMANDS,
++};
++
++/** The command of slot `number`'s key for `action`. */
++export function dockKeyCommand(number: DockSlotNumber, action: DockKeyAction): KeybindingCommand {
++  return DOCK_KEY_COMMANDS[action][number - 1]!;
++}
++
++/** Slot number and action of dock command `command`, or null if it isn't one. */
++export function dockKeyOfCommand(
++  command: KeybindingCommand,
++): { readonly number: DockSlotNumber; readonly action: DockKeyAction } | null {
++  for (const action of ["slot", "other", "assign"] as const) {
++    const index = DOCK_KEY_COMMANDS[action].indexOf(command);
++    if (index >= 0) return { number: index + 1, action };
++  }
++  return null;
++}
++
++/** A shortcut's label as the dock writes it: Super, not Meta, and first (Super+Shift+3). */
++export function dockShortcutLabel(label: string): string {
++  const plus = label.endsWith("++") || label === "+";
++  const parts = (plus ? label.slice(0, -2) : label)
++    .split("+")
++    .filter(Boolean)
++    .map((part) => (part === "Meta" ? "Super" : part));
++  const key = plus ? "+" : parts.pop();
++  const modifiers = parts.includes("Super")
++    ? ["Super", ...parts.filter((part) => part !== "Super")]
++    : parts;
++  return [...modifiers, key].join("+");
++}
++
++/** The label of slot `number`'s key for `action` in `keybindings`, or null if it has none. */
++export function dockKeyLabel(
++  keybindings: ResolvedKeybindingsConfig,
++  number: DockSlotNumber,
++  action: DockKeyAction = "slot",
++): string | null {
++  const label = shortcutLabelForCommand(keybindings, dockKeyCommand(number, action));
++  return label ? dockShortcutLabel(label) : null;
++}
++
++/** Slot `number`'s key for `action` as it is now ("Super+3"), else "slot N". */
++export function dockKeyText(number: DockSlotNumber, action: DockKeyAction = "slot"): string {
++  return (
++    dockKeyLabel(appAtomRegistry.get(primaryServerKeybindingsAtom), number, action) ??
++    (action === "slot" ? `Slot ${number}` : `slot ${number}'s key`)
++  );
++}
++
++/** How `shortcut` reads in the dock. */
++export const formatDockShortcut = (shortcut: Parameters<typeof formatShortcutLabel>[0]): string =>
++  dockShortcutLabel(formatShortcutLabel(shortcut));
+ 
+ export type DockScope = "thread" | "project" | "global";
+ export type DockLayout = "split" | "fold";
+@@ -93,12 +179,12 @@ export function migrateDockSlots(slots: unknown): DockSlots {
+   const migrated: DockSlots = {};
+   for (const [key, value] of Object.entries(slots as Record<string, unknown>)) {
+     const number = Number(key);
+-    if (!DOCK_SLOT_NUMBERS.includes(number as DockSlotNumber)) continue;
++    if (!isSlotNumber(number)) continue;
+     if (!value || typeof value !== "object") continue;
+     const slot = value as DockSlot & { target: DockTarget & { match?: string } };
+     if (!slot.target || typeof slot.target !== "object") continue;
+     const { match: _match, ...target } = slot.target;
+-    migrated[number as DockSlotNumber] = {
++    migrated[number] = {
+       ...slot,
+       id: typeof slot.id === "string" && slot.id ? slot.id : newDockSlotId(),
+       target: target as DockTarget,
+@@ -107,6 +193,31 @@ export function migrateDockSlots(slots: unknown): DockSlots {
+   return migrated;
+ }
+ 
++/**
++ * How many slots the dock shows for `slots` as stored before it had a count
++ * (version 2, nine of them): enough for the last one set, and at least four.
++ */
++export function dockCountFor(slots: DockSlots): number {
++  const numbers = Object.keys(slots).map(Number).filter(isSlotNumber);
++  return Math.max(DOCK_MIN_SLOTS, ...numbers);
++}
++
++/** `record`'s entries keyed by slot number, those past `at` moved by `by` (those moved onto `at` dropped). */
++function shiftSlotKeys<T>(
++  record: Readonly<Partial<Record<DockSlotNumber, T>>>,
++  at: DockSlotNumber,
++  by: 1 | -1,
++): Partial<Record<DockSlotNumber, T>> {
++  const next: Partial<Record<DockSlotNumber, T>> = {};
++  for (const [key, value] of Object.entries(record) as [string, T][]) {
++    const number = Number(key);
++    if (by === -1 && number === at) continue;
++    const moved = number > at || (by === 1 && number === at) ? number + by : number;
++    if (isSlotNumber(moved)) next[moved] = value;
++  }
++  return next;
++}
++
+ /** Where a slot's key came from, to go back to on the next press. */
+ interface ReturnPoint {
+   readonly slot: DockSlotNumber;
+@@ -119,6 +230,8 @@ interface ReturnPoint {
+ 
+ interface DockState {
+   readonly slots: DockSlots;
++  /** How many slots the dock shows (DOCK_MIN_SLOTS…DOCK_MAX_SLOTS). */
++  readonly count: number;
+   /** A thread's own layout for a slot (Super+Up), by thread key, then slot. */
+   readonly layouts: Readonly<Record<string, Partial<Record<DockSlotNumber, DockLayout>>>>;
+   /** Threads whose terminal drawer has the chat column to itself, by thread key. */
+@@ -126,6 +239,10 @@ interface DockState {
+   /** The slot last raised in each thread and what was showing before, by thread key. */
+   readonly returnTo: Readonly<Record<string, ReturnPoint>>;
+   setSlot(slot: DockSlotNumber, value: DockSlot | null): void;
++  /** A new empty slot at `at`; the slots from there on move one along (their keys stay where they are). */
++  insertSlot(at: DockSlotNumber): void;
++  /** Slot `at` goes; the slots after it move one back. */
++  removeSlot(at: DockSlotNumber): void;
+   setThreadLayout(threadKey: string, slot: DockSlotNumber, layout: DockLayout): void;
+   /** The thread goes back to the slot's own layout. */
+   clearThreadLayout(threadKey: string, slot: DockSlotNumber): void;
+@@ -137,6 +254,7 @@ export const useDockStore = create<DockState>()(
+   persist(
+     (set) => ({
+       slots: DEFAULT_SLOTS,
++      count: DOCK_MIN_SLOTS,
+       layouts: {},
+       terminalFolded: {},
+       returnTo: {},
+@@ -145,7 +263,32 @@ export const useDockStore = create<DockState>()(
+           const slots = { ...state.slots };
+           if (value) slots[slot] = value;
+           else delete slots[slot];
+-          return { slots };
++          // A slot past the end (its own key, set in keybindings.json) shows it.
++          return { slots, count: value ? Math.max(state.count, slot) : state.count };
++        }),
++      insertSlot: (at) =>
++        set((state) => {
++          if (state.count >= DOCK_MAX_SLOTS || !isSlotNumber(at)) return state;
++          return {
++            count: state.count + 1,
++            slots: shiftSlotKeys(state.slots, at, 1),
++            layouts: Object.fromEntries(
++              Object.entries(state.layouts).map(([key, own]) => [key, shiftSlotKeys(own, at, 1)]),
++            ),
++            returnTo: {},
++          };
++        }),
++      removeSlot: (at) =>
++        set((state) => {
++          if (state.count <= DOCK_MIN_SLOTS || !isSlotNumber(at)) return state;
++          return {
++            count: state.count - 1,
++            slots: shiftSlotKeys(state.slots, at, -1),
++            layouts: Object.fromEntries(
++              Object.entries(state.layouts).map(([key, own]) => [key, shiftSlotKeys(own, at, -1)]),
++            ),
++            returnTo: {},
++          };
+         }),
+       setThreadLayout: (threadKey, slot, layout) =>
+         set((state) => ({
+@@ -180,10 +323,12 @@ export const useDockStore = create<DockState>()(
+     }),
+     {
+       name: "t3code:plutonium-dock:v1",
+-      version: 2,
++      version: 3,
+       migrate: (persisted, version) => {
+-        const state = (persisted ?? {}) as Record<string, unknown>;
+-        return version < 2 ? { ...state, slots: migrateDockSlots(state.slots) } : state;
++        let state = (persisted ?? {}) as Record<string, unknown>;
++        if (version < 2) state = { ...state, slots: migrateDockSlots(state.slots) };
++        if (version < 3) state = { ...state, count: dockCountFor(state.slots as DockSlots) };
++        return state;
+       },
+       storage: createJSONStorage(() =>
+         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
+@@ -191,6 +336,7 @@ export const useDockStore = create<DockState>()(
+       // Where to go back to only holds while the page lives.
+       partialize: (state) => ({
+         slots: state.slots,
++        count: state.count,
+         layouts: state.layouts,
+         terminalFolded: state.terminalFolded,
+       }),
+@@ -482,6 +628,15 @@ export function clearDockSlot(number: DockSlotNumber): void {
+   state.setSlot(number, null);
+ }
+ 
++/** Takes slot `number` out of the dock; what it held leaves it, and the slots after it move back. */
++export function removeDockSlot(number: DockSlotNumber): void {
++  const state = useDockStore.getState();
++  if (state.count <= DOCK_MIN_SLOTS) return;
++  const previous = state.slots[number];
++  if (previous) releaseDockSlot(previous);
++  state.removeSlot(number);
++}
++
+ const appSurface = (entry: NativeWindowEntry): RightPanelSurface => ({
+   id: `app:${entry.id}`,
+   kind: "app",
+@@ -646,8 +801,8 @@ async function launchSlotApp(
+       type: "error",
+       title: `${target.name} isn't running`,
+       description:
+-        "No installed app was found to start it. Start it yourself, then Super+Shift+" +
+-        `${slotNumber} puts it in the slot again.`,
++        "No installed app was found to start it. Start it yourself, then " +
++        `${dockKeyText(slotNumber, "assign")} puts it in the slot again.`,
+     });
+     return;
+   }
+@@ -718,8 +873,8 @@ export function runDockSlot(
+   if (!slot) {
+     toastManager.add({
+       type: "info",
+-      title: `Super+${slotNumber} is empty`,
+-      description: `Super+Shift+${slotNumber} puts what has the keyboard there.`,
++      title: `${dockKeyText(slotNumber)} is empty`,
++      description: `${dockKeyText(slotNumber, "assign")} puts what has the keyboard there.`,
+       timeout: 3000,
+     });
+     return;
+@@ -937,7 +1092,7 @@ export async function assignDockSlot(
+   state.setSlot(slotNumber, next);
+   toastManager.add({
+     type: "success",
+-    title: `Super+${slotNumber}: ${dockSlotLabel(next)}`,
++    title: `${dockKeyText(slotNumber)}: ${dockSlotLabel(next)}`,
+     description: `Kept ${SCOPE_LABEL[next.scope]}.`,
+     timeout: 3000,
+   });
+diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
+index df55888a00..d6d8f2103e 100644
+--- a/packages/contracts/src/keybindings.ts
++++ b/packages/contracts/src/keybindings.ts
+@@ -49,42 +49,26 @@ export const RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS = [
+ export type RightPanelTabJumpKeybindingCommand =
+   (typeof RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS)[number];
+ 
+-/** Plutonium: the dock's slots, in their own layout (Super+1…9). */
+-export const DOCK_SLOT_KEYBINDING_COMMANDS = [
+-  "dock.slot.1",
+-  "dock.slot.2",
+-  "dock.slot.3",
+-  "dock.slot.4",
+-  "dock.slot.5",
+-  "dock.slot.6",
+-  "dock.slot.7",
+-  "dock.slot.8",
+-  "dock.slot.9",
++/**
++ * Plutonium: how many slots the dock can have. Each has its commands; only
++ * the first nine have keys by default (Super+1…9), the rest get theirs from
++ * the slot's editor or keybindings.json.
++ */
++export const DOCK_MAX_SLOTS = 24;
++const DOCK_SLOT_INDICES = [
++  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+ ] as const;
++type DockSlotIndex = (typeof DOCK_SLOT_INDICES)[number];
++
++/** Plutonium: the dock's slots, in their own layout (Super+1…9). */
++export const DOCK_SLOT_KEYBINDING_COMMANDS: readonly `dock.slot.${DockSlotIndex}`[] =
++  DOCK_SLOT_INDICES.map((index) => `dock.slot.${index}` as const);
+ /** Plutonium: a dock slot in its other layout this time (Super+Ctrl+1…9). */
+-export const DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS = [
+-  "dock.slotOther.1",
+-  "dock.slotOther.2",
+-  "dock.slotOther.3",
+-  "dock.slotOther.4",
+-  "dock.slotOther.5",
+-  "dock.slotOther.6",
+-  "dock.slotOther.7",
+-  "dock.slotOther.8",
+-  "dock.slotOther.9",
+-] as const;
++export const DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS: readonly `dock.slotOther.${DockSlotIndex}`[] =
++  DOCK_SLOT_INDICES.map((index) => `dock.slotOther.${index}` as const);
+ /** Plutonium: put what has the keyboard in a dock slot (Super+Shift+1…9). */
+-export const DOCK_ASSIGN_KEYBINDING_COMMANDS = [
+-  "dock.assign.1",
+-  "dock.assign.2",
+-  "dock.assign.3",
+-  "dock.assign.4",
+-  "dock.assign.5",
+-  "dock.assign.6",
+-  "dock.assign.7",
+-  "dock.assign.8",
+-  "dock.assign.9",
+-] as const;
++export const DOCK_ASSIGN_KEYBINDING_COMMANDS: readonly `dock.assign.${DockSlotIndex}`[] =
++  DOCK_SLOT_INDICES.map((index) => `dock.assign.${index}` as const);
+ 
+ const THREAD_KEYBINDING_COMMANDS = [
+   "thread.stop",
+diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
+index 3526c7c42b..b45f9cf04a 100644
+--- a/packages/shared/src/keybindings.ts
++++ b/packages/shared/src/keybindings.ts
+@@ -242,17 +242,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "q", command: "files.closePane", when: "filesFocus" },
+   // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
+   // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
+-  ...DOCK_SLOT_KEYBINDING_COMMANDS.map((command, index) => ({
++  // Slots past the ninth have no key until one is chosen for them.
++  ...DOCK_SLOT_KEYBINDING_COMMANDS.slice(0, 9).map((command, index) => ({
+     key: `meta+${index + 1}`,
+     command,
+     when: "plutoniumShell",
+   })),
+-  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS.map((command, index) => ({
++  ...DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS.slice(0, 9).map((command, index) => ({
+     key: `meta+ctrl+${index + 1}`,
+     command,
+     when: "plutoniumShell",
+   })),
+-  ...DOCK_ASSIGN_KEYBINDING_COMMANDS.map((command, index) => ({
++  ...DOCK_ASSIGN_KEYBINDING_COMMANDS.slice(0, 9).map((command, index) => ({
+     key: `meta+shift+${index + 1}`,
+     command,
+     when: "plutoniumShell",

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:50 +1300
-Subject: [PATCH 07/11] Plutonium: native windows, terminals and browser tabs
+Subject: [PATCH 07/12] Plutonium: native windows, terminals and browser tabs
  in a thread's right panel
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
