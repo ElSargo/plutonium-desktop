@@ -1,35 +1,35 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:48 +1300
-Subject: [PATCH 02/10] Plutonium: the app is Hydra
+Subject: [PATCH 02/11] Plutonium: the app is Hydra
 
 Folded from:
 - the app is Hydra
 - the computer serving the app can't be unchecked in setup
 ---
- apps/web/index.html                           |   6 ++--
+ apps/web/index.html                           |   6 +-
  apps/web/public/apple-touch-icon.png          | Bin 113787 -> 6000 bytes
  apps/web/public/favicon-16x16.png             | Bin 2126 -> 700 bytes
  apps/web/public/favicon-32x32.png             | Bin 5661 -> 1152 bytes
  apps/web/public/favicon.ico                   | Bin 283825 -> 15086 bytes
  apps/web/src/branding.ts                      |   2 +-
- apps/web/src/cloud/linkEnvironment.ts         |   4 +--
- apps/web/src/components/HydraMark.tsx         |  18 +++++++++++
- apps/web/src/components/T3Wordmark.tsx        |  12 --------
- .../src/components/chat/V2LifecycleRow.tsx    |   4 +--
- .../cloud/RelayClientInstallDialog.tsx        |   8 ++---
+ apps/web/src/cloud/linkEnvironment.ts         |   4 +-
+ apps/web/src/components/HydraMark.tsx         |  18 ++++++
+ apps/web/src/components/T3Wordmark.tsx        |  12 ----
+ .../src/components/chat/V2LifecycleRow.tsx    |   4 +-
+ .../cloud/RelayClientInstallDialog.tsx        |   8 +--
  .../DesktopAppActivationCoordinator.tsx       |   2 +-
  .../components/onboarding/FirstRunGate.tsx    |   2 +-
- .../WelcomeWizard.import.browser.test.tsx     |  15 +++++++++
- .../components/onboarding/WelcomeWizard.tsx   |  29 ++++++++++++------
+ .../WelcomeWizard.import.browser.test.tsx     |  19 +++++--
+ .../components/onboarding/WelcomeWizard.tsx   |  53 +++++++-----------
  .../promptLinks/NewThreadLinkView.tsx         |   2 +-
  .../components/promptLinks/linkedPrompt.ts    |   2 +-
- .../settings/BrowserImportWizard.tsx          |   8 ++---
- .../settings/CaptureShortcutConfig.tsx        |  11 +++----
- .../components/settings/CodexSetupSection.tsx |   8 ++---
- .../settings/IntegrationsSettings.tsx         |   8 ++---
+ .../settings/BrowserImportWizard.tsx          |   8 +--
+ .../settings/CaptureShortcutConfig.tsx        |  11 ++--
+ .../components/settings/CodexSetupSection.tsx |   8 +--
+ .../settings/IntegrationsSettings.tsx         |   8 +--
  .../settings/KeybindingsSettings.tsx          |   2 +-
- .../settings/LocalEnvironmentSetting.tsx      |   6 ++--
+ .../settings/LocalEnvironmentSetting.tsx      |   6 +-
  .../settings/NotificationSettings.tsx         |   2 +-
  .../settings/SettingsPanels.logic.ts          |   2 +-
  .../components/settings/SnapShotSettings.tsx  |   2 +-
@@ -37,8 +37,8 @@ Folded from:
  .../src/components/settings/providerStatus.ts |   2 +-
  .../src/components/settings/settingsSearch.ts |   2 +-
  apps/web/src/connection/clientMetadata.ts     |   2 +-
- apps/web/src/desktopAppActivation.ts          |   6 ++--
- 31 files changed, 100 insertions(+), 69 deletions(-)
+ apps/web/src/desktopAppActivation.ts          |   6 +-
+ 31 files changed, 101 insertions(+), 96 deletions(-)
  create mode 100644 apps/web/src/components/HydraMark.tsx
  delete mode 100644 apps/web/src/components/T3Wordmark.tsx
 
@@ -8634,10 +8634,21 @@ index 8aa16fe030..fd6c4d3452 100644
          <Button
            className="mt-5"
 diff --git a/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx b/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
-index c55691d9ca..142a84c225 100644
+index c55691d9ca..d64f0175e5 100644
 --- a/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
 +++ b/apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx
-@@ -292,6 +292,21 @@ function setup() {
+@@ -126,10 +126,6 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
+     command: "createProject" | "importThreads" | "refreshProviders" | "connectPairing",
+   ) => state[command]) as never,
+ }));
+-vi.mock(import("../settings/ChatGptWelcomeCoordinator"), async (original) => ({
+-  ...(await original()),
+-  ChatGptWelcomeCoordinator: () => <></>,
+-}));
+ 
+ import { appAtomRegistry } from "../../rpc/atomRegistry";
+ import { WelcomeWizard } from "./WelcomeWizard";
+@@ -292,6 +288,21 @@ function setup() {
    return now;
  }
  
@@ -8660,10 +8671,39 @@ index c55691d9ca..142a84c225 100644
    using _now = setup();
    await using _screen = await mountImport();
 diff --git a/apps/web/src/components/onboarding/WelcomeWizard.tsx b/apps/web/src/components/onboarding/WelcomeWizard.tsx
-index 2eb6bcd673..362d15af9b 100644
+index 2eb6bcd673..c02d2878b9 100644
 --- a/apps/web/src/components/onboarding/WelcomeWizard.tsx
 +++ b/apps/web/src/components/onboarding/WelcomeWizard.tsx
-@@ -91,7 +91,7 @@ import { TerminalViewport } from "../ThreadTerminalDrawer";
+@@ -39,7 +39,6 @@ import { useEffect, useRef, useState } from "react";
+ import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
+ import { useLocalStorage } from "../../hooks/useLocalStorage";
+ import { hasCloudPublicConfig } from "../../cloud/publicConfig";
+-import { PRIVACY_POLICY_URL } from "../../legalLinks";
+ import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
+ import { completeOnboarding } from "../../onboarding/firstRun";
+ import {
+@@ -61,11 +60,7 @@ import { newProjectId, randomUUID } from "../../lib/utils";
+ import { agentSessionImport } from "../../state/agentSessions";
+ import { readProjects, waitForProject } from "../../state/entities";
+ import { useEnvironments, usePrimaryEnvironment } from "../../state/environments";
+-import {
+-  managedInstanceLocks,
+-  managedTelemetryOffMessage,
+-  usePrimaryManagedPolicy,
+-} from "../../state/managedPolicy";
++import { managedInstanceLocks } from "../../state/managedPolicy";
+ import {
+   isOnboardingRelayEnvironment,
+   resolveOnboardingSetup,
+@@ -83,7 +78,6 @@ import { useAtomCommand } from "../../state/use-atom-command";
+ import { connectPairing } from "../../connection/onboarding";
+ import { getProviderSummary } from "../settings/providerStatus";
+ import { providerClients } from "../settings/providerDriverMeta";
+-import { ChatGptWelcomeCoordinator } from "../settings/ChatGptWelcomeCoordinator";
+ import { AddManagedCodexAccountDialog, CodexSetupSection } from "../settings/CodexSetupSection";
+ import { readCodexSetupMode } from "../settings/CodexSetupSection.logic";
+ import { buildProviderInstanceUpdatePatch } from "../settings/SettingsPanels.logic";
+@@ -91,7 +85,7 @@ import { TerminalViewport } from "../ThreadTerminalDrawer";
  import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
  import { presentSavedCloudEnvironmentConnection } from "../cloud/cloudEnvironmentConnectionPresentation";
  import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -8672,7 +8712,7 @@ index 2eb6bcd673..362d15af9b 100644
  import { Alert, AlertDescription } from "../ui/alert";
  import { Button } from "../ui/button";
  import { CommandBlock } from "../CommandBlock";
-@@ -156,8 +156,9 @@ export function WelcomeWizard({
+@@ -156,8 +150,9 @@ export function WelcomeWizard({
          ]),
      );
    }, [autoSelectedComputers, environments]);
@@ -8684,7 +8724,7 @@ index 2eb6bcd673..362d15af9b 100644
    const scans = useProjectScans(step === "import" ? setupIds : NO_ENVIRONMENTS);
    const isLoadingProjects =
      step === "import" &&
-@@ -239,12 +240,12 @@ export function WelcomeWizard({
+@@ -239,12 +234,12 @@ export function WelcomeWizard({
          initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
        >
          <WizardHeader
@@ -8701,7 +8741,7 @@ index 2eb6bcd673..362d15af9b 100644
                </span>
              </div>
            }
-@@ -265,6 +266,7 @@ export function WelcomeWizard({
+@@ -265,6 +260,7 @@ export function WelcomeWizard({
              <ConnectionStep
                expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}
                selectedIds={selectedIds}
@@ -8709,7 +8749,15 @@ index 2eb6bcd673..362d15af9b 100644
                autoSelectedComputers={autoSelectedComputers}
                onSelectionChange={setSelection}
                onToggleEnvironment={(environmentId, checked) =>
-@@ -305,6 +307,7 @@ function ConnectionStep({
+@@ -296,7 +292,6 @@ export function WelcomeWizard({
+           )}
+         </WizardPanel>
+       </WizardPopup>
+-      <ChatGptWelcomeCoordinator />
+     </Dialog>
+   );
+ }
+@@ -305,6 +300,7 @@ function ConnectionStep({
    autoSelectedComputers,
    expandPairingInitially,
    selectedIds,
@@ -8717,7 +8765,7 @@ index 2eb6bcd673..362d15af9b 100644
    onSelectionChange,
    onToggleEnvironment,
    onContinue,
-@@ -313,6 +316,8 @@ function ConnectionStep({
+@@ -313,13 +309,14 @@ function ConnectionStep({
    readonly autoSelectedComputers: Set<EnvironmentId>;
    readonly expandPairingInitially: boolean;
    readonly selectedIds: ReadonlySet<EnvironmentId>;
@@ -8726,7 +8774,14 @@ index 2eb6bcd673..362d15af9b 100644
    readonly onSelectionChange: (ids: ReadonlySet<EnvironmentId>) => void;
    readonly onToggleEnvironment: (environmentId: EnvironmentId, checked: boolean) => void;
    readonly onContinue: () => void;
-@@ -355,10 +360,16 @@ function ConnectionStep({
+   readonly onPaired: (environmentId: EnvironmentId) => void;
+ }) {
+   const { environments } = useEnvironments();
+-  const telemetryOff = managedTelemetryOffMessage(usePrimaryManagedPolicy());
+   const cloudEnabled = hasCloudPublicConfig();
+   const directEnvironments = environments.filter(
+     (environment) => !cloudEnabled || !isOnboardingRelayEnvironment(environment),
+@@ -355,10 +352,16 @@ function ConnectionStep({
            {directEnvironments.map((environment) => (
              <label
                key={environment.environmentId}
@@ -8744,7 +8799,28 @@ index 2eb6bcd673..362d15af9b 100644
                  onCheckedChange={(checked) => {
                    const next = new Set(selectedIds);
                    if (checked) next.add(environment.environmentId);
-@@ -543,7 +554,7 @@ function ConnectAccountOption({
+@@ -443,20 +446,6 @@ function ConnectionStep({
+         </p>
+       ) : null}
+       <div className="mt-6 flex flex-col-reverse gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+-        <p className="min-w-0 text-xs leading-relaxed text-muted-foreground">
+-          {telemetryOff ?? "T3 Code collects anonymous usage data to help us improve it."} To read
+-          more about how your data is used{telemetryOff === undefined ? " and how to opt out" : ""},
+-          see our{" "}
+-          <a
+-            className="underline underline-offset-2 hover:text-foreground"
+-            href={PRIVACY_POLICY_URL}
+-            target="_blank"
+-            rel="noreferrer noopener"
+-          >
+-            privacy policy
+-          </a>
+-          .
+-        </p>
+         <Button
+           className="shrink-0 self-end"
+           ref={continueRef}
+@@ -543,7 +532,7 @@ function ConnectAccountOption({
              </p>
              <CommandBlock command="npx t3 connect" className="mt-3" />
              <p className="mt-3 text-xs text-muted-foreground">

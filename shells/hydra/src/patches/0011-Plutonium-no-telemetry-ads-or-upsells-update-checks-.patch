@@ -1,0 +1,2616 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Thu, 5 Nov 2026 14:52:04 +1300
+Subject: [PATCH 11/11] Plutonium: no telemetry, ads or upsells; update checks
+ are opt-in
+
+Usage analytics are stripped: AnalyticsService drops every event instead of
+batching it to T3's PostHog ingest, the server no longer reads the Claude
+and OpenAI account ids (telemetry/Identify.ts is gone), and clients no
+longer send hashes of their T3 Connect account and device. Relay traces to
+T3's Axiom dataset are never configured. The welcome wizard and Settings no
+longer say usage data is collected.
+
+Removed: the GitHub star prompt, the "Created in T3 Code" line in new
+projects' READMEs, the T3 Chat upgrade prompts when tunnels run out, the
+desktop download links on the hosted pages, and the ChatGPT plan dialog.
+
+Provider update checks (agent CLI versions and model catalog updates) are
+off by default; Hydra asks once on its first launch, and Settings,
+Maintenance changes it later.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/cloud/publicConfig.test.ts    |  26 +-
+ apps/server/src/cloud/publicConfig.ts         |  53 +--
+ .../src/guest/GuestShareService.test.ts       |   1 -
+ apps/server/src/mcp/toolkits/core.test.ts     |   1 -
+ .../src/project/ManagedProjectFolders.ts      |  11 +-
+ .../src/provider/CodexChatGptAuth.test.ts     |   1 -
+ apps/server/src/provider/CodexChatGptAuth.ts  |  14 -
+ .../server/src/provider/ModelManifest.test.ts |   4 +-
+ apps/server/src/serverRuntimeStartup.ts       |   2 -
+ .../src/telemetry/AnalyticsService.test.ts    | 441 ------------------
+ apps/server/src/telemetry/AnalyticsService.ts | 354 +-------------
+ apps/server/src/telemetry/Identify.test.ts    | 271 -----------
+ apps/server/src/telemetry/Identify.ts         | 341 --------------
+ apps/web/src/cloud/managedRelayState.ts       |   3 +-
+ apps/web/src/cloud/publicConfig.ts            |  20 +-
+ .../src/components/GitHubStarPrompt.test.ts   | 199 --------
+ apps/web/src/components/GitHubStarPrompt.tsx  | 168 -------
+ apps/web/src/components/HostedEmptyState.tsx  |  10 +-
+ .../src/components/chat/useComposerSend.ts    |   2 -
+ .../clerk/T3ChatUserProfilePage.tsx           |  17 +-
+ .../promptLinks/HostedPromptLinkLanding.tsx   |   4 -
+ .../settings/ChatGptWelcomeCoordinator.tsx    |  83 ----
+ .../components/settings/SettingsPanels.tsx    |   9 +-
+ apps/web/src/plutonium/UpdateChecksPrompt.tsx |  60 +++
+ apps/web/src/routes/__root.tsx                |   4 +-
+ apps/web/src/state/managedPolicy.ts           |   9 -
+ .../src/authorization/remote.test.ts          |   7 +-
+ .../src/authorization/remote.ts               |  17 +-
+ packages/contracts/src/settings.ts            |   5 +-
+ 29 files changed, 114 insertions(+), 2023 deletions(-)
+ delete mode 100644 apps/server/src/telemetry/AnalyticsService.test.ts
+ delete mode 100644 apps/server/src/telemetry/Identify.test.ts
+ delete mode 100644 apps/server/src/telemetry/Identify.ts
+ delete mode 100644 apps/web/src/components/GitHubStarPrompt.test.ts
+ delete mode 100644 apps/web/src/components/GitHubStarPrompt.tsx
+ delete mode 100644 apps/web/src/components/settings/ChatGptWelcomeCoordinator.tsx
+ create mode 100644 apps/web/src/plutonium/UpdateChecksPrompt.tsx
+
+diff --git a/apps/server/src/cloud/publicConfig.test.ts b/apps/server/src/cloud/publicConfig.test.ts
+index ca1d86b8dd..26133d4361 100644
+--- a/apps/server/src/cloud/publicConfig.test.ts
++++ b/apps/server/src/cloud/publicConfig.test.ts
+@@ -55,28 +55,6 @@ it.effect("derives direct Clerk OAuth endpoints from statically injected public
+   }),
+ );
+ 
+-it("product opt-out disables relay tracing with either built-in or runtime credentials", () => {
+-  const fallback = {
+-    tracesUrl: "https://embedded.example.test/v1/traces",
+-    tracesDataset: "embedded-dataset",
+-    tracesToken: "embedded-token",
+-  };
+-  const env = {
+-    T3CODE_TELEMETRY_ENABLED: "false",
+-    T3CODE_OTEL_SDK_DISABLED: "false",
+-  };
+-
+-  assert.equal(resolveRelayClientTracingConfig(env, fallback), null);
+-  assert.equal(
+-    resolveRelayClientTracingConfig(
+-      {
+-        ...env,
+-        T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://runtime.example.test/v1/traces",
+-        T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: "runtime-dataset",
+-        T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: "runtime-token",
+-      },
+-      fallback,
+-    ),
+-    null,
+-  );
++it("relay tracing is never configured, even with credentials", () => {
++  assert.equal(resolveRelayClientTracingConfig(), null);
+ });
+diff --git a/apps/server/src/cloud/publicConfig.ts b/apps/server/src/cloud/publicConfig.ts
+index 15594f1164..6ab023e01c 100644
+--- a/apps/server/src/cloud/publicConfig.ts
++++ b/apps/server/src/cloud/publicConfig.ts
+@@ -4,7 +4,6 @@ import {
+   DEFAULT_HOSTED_APP_URL,
+ } from "@t3tools/shared/connectAuth";
+ import { clerkFrontendApiUrlFromPublishableKey } from "@t3tools/shared/relayAuth";
+-import { isRelayTracingEnabled } from "@t3tools/shared/otelEnvironment";
+ import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+ import * as Config from "effect/Config";
+ import * as ConfigProvider from "effect/ConfigProvider";
+@@ -41,15 +40,6 @@ function readBuildTimeValue(value: string | undefined): string {
+   return typeof value === "undefined" ? "" : value.trim();
+ }
+ 
+-function normalizeSecureUrl(value: string): string | null {
+-  try {
+-    const url = new URL(value);
+-    return url.protocol === "https:" ? url.toString() : null;
+-  } catch {
+-    return null;
+-  }
+-}
+-
+ const buildTimeRelayUrl =
+   typeof __T3CODE_BUILD_RELAY_URL__ === "undefined"
+     ? ""
+@@ -64,40 +54,17 @@ const buildTimeClerkCliOAuthClientId = readBuildTimeValue(
+     ? undefined
+     : __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
+ );
+-const buildTimeRelayClientTracing = {
+-  tracesUrl: readBuildTimeValue(
+-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__ === "undefined"
+-      ? undefined
+-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__,
+-  ),
+-  tracesDataset: readBuildTimeValue(
+-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__ === "undefined"
+-      ? undefined
+-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__,
+-  ),
+-  tracesToken: readBuildTimeValue(
+-    typeof __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__ === "undefined"
+-      ? undefined
+-      : __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__,
+-  ),
+-} as const;
+-
+-export function resolveRelayClientTracingConfig(
+-  env: Readonly<Record<string, string | undefined>> = process.env,
+-  fallback = buildTimeRelayClientTracing,
+-) {
+-  if (!isRelayTracingEnabled(env)) {
+-    return null;
+-  }
+ 
+-  const tracesUrl = env.T3CODE_RELAY_CLIENT_OTLP_TRACES_URL?.trim() || fallback.tracesUrl;
+-  const tracesDataset =
+-    env.T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET?.trim() || fallback.tracesDataset;
+-  const tracesToken = env.T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN?.trim() || fallback.tracesToken;
+-  const normalizedTracesUrl = normalizeSecureUrl(tracesUrl);
+-  return normalizedTracesUrl && tracesDataset && tracesToken
+-    ? { tracesUrl: normalizedTracesUrl, tracesDataset, tracesToken }
+-    : null;
++/**
++ * Plutonium: relay traces (spans of T3 Connect requests, exported to T3's Axiom dataset)
++ * are stripped, so the relay tracer is never created.
++ */
++export function resolveRelayClientTracingConfig(): {
++  readonly tracesUrl: string;
++  readonly tracesDataset: string;
++  readonly tracesToken: string;
++} | null {
++  return null;
+ }
+ 
+ export function makeRelayUrlConfig(fallback = buildTimeRelayUrl) {
+diff --git a/apps/server/src/guest/GuestShareService.test.ts b/apps/server/src/guest/GuestShareService.test.ts
+index cfd8ca1363..f0aafcb2c4 100644
+--- a/apps/server/src/guest/GuestShareService.test.ts
++++ b/apps/server/src/guest/GuestShareService.test.ts
+@@ -128,7 +128,6 @@ const layerAnalytics = Layer.effectContext(
+           record: (event, properties) =>
+             Ref.update(recorded, (events) => [...events, { event, ...properties }]),
+           flush: Effect.void,
+-          recordOwners: () => Effect.void,
+         }),
+       ),
+     );
+diff --git a/apps/server/src/mcp/toolkits/core.test.ts b/apps/server/src/mcp/toolkits/core.test.ts
+index 38beeff5e2..cb91e9b6fa 100644
+--- a/apps/server/src/mcp/toolkits/core.test.ts
++++ b/apps/server/src/mcp/toolkits/core.test.ts
+@@ -347,7 +347,6 @@ it.effect("records only failed calls of tools that hand off no work", () => {
+                   Effect.asVoid,
+                 ),
+               flush: Effect.void,
+-              recordOwners: () => Effect.void,
+             }),
+           ),
+         ),
+diff --git a/apps/server/src/project/ManagedProjectFolders.ts b/apps/server/src/project/ManagedProjectFolders.ts
+index 4b0991e1a6..8538a81462 100644
+--- a/apps/server/src/project/ManagedProjectFolders.ts
++++ b/apps/server/src/project/ManagedProjectFolders.ts
+@@ -172,14 +172,9 @@ function namedProjectIconSvg(name: string): string {
+ }
+ 
+ function namedProjectReadme(name: string): string {
+-  return [
+-    `<img src="assets/icon.svg" width="64" height="64" alt="">`,
+-    "",
+-    `# ${name}`,
+-    "",
+-    "Created in [T3 Code](https://t3.codes).",
+-    "",
+-  ].join("\n");
++  return [`<img src="assets/icon.svg" width="64" height="64" alt="">`, "", `# ${name}`, ""].join(
++    "\n",
++  );
+ }
+ 
+ function describeCommitFailure(stderr: string): string {
+diff --git a/apps/server/src/provider/CodexChatGptAuth.test.ts b/apps/server/src/provider/CodexChatGptAuth.test.ts
+index f629111264..764465fbfd 100644
+--- a/apps/server/src/provider/CodexChatGptAuth.test.ts
++++ b/apps/server/src/provider/CodexChatGptAuth.test.ts
+@@ -224,7 +224,6 @@ const makeHarnessFor = Effect.fnUntraced(function* (
+             analyticsEvents.push({ event, properties });
+           }),
+     flush: Effect.void,
+-    recordOwners: () => Effect.void,
+   });
+   const auth = yield* makeCodexChatGptAuth({
+     instanceId,
+diff --git a/apps/server/src/provider/CodexChatGptAuth.ts b/apps/server/src/provider/CodexChatGptAuth.ts
+index 457e85791b..11ae5fed5e 100644
+--- a/apps/server/src/provider/CodexChatGptAuth.ts
++++ b/apps/server/src/provider/CodexChatGptAuth.ts
+@@ -9,11 +9,9 @@ import {
+   type ProviderInstanceId,
+ } from "@t3tools/contracts";
+ import { codexCallbackUrl } from "@t3tools/shared/codexAuthHandoff";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+ import * as Clock from "effect/Clock";
+ import * as Cause from "effect/Cause";
+ import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+-import { openAiUserId } from "../telemetry/Identify.ts";
+ import * as Digest from "effect/crypto/Digest";
+ import * as SecureRandom from "effect/crypto/SecureRandom";
+ import * as Hex from "effect/encoding/Hex";
+@@ -227,18 +225,6 @@ export const makeCodexChatGptAuth = Effect.fn("makeCodexChatGptAuth")(function*
+         saved.sessions.find((session) => session.clientId === saved.activeClientId),
+       ),
+     ),
+-    // The OpenAI account is the person, so it marks who owns this install.
+-    Effect.tap((credentials) => {
+-      const userId = Option.flatMap(credentials, (saved) =>
+-        Option.flatMap(Option.fromUndefinedOr(saved.idToken), openAiUserId),
+-      );
+-      return Option.isSome(userId) && Option.isSome(analytics)
+-        ? analytics.value.recordOwners(
+-            [{ source: "openai", ownerId: hashTelemetryId(userId.value) }],
+-            "server",
+-          )
+-        : Effect.void;
+-    }),
+   );
+   const writeSessions = (saved: typeof Sessions.Type) =>
+     encodeSessions(saved).pipe(
+diff --git a/apps/server/src/provider/ModelManifest.test.ts b/apps/server/src/provider/ModelManifest.test.ts
+index d08ce0540e..d4be7c9200 100644
+--- a/apps/server/src/provider/ModelManifest.test.ts
++++ b/apps/server/src/provider/ModelManifest.test.ts
+@@ -260,7 +260,9 @@ const layerService = (input: {
+ }) =>
+   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
+     Layer.provideMerge(NodeServices.layer),
+-    Layer.provideMerge(ServerSettings.layerTest(input.settings ?? {})),
++    Layer.provideMerge(
++      ServerSettings.layerTest(input.settings ?? { enableProviderUpdateChecks: true }),
++    ),
+     Layer.provideMerge(layerHttpClient(input.response)),
+   );
+ 
+diff --git a/apps/server/src/serverRuntimeStartup.ts b/apps/server/src/serverRuntimeStartup.ts
+index e37f307854..b278cb4fd9 100644
+--- a/apps/server/src/serverRuntimeStartup.ts
++++ b/apps/server/src/serverRuntimeStartup.ts
+@@ -46,7 +46,6 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
+ import * as ServerSettings from "./serverSettings.ts";
+ import { forkParked, forkParkedFiber } from "./serverActivation.ts";
+ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+-import { getServerOwners } from "./telemetry/Identify.ts";
+ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+ import {
+@@ -176,7 +175,6 @@ const recordStartupHeartbeat = Effect.gen(function* () {
+     threadCount,
+     projectCount,
+   });
+-  yield* analytics.recordOwners(yield* getServerOwners, "server");
+ });
+ 
+ const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
+diff --git a/apps/server/src/telemetry/AnalyticsService.test.ts b/apps/server/src/telemetry/AnalyticsService.test.ts
+deleted file mode 100644
+index 4d3c2d5421..0000000000
+--- a/apps/server/src/telemetry/AnalyticsService.test.ts
++++ /dev/null
+@@ -1,441 +0,0 @@
+-import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+-import * as NodeServices from "@effect/platform-node/NodeServices";
+-import { assert, it } from "@effect/vitest";
+-import * as Clock from "effect/Clock";
+-import * as ConfigProvider from "effect/ConfigProvider";
+-import * as Effect from "effect/Effect";
+-import * as Exit from "effect/Exit";
+-import * as Fiber from "effect/Fiber";
+-import * as Layer from "effect/Layer";
+-import * as Schema from "effect/Schema";
+-import * as Scope from "effect/Scope";
+-import * as TestClock from "effect/testing/TestClock";
+-import * as HttpClient from "effect/http/HttpClient";
+-import * as HttpClientError from "effect/http/HttpClientError";
+-import * as HttpClientRequest from "effect/http/HttpClientRequest";
+-import * as HttpClientResponse from "effect/http/HttpClientResponse";
+-import * as HttpServer from "effect/http/HttpServer";
+-import * as HttpServerRequest from "effect/http/HttpServerRequest";
+-import * as HttpServerResponse from "effect/http/HttpServerResponse";
+-import * as HostProcess from "@t3tools/shared/HostProcess";
+-
+-import type { ManagedPolicyDocument } from "@t3tools/contracts";
+-
+-import * as ServerConfig from "../config.ts";
+-import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+-import { getTelemetryIdentity } from "./Identify.ts";
+-import * as AnalyticsService from "./AnalyticsService.ts";
+-
+-interface RecordedBatchRequest {
+-  readonly path: string;
+-  readonly body: {
+-    readonly batch?: ReadonlyArray<{
+-      readonly event?: string;
+-      readonly properties?: {
+-        readonly index?: number;
+-        readonly clientType?: string;
+-        readonly serverOs?: string;
+-        readonly serverArch?: string;
+-        readonly serverAppVersion?: string;
+-        readonly serverMode?: string;
+-        readonly t3CodeVersion?: string;
+-      };
+-    }>;
+-  } | null;
+-}
+-
+-interface RecordedBatchBody {
+-  readonly batch: ReadonlyArray<{
+-    readonly event?: string;
+-    readonly properties?: {
+-      readonly index?: number;
+-      readonly clientType?: string;
+-      readonly serverOs?: string;
+-      readonly serverArch?: string;
+-      readonly serverAppVersion?: string;
+-      readonly serverMode?: string;
+-      readonly t3CodeVersion?: string;
+-    };
+-  }>;
+-}
+-
+-const SentBatch = Schema.fromJsonString(
+-  Schema.Struct({
+-    batch: Schema.Array(
+-      Schema.Struct({
+-        uuid: Schema.String,
+-        event: Schema.String,
+-        distinct_id: Schema.String,
+-        properties: Schema.Struct({
+-          telemetryChannel: Schema.String,
+-          installId: Schema.optionalKey(Schema.String),
+-          ownerSource: Schema.optionalKey(Schema.String),
+-          observedBy: Schema.optionalKey(Schema.String),
+-        }),
+-      }),
+-    ),
+-  }),
+-);
+-const decodeSentBatch = Schema.decodeEffect(SentBatch);
+-type SentEvent = (typeof SentBatch.Type)["batch"][number];
+-type Respond = (
+-  request: HttpClientRequest.HttpClientRequest,
+-) => Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError>;
+-
+-const respondWithStatus =
+-  (status: number): Respond =>
+-  (request) =>
+-    Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status })));
+-
+-/**
+- * Answers 503 for `minutes` after the first send, then 204. `answers` holds each
+- * answer with its time in ms after the first send (the test clock runs on across tests).
+- */
+-const failingFor = (minutes: number) => {
+-  const answers: Array<{ readonly at: number; readonly status: number }> = [];
+-  let firstSend: number | undefined;
+-  const respond: Respond = (request) =>
+-    Effect.flatMap(Clock.currentTimeMillis, (now) => {
+-      firstSend ??= now;
+-      const at = now - firstSend;
+-      const status = at < minutes * 60_000 ? 503 : 204;
+-      answers.push({ at, status });
+-      return respondWithStatus(status)(request);
+-    });
+-  return { respond, answers };
+-};
+-
+-const recordTwentyEvents = Effect.gen(function* () {
+-  const analytics = yield* AnalyticsService.AnalyticsService;
+-  for (let index = 0; index < 20; index += 1) {
+-    yield* analytics.record("test.retry", { index });
+-  }
+-});
+-
+-const analyticsLayerWith = (client: HttpClient.HttpClient, policy?: ManagedPolicyDocument) =>
+-  AnalyticsService.layer.pipe(
+-    Layer.provideMerge(
+-      ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
+-    ),
+-    Layer.provide(
+-      ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          T3CODE_TELEMETRY_ENABLED: true,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-        }),
+-      ),
+-    ),
+-    Layer.provide(
+-      Layer.mergeAll(
+-        Layer.succeed(HostProcess.Platform, "win32"),
+-        Layer.succeed(HostProcess.Architecture, "x64"),
+-        Layer.succeed(HttpClient.HttpClient, client),
+-        ManagedPolicy.layerTest(policy),
+-      ),
+-    ),
+-  );
+-
+-/**
+- * Runs `record` (20 events by default), then lets `minutes` of background
+- * flushes run against a client that answers every send with `respond`.
+- * Returns the sent batches.
+- */
+-const sendFor = (
+-  minutes: number,
+-  respond: Respond,
+-  record: Effect.Effect<
+-    void,
+-    never,
+-    AnalyticsService.AnalyticsService | Effect.Services<typeof getTelemetryIdentity>
+-  > = recordTwentyEvents,
+-  policy?: ManagedPolicyDocument,
+-) =>
+-  Effect.gen(function* () {
+-    const batches: Array<ReadonlyArray<SentEvent>> = [];
+-    const client = HttpClient.make((request) =>
+-      Effect.gen(function* () {
+-        if (request.body._tag === "Uint8Array") {
+-          const body = yield* decodeSentBatch(new TextDecoder().decode(request.body.body)).pipe(
+-            Effect.orDie,
+-          );
+-          batches.push(body.batch);
+-        }
+-        return yield* respond(request);
+-      }),
+-    );
+-    const runtimeLayer = analyticsLayerWith(client, policy);
+-
+-    yield* Effect.gen(function* () {
+-      yield* record;
+-      for (let second = 0; second < minutes * 60; second += 1) {
+-        yield* TestClock.adjust("1 second");
+-      }
+-    }).pipe(Effect.provide(runtimeLayer));
+-    return batches;
+-  });
+-
+-it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService test", (it) => {
+-  it.effect("waits for desktop shell consent and honors a late telemetry opt-out", () =>
+-    Effect.gen(function* () {
+-      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+-      const batches = yield* sendFor(
+-        0,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.record("test.before-discovery");
+-          yield* analytics.flush;
+-          env.T3CODE_TELEMETRY_ENABLED = "false";
+-          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+-          yield* analytics.record("test.opted-out");
+-          yield* analytics.flush;
+-          env.T3CODE_TELEMETRY_ENABLED = "true";
+-          yield* analytics.record("test.allowed");
+-          yield* analytics.flush;
+-        }),
+-      ).pipe(Effect.provideService(HostProcess.Environment, env));
+-      assert.deepEqual(
+-        batches.flat().map((event) => event.event),
+-        ["test.allowed"],
+-      );
+-    }),
+-  );
+-
+-  it.effect("client owner reports cannot use up the server's owner cap", () =>
+-    Effect.gen(function* () {
+-      const batches = yield* sendFor(
+-        10,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.recordOwners(
+-            Array.from({ length: 1_001 }, (_, index) => ({
+-              source: "device" as const,
+-              ownerId: index.toString(16).padStart(64, "0"),
+-            })),
+-            "client",
+-          );
+-          // The event buffer also holds 1,000, so send the client events first.
+-          yield* analytics.flush;
+-          yield* analytics.recordOwners([{ source: "connect", ownerId: "a".repeat(64) }], "server");
+-        }),
+-      );
+-      const owners = batches.flat().map((event) => event.properties.observedBy);
+-
+-      assert.equal(owners.filter((observedBy) => observedBy === "client").length, 1_000);
+-      assert.equal(owners.filter((observedBy) => observedBy === "server").length, 1);
+-    }),
+-  );
+-
+-  it.effect("keeps a failed batch through a 20-minute outage and sends it once after", () =>
+-    Effect.gen(function* () {
+-      const ingest = failingFor(20);
+-      const batches = yield* sendFor(40, ingest.respond);
+-      const statuses = ingest.answers.map(({ status }) => status);
+-      assert.equal(statuses.at(-1), 204);
+-      assert.equal(statuses.filter((status) => status === 204).length, 1);
+-      const sentUuids = new Set(batches.map((batch) => batch.map(({ uuid }) => uuid).join()));
+-      assert.equal(sentUuids.size, 1);
+-      assert.equal(batches[0]?.length, 20);
+-    }),
+-  );
+-
+-  it.effect("drops a batch that keeps failing for 30 minutes", () =>
+-    Effect.gen(function* () {
+-      const ingest = failingFor(Infinity);
+-      yield* sendFor(60, ingest.respond);
+-      const lastSend = ingest.answers.at(-1)?.at ?? 0;
+-      assert.isAtLeast(lastSend, 30 * 60_000);
+-      assert.isBelow(lastSend, 36 * 60_000);
+-    }),
+-  );
+-
+-  it.effect(
+-    "sends nothing when a managed policy turns telemetry off, despite the environment",
+-    () =>
+-      Effect.gen(function* () {
+-        const policy = { schemaVersion: 1, organization: "Example Corp" } as const;
+-        const allowed = yield* sendFor(1, respondWithStatus(204), recordTwentyEvents, {
+-          ...policy,
+-          limits: { telemetry: true },
+-        });
+-        assert.equal(allowed.length, 1);
+-        const denied = yield* sendFor(1, respondWithStatus(204), recordTwentyEvents, {
+-          ...policy,
+-          limits: { telemetry: false },
+-        });
+-        assert.deepEqual(denied, []);
+-      }),
+-  );
+-
+-  it.effect("drops a batch the endpoint rejects without sending it again", () =>
+-    Effect.gen(function* () {
+-      const batches = yield* sendFor(10, respondWithStatus(400));
+-      assert.equal(batches.length, 1);
+-    }),
+-  );
+-
+-  it.effect("shutdown stops waiting for a telemetry endpoint that never answers", () =>
+-    Effect.gen(function* () {
+-      const scope = yield* Scope.make();
+-      const context = yield* Layer.buildWithScope(
+-        analyticsLayerWith(HttpClient.make(() => Effect.never)),
+-        scope,
+-      );
+-      yield* recordTwentyEvents.pipe(Effect.provide(context));
+-
+-      const shutdown = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+-      yield* TestClock.adjust("1 second");
+-      yield* Fiber.join(shutdown);
+-    }),
+-  );
+-
+-  it.effect("flush drains all buffered events across multiple batches", () =>
+-    Effect.gen(function* () {
+-      const capturedRequests: Array<RecordedBatchRequest> = [];
+-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+-        prefix: "t3-telemetry-base-",
+-      });
+-
+-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+-      const layerConfig = ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          T3CODE_TELEMETRY_ENABLED: true,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-          T3CODE_TELEMETRY_FLUSH_BATCH_SIZE: 20,
+-        }),
+-      );
+-      const layerBatchServer = HttpServer.serve(
+-        Effect.gen(function* () {
+-          const request = yield* HttpServerRequest.HttpServerRequest;
+-          if (request.method !== "POST") {
+-            return HttpServerResponse.empty({ status: 404 });
+-          }
+-
+-          const payload = yield* request.json.pipe(
+-            Effect.map((body) => body as RecordedBatchRequest["body"]),
+-            Effect.orElseSucceed(() => null),
+-          );
+-
+-          capturedRequests.push({ path: request.url, body: payload });
+-
+-          return HttpServerResponse.jsonUnsafe({});
+-        }),
+-      );
+-      const layerRuntime = layerTelemetry.pipe(
+-        Layer.provide(layerConfig),
+-        Layer.provide(
+-          Layer.mergeAll(
+-            Layer.succeed(HostProcess.Platform, "linux"),
+-            Layer.succeed(HostProcess.Architecture, "arm64"),
+-            ManagedPolicy.layerTest(),
+-          ),
+-        ),
+-        Layer.provideMerge(NodeHttpServer.layerTest),
+-      );
+-
+-      yield* Effect.gen(function* () {
+-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
+-        const { distinctId } = yield* getTelemetryIdentity;
+-        assert.equal(distinctId !== null, true);
+-        const analytics = yield* AnalyticsService.AnalyticsService;
+-
+-        for (let index = 0; index < 45; index += 1) {
+-          yield* analytics.record("test.flush.drain", { index });
+-        }
+-
+-        yield* analytics.flush;
+-      }).pipe(Effect.provide(layerRuntime));
+-
+-      const batchRequests = capturedRequests.filter(
+-        (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
+-          Array.isArray(request.body?.batch),
+-      );
+-      assert.equal(batchRequests.length, 3);
+-      assert.equal(
+-        batchRequests.every(
+-          (request) => request.path.endsWith("/batch/") || request.path.endsWith("/batch"),
+-        ),
+-        true,
+-      );
+-      const deliveredIndexes = batchRequests.flatMap((request) =>
+-        request.body.batch
+-          .filter((event) => event.event === "test.flush.drain")
+-          .map((event) => event.properties?.index)
+-          .filter((index): index is number => typeof index === "number"),
+-      );
+-
+-      const sorted = deliveredIndexes.toSorted((a, b) => a - b);
+-      assert.equal(sorted.length, 45);
+-      assert.deepEqual(
+-        sorted,
+-        Array.from({ length: 45 }, (_, index) => index),
+-      );
+-      assert.equal(
+-        batchRequests.every((request) =>
+-          request.body.batch.every((event) => event.properties?.clientType === "cli-web-client"),
+-        ),
+-        true,
+-      );
+-      assert.equal(
+-        batchRequests.every((request) =>
+-          request.body.batch.every(
+-            (event) =>
+-              event.properties?.serverOs === "Linux" &&
+-              event.properties.serverArch === "arm64" &&
+-              event.properties.serverAppVersion === event.properties.t3CodeVersion &&
+-              event.properties.serverMode === "web",
+-          ),
+-        ),
+-        true,
+-      );
+-    }),
+-  );
+-
+-  it.effect("does not send batch requests when telemetry is disabled", () =>
+-    Effect.gen(function* () {
+-      const capturedPaths: Array<string> = [];
+-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+-        prefix: "t3-telemetry-disabled-",
+-      });
+-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+-      const layerConfig = ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          T3CODE_TELEMETRY_ENABLED: false,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-        }),
+-      );
+-      const layerBatchServer = HttpServer.serve(
+-        Effect.gen(function* () {
+-          const request = yield* HttpServerRequest.HttpServerRequest;
+-          capturedPaths.push(request.url);
+-          return HttpServerResponse.jsonUnsafe({});
+-        }),
+-      );
+-      const layerRuntime = layerTelemetry.pipe(
+-        Layer.provide(layerConfig),
+-        Layer.provide(
+-          Layer.mergeAll(
+-            Layer.succeed(HostProcess.Platform, "linux"),
+-            Layer.succeed(HostProcess.Architecture, "arm64"),
+-            ManagedPolicy.layerTest(),
+-          ),
+-        ),
+-        Layer.provideMerge(NodeHttpServer.layerTest),
+-      );
+-
+-      yield* Effect.gen(function* () {
+-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
+-        const analytics = yield* AnalyticsService.AnalyticsService;
+-        yield* analytics.record("test.disabled", { index: 1 });
+-        yield* analytics.flush;
+-      }).pipe(Effect.provide(layerRuntime));
+-
+-      assert.deepEqual(capturedPaths, []);
+-    }),
+-  );
+-});
+diff --git a/apps/server/src/telemetry/AnalyticsService.ts b/apps/server/src/telemetry/AnalyticsService.ts
+index 384da92b3f..1b97b609d3 100644
+--- a/apps/server/src/telemetry/AnalyticsService.ts
++++ b/apps/server/src/telemetry/AnalyticsService.ts
+@@ -1,83 +1,9 @@
+-// T3 ingest retains events and forwards to PostHog; UUIDs deduplicate retries there.
+-import * as HostProcess from "@t3tools/shared/HostProcess";
+-import type { ClientOs } from "@t3tools/contracts";
+-import * as Clock from "effect/Clock";
+-import * as Config from "effect/Config";
+-import * as ConfigProvider from "effect/ConfigProvider";
++// Plutonium: usage analytics are stripped. Upstream batches these events to T3's PostHog
++// ingest; here the service keeps its interface so the call sites stay as upstream wrote
++// them, and every event is dropped where it is recorded. Nothing is buffered or sent.
+ import * as Context from "effect/Context";
+-import * as SecureRandom from "effect/crypto/SecureRandom";
+-import * as DateTime from "effect/DateTime";
+ import * as Effect from "effect/Effect";
+-import * as Exit from "effect/Exit";
+ import * as Layer from "effect/Layer";
+-import * as Option from "effect/Option";
+-import * as Random from "effect/Random";
+-import * as Ref from "effect/Ref";
+-import * as Result from "effect/Result";
+-import * as Semaphore from "effect/Semaphore";
+-import * as HttpClient from "effect/http/HttpClient";
+-import * as HttpClientRequest from "effect/http/HttpClientRequest";
+-import * as HttpClientResponse from "effect/http/HttpClientResponse";
+-
+-import packageJson from "../../package.json" with { type: "json" };
+-import * as ServerConfig from "../config.ts";
+-import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+-import { getTelemetryIdentity, type TelemetryOwner } from "./Identify.ts";
+-
+-interface BufferedAnalyticsEvent {
+-  readonly uuid: string;
+-  readonly event: string;
+-  readonly properties?: Readonly<Record<string, unknown>>;
+-  readonly capturedAt: string;
+-}
+-
+-interface DeliveryState {
+-  readonly failedBatch: ReadonlyArray<BufferedAnalyticsEvent>;
+-  readonly batchAttempts: number;
+-  readonly firstFailedAt: number;
+-  readonly failures: number;
+-  readonly retryAt: number;
+-}
+-
+-// Retry delays shorter than this still wait for the next background check.
+-const FLUSH_INTERVAL_MS = 10_000;
+-// A hung send would hold the flush lock for the next background flush.
+-const SEND_TIMEOUT = "10 seconds";
+-// Quit and restart wait for this flush; events it cannot send in time are dropped.
+-const SHUTDOWN_FLUSH_TIMEOUT = "1 second";
+-// A failed batch is tried again until it has failed for this long. Ingest answers 503 when it
+-// cannot store a batch, and a broken Cloudflare location can take about 5 minutes to fail over.
+-// The waiting batch holds newer events back; `maxBufferedEvents` bounds them meanwhile.
+-const MAX_BATCH_RETRY_MS = 30 * 60_000;
+-const RETRY_BASE_DELAY_MS = 2_000;
+-// Clients can report any number of owner ids; past this many per observer, new ones
+-// are not sent. Each observer has its own cap, so client reports never crowd out the
+-// server's own.
+-const MAX_RECORDED_OWNERS = 1_000;
+-const RETRY_MAX_DELAY_MS = 300_000;
+-// These statuses reject the batch itself; unlike 408/429, retrying cannot help.
+-const REJECTED_BATCH_STATUSES = new Set([400, 401, 413]);
+-
+-/** `random` is in [0, 1). */
+-function retryDelayMs(failures: number, random: number): number {
+-  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (failures - 1));
+-  return Math.round(ceiling / 2 + (ceiling / 2) * random);
+-}
+-
+-const TelemetryEnvConfig = Config.all({
+-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
+-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
+-  ),
+-  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
+-    Config.withDefault("https://ingest.t3.codes"),
+-  ),
+-  enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+-  flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
+-  maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
+-    Config.withDefault(1_000),
+-  ),
+-  wslDistroName: Config.String("WSL_DISTRO_NAME").pipe(Config.option),
+-});
+ 
+ export class AnalyticsService extends Context.Service<
+   AnalyticsService,
+@@ -88,277 +14,15 @@ export class AnalyticsService extends Context.Service<
+     ) => Effect.Effect<void>;
+ 
+     readonly flush: Effect.Effect<void>;
+-
+-    /**
+-     * Records `install.owner_observed` for each owner of this install that the
+-     * server read itself or a connecting client reported. Each owner is sent once
+-     * per server process, so reconnects and repeated reads are free.
+-     */
+-    readonly recordOwners: (
+-      owners: ReadonlyArray<TelemetryOwner>,
+-      observedBy: "server" | "client",
+-    ) => Effect.Effect<void>;
+   }
+ >()("t3/telemetry/AnalyticsService") {}
+ 
+-function serverOsFromNodePlatform(platform: string): ClientOs {
+-  switch (platform) {
+-    case "darwin":
+-      return "macOS";
+-    case "win32":
+-      return "Windows";
+-    case "linux":
+-      return "Linux";
+-    case "android":
+-      return "Android";
+-    default:
+-      return "other";
+-  }
+-}
+-
+ /** @public */
+-/** @public */
+-export const make = Effect.gen(function* () {
+-  const telemetryConfig = yield* TelemetryEnvConfig;
+-  const hostEnvironment = yield* HostProcess.Environment;
+-  const awaitingShellConsent = hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1";
+-  // A managed policy can switch analytics off over the environment, never on.
+-  const policyAllows =
+-    ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
+-  // A cached PATH does not establish consent from the current login shell.
+-  const telemetryEnabled = Effect.suspend(() => {
+-    if (!telemetryConfig.enabled || !policyAllows) return Effect.succeed(false);
+-    if (!awaitingShellConsent) return Effect.succeed(true);
+-    if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1")
+-      return Effect.succeed(false);
+-    const preference = hostEnvironment.T3CODE_TELEMETRY_ENABLED;
+-    return Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
+-      Config.withDefault(true),
+-      Effect.provideService(
+-        ConfigProvider.ConfigProvider,
+-        ConfigProvider.fromEnv({
+-          env: preference === undefined ? {} : { T3CODE_TELEMETRY_ENABLED: preference },
+-        }),
+-      ),
+-      Effect.orElseSucceed(() => false),
+-    );
+-  });
+-  const httpClient = yield* HttpClient.HttpClient;
+-  const serverConfig = yield* ServerConfig.ServerConfig;
+-  const { distinctId, installId } = yield* getTelemetryIdentity;
+-  const crypto = yield* SecureRandom.SecureRandom;
+-  const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
+-  const deliveryRef = yield* Ref.make<DeliveryState>({
+-    failedBatch: [],
+-    batchAttempts: 0,
+-    firstFailedAt: 0,
+-    failures: 0,
+-    retryAt: 0,
+-  });
+-  const recordedOwnersRef = yield* Ref.make<
+-    Readonly<Record<"server" | "client", ReadonlySet<string>>>
+-  >({ server: new Set(), client: new Set() });
+-  // The background flush and the shutdown flush must not send the same batch at once.
+-  const flushLock = yield* Semaphore.make(1);
+-  const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
+-  const hostPlatform = yield* HostProcess.Platform;
+-  const hostArchitecture = yield* HostProcess.Architecture;
+-
+-  const enqueueBufferedEvent = (
+-    uuid: string,
+-    event: string,
+-    properties?: Readonly<Record<string, unknown>>,
+-  ) =>
+-    Effect.flatMap(DateTime.now, (now) =>
+-      Ref.modify(bufferRef, (current) => {
+-        const appended = [
+-          ...current,
+-          {
+-            uuid,
+-            event,
+-            ...(properties ? { properties } : {}),
+-            capturedAt: DateTime.formatIso(now),
+-          } satisfies BufferedAnalyticsEvent,
+-        ];
+-
+-        const next =
+-          appended.length > telemetryConfig.maxBufferedEvents
+-            ? appended.slice(appended.length - telemetryConfig.maxBufferedEvents)
+-            : appended;
+-
+-        return [
+-          {
+-            size: next.length,
+-            dropped: next.length !== appended.length,
+-          } as const,
+-          next,
+-        ] as const;
+-      }),
+-    );
+-
+-  const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
+-    events: ReadonlyArray<BufferedAnalyticsEvent>,
+-  ) {
+-    if (!(yield* telemetryEnabled) || !distinctId) return;
+-
+-    const payload = {
+-      api_key: telemetryConfig.posthogKey,
+-      batch: events.map((event) => ({
+-        uuid: event.uuid,
+-        event: event.event,
+-        distinct_id: distinctId,
+-        properties: {
+-          ...event.properties,
+-          ...(installId === null ? {} : { installId }),
+-          $process_person_profile: false,
+-          platform: hostPlatform,
+-          wsl: Option.getOrUndefined(telemetryConfig.wslDistroName),
+-          arch: hostArchitecture,
+-          t3CodeVersion: packageJson.version,
+-          telemetryChannel: ServerConfig.telemetryChannel,
+-          clientType,
+-          serverOs: serverOsFromNodePlatform(hostPlatform),
+-          serverArch: hostArchitecture,
+-          serverWslDistro: Option.getOrUndefined(telemetryConfig.wslDistroName),
+-          serverAppVersion: packageJson.version,
+-          serverMode: serverConfig.mode,
+-        },
+-        timestamp: event.capturedAt,
+-      })),
+-    };
+-
+-    yield* HttpClientRequest.post(`${telemetryConfig.posthogHost}/batch/`).pipe(
+-      HttpClientRequest.bodyJson(payload),
+-      Effect.flatMap(httpClient.execute),
+-      Effect.flatMap(HttpClientResponse.filterStatusOk),
+-      Effect.timeout(SEND_TIMEOUT),
+-    );
+-  });
+-
+-  const takeBatch = Ref.modify(bufferRef, (current) => {
+-    const nextBatch = current.slice(0, telemetryConfig.flushBatchSize);
+-    return [nextBatch, current.slice(nextBatch.length)] as const;
+-  });
+-
+-  // Back off even after dropping rejected batches so bad API keys cannot drain the queue in a tight loop.
+-  const flush: AnalyticsService["Service"]["flush"] = Effect.gen(function* () {
+-    while (true) {
+-      const delivery = yield* Ref.get(deliveryRef);
+-      const batch = delivery.failedBatch.length > 0 ? delivery.failedBatch : yield* takeBatch;
+-      if (batch.length === 0) {
+-        return;
+-      }
+-
+-      const sent = yield* Effect.result(sendBatch(batch));
+-      if (Result.isSuccess(sent)) {
+-        yield* Ref.set(deliveryRef, {
+-          failedBatch: [],
+-          batchAttempts: 0,
+-          firstFailedAt: 0,
+-          failures: 0,
+-          retryAt: 0,
+-        });
+-        continue;
+-      }
+-
+-      const now = yield* Clock.currentTimeMillis;
+-      const failures = delivery.failures + 1;
+-      const batchAttempts = delivery.batchAttempts + 1;
+-      const firstFailedAt = delivery.batchAttempts === 0 ? now : delivery.firstFailedAt;
+-      const retryAt = now + retryDelayMs(failures, yield* Random.next);
+-      const error = sent.failure;
+-      const rejected =
+-        error._tag === "HttpClientError" &&
+-        error.reason._tag === "StatusCodeError" &&
+-        REJECTED_BATCH_STATUSES.has(error.reason.response.status);
+-      if (!rejected && now - firstFailedAt < MAX_BATCH_RETRY_MS) {
+-        yield* Ref.set(deliveryRef, {
+-          failedBatch: batch,
+-          batchAttempts,
+-          firstFailedAt,
+-          failures,
+-          retryAt,
+-        });
+-        yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
+-          attempt: batchAttempts,
+-          cause: error,
+-        });
+-        return;
+-      }
+-      yield* Ref.set(deliveryRef, {
+-        failedBatch: [],
+-        batchAttempts: 0,
+-        firstFailedAt: 0,
+-        failures,
+-        retryAt,
+-      });
+-      yield* Effect.logWarning(
+-        rejected
+-          ? "Dropped telemetry batch the endpoint rejected"
+-          : "Dropped telemetry batch after repeated send failures",
+-        { events: batch.length, attempts: batchAttempts, cause: error },
+-      );
+-      return;
+-    }
+-  }).pipe(flushLock.withPermit);
+-
+-  const flushWhenDue = Effect.gen(function* () {
+-    const { retryAt } = yield* Ref.get(deliveryRef);
+-    if ((yield* Clock.currentTimeMillis) >= retryAt) {
+-      yield* flush;
+-    }
+-  });
+-
+-  const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
+-    function* (event, properties) {
+-      if (!(yield* telemetryEnabled) || !distinctId) return;
+-
+-      // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
+-      const uuid = yield* Effect.exit(crypto.uuidV7());
+-      if (Exit.isFailure(uuid)) return;
+-
+-      const enqueueResult = yield* enqueueBufferedEvent(uuid.value, event, properties);
+-      if (enqueueResult.dropped) {
+-        yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
+-          size: enqueueResult.size,
+-          event,
+-        });
+-      }
+-    },
+-  );
+-
+-  const recordOwners: AnalyticsService["Service"]["recordOwners"] = Effect.fn(
+-    "AnalyticsService.recordOwners",
+-  )((owners, observedBy) =>
+-    Effect.forEach(
+-      owners,
+-      ({ source, ownerId }) =>
+-        Ref.modify(recordedOwnersRef, (recorded) => {
+-          const key = `${source}:${ownerId}`;
+-          const seen = recorded[observedBy];
+-          return seen.has(key) || seen.size >= MAX_RECORDED_OWNERS
+-            ? [false, recorded]
+-            : [true, { ...recorded, [observedBy]: new Set(seen).add(key) }];
+-        }).pipe(
+-          Effect.flatMap((isNew) =>
+-            isNew
+-              ? record("install.owner_observed", { ownerSource: source, ownerId, observedBy })
+-              : Effect.void,
+-          ),
+-        ),
+-      { discard: true },
+-    ),
+-  );
+-
+-  yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.andThen(flushWhenDue)), {
+-    disableYield: true,
+-  }).pipe(Effect.forkScoped);
+-
+-  yield* Effect.addFinalizer(() =>
+-    flush.pipe(Effect.timeout(SHUTDOWN_FLUSH_TIMEOUT), Effect.ignore),
+-  );
+-
+-  return AnalyticsService.of({ record, flush, recordOwners });
+-});
++export const make = Effect.succeed(
++  AnalyticsService.of({
++    record: Effect.fn("AnalyticsService.record")(function* (_event, _properties) {}),
++    flush: Effect.void,
++  }),
++);
+ 
+ export const layer = Layer.effect(AnalyticsService, make);
+diff --git a/apps/server/src/telemetry/Identify.test.ts b/apps/server/src/telemetry/Identify.test.ts
+deleted file mode 100644
+index 6a09518751..0000000000
+--- a/apps/server/src/telemetry/Identify.test.ts
++++ /dev/null
+@@ -1,271 +0,0 @@
+-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+-import * as NodeServices from "@effect/platform-node/NodeServices";
+-import { assert, it } from "@effect/vitest";
+-import * as Digest from "effect/crypto/Digest";
+-import * as Effect from "effect/Effect";
+-import * as Hex from "effect/encoding/Hex";
+-import * as FileSystem from "effect/FileSystem";
+-import * as Layer from "effect/Layer";
+-import * as Logger from "effect/Logger";
+-import * as Path from "effect/Path";
+-import * as PlatformError from "effect/PlatformError";
+-import * as References from "effect/References";
+-
+-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+-import { CLOUD_LINKED_USER_ID } from "../cloud/config.ts";
+-import * as ServerConfig from "../config.ts";
+-import * as Identify from "./Identify.ts";
+-
+-interface CapturedLog {
+-  readonly message: unknown;
+-  readonly annotations: Readonly<Record<string, unknown>>;
+-}
+-
+-const sha256 = Effect.fn("test.sha256")(function* (value: string) {
+-  const digest = yield* Digest.Digest;
+-  return Hex.encode(
+-    yield* digest.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(Effect.orDie),
+-  );
+-});
+-
+-const makeCaptureLogger = (logs: CapturedLog[]) =>
+-  Logger.make(({ fiber, message }) => {
+-    logs.push({
+-      message,
+-      annotations: fiber.getRef(References.CurrentLogAnnotations),
+-    });
+-  });
+-
+-const findIdentityLog = (
+-  logs: ReadonlyArray<CapturedLog>,
+-  source: Identify.TelemetryIdentitySource,
+-  errorTag: string,
+-) => logs.find((log) => log.annotations.source === source && log.annotations.errorTag === errorTag);
+-
+-const unsignedJwt = (claims: Readonly<Record<string, unknown>>) =>
+-  ["e30", Buffer.from(JSON.stringify(claims)).toString("base64url"), "signature"].join(".");
+-
+-const layerIdentity = (prefix: string, logs?: CapturedLog[]) =>
+-  Layer.provideMerge(
+-    ServerSecretStore.layer,
+-    ServerConfig.layerTest(process.cwd(), { prefix }),
+-  ).pipe(
+-    Layer.merge(
+-      logs === undefined
+-        ? Layer.empty
+-        : Logger.layer([makeCaptureLogger(logs)], { mergeWithExisting: false }),
+-    ),
+-  );
+-
+-const writeHomeFile = Effect.fn("test.writeHomeFile")(function* (
+-  homeDirectory: string,
+-  relativePath: string,
+-  contents: string,
+-) {
+-  const fileSystem = yield* FileSystem.FileSystem;
+-  const path = yield* Path.Path;
+-  const filePath = path.join(homeDirectory, relativePath);
+-  yield* fileSystem.makeDirectory(path.dirname(filePath), { recursive: true });
+-  yield* fileSystem.writeFileString(filePath, contents);
+-  return filePath;
+-});
+-
+-it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("telemetry identity", (it) => {
+-  it.effect("keeps the old distinct_id rule and a fixed install id as logins change", () =>
+-    Effect.gen(function* () {
+-      const config = yield* ServerConfig.ServerConfig;
+-      const fileSystem = yield* FileSystem.FileSystem;
+-      const path = yield* Path.Path;
+-      const homeDirectory = path.join(config.baseDir, "home");
+-      const anonymousId = "persisted-anonymous-id";
+-      yield* fileSystem.writeFileString(config.anonymousIdPath, anonymousId);
+-      const installId = yield* sha256(anonymousId);
+-      const identity = () => Identify.getTelemetryIdentityForHome(homeDirectory);
+-
+-      assert.deepEqual(yield* identity(), { distinctId: installId, installId });
+-
+-      yield* writeHomeFile(homeDirectory, ".claude.json", `{"userID":"claude-machine"}`);
+-      assert.deepEqual(yield* identity(), {
+-        distinctId: yield* sha256("claude-machine"),
+-        installId,
+-      });
+-
+-      yield* writeHomeFile(homeDirectory, ".codex/auth.json", `{"auth_mode":"apikey"}`);
+-      assert.equal((yield* identity()).distinctId, yield* sha256("claude-machine"));
+-
+-      yield* writeHomeFile(homeDirectory, ".codex/auth.json", `{"tokens":{"account_id":"ws-1"}}`);
+-      assert.deepEqual(yield* identity(), { distinctId: yield* sha256("ws-1"), installId });
+-    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-install-"))),
+-  );
+-
+-  it.effect("leaves no torn anonymous id behind when its write fails midway", () =>
+-    Effect.gen(function* () {
+-      const config = yield* ServerConfig.ServerConfig;
+-      const fileSystem = yield* FileSystem.FileSystem;
+-      const path = yield* Path.Path;
+-      const tornWrites = FileSystem.FileSystem.of({
+-        ...fileSystem,
+-        writeFileString: (filePath, data, options) =>
+-          fileSystem
+-            .writeFileString(filePath, data.slice(0, Math.floor(data.length / 2)), options)
+-            .pipe(
+-              Effect.andThen(
+-                Effect.fail(
+-                  PlatformError.systemError({
+-                    _tag: "WriteZero",
+-                    module: "FileSystem",
+-                    method: "writeFileString",
+-                    pathOrDescriptor: filePath,
+-                  }),
+-                ),
+-              ),
+-            ),
+-      });
+-
+-      const identity = yield* Identify.getTelemetryIdentityForHome(
+-        path.join(config.baseDir, "home"),
+-      ).pipe(Effect.provideService(FileSystem.FileSystem, tornWrites));
+-
+-      assert.deepEqual(identity, { distinctId: null, installId: null });
+-      assert.isFalse(yield* fileSystem.exists(config.anonymousIdPath));
+-    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-torn-"))),
+-  );
+-
+-  it.effect("does not overwrite the anonymous id path after a non-NotFound read failure", () => {
+-    const logs: CapturedLog[] = [];
+-
+-    return Effect.gen(function* () {
+-      const config = yield* ServerConfig.ServerConfig;
+-      const fileSystem = yield* FileSystem.FileSystem;
+-      const path = yield* Path.Path;
+-      yield* fileSystem.makeDirectory(config.anonymousIdPath);
+-
+-      const identity = yield* Identify.getTelemetryIdentityForHome(
+-        path.join(config.baseDir, "home"),
+-      );
+-      assert.deepEqual(identity, { distinctId: null, installId: null });
+-      assert.deepEqual(yield* fileSystem.readDirectory(config.anonymousIdPath), []);
+-
+-      const readLog = findIdentityLog(logs, "anonymous", "TelemetryIdentityReadError");
+-      assert.equal(readLog?.annotations.filePath, config.anonymousIdPath);
+-      assert.notEqual(readLog?.annotations.platformReason, "NotFound");
+-      assert.notProperty(readLog?.annotations ?? {}, "cause");
+-      assert.isUndefined(
+-        findIdentityLog(logs, "anonymous", "TelemetryAnonymousIdPersistenceError"),
+-      );
+-    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-read-", logs)));
+-  });
+-
+-  it.effect("reads the Connect account and each provider account as owners", () =>
+-    Effect.gen(function* () {
+-      const config = yield* ServerConfig.ServerConfig;
+-      const secrets = yield* ServerSecretStore.ServerSecretStore;
+-      const path = yield* Path.Path;
+-      const homeDirectory = path.join(config.baseDir, "home");
+-      yield* secrets.set(CLOUD_LINKED_USER_ID, new TextEncoder().encode("user_connect"));
+-      yield* writeHomeFile(
+-        homeDirectory,
+-        ".codex/auth.json",
+-        JSON.stringify({
+-          tokens: {
+-            account_id: "team-workspace",
+-            id_token: unsignedJwt({
+-              sub: "google-oauth2|login-method",
+-              "https://api.openai.com/auth": { user_id: "user-openai-person" },
+-            }),
+-          },
+-        }),
+-      );
+-      yield* writeHomeFile(
+-        homeDirectory,
+-        ".claude.json",
+-        JSON.stringify({
+-          userID: "claude-machine",
+-          oauthAccount: { accountUuid: "claude-person" },
+-        }),
+-      );
+-
+-      const owners = yield* Identify.getServerOwnersForHome(homeDirectory);
+-
+-      assert.deepEqual(owners, [
+-        { source: "connect", ownerId: yield* sha256("user_connect") },
+-        { source: "openai", ownerId: yield* sha256("user-openai-person") },
+-        { source: "claude", ownerId: yield* sha256("claude-person") },
+-      ]);
+-    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-owners-"))),
+-  );
+-
+-  it.effect.each([
+-    {
+-      login: "an API key",
+-      secret: "sk-private-openai-api-key",
+-      authJson: (secret: string) => `{"auth_mode":"apikey","OPENAI_API_KEY":"${secret}"}`,
+-    },
+-    {
+-      login: "an agent identity",
+-      secret: "private-agent-identity-jwt",
+-      authJson: (secret: string) =>
+-        `{"auth_mode":"agentIdentity","OPENAI_API_KEY":null,"agent_identity":"${secret}"}`,
+-    },
+-    {
+-      login: "a personal access token",
+-      secret: "private-personal-access-token",
+-      authJson: (secret: string) => `{"OPENAI_API_KEY":null,"personal_access_token":"${secret}"}`,
+-    },
+-  ])(
+-    "adds no owner and logs nothing when Codex authenticates with $login",
+-    ({ secret, authJson }) => {
+-      const logs: CapturedLog[] = [];
+-
+-      return Effect.gen(function* () {
+-        const config = yield* ServerConfig.ServerConfig;
+-        const path = yield* Path.Path;
+-        const homeDirectory = path.join(config.baseDir, "home");
+-        yield* writeHomeFile(homeDirectory, ".codex/auth.json", authJson(secret));
+-
+-        assert.deepEqual(yield* Identify.getServerOwnersForHome(homeDirectory), []);
+-        assert.deepEqual(logs, []);
+-      }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-tokenless-", logs)));
+-    },
+-  );
+-
+-  it.effect(
+-    "warns about malformed Codex auth without its tokens and keeps the other owners",
+-    () => {
+-      const logs: CapturedLog[] = [];
+-
+-      return Effect.gen(function* () {
+-        const config = yield* ServerConfig.ServerConfig;
+-        const path = yield* Path.Path;
+-        const homeDirectory = path.join(config.baseDir, "home");
+-        const privateAccessToken = "private-codex-access-token";
+-        const codexAuthPath = yield* writeHomeFile(
+-          homeDirectory,
+-          ".codex/auth.json",
+-          `{"tokens":{"access_token":"${privateAccessToken}"}}`,
+-        );
+-        yield* writeHomeFile(
+-          homeDirectory,
+-          ".claude.json",
+-          `{"oauthAccount":{"accountUuid":"claude-person"}}`,
+-        );
+-
+-        assert.deepEqual(yield* Identify.getServerOwnersForHome(homeDirectory), [
+-          { source: "claude", ownerId: yield* sha256("claude-person") },
+-        ]);
+-        const decodeLog = findIdentityLog(logs, "codex", "TelemetryIdentityDecodeError");
+-        assert.equal(
+-          decodeLog?.message,
+-          `Failed to decode codex telemetry identity at '${codexAuthPath}'.`,
+-        );
+-        assert.equal(decodeLog?.annotations.causeKind, "schema");
+-        assert.notInclude(
+-          Object.values(decodeLog?.annotations ?? {})
+-            .map(String)
+-            .join("\n"),
+-          privateAccessToken,
+-        );
+-      }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-decode-", logs)));
+-    },
+-  );
+-});
+diff --git a/apps/server/src/telemetry/Identify.ts b/apps/server/src/telemetry/Identify.ts
+deleted file mode 100644
+index 7ea7e9d296..0000000000
+--- a/apps/server/src/telemetry/Identify.ts
++++ /dev/null
+@@ -1,341 +0,0 @@
+-import * as SecureRandom from "effect/crypto/SecureRandom";
+-import * as Effect from "effect/Effect";
+-import * as Base64Url from "effect/encoding/Base64Url";
+-import * as FileSystem from "effect/FileSystem";
+-import * as Option from "effect/Option";
+-import * as Path from "effect/Path";
+-import * as PlatformError from "effect/PlatformError";
+-import * as Result from "effect/Result";
+-import * as Schema from "effect/Schema";
+-
+-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+-import * as HostProcess from "@t3tools/shared/HostProcess";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+-import { CLOUD_LINKED_USER_ID } from "../cloud/config.ts";
+-import * as ServerConfig from "../config.ts";
+-
+-/**
+- * Codex writes `tokens` only for ChatGPT logins and omits the key for API-key,
+- * agent-identity, and personal-access-token logins, so its absence is a
+- * supported install and not a malformed file. `account_id` is the ChatGPT
+- * workspace, which a whole Team shares; the `id_token` names the person.
+- */
+-const CodexAuthJsonSchema = Schema.Struct({
+-  tokens: Schema.optionalKey(
+-    Schema.Struct({
+-      account_id: Schema.String,
+-      id_token: Schema.optionalKey(Schema.String),
+-    }),
+-  ),
+-});
+-
+-/** `userID` is random per machine. `oauthAccount` is present only while Claude Code is logged in. */
+-const ClaudeJsonSchema = Schema.Struct({
+-  userID: Schema.optionalKey(Schema.String),
+-  oauthAccount: Schema.optionalKey(
+-    Schema.Struct({
+-      accountUuid: Schema.optionalKey(Schema.String),
+-    }),
+-  ),
+-});
+-
+-// `sub` names the login method (`google-oauth2|…`), so one person can have several.
+-// `user_id` (`user-…`) is the OpenAI account and is the same for every login.
+-const IdTokenClaims = Schema.Struct({
+-  "https://api.openai.com/auth": Schema.Struct({ user_id: Schema.NonEmptyString }),
+-});
+-const decodeIdTokenClaims = Schema.decodeUnknownOption(Schema.fromJsonString(IdTokenClaims));
+-
+-/**
+- * Who an install belongs to, from strongest to weakest. `connect` is the T3
+- * Connect account. `openai` and `claude` are provider accounts. `device` is a
+- * client device that connected.
+- */
+-export const TelemetryOwnerSource = Schema.Literals(["connect", "openai", "claude", "device"]);
+-export type TelemetryOwnerSource = typeof TelemetryOwnerSource.Type;
+-
+-export interface TelemetryOwner {
+-  readonly source: TelemetryOwnerSource;
+-  /** `hashTelemetryId` of the source's raw id. */
+-  readonly ownerId: string;
+-}
+-
+-export const TelemetryIdentitySource = Schema.Literals(["codex", "claude", "anonymous"]);
+-export type TelemetryIdentitySource = typeof TelemetryIdentitySource.Type;
+-
+-class TelemetryIdentityReadError extends Schema.TaggedError<TelemetryIdentityReadError>()(
+-  "TelemetryIdentityReadError",
+-  {
+-    source: TelemetryIdentitySource,
+-    filePath: Schema.String,
+-    cause: Schema.Defect(),
+-  },
+-) {
+-  override get message(): string {
+-    return `Failed to read ${this.source} telemetry identity at '${this.filePath}'.`;
+-  }
+-}
+-
+-class TelemetryIdentityDecodeError extends Schema.TaggedError<TelemetryIdentityDecodeError>()(
+-  "TelemetryIdentityDecodeError",
+-  {
+-    source: Schema.Literals(["codex", "claude"]),
+-    filePath: Schema.String,
+-    cause: Schema.Defect(),
+-  },
+-) {
+-  override get message(): string {
+-    return `Failed to decode ${this.source} telemetry identity at '${this.filePath}'.`;
+-  }
+-}
+-
+-export class TelemetryAnonymousIdGenerationError extends Schema.TaggedError<TelemetryAnonymousIdGenerationError>()(
+-  "TelemetryAnonymousIdGenerationError",
+-  {
+-    source: Schema.Literal("anonymous"),
+-    filePath: Schema.String,
+-    cause: Schema.Defect(),
+-  },
+-) {
+-  override get message(): string {
+-    return `Failed to generate anonymous telemetry identity for '${this.filePath}'.`;
+-  }
+-}
+-
+-export class TelemetryAnonymousIdPersistenceError extends Schema.TaggedError<TelemetryAnonymousIdPersistenceError>()(
+-  "TelemetryAnonymousIdPersistenceError",
+-  {
+-    source: Schema.Literal("anonymous"),
+-    filePath: Schema.String,
+-    cause: Schema.Defect(),
+-  },
+-) {
+-  override get message(): string {
+-    return `Failed to persist anonymous telemetry identity at '${this.filePath}'.`;
+-  }
+-}
+-
+-type TelemetryIdentityError =
+-  | TelemetryIdentityReadError
+-  | TelemetryIdentityDecodeError
+-  | TelemetryAnonymousIdGenerationError
+-  | TelemetryAnonymousIdPersistenceError;
+-
+-const decodeCodexAuthJson = Schema.decodeEffect(Schema.fromJsonString(CodexAuthJsonSchema));
+-const decodeClaudeJson = Schema.decodeEffect(Schema.fromJsonString(ClaudeJsonSchema));
+-
+-function isNotFoundError(error: PlatformError.PlatformError): boolean {
+-  return error.reason._tag === "NotFound";
+-}
+-
+-const getTelemetryIdentityCauseAnnotations = (cause: unknown) => {
+-  if (cause instanceof PlatformError.PlatformError) {
+-    return {
+-      causeKind: "platform",
+-      platformReason: cause.reason._tag,
+-    };
+-  }
+-  if (cause instanceof Schema.SchemaError) {
+-    return { causeKind: "schema" };
+-  }
+-  return { causeKind: "other" };
+-};
+-
+-const logTelemetryIdentityError = (error: TelemetryIdentityError) =>
+-  Effect.logWarning(error.message).pipe(
+-    Effect.annotateLogs({
+-      errorTag: error._tag,
+-      source: error.source,
+-      ...("filePath" in error ? { filePath: error.filePath } : {}),
+-      ...getTelemetryIdentityCauseAnnotations(error.cause),
+-      ...(error.stack === undefined ? {} : { errorStack: error.stack }),
+-    }),
+-  );
+-
+-const readIdentityFile = (
+-  fileSystem: FileSystem.FileSystem,
+-  source: TelemetryIdentitySource,
+-  filePath: string,
+-) =>
+-  fileSystem.readFileString(filePath).pipe(
+-    Effect.asSome,
+-    Effect.catchTags({
+-      PlatformError: (cause) =>
+-        isNotFoundError(cause)
+-          ? Effect.succeed(Option.none<string>())
+-          : Effect.fail(
+-              new TelemetryIdentityReadError({
+-                source,
+-                filePath,
+-                cause,
+-              }),
+-            ),
+-    }),
+-  );
+-
+-/**
+- * The OpenAI account id in a ChatGPT id_token, read without verifying it:
+- * analytics needs only a stable id. Codex CLI and T3's own sign-in both use it.
+- */
+-export const openAiUserId = (idToken: string) => {
+-  const payload = Base64Url.decodeString(idToken.split(".")[1] ?? "");
+-  return Result.isSuccess(payload)
+-    ? Option.map(
+-        decodeIdTokenClaims(payload.success),
+-        (claims) => claims["https://api.openai.com/auth"].user_id,
+-      )
+-    : Option.none<string>();
+-};
+-
+-const readJsonIdentityFile = Effect.fn("TelemetryIdentity.readJsonIdentityFile")(function* <A>(
+-  source: "codex" | "claude",
+-  filePath: string,
+-  decode: (encoded: string) => Effect.Effect<A, Schema.SchemaError>,
+-) {
+-  const fileSystem = yield* FileSystem.FileSystem;
+-  const encoded = yield* readIdentityFile(fileSystem, source, filePath);
+-  if (Option.isNone(encoded)) {
+-    return Option.none<A>();
+-  }
+-  return yield* decode(encoded.value).pipe(
+-    Effect.asSome,
+-    Effect.mapError((cause) => new TelemetryIdentityDecodeError({ source, filePath, cause })),
+-  );
+-});
+-
+-// A missing or unreadable file only removes that owner; it never blocks the others.
+-const skipOnError = <A, R>(
+-  effect: Effect.Effect<
+-    Option.Option<A>,
+-    TelemetryIdentityReadError | TelemetryIdentityDecodeError,
+-    R
+-  >,
+-) =>
+-  effect.pipe(
+-    Effect.catch((error) => logTelemetryIdentityError(error).pipe(Effect.as(Option.none<A>()))),
+-  );
+-
+-const upsertAnonymousId = Effect.gen(function* () {
+-  const fileSystem = yield* FileSystem.FileSystem;
+-  const { anonymousIdPath } = yield* ServerConfig.ServerConfig;
+-
+-  const existing = yield* readIdentityFile(fileSystem, "anonymous", anonymousIdPath);
+-  if (Option.isSome(existing)) {
+-    return existing.value;
+-  }
+-
+-  const anonymousId = yield* SecureRandom.SecureRandom.pipe(
+-    Effect.flatMap((crypto) => crypto.uuidV4()),
+-    Effect.mapError(
+-      (cause) =>
+-        new TelemetryAnonymousIdGenerationError({
+-          source: "anonymous",
+-          filePath: anonymousIdPath,
+-          cause,
+-        }),
+-    ),
+-  );
+-  yield* writeFileStringAtomically({ filePath: anonymousIdPath, contents: anonymousId }).pipe(
+-    Effect.mapError(
+-      (cause) =>
+-        new TelemetryAnonymousIdPersistenceError({
+-          source: "anonymous",
+-          filePath: anonymousIdPath,
+-          cause,
+-        }),
+-    ),
+-  );
+-
+-  return anonymousId;
+-});
+-
+-const readProviderLogins = Effect.fn("TelemetryIdentity.readProviderLogins")(function* (
+-  homeDirectory: string,
+-) {
+-  const path = yield* Path.Path;
+-  const codexTokens = yield* readJsonIdentityFile(
+-    "codex",
+-    path.join(homeDirectory, ".codex", "auth.json"),
+-    decodeCodexAuthJson,
+-  ).pipe(
+-    skipOnError,
+-    Effect.map(Option.flatMap((authJson) => Option.fromUndefinedOr(authJson.tokens))),
+-  );
+-  const claudeJson = yield* readJsonIdentityFile(
+-    "claude",
+-    path.join(homeDirectory, ".claude.json"),
+-    decodeClaudeJson,
+-  ).pipe(skipOnError);
+-  return { codexTokens, claudeJson };
+-});
+-
+-/**
+- * `distinctId` preserves legacy priority: hashed Codex account_id, Claude userID, then anonymous id.
+- * It can change on login or be shared by a Codex Team; hashed `installId` stays stable per install.
+- * A null `distinctId` disables telemetry. Missing files and API-key-only Codex auth fall through;
+- * only unreadable or malformed files warn.
+- */
+-export const getTelemetryIdentityForHome = Effect.fn("getTelemetryIdentityForHome")(function* (
+-  homeDirectory: string,
+-) {
+-  const { codexTokens, claudeJson } = yield* readProviderLogins(homeDirectory);
+-  const installId = yield* upsertAnonymousId.pipe(
+-    Effect.map(hashTelemetryId),
+-    Effect.catch((error) => logTelemetryIdentityError(error).pipe(Effect.as(null))),
+-  );
+-  const providerId = Option.orElse(
+-    Option.map(codexTokens, (tokens) => tokens.account_id),
+-    () => Option.flatMap(claudeJson, (json) => Option.fromUndefinedOr(json.userID)),
+-  );
+-  return {
+-    distinctId: Option.isSome(providerId) ? hashTelemetryId(providerId.value) : installId,
+-    installId,
+-  };
+-});
+-
+-export const getTelemetryIdentity = Effect.flatMap(
+-  HostProcess.HomeDirectory,
+-  getTelemetryIdentityForHome,
+-);
+-
+-/**
+- * Owners the server can read without a client: the linked T3 Connect account
+- * and the provider logins under `homeDirectory`. Clients add `connect` and
+- * `device` owners when they connect.
+- */
+-export const getServerOwnersForHome = Effect.fn("getServerOwnersForHome")(function* (
+-  homeDirectory: string,
+-) {
+-  const secrets = yield* ServerSecretStore.ServerSecretStore;
+-  const connectUser = yield* secrets.get(CLOUD_LINKED_USER_ID).pipe(
+-    Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
+-    Effect.catch((cause) =>
+-      Effect.logWarning("Failed to read the linked T3 Connect account for telemetry", {
+-        errorTag: cause._tag,
+-      }).pipe(Effect.as(Option.none<string>())),
+-    ),
+-  );
+-  const { codexTokens, claudeJson } = yield* readProviderLogins(homeDirectory);
+-
+-  const raw: ReadonlyArray<readonly [TelemetryOwnerSource, Option.Option<string>]> = [
+-    ["connect", connectUser],
+-    [
+-      "openai",
+-      Option.flatMap(codexTokens, (tokens) =>
+-        Option.flatMap(Option.fromUndefinedOr(tokens.id_token), openAiUserId),
+-      ),
+-    ],
+-    [
+-      "claude",
+-      Option.flatMap(claudeJson, (json) => Option.fromUndefinedOr(json.oauthAccount?.accountUuid)),
+-    ],
+-  ];
+-  return raw.flatMap(([source, value]): ReadonlyArray<TelemetryOwner> =>
+-    Option.isSome(value) && value.value.trim() !== ""
+-      ? [{ source, ownerId: hashTelemetryId(value.value) }]
+-      : [],
+-  );
+-});
+-
+-export const getServerOwners = Effect.flatMap(HostProcess.HomeDirectory, getServerOwnersForHome);
+diff --git a/apps/web/src/cloud/managedRelayState.ts b/apps/web/src/cloud/managedRelayState.ts
+index 679f362fdf..daf8381070 100644
+--- a/apps/web/src/cloud/managedRelayState.ts
++++ b/apps/web/src/cloud/managedRelayState.ts
+@@ -193,7 +193,8 @@ export function useManagedTunnelUsage() {
+   return {
+     used,
+     limit: cap?.limit ?? null,
+-    upgrade: cap?.upgrade ?? null,
++    // Plutonium: no T3 Chat upsell (link or upgrade a plan) when the tunnels run out.
++    upgrade: null as ManagedTunnelUpgrade,
+     refresh: refreshManagedTunnelUsage,
+   };
+ }
+diff --git a/apps/web/src/cloud/publicConfig.ts b/apps/web/src/cloud/publicConfig.ts
+index f7f53ca2c3..af22b55b40 100644
+--- a/apps/web/src/cloud/publicConfig.ts
++++ b/apps/web/src/cloud/publicConfig.ts
+@@ -61,19 +61,13 @@ export function resolveCloudPublicConfig(): CloudPublicConfig {
+   };
+ }
+ 
+-export function resolveRelayTracingConfig() {
+-  // The relay exporter is created during module initialization, so this must be synchronous.
+-  if (typeof window !== "undefined" && window.desktopBridge?.getRelayTelemetryEnabled() === false) {
+-    return null;
+-  }
+-  const { relayTracing } = resolveCloudPublicConfig();
+-  return relayTracing.tracesUrl && relayTracing.tracesDataset && relayTracing.tracesToken
+-    ? {
+-        tracesUrl: relayTracing.tracesUrl,
+-        tracesDataset: relayTracing.tracesDataset,
+-        tracesToken: relayTracing.tracesToken,
+-      }
+-    : null;
++/** Plutonium: relay traces to T3's Axiom dataset are stripped; the exporter is never made. */
++export function resolveRelayTracingConfig(): {
++  readonly tracesUrl: string;
++  readonly tracesDataset: string;
++  readonly tracesToken: string;
++} | null {
++  return null;
+ }
+ 
+ export function hasCloudPublicConfig(): boolean {
+diff --git a/apps/web/src/components/GitHubStarPrompt.test.ts b/apps/web/src/components/GitHubStarPrompt.test.ts
+deleted file mode 100644
+index f748ec8b82..0000000000
+--- a/apps/web/src/components/GitHubStarPrompt.test.ts
++++ /dev/null
+@@ -1,199 +0,0 @@
+-import { EnvironmentId } from "@t3tools/contracts";
+-import { describe, expect, it, vi } from "vite-plus/test";
+-
+-import type { toastManager } from "./ui/toast";
+-
+-const { add, update, openExternal, commands, starred, page } = vi.hoisted(() => ({
+-  add: vi.fn<typeof toastManager.add>(),
+-  update: vi.fn<typeof toastManager.update>(),
+-  openExternal: vi.fn(async (_url: string) => {}),
+-  commands: { checkStarred: {}, star: {} },
+-  starred: { value: false, failed: false, starWorks: true, duringCheck: () => {} },
+-  page: {
+-    focused: true,
+-    activeElement: null as { matches: (selector: string) => boolean } | null,
+-    events: new EventTarget(),
+-  },
+-}));
+-vi.mock("./ui/toast", () => ({ toastManager: { add, update, close: vi.fn() } }));
+-vi.mock("../localApi", () => ({ readLocalApi: () => ({ shell: { openExternal } }) }));
+-vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
+-vi.mock("../state/sourceControl", () => ({ sourceControlEnvironment: commands }));
+-vi.mock("@t3tools/client-runtime/state/runtime", () => ({
+-  runAtomCommand: async (_registry: unknown, command: unknown) => {
+-    if (command === commands.star) return { _tag: "Success", value: starred.starWorks };
+-    starred.duringCheck();
+-    return starred.failed ? { _tag: "Failure" } : { _tag: "Success", value: starred.value };
+-  },
+-}));
+-
+-const environmentId = EnvironmentId.make("environment-1");
+-const IDLE_MS = 30_000;
+-
+-function setup({ sent = 0, writable = true, alreadyStarred = false } = {}) {
+-  add.mockReset();
+-  update.mockReset();
+-  openExternal.mockClear();
+-  starred.value = alreadyStarred;
+-  starred.failed = false;
+-  starred.starWorks = true;
+-  starred.duringCheck = () => {};
+-  page.focused = true;
+-  page.activeElement = null;
+-  page.events = new EventTarget();
+-  const store = new Map([["t3code:github-star-prompt:sent", String(sent)]]);
+-  vi.stubGlobal("document", {
+-    hasFocus: () => page.focused,
+-    get activeElement() {
+-      return page.activeElement;
+-    },
+-  });
+-  vi.stubGlobal("window", {
+-    addEventListener: page.events.addEventListener.bind(page.events),
+-    removeEventListener: page.events.removeEventListener.bind(page.events),
+-    localStorage: {
+-      getItem: (key: string) => store.get(key) ?? null,
+-      setItem: (key: string, value: string) => {
+-        if (!writable) throw new Error("QuotaExceededError");
+-        store.set(key, value);
+-      },
+-    },
+-  });
+-  return store;
+-}
+-
+-// A fresh module import stands in for an app reload; storage survives it.
+-async function startSession() {
+-  vi.resetModules();
+-  const session = await import("./GitHubStarPrompt");
+-  return {
+-    // Sends a prompt, then leaves the page idle long enough to ask.
+-    send: async () => {
+-      const sent = session.recordPromptSent(environmentId);
+-      await vi.advanceTimersByTimeAsync(IDLE_MS);
+-      await sent;
+-    },
+-    sendWithoutWaiting: () => void session.recordPromptSent(environmentId),
+-  };
+-}
+-
+-// The toast's handlers ignore their click event.
+-const click = (props: unknown) => (props as { onClick: () => unknown }).onClick();
+-
+-describe("recordPromptSent", () => {
+-  vi.useFakeTimers();
+-
+-  it("asks only after the focused page is idle", async () => {
+-    setup({ sent: 5 });
+-    (await startSession()).sendWithoutWaiting();
+-    await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
+-    page.events.dispatchEvent(new Event("keydown"));
+-    await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
+-    expect(add).not.toHaveBeenCalled();
+-
+-    page.focused = false;
+-    await vi.advanceTimersByTimeAsync(IDLE_MS);
+-    expect(add).not.toHaveBeenCalled();
+-
+-    page.focused = true;
+-    page.activeElement = { matches: (selector) => selector.includes("iframe") };
+-    page.events.dispatchEvent(new Event("focus"));
+-    await vi.advanceTimersByTimeAsync(IDLE_MS);
+-    expect(add).not.toHaveBeenCalled();
+-
+-    page.activeElement = null;
+-    page.events.dispatchEvent(new Event("pointerdown"));
+-    await vi.advanceTimersByTimeAsync(IDLE_MS);
+-    expect(add).toHaveBeenCalledOnce();
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it("asks after five prompts, once per session, and never again once closed", async () => {
+-    setup();
+-    let session = await startSession();
+-    for (let sent = 0; sent < 5; sent++) await session.send();
+-    expect(add).not.toHaveBeenCalled();
+-
+-    await session.send();
+-    await session.send();
+-    expect(add).toHaveBeenCalledOnce();
+-
+-    session = await startSession();
+-    await session.send();
+-    expect(add).toHaveBeenCalledTimes(2);
+-
+-    add.mock.lastCall?.[0].onClose?.();
+-    session = await startSession();
+-    for (let sent = 0; sent < 10; sent++) await session.send();
+-    expect(add).toHaveBeenCalledTimes(2);
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it("never asks when a dismissal could not be saved", async () => {
+-    setup({ sent: 5, writable: false });
+-    await (await startSession()).send();
+-    expect(add).not.toHaveBeenCalled();
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it("never asks once the environment's GitHub account starred the repo", async () => {
+-    setup({ sent: 5, alreadyStarred: true });
+-    await (await startSession()).send();
+-    starred.value = false;
+-    await (await startSession()).send();
+-    expect(add).not.toHaveBeenCalled();
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it("skips an unavailable server check without permanently dismissing", async () => {
+-    const store = setup({ sent: 5 });
+-    starred.failed = true;
+-    await (await startSession()).send();
+-    expect(add).not.toHaveBeenCalled();
+-    expect(store.has("t3code:github-star-prompt:dismissed")).toBe(false);
+-    starred.failed = false;
+-    await (await startSession()).send();
+-    expect(add).toHaveBeenCalledOnce();
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it("never asks when another tab dismisses it during the star check", async () => {
+-    const store = setup({ sent: 5 });
+-    starred.duringCheck = () => store.set("t3code:github-star-prompt:dismissed", "true");
+-    await (await startSession()).send();
+-    expect(add).not.toHaveBeenCalled();
+-    vi.unstubAllGlobals();
+-  });
+-  it("stars on click, opens GitHub when starring fails, and asks for a click once the click expired", async () => {
+-    const store = setup({ sent: 5 });
+-    await (await startSession()).send();
+-    click(add.mock.lastCall?.[0].actionProps);
+-    await vi.advanceTimersByTimeAsync(0);
+-    expect(update.mock.lastCall?.[1]).toMatchObject({ title: "Thanks for the star!" });
+-    expect(store.get("t3code:github-star-prompt:dismissed")).toBe("true");
+-    expect(openExternal).not.toHaveBeenCalled();
+-
+-    setup({ sent: 5 });
+-    starred.starWorks = false;
+-    await (await startSession()).send();
+-    click(add.mock.lastCall?.[0].actionProps);
+-    await vi.advanceTimersByTimeAsync(0);
+-    expect(openExternal).toHaveBeenCalledWith("https://github.com/pingdotgg/t3code");
+-    expect(update.mock.lastCall?.[1]).not.toMatchObject({
+-      actionProps: { children: "Open GitHub" },
+-    });
+-
+-    setup({ sent: 5 });
+-    starred.starWorks = false;
+-    vi.stubGlobal("navigator", { userActivation: { isActive: false } });
+-    await (await startSession()).send();
+-    click(add.mock.lastCall?.[0].actionProps);
+-    await vi.advanceTimersByTimeAsync(0);
+-    const fallback = update.mock.lastCall?.[1];
+-    expect(fallback).toMatchObject({ actionProps: { children: "Open GitHub" } });
+-    expect(openExternal).not.toHaveBeenCalled();
+-    click(typeof fallback === "object" ? fallback.actionProps : undefined);
+-    expect(openExternal).toHaveBeenCalledOnce();
+-    vi.unstubAllGlobals();
+-  });
+-});
+diff --git a/apps/web/src/components/GitHubStarPrompt.tsx b/apps/web/src/components/GitHubStarPrompt.tsx
+deleted file mode 100644
+index 679d61b1f3..0000000000
+--- a/apps/web/src/components/GitHubStarPrompt.tsx
++++ /dev/null
+@@ -1,168 +0,0 @@
+-import { type EnvironmentId, SourceControlProviderKind } from "@t3tools/contracts";
+-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+-import * as Schema from "effect/Schema";
+-import { StarIcon } from "lucide-react";
+-
+-import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
+-import { readLocalApi } from "../localApi";
+-import { appAtomRegistry } from "../rpc/atomRegistry";
+-import { sourceControlEnvironment } from "../state/sourceControl";
+-import { toastManager } from "./ui/toast";
+-
+-// Separate keys so a count written by another tab can never undo a dismissal.
+-const SENT_KEY = "t3code:github-star-prompt:sent";
+-const DISMISSED_KEY = "t3code:github-star-prompt:dismissed";
+-const REPOSITORY = "pingdotgg/t3code";
+-const PROMPTS_BEFORE_ASKING = 5;
+-const IDLE_MS = 30_000;
+-// User-driven actions (send, navigate, type, scroll) start with one of these; touch fires pointerdown.
+-const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "focus"] as const;
+-
+-let shownThisSession = false;
+-
+-function dismiss() {
+-  try {
+-    setLocalStorageItem(DISMISSED_KEY, true, Schema.Boolean);
+-  } catch {}
+-}
+-
+-// Every close path, including both buttons, runs `onClose`, which saves the dismissal.
+-function showStarPrompt(environmentId: EnvironmentId) {
+-  const close = () => toastManager.close(id);
+-  const openInBrowser = () => {
+-    close();
+-    void readLocalApi()
+-      ?.shell.openExternal(`https://github.com/${REPOSITORY}`)
+-      .catch(() => undefined);
+-  };
+-  const starInPlace = async () => {
+-    toastManager.update(id, { actionProps: { children: "Starring…", disabled: true } });
+-    if (await starRepository(environmentId)) {
+-      // Thank them in place: a closing and opening toast would slide under the confetti.
+-      dismiss();
+-      toastManager.update(id, {
+-        type: "success",
+-        title: "Thanks for the star!",
+-        description: "It really helps T3 Code grow.",
+-        timeout: 5_000,
+-        actionProps: undefined,
+-        data: {},
+-      });
+-      celebrate();
+-      return;
+-    }
+-    // Browsers block new tabs once the click's activation expires; desktop opens through its bridge.
+-    if (window.desktopBridge || navigator.userActivation?.isActive !== false)
+-      return openInBrowser();
+-    toastManager.update(id, { actionProps: { children: "Open GitHub", onClick: openInBrowser } });
+-  };
+-  const id = toastManager.add({
+-    title: "Enjoying T3 Code?",
+-    description: "Give us a star on GitHub to let us know!",
+-    timeout: 0,
+-    onClose: dismiss,
+-    actionProps: { children: "Star on GitHub", onClick: () => void starInPlace() },
+-    data: {
+-      actionLayout: "stacked-end",
+-      leadingIcon: <StarIcon aria-hidden className="size-4 text-warning-foreground" />,
+-      secondaryActionProps: { children: "Dismiss", onClick: close },
+-      secondaryActionVariant: "ghost",
+-    },
+-  });
+-}
+-
+-// One burst out of the toast. The library loads only here, and its canvas stops when done.
+-function celebrate() {
+-  void import("canvas-confetti")
+-    .then(({ default: confetti }) =>
+-      confetti({
+-        particleCount: 160,
+-        spread: 360,
+-        startVelocity: 38,
+-        gravity: 1.6,
+-        ticks: 140,
+-        origin: { x: 0.83, y: 0.15 },
+-        disableForReducedMotion: true,
+-      }),
+-    )
+-    .catch(() => undefined);
+-}
+-
+-// Resolves after IDLE_MS without input while this window has focus.
+-function waitForIdle() {
+-  return new Promise<void>((resolve) => {
+-    let timer: ReturnType<typeof setTimeout> | undefined;
+-    const restart = () => {
+-      clearTimeout(timer);
+-      timer = setTimeout(() => {
+-        // Input inside another app or an embedded frame never reaches us; the next focus restarts.
+-        if (!document.hasFocus() || document.activeElement?.matches("iframe, webview")) return;
+-        for (const type of ACTIVITY_EVENTS) window.removeEventListener(type, restart, true);
+-        resolve();
+-      }, IDLE_MS);
+-    };
+-    for (const type of ACTIVITY_EVENTS) {
+-      window.addEventListener(type, restart, { capture: true, passive: true });
+-    }
+-    restart();
+-  });
+-}
+-
+-// The server's GitHub account stands in for the user's; it may not be theirs on a shared server.
+-const starInput = (environmentId: EnvironmentId) => ({
+-  environmentId,
+-  input: {
+-    provider: SourceControlProviderKind.make("github"),
+-    host: "github.com",
+-    repository: REPOSITORY,
+-  },
+-});
+-
+-async function alreadyStarred(environmentId: EnvironmentId) {
+-  const result = await runAtomCommand(
+-    appAtomRegistry,
+-    sourceControlEnvironment.checkStarred,
+-    starInput(environmentId),
+-    { label: "check GitHub star", reportFailure: false, reportDefect: false },
+-  );
+-  return result._tag === "Success" ? result.value : undefined;
+-}
+-
+-async function starRepository(environmentId: EnvironmentId) {
+-  const result = await runAtomCommand(
+-    appAtomRegistry,
+-    sourceControlEnvironment.star,
+-    starInput(environmentId),
+-    { label: "star on GitHub", reportFailure: false, reportDefect: false },
+-  );
+-  return result._tag === "Success" && result.value;
+-}
+-
+-/**
+- * Counts a sent prompt. After more than five, asks once per session for a star until dismissed,
+- * unless the environment's GitHub account already starred the repo. Waits until the user is idle.
+- */
+-export async function recordPromptSent(environmentId: EnvironmentId): Promise<void> {
+-  if (shownThisSession) return;
+-  try {
+-    if (getLocalStorageItem(DISMISSED_KEY, Schema.Boolean)) return;
+-    const sent = (getLocalStorageItem(SENT_KEY, Schema.Number) ?? 0) + 1;
+-    setLocalStorageItem(SENT_KEY, sent, Schema.Number);
+-    if (sent <= PROMPTS_BEFORE_ASKING) return;
+-  } catch {
+-    // Storage that cannot be read or written could not keep a dismissal, so never ask.
+-    return;
+-  }
+-  shownThisSession = true;
+-  const starred = await alreadyStarred(environmentId);
+-  if (starred === undefined) return;
+-  if (starred) return dismiss();
+-  await waitForIdle();
+-  try {
+-    // Another tab can dismiss while the check or the idle wait runs.
+-    if (getLocalStorageItem(DISMISSED_KEY, Schema.Boolean)) return;
+-  } catch {
+-    return;
+-  }
+-  showStarPrompt(environmentId);
+-}
+diff --git a/apps/web/src/components/HostedEmptyState.tsx b/apps/web/src/components/HostedEmptyState.tsx
+index d7fbb02a28..a48f394140 100644
+--- a/apps/web/src/components/HostedEmptyState.tsx
++++ b/apps/web/src/components/HostedEmptyState.tsx
+@@ -4,7 +4,7 @@ import { Link } from "@tanstack/react-router";
+ import { CheckIcon } from "lucide-react";
+ import { type ReactNode, useState } from "react";
+ 
+-import { APP_DISPLAY_NAME, DESKTOP_DOWNLOAD_URL } from "~/branding";
++import { APP_DISPLAY_NAME } from "~/branding";
+ import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+ import { isElectron } from "../env";
+ import { isLocalEnvironmentDisabled } from "../localEnvironment";
+@@ -150,14 +150,6 @@ function RunOnComputer({ command }: { readonly command: string }) {
+     <>
+       <p>Run on your computer:</p>
+       <CommandBlock command={command} className="mt-2" />
+-      <a
+-        className="mt-2 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+-        href={DESKTOP_DOWNLOAD_URL}
+-        target="_blank"
+-        rel="noreferrer noopener"
+-      >
+-        Or download the desktop app
+-      </a>
+     </>
+   );
+ }
+diff --git a/apps/web/src/components/chat/useComposerSend.ts b/apps/web/src/components/chat/useComposerSend.ts
+index 98084e9795..ab3f42bc57 100644
+--- a/apps/web/src/components/chat/useComposerSend.ts
++++ b/apps/web/src/components/chat/useComposerSend.ts
+@@ -59,7 +59,6 @@ import {
+ } from "../../composer-logic";
+ import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
+ import { type ChatMessage } from "../../types";
+-import { recordPromptSent } from "../GitHubStarPrompt";
+ import { stackedThreadToast, toastManager } from "../ui/toast";
+ import { newMessageId, newThreadId } from "~/lib/utils";
+ import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
+@@ -1435,7 +1434,6 @@ export function useComposerSend(input: ComposerSendInput) {
+         ) {
+           handleNewThreadInActiveProject();
+         }
+-        void recordPromptSent(environmentId);
+       }
+     }
+ 
+diff --git a/apps/web/src/components/clerk/T3ChatUserProfilePage.tsx b/apps/web/src/components/clerk/T3ChatUserProfilePage.tsx
+index 0a1bbe57ab..28d47d9a14 100644
+--- a/apps/web/src/components/clerk/T3ChatUserProfilePage.tsx
++++ b/apps/web/src/components/clerk/T3ChatUserProfilePage.tsx
+@@ -3,7 +3,7 @@ import { MessageSquareIcon } from "lucide-react";
+ import type { ReactNode } from "react";
+ 
+ import { useManagedTunnelUsage } from "../../cloud/managedRelayState";
+-import { T3CHAT_SUBSCRIPTION_URL, TunnelUsageMeter } from "../cloud/TunnelUsage";
++import { TunnelUsageMeter } from "../cloud/TunnelUsage";
+ import { Button } from "../ui/button";
+ import {
+   ClerkUserProfilePage,
+@@ -12,25 +12,14 @@ import {
+ } from "./ClerkUserProfilePage";
+ import { useT3ChatLink } from "./useT3ChatLink";
+ 
+-const upgradeLink = (
+-  <a className="underline" href={T3CHAT_SUBSCRIPTION_URL} target="_blank" rel="noopener noreferrer">
+-    Upgrade on T3 Chat
+-  </a>
+-);
+-
+ function planLabel(link: RelayT3ChatLink): ReactNode {
+   switch (link.plan) {
+     case "premier":
+       return `Premier · up to ${T3CHAT_PLAN_TUNNEL_LIMITS.premier} tunnels`;
+     case "pro":
+-      return (
+-        <>
+-          Pro · up to {T3CHAT_PLAN_TUNNEL_LIMITS.pro} tunnels. {upgradeLink} to Premier for{" "}
+-          {T3CHAT_PLAN_TUNNEL_LIMITS.premier}.
+-        </>
+-      );
++      return `Pro · up to ${T3CHAT_PLAN_TUNNEL_LIMITS.pro} tunnels`;
+     case "free":
+-      return <>{upgradeLink} for more tunnels</>;
++      return "Free";
+   }
+ }
+ 
+diff --git a/apps/web/src/components/promptLinks/HostedPromptLinkLanding.tsx b/apps/web/src/components/promptLinks/HostedPromptLinkLanding.tsx
+index ca44345e17..40da440fa8 100644
+--- a/apps/web/src/components/promptLinks/HostedPromptLinkLanding.tsx
++++ b/apps/web/src/components/promptLinks/HostedPromptLinkLanding.tsx
+@@ -9,7 +9,6 @@ import { useLocation } from "@tanstack/react-router";
+ import * as Schema from "effect/Schema";
+ import { type ReactNode, useEffect, useRef, useState } from "react";
+ 
+-import { DESKTOP_DOWNLOAD_URL } from "~/branding";
+ import { useLocalStorage } from "~/hooks/useLocalStorage";
+ import { isHostedStaticApp } from "~/hostedPairing";
+ import { useEnvironments } from "~/state/environments";
+@@ -171,9 +170,6 @@ function HostedPromptLinkLanding({
+             Continue here
+           </Button>
+         ) : null}
+-        <Button variant="ghost" render={<a href={DESKTOP_DOWNLOAD_URL} />}>
+-          Get T3 Code
+-        </Button>
+       </div>
+       <label className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+         <Checkbox checked={remember} onCheckedChange={(checked) => setRemember(checked === true)} />
+diff --git a/apps/web/src/components/settings/ChatGptWelcomeCoordinator.tsx b/apps/web/src/components/settings/ChatGptWelcomeCoordinator.tsx
+deleted file mode 100644
+index 6b449407ab..0000000000
+--- a/apps/web/src/components/settings/ChatGptWelcomeCoordinator.tsx
++++ /dev/null
+@@ -1,83 +0,0 @@
+-import { useAtomValue } from "@effect/atom-react";
+-import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
+-import { useState } from "react";
+-import { environmentPresentations } from "../../state/presentation";
+-import { OpenAI } from "../Icons";
+-import { Button } from "../ui/button";
+-import {
+-  Dialog,
+-  DialogPopup,
+-  DialogHeader,
+-  DialogTitle,
+-  DialogDescription,
+-  DialogFooter,
+-} from "../ui/dialog";
+-import { ChatGptUsageButton } from "./ChatGptUsageButton";
+-
+-const STORAGE_KEY = "t3:chatgpt-sharing-welcome:v1";
+-function readAcknowledgedProfiles(): string[] {
+-  try {
+-    const value: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+-    return Array.isArray(value)
+-      ? value.filter((key): key is string => typeof key === "string")
+-      : [];
+-  } catch {
+-    return [];
+-  }
+-}
+-
+-export function ChatGptWelcomeCoordinator() {
+-  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+-  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+-  const [acknowledged, setAcknowledged] = useState(readAcknowledgedProfiles);
+-  const profiles = [...presentations].flatMap(([environmentId, presentation]) =>
+-    presentation.connection.phase !== "connected"
+-      ? []
+-      : (providersByEnvironment.get(environmentId) ?? [])
+-          .filter(usesChatGptSharing)
+-          .map((provider) => ({
+-            key: JSON.stringify([
+-              environmentId,
+-              provider.instanceId,
+-              provider.auth.profileId ?? provider.auth.email ?? "default",
+-            ]),
+-            environmentLabel: presentation.entry.target.label,
+-            providerName: provider.displayName ?? "Codex",
+-          })),
+-  );
+-  const next = profiles.find((profile) => !acknowledged.includes(profile.key));
+-  const dismiss = () => {
+-    if (!next) return;
+-    const updated = [...acknowledged, next.key];
+-    setAcknowledged(updated);
+-    try {
+-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+-    } catch {}
+-  };
+-  return (
+-    <Dialog
+-      open={next !== undefined}
+-      onOpenChange={(open) => {
+-        if (!open) dismiss();
+-      }}
+-    >
+-      <DialogPopup>
+-        <DialogHeader>
+-          <OpenAI className="mb-2 size-8" aria-hidden="true" />
+-          <DialogTitle>Your ChatGPT plan is connected</DialogTitle>
+-          <DialogDescription>
+-            Eligible usage in T3 Code uses your ChatGPT plan. Manage your shared usage and any
+-            credit settings in ChatGPT.
+-          </DialogDescription>
+-          <p className="text-xs text-muted-foreground">
+-            {next?.providerName} on {next?.environmentLabel}
+-          </p>
+-        </DialogHeader>
+-        <DialogFooter>
+-          <ChatGptUsageButton />
+-          <Button onClick={dismiss}>Continue</Button>
+-        </DialogFooter>
+-      </DialogPopup>
+-    </Dialog>
+-  );
+-}
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index 362210f96e..7ab8fe31da 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -62,7 +62,7 @@ import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+ import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
+ import { SnoozePresetsRow } from "./SnoozePresetsSettings";
+ import { useDesktopUpdateState } from "../../state/desktopUpdate";
+-import { managedTelemetryOffMessage, usePrimaryManagedPolicy } from "../../state/managedPolicy";
++import { usePrimaryManagedPolicy } from "../../state/managedPolicy";
+ import {
+   getCustomModelOptionsByInstance,
+   resolveAppModelSelectionState,
+@@ -2005,7 +2005,6 @@ export function MaintenanceSettingsPanel() {
+ 
+ export function AboutSettingsPanel() {
+   const primaryPolicy = usePrimaryManagedPolicy();
+-  const telemetryOff = managedTelemetryOffMessage(primaryPolicy);
+   return (
+     <SettingsPageContainer>
+       <SettingsSection id="about" title="App">
+@@ -2045,11 +2044,7 @@ export function AboutSettingsPanel() {
+       <SettingsSection id="legal" title="Legal">
+         <SettingsRow
+           {...searchableSetting("privacy-policy")}
+-          description={
+-            telemetryOff === undefined
+-              ? "How we handle your data, including the anonymous usage data T3 Code collects."
+-              : `How we handle your data. ${telemetryOff}`
+-          }
++          description="T3 Code's privacy policy. This build has its usage analytics removed, so none are sent."
+           control={
+             <Button
+               render={<a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer noopener" />}
+diff --git a/apps/web/src/plutonium/UpdateChecksPrompt.tsx b/apps/web/src/plutonium/UpdateChecksPrompt.tsx
+new file mode 100644
+index 0000000000..f54016de17
+--- /dev/null
++++ b/apps/web/src/plutonium/UpdateChecksPrompt.tsx
+@@ -0,0 +1,60 @@
++import * as Schema from "effect/Schema";
++import { RefreshCwIcon } from "lucide-react";
++
++import { Button } from "../components/ui/button";
++import {
++  Dialog,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogPopup,
++  DialogTitle,
++} from "../components/ui/dialog";
++import { useLocalStorage } from "../hooks/useLocalStorage";
++import { useUpdatePrimarySettings } from "../hooks/useSettings";
++
++const ASKED_KEY = "hydra:update-checks-asked";
++
++/**
++ * Update checks are off until the user turns them on (`enableProviderUpdateChecks`
++ * defaults to false). On the first launch this asks once; either answer is saved on the
++ * server, and Settings, Maintenance, Updates changes it later.
++ */
++export function UpdateChecksPrompt() {
++  const [asked, setAsked] = useLocalStorage(ASKED_KEY, false, Schema.Boolean);
++  const updateSettings = useUpdatePrimarySettings();
++
++  const answer = (enabled: boolean) => {
++    updateSettings({ enableProviderUpdateChecks: enabled });
++    setAsked(true);
++  };
++
++  return (
++    <Dialog
++      open={!asked}
++      onOpenChange={(open) => {
++        if (!open) answer(false);
++      }}
++    >
++      <DialogPopup className="max-w-md">
++        <DialogHeader>
++          <div className="flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/60">
++            <RefreshCwIcon aria-hidden className="size-4.5 text-muted-foreground" />
++          </div>
++          <DialogTitle>Check for updates?</DialogTitle>
++          <DialogDescription>
++            Hydra can check npm for newer versions of your agent CLIs (Claude, Codex and the others
++            you use) and fetch updates to the model list. Nothing is checked unless you turn this
++            on. You can change it later in Settings, Maintenance.
++          </DialogDescription>
++        </DialogHeader>
++        <DialogFooter>
++          <Button variant="outline" onClick={() => answer(false)}>
++            Don&apos;t check
++          </Button>
++          <Button onClick={() => answer(true)}>Check for updates</Button>
++        </DialogFooter>
++      </DialogPopup>
++    </Dialog>
++  );
++}
+diff --git a/apps/web/src/routes/__root.tsx b/apps/web/src/routes/__root.tsx
+index 1207b50171..af3d297a28 100644
+--- a/apps/web/src/routes/__root.tsx
++++ b/apps/web/src/routes/__root.tsx
+@@ -31,7 +31,6 @@ import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkC
+ import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
+ import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
+ import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";
+-import { ChatGptWelcomeCoordinator } from "../components/settings/ChatGptWelcomeCoordinator";
+ import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
+ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+ import { Button } from "../components/ui/button";
+@@ -59,6 +58,7 @@ import { readProject } from "../state/entities";
+ 
+ import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
+ import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
++import { UpdateChecksPrompt } from "../plutonium/UpdateChecksPrompt";
+ 
+ export const Route = createRootRoute({
+   beforeLoad: async ({ location }) => {
+@@ -192,7 +192,6 @@ function RootRouteBranch() {
+ 
+   return (
+     <>
+-      <ChatGptWelcomeCoordinator />
+       <FirstRunGate
+         enabled={primaryEnvironmentAuthenticated}
+         hostedStatic={authGateState.status === "hosted-static"}
+@@ -211,6 +210,7 @@ function RootRouteBranch() {
+         <CustomSnoozeDialogHost />
+         <GuestShareDialogHost />
+         <ProjectCloneToastCoordinator />
++        {primaryEnvironmentAuthenticated ? <UpdateChecksPrompt /> : null}
+         <AddProjectToMachineDialogHost />
+         {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}
+         {primaryEnvironmentAuthenticated ? (
+diff --git a/apps/web/src/state/managedPolicy.ts b/apps/web/src/state/managedPolicy.ts
+index 4e588b3796..3a779ea711 100644
+--- a/apps/web/src/state/managedPolicy.ts
++++ b/apps/web/src/state/managedPolicy.ts
+@@ -30,15 +30,6 @@ export function firstManagedDenial(
+   return undefined;
+ }
+ 
+-/** What usage-data notices say when the policy turns product analytics off. */
+-export function managedTelemetryOffMessage(
+-  policy: ManagedPolicySummary | undefined,
+-): string | undefined {
+-  return policy?.limits?.telemetry === false
+-    ? `${policy.organization} turned off anonymous usage data.`
+-    : undefined;
+-}
+-
+ export interface ManagedInstanceLocks {
+   /** Keys inside the instance's `config` users cannot change. */
+   readonly configKeys: ReadonlySet<string>;
+diff --git a/packages/client-runtime/src/authorization/remote.test.ts b/packages/client-runtime/src/authorization/remote.test.ts
+index d63110e37b..4c58890db0 100644
+--- a/packages/client-runtime/src/authorization/remote.test.ts
++++ b/packages/client-runtime/src/authorization/remote.test.ts
+@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
+ import * as Schema from "effect/Schema";
+ 
+ import { EnvironmentAuthInvalidError } from "@t3tools/contracts";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+ import {
+   bootstrapRemoteBearerSession,
+   exchangeRemoteDpopAccessToken,
+@@ -314,7 +313,7 @@ describe("remote environment authorization", () => {
+     }),
+   );
+ 
+-  it.effect("names the signed-in Connect account and this device by hash only", () =>
++  it.effect("names neither the signed-in Connect account nor this device", () =>
+     Effect.gen(function* () {
+       const fetch = recordedFetch(
+         Response.json({ ticket: "ws-ticket", expiresAt: "2026-05-01T12:05:00.000Z" }),
+@@ -340,8 +339,8 @@ describe("remote environment authorization", () => {
+         ),
+       );
+ 
+-      expect(url.searchParams.get("clientOwner")).toBe(hashTelemetryId("user_connect"));
+-      expect(url.searchParams.get("clientDevice")).toBe(hashTelemetryId("device-1"));
++      expect(url.searchParams.has("clientOwner")).toBe(false);
++      expect(url.searchParams.has("clientDevice")).toBe(false);
+       expect(url.toString()).not.toContain("user_connect");
+       expect(url.toString()).not.toContain("device-1");
+     }),
+diff --git a/packages/client-runtime/src/authorization/remote.ts b/packages/client-runtime/src/authorization/remote.ts
+index 135c443df3..629d68d5d9 100644
+--- a/packages/client-runtime/src/authorization/remote.ts
++++ b/packages/client-runtime/src/authorization/remote.ts
+@@ -9,12 +9,9 @@ import {
+   type AuthWebSocketTicketUse,
+ } from "@t3tools/contracts";
+ import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+ import * as Effect from "effect/Effect";
+-import * as Option from "effect/Option";
+ import * as Redacted from "effect/Redacted";
+ import { environmentEndpointUrl } from "../environment/endpoint.ts";
+-import * as ClientCapabilities from "../platform/capabilities.ts";
+ import {
+   executeEnvironmentHttpRequest,
+   makeEnvironmentHttpApiGroupClient,
+@@ -47,18 +44,10 @@ export interface ClientOwnerParams {
+ }
+ 
+ /**
+- * Tells the environment, for analytics, which T3 Connect account and device
+- * are connecting, so it can count the environment as theirs.
++ * Plutonium: upstream sends hashes of the T3 Connect account and the device here, for
++ * analytics. Analytics are stripped, so no owner is reported.
+  */
+-export const readClientOwnerParams = Effect.gen(function* () {
+-  const session = yield* Effect.serviceOption(ClientCapabilities.CloudSession);
+-  const account = Option.isSome(session) ? yield* session.value.identity : Option.none();
+-  const device = yield* (yield* ClientCapabilities.AnalyticsDevice).id;
+-  return {
+-    ...(Option.isSome(account) ? { connect: hashTelemetryId(account.value.accountId) } : {}),
+-    ...(Option.isSome(device) ? { device: hashTelemetryId(device.value) } : {}),
+-  } satisfies ClientOwnerParams;
+-});
++export const readClientOwnerParams: Effect.Effect<ClientOwnerParams> = Effect.succeed({});
+ 
+ export const appendClientConnectionParams = (
+   url: URL,
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 7f6e8a4aea..c275b9a26f 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -1202,7 +1202,10 @@ export const ServerSettings = Schema.Struct({
+   responseStreamingMode: ResponseStreamingMode.pipe(
+     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
+   ),
+-  enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  // Plutonium: update checks are opt-in. Hydra asks once, on its first launch.
++  enableProviderUpdateChecks: Schema.Boolean.pipe(
++    Schema.withDecodingDefault(Effect.succeed(false)),
++  ),
+   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
+     Schema.withDecodingDefault(Effect.succeed(true)),
+   ),

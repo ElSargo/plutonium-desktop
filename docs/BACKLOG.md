@@ -883,6 +883,17 @@ shell find it.
   `org.freedesktop.Notifications`, `shell.system.notifications`, the
   library's popups in the visible shell. Open: check the popups in a session;
   tabs' web notifications (the item above) to go the same way.
+- [ ] **Hydra's toasts in one notification area.** M · Hydra's toasts that
+  come by themselves ("Some requests are slow", the host-freeze warning,
+  "Permissions have changed", keybindings reloaded, the GitHub App access
+  hint, the "agent opened X" toast with Show) should dismiss themselves
+  instead of staying until closed, but stay in a notification area the user
+  can open later, the way a desktop's notification history works. Go through
+  the desktop notifications service above, so the visible shell shows the
+  popups and keeps the history, and a toast's action (Show, Give access)
+  still works from there. Toasts that answer something the user just did
+  (copied, saved, failed) stay as toasts. From the telemetry sweep,
+  2026-11-05.
 - [x] **Lock screen and idle.** M · Idle time, a lock that no shell can skip
   (Ash's own, or a locked page), inhibit while video plays. Done 2026-10-26:
   Ash's lock over every display (Super+L), the password through

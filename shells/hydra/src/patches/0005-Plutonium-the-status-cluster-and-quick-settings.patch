@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Thu, 5 Nov 2026 09:18:48 +1300
-Subject: [PATCH 05/10] Plutonium: the status cluster and quick settings
+Subject: [PATCH 05/11] Plutonium: the status cluster and quick settings
 
 Folded from:
 - the status cluster: clock, battery and quick settings in the title bar
