@@ -293,7 +293,7 @@ plutonium doctor                    <span class="c"># checks everything is in pl
 
   <h3>2. Log in to it</h3>
   <p class="soft">Log out, pick Pluto on the login screen and log in. Your other desktops stay there, so you can switch back any time.</p>
-  <p class="soft">You start in Hydra, which helps you set up your agents. If you already use T3 Code, quit it first and Hydra opens your threads. Press Super+Tab to switch to Styx or Charon, and Ctrl+Alt+Backspace to log out.</p>
+  <p class="soft">You start in Hydra, which helps you set up your agents. If you already use T3 Code, quit it first and Hydra opens your threads. Press Super+Tab to pick Styx or Charon and turn it on, and Ctrl+Alt+Backspace to log out.</p>
 
   <div class="note"><b>Just want a look first?</b> <code>plutonium run --x11 :0 niri</code> opens Styx in a window on your current desktop, and <code>plutonium stop --x11</code> closes it.</div>
 
@@ -313,6 +313,8 @@ plutonium doctor                    <span class="c"># checks everything is in pl
     <p>No. Your apps aren't drawn by the page; they go straight to the GPU. The page only draws the shell around them.</p></details>
   <details><summary>Do I have to write a shell to use it?</summary>
     <p>No. Styx and Charon are complete desktops. To make your own, start from one of them and change what you want, or have an agent do it.</p></details>
+  <details><summary>What can an agent reach?</summary>
+    <p>Only the windows and tabs in its own thread: the ones it opened, and ones you add to the thread. It can't see or drive the rest of your desktop.</p></details>
   <details><summary>What if it hangs?</summary>
     <p>Ctrl+Alt+Backspace logs you out. If that doesn't respond, run <code>plutonium stop --drm</code> from another console (Ctrl+Alt+F3) or over ssh. A broken shell falls back to the plain one by itself.</p></details>
 </div></section>
