@@ -12,6 +12,8 @@ Hydra is optional, and all of it is in this folder: Plutonium knows it only thro
 - **`src/patches/`**: the series (`git am`), one patch per part of Hydra, and no two touch the same file ("The patches" below). Most of it is in `apps/web/src/plutonium/`, `apps/server/src/plutonium/` and `packages/shared/src/plutonium.ts`.
 - **`src/runtime.ts`**: the native packages a release's build carries (`hydra bundle`).
 
+A release's build keeps Hydra's icons: T3's build and T3's own release step put T3's over `apps/web/public`'s, so `hydra bundle` copies `public/` back. The boot splash shows `apple-touch-icon.png`. A checkout's build never has T3's, so test this on a `hydra bundle` build (into `shells/hydra/build`, which a slot's session then runs).
+
 An install copies `shell.json`, `bin/` and `lib/` into `~/.pluto/shells/hydra` (`exclude` leaves out `src/`, `build/` and this file). A release has the server built beside it, in `shells/hydra/build`; a checkout runs it from its T3 Code checkout's source.
 
 ```

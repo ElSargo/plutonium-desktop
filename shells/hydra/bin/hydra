@@ -253,9 +253,10 @@ t3_bundle() {
   t3_fetch "$base"
   t3_build "$base"
   (cd "$T3CODE_DIR/apps/server" && node scripts/cli.ts build)
-  # Its release icons, not the development ones the build puts in (as T3's
-  # own release does, scripts/build-desktop-artifact.ts).
-  (cd "$T3CODE_DIR" && node scripts/apply-web-brand-assets.ts production apps/server/dist/client)
+  # Hydra's icons (patch 0002): T3's build puts its development ones over them,
+  # and T3's own release its production ones (apply-web-brand-assets), which the
+  # boot splash would show.
+  cp -r "$T3CODE_DIR/apps/web/public/." "$T3CODE_DIR/apps/server/dist/client/"
   rm -rf "$out"
   mkdir -p "$out"
   cp "$T3CODE_DIR"/apps/server/dist/*.mjs "$out/"
