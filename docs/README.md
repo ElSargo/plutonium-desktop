@@ -19,12 +19,18 @@
 - [features/OPENING_LINKS.md](features/OPENING_LINKS.md): links and files open in their thread
 - [features/GPU_X11.md](features/GPU_X11.md): the GPU path for apps
 - [features/SEAT.md](features/SEAT.md): DRM sessions through logind: starting, stopping, switching VTs
-- [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording (design, not built)
+- [features/CAPTURE.md](features/CAPTURE.md): screenshots, screen sharing and recording
 - [features/PASSWORDS.md](features/PASSWORDS.md): a password manager adapter for apps, tabs and agents (design, not built)
 - [features/TAB_FEATURES.md](features/TAB_FEATURES.md): find, zoom, printing, permission prompts, downloads, file pickers for tabs, through the shell (built; autofill not)
 - [features/FILE_MANAGER.md](features/FILE_MANAGER.md): Hydra's file manager and picker: tree, columns and grid, Yazi's keys, fuzzy finding, drag and drop in and out, and carrying files with no mouse.
 - [features/REMOTE_WINDOWS.md](features/REMOTE_WINDOWS.md): native windows for Hydra (T3 Code) clients away from the desktop, streamed by the server
-- [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them (design, not built)
+- [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md): a shell per display, and what moves between them
+- [features/CHARON_SHELL.md](features/CHARON_SHELL.md): Charon, the floating shell, with workspaces as threads
+- [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md): shells as installed packages, edited safely and rolled back
+- [features/HYDRA_DOCK.md](features/HYDRA_DOCK.md): Hydra's dock of apps, sites and terminals
+- [features/AGENT_CONTROL.md](features/AGENT_CONTROL.md): how agents see and drive apps and tabs
+- [features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md): what a shell gets from the desktop: notifications, audio, power, network
+- [features/IME.md](features/IME.md): input methods
 
 **History.** These are the reports as they were written, in order. Their commands and paths refer to the original research repository: `tools/launch-*.sh` is now `plutonium run`, `patches/exo-*.patch` is now `chromium/patches/`, and `shell/` and `shell-niri/` are now `shells/`.
 1. [history/exo-viability-handoff.md](history/exo-viability-handoff.md): the brief

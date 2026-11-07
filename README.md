@@ -10,6 +10,7 @@ In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real 
 - **Apps and tabs side by side.** Apps get the GPU, keyboard, mouse, touchpad, fullscreen, pointer lock, and drag and drop. Tabs are real Chromium tabs.
 - **Work stays together.** Every app and tab belongs to the thread or workspace that started it. A link clicked in a terminal opens as a tab next to it, and a file opens in its app in the same place.
 - **Built for agents.** An agent can see, launch, screenshot and drive its own thread's apps and tabs over MCP.
+- **A desktop in Hydra.** A [file manager](docs/features/FILE_MANAGER.md) that's also the file picker, a dock of apps, sites and terminals, and [windows streamed](docs/features/REMOTE_WINDOWS.md) to T3 Code clients on other devices. It has no telemetry, ads or upsells, and update checks are opt-in.
 
 Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (Exo). It runs directly on the display hardware, like any Wayland compositor, or in a window on your current desktop.
 

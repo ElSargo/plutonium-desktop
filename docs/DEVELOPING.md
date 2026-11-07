@@ -110,6 +110,8 @@ bin/plutonium bundle publish --draft dist/plutonium-0.1.0-x86_64.tar.xz   # --dr
 - **The version** is the tag without its `v`. `bundle build` reads it from `git describe`, so build from the tagged commit, with nothing uncommitted (no `--allow-dirty`).
 - **Chrome** is the official build of exactly that commit's patches (steps 2 and 3 below, with `.plutonium-build` written).
 - **`publish`** refuses a bundle that's dirty, untagged, or has no notes. It uploads the tarball twice: under its own name, and as `plutonium-x86_64.tar.xz`, the fixed name `install.sh` downloads. Each copy has a `.sha256` beside it. It also uploads `install.sh` as of the tag. `--draft` lets you look the release over on GitHub before publishing it.
+- **`install.sh`** downloads `releases/latest`, which skips drafts and pre-releases: until a release is published as a plain release, `curl … | sh` gets the one before it. The repository has to be public for that download to work without a login.
+- **The site** is `.github/workflows/pages.yml`, which runs on a push to `main` that touches `site/` or the installer, with Pages' source set to GitHub Actions (`gh api -X POST repos/<owner>/<name>/pages -f build_type=workflow`).
 - **Licenses:** the bundle has to carry Chromium's license notices, and `publish` checks for them. `out/Official` doesn't get them from the build, so make them before `bundle build`, in the build container (`plutonium`):
 
   ```

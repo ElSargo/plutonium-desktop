@@ -1,6 +1,6 @@
 # Screenshots, screen sharing and recording
 
-Status: built on branch `capture` (patches "screen capture for shells, capture requests to the focused shell" and "PipeWire video nodes for captures, getDisplayMedia asks the shell"); being verified. What's left is in `BACKLOG.md`, "Capture and sharing". "How it's built" below says where each part is.
+Status: built and on `main`: screen capture for shells, capture requests to the focused shell, PipeWire video nodes, and getDisplayMedia through the shell's picker. What's left is in `BACKLOG.md`, "Capture and sharing". "How it's built" below says where each part is.
 
 There's one capture primitive in Ash, and three kinds of consumer use it: native apps through the desktop portal, shell pages, and agents. The shell the user has in focus runs the UI: the picker, the indicators and the stop buttons.
 
