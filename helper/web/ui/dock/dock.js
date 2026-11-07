@@ -237,6 +237,9 @@ export function mountDock(container, dock, options) {
 
   // ------------------------------------------------------------ drawing
   function draw() {
+    // A press may yet be a click, and a click needs the button it began on:
+    // a button replaced under the pointer gets no click. onEnd draws after it.
+    if (drag && !drag.moved && !drag.external) return;
     const view = dock.view();
     const numbers = dock.setting("showNumbers");
     const size = Number(dock.setting("iconSize")) || 24;
@@ -536,8 +539,9 @@ export function mountDock(container, dock, options) {
         const done = drag;
         drag = null;
         done?.ghost?.remove();
+        // A press, not a drag: the click comes after this release, on this button.
+        if (!moved || !done) { setTimeout(draw, 0); return; }
         signature = "";
-        if (!moved || !done) { draw(); return; }
         // The click that follows the release isn't one.
         const swallow = (e) => { e.stopPropagation(); e.preventDefault(); };
         addEventListener("click", swallow, { capture: true, once: true });
