@@ -1,6 +1,6 @@
-# Installing Plutonium
+# Installing Pluto
 
-**The release.** One package, no podman or checkout: the installer puts it in `/opt/plutonium`, sets up Chromium's `chrome-sandbox`, and adds Plutonium to the login screen. It needs x86-64 Linux with systemd, glibc 2.35 or newer, a desktop's libraries (Mesa, X11, GLib, ALSA), and python3, git and curl; it says what's missing. On NixOS the installer puts the release in place, and the rest is a module it carries, `/opt/plutonium/lib/nixos.nix`: copy it beside `configuration.nix` as `plutonium.nix`, add it to `imports`, and `sudo nixos-rebuild switch`. It sets up nix-ld (the release's binaries are generic Linux ones), the login screen's entry, the `plutonium` command, the keyboard layout links, and Python, git, curl, foot and xwayland-satellite.
+**The release.** One package, no podman or checkout: the installer puts it in `/opt/plutonium`, sets up Chromium's `chrome-sandbox`, and adds Pluto to the login screen. It needs x86-64 Linux with systemd, glibc 2.35 or newer, a desktop's libraries (Mesa, X11, GLib, ALSA), and python3, git and curl; it says what's missing. On NixOS the installer puts the release in place, and the rest is a module it carries, `/opt/plutonium/lib/nixos.nix`: copy it beside `configuration.nix` as `plutonium.nix`, add it to `imports`, and `sudo nixos-rebuild switch`. It sets up nix-ld (the release's binaries are generic Linux ones), the login screen's entry, the `plutonium` command, the keyboard layout links, and Python, git, curl, foot and xwayland-satellite.
 
 ```
 curl -fsSL https://elsargo.github.io/pluto/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
@@ -9,7 +9,7 @@ plutonium doctor
 
 Then steps 4 to 6 below, with `~/.config/plutonium/plutonium.env` in place of the checkout's `plutonium.env`. `sh install.sh --uninstall` removes it (your data stays). The rest of this page installs from a checkout instead.
 
-From a fresh clone to a running desktop. A checkout runs Plutonium's Chromium built from source, so expect an afternoon, mostly the download and the first build. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each.
+From a fresh clone to a running desktop. A checkout runs Pluto's Chromium built from source, so expect an afternoon, mostly the download and the first build. Each step has a `plutonium` command, and `plutonium doctor` says what's left, with the command for each.
 
 ## 1. What you need
 
@@ -67,7 +67,7 @@ bin/plutonium doctor
 plutonium container build     # the build container's image (~1.6 GB, ~10 min)
 plutonium container create    # the container 'plutonium', started
 plutonium chromium fetch      # depot_tools and Chromium at chromium/BASE (28 GB)
-plutonium chromium patch      # Plutonium's patches, on a branch 'plutonium'
+plutonium chromium patch      # Pluto's patches, on a branch 'plutonium'
 plutonium chromium build      # out/Plutonium/chrome (about two hours on 32 threads, the first time)
 ```
 
@@ -103,11 +103,11 @@ plutonium run niri plain       # or name them: Styx first, the plain shell behin
 
 Ash runs in that console's logind session, which hands it the display and input devices ([docs/features/SEAT.md](docs/features/SEAT.md)).
 
-**Switching VTs.** Ctrl+Alt+F1…F12 switch to another VT, such as your graphical desktop, while Plutonium keeps running. Switch back to its VT and it's as you left it. Apps keep running in between; they just aren't drawn.
+**Switching VTs.** Ctrl+Alt+F1…F12 switch to another VT, such as your graphical desktop, while Pluto keeps running. Switch back to its VT and it's as you left it. Apps keep running in between; they just aren't drawn.
 
 **Leaving the session:**
 - **Ctrl+Alt+Backspace** ends it, and the text console comes back.
-- `plutonium stop --drm` (from ssh, another VT, or a terminal inside Plutonium) does the same.
+- `plutonium stop --drm` (from ssh, another VT, or a terminal inside Pluto) does the same.
 
 However the session ends, even when Ash crashes or is killed, the text console comes back in working order: logind restores it.
 
@@ -118,21 +118,21 @@ plutonium run --vt tty2 niri
 plutonium run --vt tty2 --hold 120 niri    # unattended: stops after 120 s
 ```
 
-**From the login screen.** With a display manager (GDM, SDDM, LightDM), Plutonium can be a session you pick when you log in:
+**From the login screen.** With a display manager (GDM, SDDM, LightDM), Pluto can be a session you pick when you log in:
 
 ```
 plutonium session install --dry-run   # shows the entry it would write
 plutonium session install             # /usr/share/wayland-sessions/plutonium.desktop, with sudo
 ```
 
-Log out, pick Plutonium at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
+Log out, pick Pluto at the login screen (GDM: the gear button; SDDM: the session menu), and log in. The entry runs `plutonium session start` from this checkout:
 - it starts the container if it isn't running;
 - it runs `plutonium run` on the display manager's VT, with your installed shells. `SESSION_SHELLS="niri plain"` in `plutonium.env` names others instead;
 - when the session ends (Ctrl+Alt+Backspace, `plutonium stop --drm`, a crash), the login screen comes back. If something is missing, or Ash doesn't start, it's back at once, and `journalctl -t plutonium-session` says why.
 
-The display manager's own automatic login, with the Plutonium session, starts it at power-on. `plutonium session uninstall` removes the entry. The entry is new: if it doesn't work with your display manager, please report it, and start from a text console meanwhile.
+The display manager's own automatic login, with the Pluto session, starts it at power-on. `plutonium session uninstall` removes the entry. The entry is new: if it doesn't work with your display manager, please report it, and start from a text console meanwhile.
 
-**Without a display manager.** Log in on tty1 automatically, and start Plutonium from the login shell. For getty autologin, run `sudo systemctl edit getty@tty1` and add (NixOS: `services.getty.autologinUser = "<you>";`):
+**Without a display manager.** Log in on tty1 automatically, and start Pluto from the login shell. For getty autologin, run `sudo systemctl edit getty@tty1` and add (NixOS: `services.getty.autologinUser = "<you>";`):
 
 ```
 [Service]
@@ -156,7 +156,7 @@ Not `exec`: when the session ends, or doesn't start, you're at tty1's prompt, ra
 
 ## 6. Optional: Hydra
 
-Hydra is the shell built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for coding agents, with Plutonium's patches.
+Hydra is the shell built on [T3 Code](https://github.com/pingdotgg/t3code), a chat UI for coding agents, with Pluto's patches.
 
 ```
 plutonium hydra fetch            # clone at shells/hydra/src/BASE, apply the patches
@@ -164,7 +164,7 @@ plutonium hydra build            # pnpm install + build the web app (the checkou
 plutonium run hydra niri         # Hydra; the helper starts T3 Code's server, and the shell pairs itself
 ```
 
-Hydra runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Plutonium won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
+Hydra runs on your own T3 Code data (`~/.t3`, or `$T3CODE_HOME`): the same threads, settings and paired devices as the T3 Code app. Quit the app (or any other T3 Code server) first; Pluto won't start beside one. On a fresh `~/.t3`, T3 walks you through its own setup (computers, agents, projects).
 
 Phones and other computers pair the way T3 Code's own CLI does it, through `plutonium hydra` (T3's CLI on the same data): `plutonium hydra connect link` for T3 Connect, or `plutonium hydra pair --tailscale`.
 
@@ -189,7 +189,7 @@ Styx's launcher (Super+D) has an entry that starts Claude Code with these tools.
 
 In `~/.local/share/plutonium/logs` for the release (`logs/` in a checkout), one set per session (the name is its Wayland socket, `wayland-plutonium` on DRM, `wayland-plutonium-x11` in a window):
 - `session-*.log`: the launcher: what it checked, and why it stopped;
-- `ash-*.log`: Ash, Plutonium's Chromium, with the previous run kept as `*.prev.log`;
+- `ash-*.log`: Ash, Pluto's Chromium, with the previous run kept as `*.prev.log`;
 - `helper-*.log`: the helper (apps, threads, the GPU check);
 - `login-session.log`, and `journalctl -t plutonium-session`: sessions from the login screen.
 

@@ -293,7 +293,7 @@ SESSION_ENTRY=/usr/share/wayland-sessions/plutonium.desktop
 session_entry() {
   cat <<EOF2
 [Desktop Entry]
-Name=Plutonium
+Name=Pluto
 Comment=A web-based desktop (from $ROOT)
 Exec=$ROOT/bin/plutonium session start
 TryExec=$ROOT/bin/plutonium
