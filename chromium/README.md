@@ -27,6 +27,7 @@ One patch per part of Plutonium. Each holds every change to its own files, so no
 | 0011 | Screen capture | Capture requests to the focused shell, `getDisplayMedia`, PipeWire video nodes (with dmabufs), window captures from the window's own frames, `ext-image-copy-capture-v1` for grim | [CAPTURE](../docs/features/CAPTURE.md) |
 | 0012 | Wayland protocols | `zwp_text_input_v3`, `xdg_activation_v1`, `wp_cursor_shape_v1`, `ext_idle_notify_v1`, `ext_data_control_v1`, server-side decorations | [WAYLAND_PROTOCOLS](../docs/features/WAYLAND_PROTOCOLS.md), [IME](../docs/features/IME.md) |
 | 0013 | The lock screen and idle | Ash's lock over every display (Super+L), idle and inhibitors | [DESKTOP_SERVICES](../docs/features/DESKTOP_SERVICES.md) |
+| 0014 | Pluto Vim's key hook | A key no page handler took, in an editable field, offered to Pluto Vim (`plutoniumvimkey`) before Blink's editing acts on it | [PLUTO_VIM](../docs/features/PLUTO_VIM.md) |
 
 Where to look in the tree:
 - **Exo:** `components/exo/` (`embedded_windows.*`, data device and drag and drop).

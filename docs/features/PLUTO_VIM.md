@@ -1,6 +1,6 @@
 # Pluto Vim: vim mode in every text field, one engine, JS for config
 
-**Status: steps 1 and 2 built: the engine, and a stand-in web backend in page JS, tested in Chromium and in Hydra's composer on a slot** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
+**Status: steps 1–3 built: the engine, the web backend, and Blink's key hook with the engine in its own isolated world, off unless `PLUTONIUM_VIM=1`; tested in Chromium and in Hydra's composer on a slot** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
 - vim's modal editing in every text field: web pages, shell pages and native apps;
 - one engine everywhere, so keymaps, registers, marks and macros work the same in every field;
 - configured and extended in JavaScript, as neovim is in Lua: `~/.pluto/vim/init.js`, with an API close to neovim's, so habits and plugin ideas carry over;
@@ -276,7 +276,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 
 1. **The engine** in plain JS, against a fake Buffer, with unit tests: modes, counts, operators, motions, text objects, in-memory registers, `.`, the insert mode extras. No Chromium build, so the engine's shape is settled before any C++.
 2. **A stand-in web backend** in page JS (`Selection.modify`, `execCommand`), loaded into a test page and the shell pages. Pluto Vim works in real fields, Hydra's composer included, and shows what only Blink can do.
-3. **Blink's Pluto Vim core and the isolated world:** the key hook after the page's handlers, motions, edits, caret shape, a world id, loading the engine and `init.js` in each frame. Chromium, one patch. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the register store's browser-side IPC instead.
+3. **Blink's key hook and the isolated world** (built, above): the hook in Chromium, the engine in its own world from the helper over DevTools. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the register store's browser-side IPC instead.
 4. **The `init.js` API** on the engine: `opt`, `keymap.set`, `motion`, `operator`, `textobject`, `command`, events; reload on save; `plutonium vim check`.
 5. **The register store** in the browser process, persisted by the helper; scopes; `"+` and `"=`.
 6. **Pages that integrate,** and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
@@ -312,6 +312,18 @@ What it found:
 - **Hydra's composer groups its own undo history widely:** keys under ~500 ms apart (a script) undo together; at a person's pace `u` undoes one change at a time, as it should.
 - **Verified in Hydra's composer** on a slot (Plutonium's Chromium, a release Hydra): Ctrl+[ to normal mode with a block caret, `b`, `dw`, `u`, `cw`, `o`, `yy` and `p`, `dd`, `u u`, `viw` then `U`, `A`; the composer's own text matched the engine's after each.
 - **A Blink DCHECK in a dev build:** in two of five runs with spellcheck on, vim's edits in Hydra's composer crashed its renderer, painting a stale spelling marker (`fragment_item.cc:1189`, `start_offset >= StartOffset()`, from `HighlightPainter::PaintOneSpellingGrammarDecoration`). Typing and deleting the same misspelled words without vim didn't. It's intermittent, and never happened in four runs with spellcheck off. Release builds don't check it, so the live desktop paints a wrong underline at worst. Step 3's edits go through the same editing code, so it needs a look there, with a repro.
+
+### Step 3: Blink's key hook and the isolated world (built)
+
+Step 2 showed that the engine needs nothing from Blink to read text, move and edit: the DOM does all of it, from any world. What only Blink can do is give the engine a key **after every handler of the page's and before the field acts on it**. So step 3 is smaller than the design above assumed:
+
+- **Chromium patch 0014, "Pluto Vim's key hook"** (`keyboard_event_manager.cc`, `local_dom_window.cc`; 52 lines, no IDL or mojom). In `KeyboardEventManager::DefaultKeyboardEventHandler`, a keydown no handler cancelled, in a text control or an editable element, and not composing, is first offered as a trusted `plutoniumvimkey` event (a copy of the keydown) at its target. A listener that cancels it takes the key: the keydown counts as default-handled, so Blink's editing doesn't act and its keypress (the text) is suppressed. Nothing is sent unless the window has a listener for it. Adding one gets a `plutoniumvimready` event, a task later, so the engine knows to use the hook.
+- **The engine in its own world, from the helper** (`helper/src/vimInject.ts`, `vimBundle.ts`): no Chromium code. The helper bundles `web/vim` into one classic script and adds it to every web page, shell pages and tabs, with `Page.addScriptToEvaluateOnNewDocument` and `worldName: "pluto-vim"` over the browser's DevTools. It keeps a session per page (a script lives as long as its session), and starts again whenever it connects to the browser anew. The page can't see the engine (`window.plutoVim` is undefined in the main world). Off unless the helper has `PLUTONIUM_VIM=1`.
+- **Keys:** Ctrl+[ (`vim.opt.claim`) from the window's capture phase, which the engine's world, injected before the page's scripts, is first to register. Everything else from `plutoniumvimkey`, once ready; before that, or in a browser without the patch, from keydown as in step 2.
+
+Verified on a slot (out/Cros, main's series plus 0014; a release Hydra): the engine in Hydra's page in its own world, `plutoniumvimready` received, Ctrl+[ to normal mode, `b dw`, `x`, `u`, `A`, `o`, `k J` in the composer, again after the session restarted. A window keydown listener the page added after the engine took `x`, and vim left it alone, which the step 2 backend couldn't do.
+
+Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach` on each page), registers shared between pages (each world has its own until step 5's store), and Blink-side motions (`gj` over wrapped lines) for later.
 
 ## Decisions
 

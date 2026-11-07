@@ -369,8 +369,12 @@ export function attach(doc = globalThis.document, options = {}) {
   };
   // The claimed keys, before anything of the page's (the window's capture phase is the first to see a key).
   const onClaimed = (event) => handle(event, true);
-  // The rest, after the page's own handlers on the field and the document.
-  const onKey = (event) => handle(event, false);
+  // The rest, after the page's own handlers on the field and the document; once Blink offers keys
+  // (Plutonium's key hook), from its plutoniumvimkey instead, after every handler of the page's.
+  let hooked = false;
+  const onKey = (event) => { if (!hooked) handle(event, false); };
+  const onOffer = (event) => handle(event, false);
+  const onReady = (event) => { if (event.isTrusted) hooked = true; };
 
   const onMode = ({ session, to }) => {
     const el = session.buffer.el ?? session.buffer.root;
@@ -381,6 +385,8 @@ export function attach(doc = globalThis.document, options = {}) {
   doc.addEventListener("focusin", onFocus, true);
   view.addEventListener("keydown", onClaimed, true);
   view.addEventListener("keydown", onKey);
+  view.addEventListener("plutoniumvimready", onReady);
+  view.addEventListener("plutoniumvimkey", onOffer);
   const unlisten = vim.on("ModeChanged", onMode);
   const active = fieldOf(doc.activeElement);
   if (active) sessionOf(active);
@@ -388,10 +394,14 @@ export function attach(doc = globalThis.document, options = {}) {
   return {
     vim,
     sessionOf,
+    /** Whether keys come from Blink's hook (plutoniumvimkey), not keydown. */
+    get hooked() { return hooked; },
     detach() {
       doc.removeEventListener("focusin", onFocus, true);
       view.removeEventListener("keydown", onClaimed, true);
       view.removeEventListener("keydown", onKey);
+      view.removeEventListener("plutoniumvimkey", onOffer);
+      view.removeEventListener("plutoniumvimready", onReady);
       unlisten();
     },
   };

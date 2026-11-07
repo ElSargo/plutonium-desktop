@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 8 Nov 2026 12:43:56 +1300
+Subject: [PATCH 14/14] Plutonium: Pluto Vim's key hook
+
+A keydown no page handler took, in an editable field, is offered to a
+trusted plutoniumvimkey event before Blink's editing acts on it;
+cancelling it takes the key. A listener for it gets plutoniumvimready.
+docs/features/PLUTO_VIM.md.
+---
+ .../renderer/core/frame/local_dom_window.cc   | 16 +++++++++
+ .../core/input/keyboard_event_manager.cc      | 36 +++++++++++++++++++
+ 2 files changed, 52 insertions(+)
+
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index f2aeb1ac0c..9116d373a2 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -2312,6 +2312,22 @@ void LocalDOMWindow::AddedEventListener(
+     it->DidAddEventListener(this, event_type);
+   }
+ 
++  // Plutonium: Pluto Vim. A listener for "plutoniumvimkey" (keyboard_event_
++  // manager.cc) is answered with a "plutoniumvimready" event, so the engine
++  // knows this browser offers it keys and stops taking them from keydown.
++  if (event_type == "plutoniumvimkey") {
++    GetTaskRunner(TaskType::kDOMManipulation)
++        ->PostTask(FROM_HERE,
++                   blink::BindOnce(
++                       [](LocalDOMWindow* window) {
++                         if (window && window->GetFrame()) {
++                           window->DispatchEvent(*Event::Create(
++                               AtomicString("plutoniumvimready")));
++                         }
++                       },
++                       WrapWeakPersistent(this)));
++  }
++
+   if (event_type == event_type_names::kUnload) {
+     CountDeprecation(WebFeature::kDocumentUnloadRegistered);
+   } else if (event_type == event_type_names::kBeforeunload) {
+diff --git a/third_party/blink/renderer/core/input/keyboard_event_manager.cc b/third_party/blink/renderer/core/input/keyboard_event_manager.cc
+index 6d86e2c502..5e01a8537d 100644
+--- a/third_party/blink/renderer/core/input/keyboard_event_manager.cc
++++ b/third_party/blink/renderer/core/input/keyboard_event_manager.cc
+@@ -24,6 +24,7 @@
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+ #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
++#include "third_party/blink/renderer/core/html/forms/text_control_element.h"
+ #include "third_party/blink/renderer/core/html/html_dialog_element.h"
+ #include "third_party/blink/renderer/core/input/event_handling_util.h"
+ #include "third_party/blink/renderer/core/input/input_device_capabilities.h"
+@@ -52,6 +53,36 @@ namespace {
+ 
+ const int kVKeyProcessKey = 229;
+ 
++// Plutonium: Pluto Vim (docs/features/PLUTO_VIM.md, "Web: Blink"). A keydown
++// no handler of the page took, in an editable field, is offered to a trusted
++// "plutoniumvimkey" event (a copy of the keydown) before Blink acts on it:
++// after every page handler, and before the field inserts text or runs an
++// editing command. A listener that cancels it takes the key, as if the
++// keydown's default action were vim's; its keypress is then suppressed.
++// Pluto Vim's engine listens from its own isolated world. Nothing is sent
++// unless the window has a listener for it.
++const AtomicString& PlutoniumVimKeyType() {
++  DEFINE_STATIC_LOCAL(const AtomicString, type, ("plutoniumvimkey"));
++  return type;
++}
++
++bool OfferKeyToPlutoniumVim(LocalFrame& frame, KeyboardEvent& event) {
++  LocalDOMWindow* window = frame.DomWindow();
++  if (!window || !window->HasEventListeners(PlutoniumVimKeyType()) ||
++      !event.KeyEvent() || event.isComposing()) {
++    return false;
++  }
++  Node* target = event.target() ? event.target()->ToNode() : nullptr;
++  if (!target || (!IsTextControl(target) && !IsEditable(*target))) {
++    return false;
++  }
++  KeyboardEvent* offer =
++      KeyboardEvent::Create(*event.KeyEvent(), window, /*cancellable=*/true);
++  offer->SetType(PlutoniumVimKeyType());
++  return target->DispatchEvent(*offer) ==
++         DispatchEventResult::kCanceledByEventHandler;
++}
++
+ bool IsPageUpOrDownKeyEvent(int key_code, WebInputEvent::Modifiers modifiers) {
+   if (modifiers & WebInputEvent::kAltKey) {
+     // Alt-Up/Down should behave like PageUp/Down on Mac. (Note that Alt-keys
+@@ -440,6 +471,11 @@ void KeyboardEventManager::DefaultKeyboardEventHandler(
+       }
+     }
+ 
++    if (!is_process_key && OfferKeyToPlutoniumVim(*frame_, *event)) {
++      event->SetDefaultHandled();
++      return;
++    }
++
+     frame_->GetEditor().HandleKeyboardEvent(event);
+     if (event->DefaultHandled())
+       return;

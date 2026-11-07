@@ -32,6 +32,8 @@ import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { SiteIcons } from "./siteIcons.ts";
 import { uiLibraryFile } from "./uiLibrary.ts";
+import { vimBundle } from "./vimBundle.ts";
+import { VimInjector } from "./vimInject.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
   Desktop,
@@ -583,6 +585,15 @@ export class Daemon {
     this.desktop = cdp ? new Desktop(cdp) : null;
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
     if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
+    // Pluto Vim in every page (vimInject.ts), while it's young only when asked for.
+    if (cdp && process.env.PLUTONIUM_VIM === "1") {
+      const vimDir = join(dirname(SHELL_LIBRARY), "vim");
+      const injector = new VimInjector(cdp, () => vimBundle(vimDir), (message) => console.error(`plutoniumd: ${message}`));
+      const start = () => void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
+      // Again each time the helper connects to the browser (as watchCrashes does): a new connection has no sessions.
+      this.desktop?.enableListeners.add(start);
+      start();
+    }
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
       this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
