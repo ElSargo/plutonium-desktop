@@ -1,6 +1,6 @@
 # Pluto Vim: vim mode in every text field, one engine, JS for config
 
-**Status: design, nothing built yet** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
+**Status: step 1 built (the engine, tested over a string; no field uses it yet)** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
 - vim's modal editing in every text field: web pages, shell pages and native apps;
 - one engine everywhere, so keymaps, registers, marks and macros work the same in every field;
 - configured and extended in JavaScript, as neovim is in Lua: `~/.pluto/vim/init.js`, with an API close to neovim's, so habits and plugin ideas carry over;
@@ -284,6 +284,17 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 8. **`zwp_primary_selection_v1`** in Exo, for `"*` and middle-click paste.
 9. **Across the desktop:** marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
 10. **AT-SPI,** for apps without text-input-v3.
+
+### Step 1: the engine (built)
+
+`helper/web/vim/`, plain ES modules with no DOM, so the same files load in a page's isolated world, the vim host and the helper's Node: `engine.js` (modes, the parser, what each command does), `commands.js` (the motions, text objects, operators and actions, as tables), `text.js` (offsets over a string), `registers.js`, `keys.js` (neovim's notation, and DOM key events to it), and `stringBuffer.js`, a Buffer over a string that the tests drive and that shows what a backend must do. Tests: `helper/test/vim.test.ts`.
+
+What it settled:
+- **The engine works out offsets; a Buffer only moves to them.** Motions and text objects are functions over the text, and the engine calls `move({ offset })`. The granular `move({ by })` stays in the interface for backends that need it (`gj` over wrapped lines, later) but nothing uses it yet. Native backends turn an offset into key presses (best effort, above).
+- **Deciding and doing are split.** `session.feed(key)` answers at once from the mode and the pending keys; the command runs on a queue. The mode a command leaves is set at once too, so the next key is decided right even while the field is still catching up. A backend holds keys the engine didn't take until `session.idle()`, so text typed after `cw` lands after the delete.
+- **`u` undoes a whole change.** The engine counts the field's undo steps each change made (its own edits, plus a step for what was typed), and `u` undoes that many. This assumes a field groups a run of typing into one step, as browsers do; step 3 checks it against Blink.
+- **`.` replays the command, then the text typed.** What was typed is the difference between the field's text when insert mode started and when it ended, so it works whatever the field did with the keys (an IME, autocorrect).
+- **What's not in it yet:** user mappings (`jk`, step 4), `"=` and `"#n` (step 5), `gv`, macros, search, marks, the `:` line (step 9), and counts on `iw`/`ip` beyond words.
 
 ## Decisions
 
