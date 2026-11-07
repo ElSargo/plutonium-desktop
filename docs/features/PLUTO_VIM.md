@@ -276,7 +276,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 
 1. **The engine** in plain JS, against a fake Buffer, with unit tests: modes, counts, operators, motions, text objects, in-memory registers, `.`, the insert mode extras. No Chromium build, so the engine's shape is settled before any C++.
 2. **A stand-in web backend** in page JS (`Selection.modify`, `execCommand`), loaded into a test page and the shell pages. Pluto Vim works in real fields, Hydra's composer included, and shows what only Blink can do.
-3. **Blink's Pluto Vim core and the isolated world:** the key hook after the page's handlers, motions, edits, caret shape, a world id, loading the engine and `init.js` in each frame. Chromium, one patch.
+3. **Blink's Pluto Vim core and the isolated world:** the key hook after the page's handlers, motions, edits, caret shape, a world id, loading the engine and `init.js` in each frame. Chromium, one patch. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the register store's browser-side IPC instead.
 4. **The `init.js` API** on the engine: `opt`, `keymap.set`, `motion`, `operator`, `textobject`, `command`, events; reload on save; `plutonium vim check`.
 5. **The register store** in the browser process, persisted by the helper; scopes; `"+` and `"=`.
 6. **Pages that integrate,** and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
