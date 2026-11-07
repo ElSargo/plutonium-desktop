@@ -79,7 +79,7 @@ To check: Exo must keep sending frame callbacks to a parked window while it's ca
 
 `plutoniumd` implements the backend side of xdg-desktop-portal on the session D-Bus:
 
-- `org.freedesktop.impl.portal.ScreenCast`, `Screenshot`, `GlobalShortcuts` and `FileChooser` (`TAB_FEATURES.md`, "One picker with the FileChooser portal"), and `Print` under a name of its own (`TAB_FEATURES.md`, "The Print portal"). `RemoteDesktop` may come later.
+- `org.freedesktop.impl.portal.ScreenCast`, `Screenshot`, `GlobalShortcuts` and `FileChooser` (`TAB_FEATURES.md`, "One picker with the FileChooser portal"), `Settings` (light or dark, `APPEARANCE.md`), and `Print` under a name of its own (`TAB_FEATURES.md`, "The Print portal"). `RemoteDesktop` may come later.
 - Files: `plutonium.portal`, plus `plutonium-portals.conf`, which chooses our backend for these interfaces. `plutonium-print.portal` names the Print backend, `printportal.py`. The rest stay with the GTK backend until our own backend covers them (`BACKLOG.md`, "Our own portal backend for the rest").
 - The session sets `XDG_CURRENT_DESKTOP=Plutonium` and passes it to D-Bus activation (`dbus-update-activation-environment`).
 

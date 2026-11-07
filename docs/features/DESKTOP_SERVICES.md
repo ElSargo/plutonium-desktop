@@ -25,7 +25,7 @@ await shell.system.available();            // [{ name, allowed }]: what this hel
   `"uses": ["audio", "power"]`. It gets only those (403 otherwise); a page that
   isn't an installed shell (a URL given to `plutonium run`) gets them all.
   The names: `audio`, `power`, `network`, `bluetooth`, `media`,
-  `notifications`, `session`, `display`.
+  `notifications`, `session`, `display`, `appearance`.
 - A service the computer doesn't have (no NetworkManager, no battery) answers
   its state with what's there (`{ available: false }` or an empty list), not an
   error, so a shell can hide its control.
@@ -559,3 +559,20 @@ second display does to the shells.
   `open-settings`'s pages, and changes sent on the browser's event. In an X11
   session with two host displays and several modes each, see SHELLS.md
   ("Verified: settings and Displays").
+
+### appearance
+
+Light or dark for the whole desktop: shells, tabs, GTK and Qt apps
+([APPEARANCE.md](APPEARANCE.md)).
+
+- **State:** `{ available, colorScheme, chosen, system, gtkTheme, iconTheme }`.
+  `colorScheme` is `"light"` or `"dark"`; `chosen`, whether the user chose it
+  (else it is the host desktop's, or the default); `system`, whether this
+  session changes GTK's settings too (the desktop session); `gtkTheme` and
+  `iconTheme`, GTK's themes for the scheme, when known.
+- **Actions** (each returns the new state): `set {colorScheme}` (`"light"`,
+  `"dark"`, or `null` to drop the choice), `toggle`.
+- **Host:** Ash's dark mode, the helper's settings portal backend, GNOME's
+  dconf keys and GTK's `settings.ini` (APPEARANCE.md, "Where it goes").
+- **Tested:** `helper/test/appearance.test.ts`, `helper/test/portal.test.ts`;
+  end to end with the real xdg-desktop-portal and a Qt app (APPEARANCE.md).

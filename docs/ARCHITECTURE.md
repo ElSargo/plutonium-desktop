@@ -89,6 +89,7 @@
 | Find, zoom, printing, permissions, downloads, file pickers for tabs | [features/TAB_FEATURES.md](features/TAB_FEATURES.md) |
 | Hydra's file manager and picker, keyboard drags | [features/FILE_MANAGER.md](features/FILE_MANAGER.md) |
 | Several monitors (design) | [features/MULTI_MONITOR.md](features/MULTI_MONITOR.md) |
+| Light or dark for shells, tabs, GTK and Qt apps | [features/APPEARANCE.md](features/APPEARANCE.md) |
 | What pages see (Linux, not ChromeOS), and what still differs | [features/LINUX_COMPAT.md](features/LINUX_COMPAT.md) |
 | Input methods for native apps (text-input-v3) | [features/IME.md](features/IME.md) |
 | Wayland protocols added to Exo: activation, cursor shapes | [features/WAYLAND_PROTOCOLS.md](features/WAYLAND_PROTOCOLS.md) |

@@ -24,6 +24,8 @@
 //   over the app's window (fileChooser.ts).
 // - Print: the shell's print dialog, then CUPS; served under a name of its
 //   own by printportal.py, which can take the document's fd (printPortal.ts).
+// - Settings: org.freedesktop.appearance (light or dark: the appearance
+//   service's, docs/features/APPEARANCE.md), with SettingChanged on each change.
 //
 // The session's environment picks it: XDG_CURRENT_DESKTOP=Plutonium and
 // plutonium-portals.conf (helper/portal/).
@@ -52,6 +54,7 @@ const SCREENSHOT = "org.freedesktop.impl.portal.Screenshot";
 const GLOBAL_SHORTCUTS = "org.freedesktop.impl.portal.GlobalShortcuts";
 const FILE_CHOOSER = "org.freedesktop.impl.portal.FileChooser";
 const INHIBIT = "org.freedesktop.impl.portal.Inhibit";
+const SETTINGS = "org.freedesktop.impl.portal.Settings";
 /** Inhibit's flag for idle (1 logout, 2 user switch, 4 suspend). */
 const INHIBIT_IDLE = 8;
 const REQUEST = "org.freedesktop.impl.portal.Request";
@@ -157,6 +160,19 @@ export interface PortalOptions {
    */
   readonly inhibit?: (key: string, who: string, why: string) => void;
   readonly uninhibit?: (key: string) => void;
+  /** The Settings portal's values, by namespace and key, and their changes (the appearance service). */
+  readonly settings?: PortalSettings;
+}
+
+export interface PortalSettings {
+  values(): Map<string, Map<string, Variant>>;
+  onChange(listener: () => void): void;
+}
+
+/** Whether a namespace is one of ReadAll's: all of them for none, a trailing * a prefix. */
+export function namespaceMatches(namespace: string, patterns: readonly string[]): boolean {
+  if (!patterns.length || patterns.includes("")) return true;
+  return patterns.some((pattern) => (pattern.endsWith("*") ? namespace.startsWith(pattern.slice(0, -1)) : namespace === pattern));
 }
 
 /** A global shortcut an app bound: its combo, if it has one. */
@@ -182,11 +198,18 @@ export class Portal {
   private readonly shortcutSessions = new Map<string, ShortcutSession>();
   private printBackend: PrintBackend | null = null;
 
+  /** The Settings values last sent, for SettingChanged on the ones that change. */
+  private settingsSent = new Map<string, Map<string, Variant>>();
+
   constructor(options: PortalOptions) {
     this.options = options;
     options.desktop.captureListeners.add((type, capture) => {
       if (type === "stop") this.onCaptureStopped(capture);
     });
+    if (options.settings) {
+      this.settingsSent = options.settings.values();
+      options.settings.onChange(() => this.settingsChanged());
+    }
   }
 
   /** Connects and takes the portal's name. Resolves once served, or rejects. */
@@ -273,6 +296,21 @@ export class Portal {
     if (iface === INHIBIT && member === "Inhibit") {
       return this.inhibit(String(body[0]), String(body[1]), Number(body[3]), optionsOf(body[4]));
     }
+    if (iface === SETTINGS && this.options.settings) {
+      const values = this.options.settings.values();
+      if (member === "ReadAll") {
+        const patterns = Array.isArray(body[0]) ? (body[0] as unknown[]).map(String) : [];
+        return {
+          signature: "a{sa{sv}}",
+          body: [new Map([...values].filter(([namespace]) => namespaceMatches(namespace, patterns)))],
+        };
+      }
+      if (member === "Read") {
+        const value = values.get(String(body[0]))?.get(String(body[1]));
+        if (!value) throw new DBusError("org.freedesktop.portal.Error.NotFound", "Requested setting not found");
+        return { signature: "v", body: [value] };
+      }
+    }
     if (iface === SCREENSHOT) {
       switch (member) {
         case "Screenshot":
@@ -294,7 +332,21 @@ export class Portal {
     }
     if (iface === SCREENSHOT) return { version: ["u", 2] };
     if (iface === GLOBAL_SHORTCUTS) return { version: ["u", 1] };
+    if (iface === SETTINGS && this.options.settings) return { version: ["u", 2] };
     return {};
+  }
+
+  /** SettingChanged for each value that changed. */
+  private settingsChanged(): void {
+    const values = this.options.settings!.values();
+    for (const [namespace, keys] of values) {
+      for (const [key, value] of keys) {
+        const before = this.settingsSent.get(namespace)?.get(key);
+        if (before && JSON.stringify(before) === JSON.stringify(value)) continue;
+        this.bus?.emit(PORTAL_PATH, SETTINGS, "SettingChanged", "ssv", [namespace, key, value]);
+      }
+    }
+    this.settingsSent = values;
   }
 
   /** EXO-LOCK: an app's Inhibit; it lasts until the frontend closes its request. */
@@ -748,6 +800,12 @@ const INTROSPECTION = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object I
   </interface>
   <interface name="${INHIBIT}">
     <method name="Inhibit"><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="a{sv}" direction="in"/></method>
+  </interface>
+  <interface name="${SETTINGS}">
+    <method name="ReadAll"><arg type="as" direction="in"/><arg type="a{sa{sv}}" direction="out"/></method>
+    <method name="Read"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="out"/></method>
+    <signal name="SettingChanged"><arg type="s"/><arg type="s"/><arg type="v"/></signal>
+    <property name="version" type="u" access="read"/>
   </interface>
   <interface name="${GLOBAL_SHORTCUTS}">
     <method name="CreateSession"><arg type="o" direction="in"/><arg type="o" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="u" direction="out"/><arg type="a{sv}" direction="out"/></method>

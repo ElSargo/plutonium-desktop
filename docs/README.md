@@ -29,6 +29,7 @@
 - [features/SHELL_PACKAGES.md](features/SHELL_PACKAGES.md): shells as installed packages, edited safely and rolled back
 - [features/HYDRA_DOCK.md](features/HYDRA_DOCK.md): Hydra's dock of apps, sites and terminals
 - [features/AGENT_CONTROL.md](features/AGENT_CONTROL.md): how agents see and drive apps and tabs
+- [features/APPEARANCE.md](features/APPEARANCE.md): light or dark for the whole desktop: shells, tabs, GTK and Qt apps
 - [features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md): what a shell gets from the desktop: notifications, audio, power, network
 - [features/IME.md](features/IME.md): input methods
 

@@ -250,6 +250,11 @@ export class Threads {
       WAYLAND_DISPLAY: this.waylandDisplay,
       GDK_BACKEND: "wayland",
       QT_QPA_PLATFORM: "wayland",
+      // Qt 6 follows the settings portal's light or dark (APPEARANCE.md) only
+      // with this platform theme; its generic one never does. Its file dialogs
+      // go through the portal too, like GTK's below. A theme the user chose
+      // (qt6ct, kde) stays.
+      ...(process.env.QT_QPA_PLATFORMTHEME ? {} : { QT_QPA_PLATFORMTHEME: "xdgdesktopportal" }),
       MOZ_ENABLE_WAYLAND: "1",
       // Apps' file dialogs through the portal, so the desktop's picker: GTK 3 and
       // Firefox, GTK 4. An app that draws its own GtkFileChooserDialog keeps it.

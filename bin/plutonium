@@ -21,6 +21,8 @@ Sessions:
   shells <command>           the installed shells in $PLUTO_HOME/shells: plutonium shells help
   stop [--drm|--x11]         stop a session's Ash (both if neither is given)
   status                     what is running
+  appearance [--drm|--x11] [light|dark|toggle|default]
+                             light or dark for the desktop: shells, tabs, GTK and Qt apps
   helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
   <shell> <args>             a shell's own command, if it has one: plutonium hydra help
 EOF
@@ -492,6 +494,20 @@ case "$cmd" in
   status) status_cmd ;;
   session) session_cmd "$@" ;;
   shells) shells_cmd "$@" ;;
+  # Light or dark for the whole desktop, through the running session's helper:
+  # this thread's, else the DRM session's, else the X11 one's (--drm, --x11 to say).
+  appearance)
+    mode=
+    case ${1:-} in --drm) mode=drm; shift ;; --x11) mode=x11; shift ;; esac
+    if [[ -z $mode && -z ${PLUTONIUM_HELPER:-} ]]; then
+      session_vars drm
+      mode=drm; [[ -S $RUN_DIR/plutonium/$SOCKET.sock ]] || mode=x11
+    fi
+    if [[ -n $mode ]]; then
+      session_vars "$mode"
+      exec "$NODE" "$ROOT/helper/plutonium.ts" appearance --socket "$RUN_DIR/plutonium/$SOCKET.sock" "$@"
+    fi
+    exec "$0" helper appearance "$@" ;;
   helper)
     session_vars drm
     # In a worktree's slot, a thread's variables (an agent in a Hydra thread of

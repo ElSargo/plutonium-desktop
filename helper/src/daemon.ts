@@ -56,7 +56,6 @@ import { comboKeys, commitRuns, typingRuns } from "./keys.ts";
 import { installOpeners, openerEnvironment } from "./opener.ts";
 import { ThreadPages } from "./pages.ts";
 import { callTool, mcpTools } from "./mcp.ts";
-import { Appearance } from "./appearance.ts";
 import { Portal } from "./portal.ts";
 import { Recordings, type RecordingSource } from "./recordings.ts";
 import { saveScreenshot } from "./screenshots.ts";
@@ -70,6 +69,7 @@ import { BluetoothService } from "./services/bluetooth.ts";
 import { DisplayService } from "./services/display.ts";
 import { NetworkService } from "./services/network.ts";
 import { SessionService } from "./services/session.ts";
+import { AppearanceService } from "./services/appearance.ts";
 import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { plutoHome, ShellError } from "./shells.ts";
@@ -416,7 +416,8 @@ export class Daemon {
   private portal: Portal | null = null;
   /** EXO-CAPTURE: agents' recordings (start_recording, stop_recording). */
   private recordings: Recordings | null = null;
-  private appearance: Appearance | null = null;
+  /** Light or dark, for the whole desktop (services/appearance.ts). */
+  readonly appearance: AppearanceService;
   private readonly servers: Server[] = [];
   private groupsCache: { at: number; groups: Promise<ItemGroup[]> } | null = null;
   /** Shell origins a shell page reported (shells added in the browser at runtime). */
@@ -541,6 +542,17 @@ export class Daemon {
       notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
     });
     this.services.register(this.session);
+    // Light or dark (docs/features/APPEARANCE.md). GTK's dconf keys and
+    // settings.ini follow only in the desktop session itself: the user's own
+    // slot on DRM (a test session would change the user's GTK apps);
+    // PLUTONIUM_APPEARANCE_SYSTEM=1 or 0 says otherwise.
+    this.appearance = new AppearanceService({
+      file: join(options.shells?.home ?? plutoHome(), "appearance.json"),
+      system:
+        (process.env.PLUTONIUM_APPEARANCE_SYSTEM ??
+          ((options.shells?.context.slot ?? 0) === 0 && process.env.PLUTONIUM_LOGIND_SESSION ? "1" : "0")) === "1",
+    });
+    this.services.register(this.appearance);
     const shells = options.shells;
     this.native = shells
       ? new ShellNative(shells.home, (name, event, detail) =>
@@ -2932,20 +2944,20 @@ export class Daemon {
       // Connected whenever the browser is up, so its events (tabs' notifications) arrive
       // without waiting for something to ask it.
       setInterval(() => void desktop.available(true), 5000).unref();
-      // EXO-SERVICES: Ash's dark mode follows the host's color scheme.
-      const appearance = new Appearance();
-      this.appearance = appearance;
+      // EXO-SERVICES: Ash's dark mode, so the web's prefers-color-scheme, is the appearance setting's.
+      const appearance = this.appearance;
       const apply = (retry = true) => {
-        const dark = appearance.current;
-        if (dark === null) return;
-        void desktop.setColorScheme(dark).then((done) => {
+        void desktop.setColorScheme(appearance.colorScheme === "dark").then((done) => {
           // Before the user session is up: once more, a little later.
           if (!done && retry) setTimeout(() => apply(false), 3000).unref();
         });
       };
       appearance.onChange(() => apply());
       desktop.enableListeners.add(() => apply());
-      void appearance.start();
+      this.services
+        .state("appearance")
+        .then(() => apply())
+        .catch((error: unknown) => console.warn(`plutoniumd: no appearance: ${(error as Error).message}`));
       void desktop.available(true);
     }
     if (this.desktop) {
@@ -2971,6 +2983,10 @@ export class Daemon {
         windows: () => this.relay.windows(),
         inhibit: (key, who, why) => this.session.portalInhibit(key, who, why),
         uninhibit: (key) => this.session.portalUninhibit(key),
+        settings: {
+          values: () => this.appearance.portalSettings(),
+          onChange: (listener) => this.appearance.onChange(() => listener()),
+        },
       });
       portal.start().then(
         () => (this.portal = portal),
@@ -2985,7 +3001,6 @@ export class Daemon {
     this.native?.stopAll();
     this.portal?.stop();
     this.recordings?.stopAll();
-    this.appearance?.stop();
     this.terminals.closeAll();
     this.pages?.closeAll();
     for (const server of this.servers) server.close();

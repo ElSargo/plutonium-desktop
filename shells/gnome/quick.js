@@ -1,6 +1,6 @@
 // GNOME's quick settings: the status icons at the right of the top bar and
 // the menu they open: volume, microphone and brightness sliders, Wi-Fi,
-// Bluetooth, Do Not Disturb, Keep Awake and Airplane Mode toggles, each with
+// Bluetooth, Do Not Disturb, Keep Awake, Dark Style and Airplane Mode toggles, each with
 // its submenu, and the battery, screenshot, display settings, settings, lock
 // and power buttons.
 // Everything is over the desktop services (shell.system.<name>).
@@ -15,8 +15,8 @@ import { el, button, slider, confirm } from "./ui.js";
 export function mountQuick(ctx) {
   const { shell } = ctx;
   const sys = shell?.system;
-  const state = { audio: null, power: null, network: null, bluetooth: null, notifications: null, session: null };
-  const services = ["audio", "power", "network", "bluetooth", "notifications", "session"];
+  const state = { audio: null, power: null, network: null, bluetooth: null, notifications: null, session: null, appearance: null };
+  const services = ["audio", "power", "network", "bluetooth", "notifications", "session", "appearance"];
 
   // ---------------------------------------------------------------- the bar's icons
   const indicators = el("button", "pill-btn", undefined);
@@ -222,6 +222,13 @@ export function mountQuick(ctx) {
           renderAll();
           await call("session", on ? "uninhibit" : "inhibit", on ? {} : { why: KEEP_AWAKE });
         },
+      }));
+    }
+    if (state.appearance) {
+      const dark = state.appearance.colorScheme === "dark";
+      grid.append(togglePill({
+        iconName: icon("appearance"), title: "Dark Style", subtitle: dark ? "On" : "Off", active: dark,
+        onToggle: () => call("appearance", "set", { colorScheme: dark ? "light" : "dark" }),
       }));
     }
     const radios = (n?.wifi?.available ? 1 : 0) + (bt?.adapter ? 1 : 0);

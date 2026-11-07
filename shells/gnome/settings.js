@@ -108,13 +108,13 @@ export function mountSettings(ctx) {
   const pageById = (id) => PAGES.find((p) => p.id === id);
 
   const states = {};
-  for (const name of ["audio", "power", "network", "bluetooth", "notifications", "session", "display"]) {
+  for (const name of ["audio", "power", "network", "bluetooth", "notifications", "session", "display", "appearance"]) {
     if (!sys) break;
     states[name] = sys[name].state;
     sys[name].addEventListener("change", (e) => { states[name] = e.detail; if (page === pageFor(name)) render(); });
     sys[name].ready.then((s) => { states[name] = s; if (page === pageFor(name)) render(); }, () => {});
   }
-  const pageFor = (service) => ({ audio: "sound", power: "power", network: "wifi", bluetooth: "bluetooth", notifications: "notifications", session: "privacy", display: "displays" })[service];
+  const pageFor = (service) => ({ audio: "sound", power: "power", network: "wifi", bluetooth: "bluetooth", notifications: "notifications", session: "privacy", display: "displays", appearance: "appearance" })[service];
   const call = async (service, action, args) => {
     try { return await sys[service].call(action, args); }
     catch (error) { ctx.toast(`${service}: ${error.message}`); return null; }
@@ -539,7 +539,20 @@ export function mountSettings(ctx) {
         b.append(pic(bars), el("span", "", label));
         dock.append(b);
       }
+      // Light or dark for the whole desktop: shells, tabs, GTK and Qt apps (the appearance service).
+      const look = states.appearance;
+      const style = el("div", "st-choice");
+      style.style.gridTemplateColumns = "repeat(2, 1fr)";
+      for (const [v, label, bg, fg] of [["light", "Default", "#fafafa", "#d8d8d8"], ["dark", "Dark", "#242424", "#4a4a4a"]]) {
+        const b = button(look?.colorScheme === v ? "cur" : "", { onClick: () => call("appearance", "set", { colorScheme: v }) });
+        const p = pic([[10, 10, 80, 22], [10, 40, 50, 50]]);
+        p.style.background = bg;
+        for (const i of p.children) i.style.background = fg;
+        b.append(p, el("span", "", label));
+        style.append(b);
+      }
       return [
+        ...(look ? [group("Style", [style], { desc: "For the whole desktop: the shells, web pages, and GTK and Qt apps." })] : []),
         group("Background", [walls, textRow("Picture Address", P.wallpaperUrl, (v) => { ctx.setPref("wallpaperUrl", v); if (v) ctx.setPref("wallpaper", "custom"); render(); }, { placeholder: "https://… or data:", sub: "An image on the web for the background" })]),
         group("Accent Color", [row("Color", accents)]),
         group("Dash", [dock, row("Icon Size", slider(P.dockIconSize, 64, (v) => ctx.setPref("dockIconSize", Math.max(32, Math.round(v))), { step: 4 }), { sub: `${P.dockIconSize} px` }),
