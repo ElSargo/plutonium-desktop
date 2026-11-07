@@ -65,10 +65,12 @@
 
   /* Top bar. */
   #topbar {
-    position: fixed; inset: 0 0 auto; height: var(--bar-h); z-index: 1000; background: #000;
+    position: fixed; inset: 0 0 auto; height: var(--bar-h); z-index: 1000;
     display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 6px;
     font-weight: 700; font-size: 14px;
   }
+  /* Its black, which goes in the overview: an opacity, so the bar isn't painted again each frame. */
+  #topbar::before { content: ""; position: absolute; inset: 0; z-index: -1; background: #000; opacity: var(--bar-black, 1); will-change: opacity; }
   #topbar > :first-child { justify-self: start; }
   #topbar > :nth-child(2) { justify-self: center; }
   #topbar > :last-child { justify-self: end; }
@@ -87,15 +89,23 @@
   /* The overview's backdrop: the wallpaper, dimmed (#shade). The workspaces
      are the cards above it, the desktop included: at rest one covers the desk. */
   #desk { position: fixed; inset: var(--bar-h) 0 0; overflow: hidden; background: var(--wallpaper) center / cover; }
-  #shade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; }
+  /* What frame() moves each frame is a layer of its own (will-change), and it
+     changes only transforms, opacities and clips: the compositor redraws it,
+     nothing is painted or rastered again. Raster is slow (on the CPU when
+     Chromium has no GPU raster), and a workspace's backdrop is the screen's size. */
+  #shade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; will-change: opacity; }
   #hotcorner { position: fixed; left: 0; top: 0; width: 2px; height: 2px; z-index: 1001; }
   #cards { position: absolute; inset: 0; pointer-events: none; }
-  .wscard {
-    position: absolute; left: 0; top: 0; transform-origin: 0 0;
-    background: var(--wallpaper) center / cover; box-shadow: 0 4px 24px #0008;
-  }
+  /* A workspace's card: its shadow, and the wallpaper in a rounded clip. The
+     clip's radius changes each frame, the wallpaper's layer under it doesn't.
+     The shadow's radius changes once a transition (frame()). */
+  .wscard { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+  .wscard > * { position: absolute; inset: 0; }
+  .wscard .ws-shadow { box-shadow: 0 4px 24px #0008; }
+  .wscard .ws-clip { overflow: hidden; }
+  .wscard .ws-wall { position: absolute; inset: 0; background: var(--wallpaper) center / cover; will-change: transform; }
   body.overview .wscard { pointer-events: auto; }
-  .wscard.drop { box-shadow: 0 4px 24px #0008, 0 0 0 calc(3px / var(--s, 1)) var(--accent); }
+  .wscard.drop .ws-clip { outline: calc(3px / var(--s, 1)) solid var(--accent); }
   #windows { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
   body.ovdragging #windows { z-index: 5; }
   body.searching #windows, body.searching #cards, body.searching #ov-chrome { opacity: 0; pointer-events: none !important; }
@@ -113,7 +123,7 @@
   .win {
     position: absolute; left: 0; top: 0; transform-origin: 0 0; border-radius: 12px;
     background: var(--win-bg); box-shadow: 0 2px 6px #0003, 0 8px 28px #0004;
-    transition: box-shadow .2s;
+    transition: box-shadow .2s; will-change: transform;
   }
   body.overview .win { transition: none; }
   .win.hidden { pointer-events: none; }
@@ -178,7 +188,7 @@
   #ov-chrome .cap .cap-icon {
     position: absolute; left: 50%; bottom: -19px; width: 64px; height: 64px; margin-left: -32px; display: grid; place-items: center;
     transform-origin: 50% 70%; transform: scale(var(--spread, 0)); opacity: var(--spread, 0);
-    filter: drop-shadow(0 1px 3px #0008);
+    filter: drop-shadow(0 1px 3px #0008); will-change: transform;
   }
   #ov-chrome .cap .cap-icon img, #ov-chrome .cap .cap-icon .letter, #ov-chrome .cap .cap-icon .glyph { width: 56px; height: 56px; }
   #ov-chrome .cap .cap-title {
@@ -195,7 +205,7 @@
   #ov-chrome .cap.dragging { opacity: 0 !important; }
   #ov-top {
     position: absolute; top: 0; left: 0; right: 0; display: grid; justify-items: center; gap: 12px; padding-top: 14px;
-    opacity: 0; pointer-events: none;
+    opacity: 0; pointer-events: none; will-change: opacity;
   }
   body.overview #search, body.overview .thumb { pointer-events: auto; }
   #search {
@@ -204,7 +214,7 @@
   }
   #search:focus { box-shadow: 0 0 0 2px var(--accent); }
   #search::placeholder { color: #ffffffa0; }
-  #thumbs { position: relative; display: flex; gap: 10px; height: var(--thumb-h, 58px); }
+  #thumbs { position: relative; display: flex; gap: 10px; height: var(--thumb-h, 58px); will-change: transform; }
   .thumb {
     position: relative; height: 100%; border-radius: 8px; overflow: hidden; background: var(--wallpaper) center / cover;
     box-shadow: 0 1px 4px #0006; outline: 2px solid transparent; outline-offset: 2px;
@@ -224,7 +234,7 @@
   #dash {
     position: absolute; bottom: 12px; left: 50%; transform: translate(-50%, 150%); display: flex; align-items: center; gap: 4px;
     padding: 6px; border-radius: 22px; background: #2e2e2ee6; transition: transform var(--dur) var(--ov-ease); z-index: 950;
-    box-shadow: 0 2px 12px #0006;
+    box-shadow: 0 2px 12px #0006; will-change: transform;
   }
   body.dock-shown #dash { transform: translate(-50%, 0); }
   /* In the overview it comes up with it, frame by frame (--ovp, the overview's progress). */
@@ -1236,6 +1246,12 @@ function reslot(now, instant) {
 const scrolling = () => !!swipe || posT.busy(performance.now()) || Math.abs(posT.to - (cur - slide / W())) > 1e-3;
 
 let raf = 0;
+let shadowState = 1; // the overview state the cards' shadows have the corners of (frame())
+/** Sets a style only when it changes: an unchanged value written again still invalidates the element's style. */
+function setStyle(node, prop, value) {
+  if (prop.startsWith("--")) { if (node.style.getPropertyValue(prop) !== value) node.style.setProperty(prop, value); }
+  else if (node.style[prop] !== value) node.style[prop] = value;
+}
 function kick() { if (!raf) raf = requestAnimationFrame(tick); }
 function tick() {
   raf = 0;
@@ -1406,16 +1422,25 @@ function frame(now) {
     if (s?.busy(now)) busy = true;
     boxes.set(ws.id, wsBoxAt(p, s ? s.at(now) : i, pos, m));
   });
-  const radius = lerp(0, lerp(16, 10, g), t);
+  const cornerOf = (state) => (state === 2 ? 10 : 16);
+  const radius = lerp(0, lerp(cornerOf(1), cornerOf(2), g), t);
+  // The shadow's corners are those of the state the view is going to (or
+  // last went to, toward the desktop, where it's under the card), so they
+  // change once a transition rather than repainting the shadow each frame.
+  if (overviewTarget > 0) shadowState = overviewTarget;
   for (const card of $("cards").children) {
-    const c = boxes.get(Number(card.dataset.ws));
+    const id = Number(card.dataset.ws);
+    const c = boxes.get(id);
     if (!c) continue;
     const k = c.w / w;
-    card.style.width = `${w}px`;
-    card.style.height = `${h}px`;
+    const [shadowEl, clip] = card.children;
+    setStyle(card, "width", `${w}px`);
+    setStyle(card, "height", `${h}px`);
     card.style.transform = `translate(${c.x}px, ${c.y}px) scale(${k})`;
-    card.style.borderRadius = `${radius / Math.max(k, 0.05)}px`;
-    card.style.setProperty("--s", String(k));
+    clip.style.borderRadius = `${radius / Math.max(k, 0.05)}px`;
+    const ks = wsBox(shadowState, wsIndex(id), posT.to, m).w / w;
+    setStyle(shadowEl, "borderRadius", `${Math.round(cornerOf(shadowState) / Math.max(ks, 0.05))}px`);
+    if (card.classList.contains("drop")) setStyle(card, "--s", k.toFixed(3));
   }
 
   // The windows, each on its workspace.
@@ -1463,7 +1488,7 @@ function frame(now) {
 
   // The backdrop dims; the top bar's black goes; the search, thumbnails, grid and dash come.
   $("shade").style.opacity = String(1 - 0.45 * t);
-  $("topbar").style.backgroundColor = `rgb(0 0 0 / ${1 - t})`;
+  setStyle($("topbar"), "--bar-black", String(1 - t));
   const ovTop = $("ov-top");
   ovTop.style.opacity = String(t);
   ovTop.style.setProperty("--thumb-h", `${m.thumbH}px`);
@@ -1491,6 +1516,9 @@ function frame(now) {
 function makeCard(id) {
   const card = el("div", "wscard");
   card.dataset.ws = String(id);
+  const clip = el("div", "ws-clip");
+  clip.append(el("div", "ws-wall"));
+  card.append(el("div", "ws-shadow"), clip);
   card.addEventListener("click", () => {
     const i = wsIndex(Number(card.dataset.ws));
     // As GNOME's: the current workspace (or any, from the app grid) leaves the overview.

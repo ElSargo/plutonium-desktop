@@ -42,6 +42,11 @@ in
       pcre2
       libselinux
       util-linux
+      # libpci, which ANGLE dlopen()s for the GPU's PCI ids. Without them
+      # Chromium's ChromeOS GPU list can't tell an AMD or Intel GPU from one it
+      # doesn't trust, and turns GPU rasterization off: every page is painted
+      # on the CPU (Charon's overview at 20-30 fps).
+      pciutils
     ]
     # X11's: lowercase at the top level since NixOS 26.05, in xorg before.
     ++ map (name: pkgs.${pkgs.lib.toLower name} or pkgs.xorg.${name}) [
