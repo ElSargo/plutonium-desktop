@@ -16,6 +16,17 @@ While a page shows a window, nothing else sizes it (0017):
 
 Before 0017, an app's maximize button made Ash resize the window to the work area while its element kept its size. A 1600×1000 window then drew inside a 1380×875 element.
 
+## The app's size limits
+
+An app can say how small and how big it can be: `xdg_toplevel.set_min_size` and `set_max_size`, or an X11 app's `WM_NORMAL_HINTS`, which xwayland-satellite turns into the same requests. A dialog, a game or an installer that can't be resized sets its minimum to its maximum. The element and the broker give the page those limits, so it can lay the window out at a size the app will take. Otherwise the app answers with a size other than the box, and `object-fit` places its frame in a box it doesn't fill (below):
+- **The element:** `windowMinWidth`, `windowMinHeight`, `windowMaxWidth` and `windowMaxHeight`, in CSS pixels at zoom 1 (DIPs) like `windowWidth`. 0 on an axis means no limit on it, as in xdg-shell. They change with a `windowchange` event.
+- **The broker's entries:** `minWidth`, `minHeight`, `maxWidth` and `maxHeight`, the same values, so a shell can decide how to place a window before it shows it.
+
+They are what the app committed, unadjusted (`ShellSurfaceBase::requested_minimum_size()`; Ash's `GetMinimumSize()` makes an unset minimum 1×1 and raises the maximum to the minimum). Ash's log lists them with each window (`min=… max=…`).
+
+What the shells do with them:
+- **Charon** keeps a floating window's frame within them, as mutter keeps to size hints: resizing by the frame, by the app's own edges or with Alt+F8 stops at them, and a saved size that no longer fits is clamped. A window that can't be resized isn't maximized or tiled (no maximize button, no edge tiling, nothing to tile in its menu; the app's own maximize request is ignored). A tile a window can't fill gets the nearest size it takes, centered in the tile, so its frame is never bigger or smaller than what the app draws.
+
 ## The box is where the window is
 
 The page's content box is always where the window is drawn, as Hyprland draws a window it is resizing (0020):

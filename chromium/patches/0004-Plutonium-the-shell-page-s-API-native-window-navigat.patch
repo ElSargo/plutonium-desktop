@@ -41,8 +41,8 @@ and the parts in these files of:
 - xdg_toplevel_icon_v1, apps' window icons for the shells
 ---
  third_party/blink/public/mojom/BUILD.gn       |   16 +
- .../mojom/native_window/native_window.mojom   |  113 ++
- .../mojom/native_window/window_broker.mojom   |  506 ++++++
+ .../mojom/native_window/native_window.mojom   |  117 ++
+ .../mojom/native_window/window_broker.mojom   |  512 ++++++
  third_party/blink/public/web/web_plugin.h     |    4 +
  .../blink/public/web/web_plugin_container.h   |    8 +
  .../renderer/bindings/generated_in_core.gni   |   32 +
@@ -74,16 +74,16 @@ and the parts in these files of:
  .../core/html/context_menu_request_event.idl  |   29 +
  .../core/html/custom/custom_element.cc        |    2 +
  .../core/html/html_attribute_names.json5      |    5 +
- .../core/html/html_native_window_element.cc   |  933 +++++++++++
- .../core/html/html_native_window_element.h    |  256 +++
- .../core/html/html_native_window_element.idl  |   48 +
+ .../core/html/html_native_window_element.cc   |  949 +++++++++++
+ .../core/html/html_native_window_element.h    |  260 +++
+ .../core/html/html_native_window_element.idl  |   57 +
  .../renderer/core/html/html_tag_names.json5   |    4 +
  .../blink/renderer/core/html/item_group.idl   |   12 +
  .../core/html/native_display_entry.idl        |   32 +
- .../core/html/native_window_broker.cc         | 1453 +++++++++++++++++
+ .../core/html/native_window_broker.cc         | 1457 +++++++++++++++++
  .../renderer/core/html/native_window_broker.h |  340 ++++
  .../core/html/native_window_broker.idl        |  241 +++
- .../core/html/native_window_entry.idl         |   29 +
+ .../core/html/native_window_entry.idl         |   35 +
  .../renderer/core/html/native_window_event.cc |   56 +
  .../renderer/core/html/native_window_event.h  |   51 +
  .../core/html/native_window_event.idl         |   21 +
@@ -109,7 +109,7 @@ and the parts in these files of:
  .../graphics/compositing/pending_layer.cc     |   21 +-
  .../platform/runtime_enabled_features.json5   |   11 +
  .../widget/compositing/layer_tree_view.cc     |   15 +-
- 69 files changed, 5416 insertions(+), 8 deletions(-)
+ 69 files changed, 5465 insertions(+), 8 deletions(-)
  create mode 100644 third_party/blink/public/mojom/native_window/native_window.mojom
  create mode 100644 third_party/blink/public/mojom/native_window/window_broker.mojom
  create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
@@ -180,10 +180,10 @@ index f43e0699bc..6a95e6a5ce 100644
    visibility = [
 diff --git a/third_party/blink/public/mojom/native_window/native_window.mojom b/third_party/blink/public/mojom/native_window/native_window.mojom
 new file mode 100644
-index 0000000000..03343e0e85
+index 0000000000..632b780276
 --- /dev/null
 +++ b/third_party/blink/public/mojom/native_window/native_window.mojom
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,117 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -215,6 +215,10 @@ index 0000000000..03343e0e85
 +  gfx.mojom.Rect geometry;
 +  // The whole surface: the geometry plus client-side shadows (DIPs).
 +  gfx.mojom.Size surface_size;
++  // PLUTONIUM: the app's size limits for its geometry (DIPs). 0 on an axis
++  // means no limit on it.
++  gfx.mojom.Size min_size;
++  gfx.mojom.Size max_size;
 +  // Scale of the window's surface (pixels per DIP).
 +  float device_scale_factor;
 +  string title;
@@ -299,10 +303,10 @@ index 0000000000..03343e0e85
 +const int32 kResizeEdgeMargin = 8;
 diff --git a/third_party/blink/public/mojom/native_window/window_broker.mojom b/third_party/blink/public/mojom/native_window/window_broker.mojom
 new file mode 100644
-index 0000000000..19aa78c01f
+index 0000000000..3057e4798a
 --- /dev/null
 +++ b/third_party/blink/public/mojom/native_window/window_broker.mojom
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,512 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -330,6 +334,12 @@ index 0000000000..19aa78c01f
 +  // Window geometry size in DIPs.
 +  int32 width;
 +  int32 height;
++  // PLUTONIUM: the app's size limits (DIPs); 0 on an axis means no limit.
++  // A window whose minimum equals its maximum can't be resized.
++  int32 min_width;
++  int32 min_height;
++  int32 max_width;
++  int32 max_height;
 +  float device_scale_factor;
 +  // Whether an element shows the window, and whether it has embedded
 +  // keyboard focus.
@@ -1922,10 +1932,10 @@ index 23d12fae19..bdd3746efc 100644
    ],
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
 new file mode 100644
-index 0000000000..c5c34e2c5c
+index 0000000000..4b5a2d0052
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
-@@ -0,0 +1,933 @@
+@@ -0,0 +1,949 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2140,6 +2150,22 @@ index 0000000000..c5c34e2c5c
 +
 +unsigned HTMLNativeWindowElement::windowHeight() const {
 +  return info_ ? info_->geometry.height() : 0;
++}
++
++unsigned HTMLNativeWindowElement::windowMinWidth() const {
++  return info_ ? std::max(info_->min_size.width(), 0) : 0;
++}
++
++unsigned HTMLNativeWindowElement::windowMinHeight() const {
++  return info_ ? std::max(info_->min_size.height(), 0) : 0;
++}
++
++unsigned HTMLNativeWindowElement::windowMaxWidth() const {
++  return info_ ? std::max(info_->max_size.width(), 0) : 0;
++}
++
++unsigned HTMLNativeWindowElement::windowMaxHeight() const {
++  return info_ ? std::max(info_->max_size.height(), 0) : 0;
 +}
 +
 +bool HTMLNativeWindowElement::windowFocused() const {
@@ -2861,10 +2887,10 @@ index 0000000000..c5c34e2c5c
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.h b/third_party/blink/renderer/core/html/html_native_window_element.h
 new file mode 100644
-index 0000000000..319f17c452
+index 0000000000..6559febe66
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.h
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,260 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2946,6 +2972,10 @@ index 0000000000..319f17c452
 +  String appId() const;
 +  unsigned windowWidth() const;
 +  unsigned windowHeight() const;
++  unsigned windowMinWidth() const;
++  unsigned windowMinHeight() const;
++  unsigned windowMaxWidth() const;
++  unsigned windowMaxHeight() const;
 +  bool windowFocused() const;
 +  int32_t windowId() const;
 +  void focusWindow();
@@ -3123,10 +3153,10 @@ index 0000000000..319f17c452
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_NATIVE_WINDOW_ELEMENT_H_
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.idl b/third_party/blink/renderer/core/html/html_native_window_element.idl
 new file mode 100644
-index 0000000000..b526545f13
+index 0000000000..e9bc0073c7
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.idl
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,57 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3169,6 +3199,15 @@ index 0000000000..b526545f13
 +    // The window's current size in CSS pixels at zoom 1 (DIPs).
 +    readonly attribute unsigned long windowWidth;
 +    readonly attribute unsigned long windowHeight;
++    // PLUTONIUM: the size limits the app set for itself, in CSS pixels at
++    // zoom 1 (DIPs); 0 on an axis means no limit. A page sizing the element
++    // keeps it within them, or the app draws at another size than the box
++    // (placed by object-fit). Minimum equal to maximum: it can't be resized.
++    // They change with a "windowchange" event.
++    readonly attribute unsigned long windowMinWidth;
++    readonly attribute unsigned long windowMinHeight;
++    readonly attribute unsigned long windowMaxWidth;
++    readonly attribute unsigned long windowMaxHeight;
 +    readonly attribute boolean windowFocused;
 +    // Gives the window keyboard focus, or takes it back.
 +    undefined focusWindow();
@@ -3248,10 +3287,10 @@ index 0000000000..8efe478a61
 +};
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
 new file mode 100644
-index 0000000000..0bcde6c7d2
+index 0000000000..4752a53a52
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.cc
-@@ -0,0 +1,1453 @@
+@@ -0,0 +1,1457 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3326,6 +3365,10 @@ index 0000000000..0bcde6c7d2
 +  entry->setTitle(window.title);
 +  entry->setWidth(window.width);
 +  entry->setHeight(window.height);
++  entry->setMinWidth(window.min_width);
++  entry->setMinHeight(window.min_height);
++  entry->setMaxWidth(window.max_width);
++  entry->setMaxHeight(window.max_height);
 +  entry->setDeviceScaleFactor(window.device_scale_factor);
 +  entry->setEmbedded(window.embedded);
 +  entry->setFocused(window.focused);
@@ -5300,10 +5343,10 @@ index 0000000000..c9181b6b7b
 +};
 diff --git a/third_party/blink/renderer/core/html/native_window_entry.idl b/third_party/blink/renderer/core/html/native_window_entry.idl
 new file mode 100644
-index 0000000000..aa950e55c5
+index 0000000000..51c9bc0f8a
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_entry.idl
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,35 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5317,6 +5360,12 @@ index 0000000000..aa950e55c5
 +    // Window size in CSS pixels at zoom 1 (DIPs).
 +    required unsigned long width;
 +    required unsigned long height;
++    // PLUTONIUM: the app's size limits in CSS pixels at zoom 1 (DIPs); 0 on
++    // an axis means no limit. Minimum equal to maximum: it can't be resized.
++    required unsigned long minWidth;
++    required unsigned long minHeight;
++    required unsigned long maxWidth;
++    required unsigned long maxHeight;
 +    required double deviceScaleFactor;
 +    // An element shows it / it has embedded keyboard focus.
 +    required boolean embedded;

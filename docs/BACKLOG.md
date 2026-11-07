@@ -932,7 +932,11 @@ shell find it.
   logical size) rather than bigger content. Decide which is wanted.
 - [ ] **Apps with a minimum size larger than the element** (Firefox: 500 px
   wide) get clipped. Options: let the element grow, scale down, or show it
-  as-is.
+  as-is. The limits now reach the page (`windowMinWidth`…, WINDOW_SIZING.md,
+  "The app's size limits") and Charon keeps to them. Still to do: Styx's
+  columns and tiles, Hydra's panel, and the plain shell; perhaps the limits
+  as the element's intrinsic min-content size, so flex and grid layouts
+  keep to the minimum without script.
 
 ## Known quirks (not ours, or low priority)
 

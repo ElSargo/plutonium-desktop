@@ -68,8 +68,8 @@ and the parts in these files of:
  chrome/browser/exo_embedder.h                 |   81 +
  chrome/browser/exo_parts.cc                   |    9 +
  chrome/browser/exo_parts.h                    |   13 +
- chrome/browser/exo_window_broker.cc           |  395 +++++
- chrome/browser/exo_window_broker.h            |  191 ++
+ chrome/browser/exo_window_broker.cc           |  399 +++++
+ chrome/browser/exo_window_broker.h            |  194 +++
  chrome/browser/exo_window_broker_unittest.cc  |  328 ++++
  chrome/browser/plutonium_agent.cc             |   95 +
  chrome/browser/plutonium_agent.h              |   72 +
@@ -77,7 +77,7 @@ and the parts in these files of:
  chrome/browser/plutonium_groups.h             |  114 ++
  chrome/browser/plutonium_keys.cc              |  435 +++++
  chrome/browser/plutonium_keys.h               |   90 +
- chrome/browser/plutonium_shell.cc             | 1544 +++++++++++++++++
+ chrome/browser/plutonium_shell.cc             | 1546 +++++++++++++++++
  chrome/browser/plutonium_shell.h              |  189 ++
  chrome/browser/plutonium_shell_unittest.cc    |  528 ++++++
  chrome/browser/plutonium_shells.cc            |  110 ++
@@ -93,7 +93,7 @@ and the parts in these files of:
  content/public/common/content_switches.h      |    3 +-
  third_party/blink/public/web/web_document.h   |    3 +
  .../renderer/core/exported/web_document.cc    |    7 +
- 35 files changed, 5997 insertions(+), 11 deletions(-)
+ 35 files changed, 6006 insertions(+), 11 deletions(-)
  create mode 100644 chrome/browser/exo_embedder.cc
  create mode 100644 chrome/browser/exo_embedder.h
  create mode 100644 chrome/browser/exo_window_broker.cc
@@ -436,7 +436,7 @@ index 180db63d39..58c011e8eb 100644
                surface_embed::SurfaceEmbedHost::Create(render_frame_host,
 diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
 new file mode 100644
-index 0000000000..3df905e95c
+index 0000000000..751156f1b8
 --- /dev/null
 +++ b/chrome/browser/exo_embedder.cc
 @@ -0,0 +1,1026 @@
@@ -582,7 +582,7 @@ index 0000000000..3df905e95c
 +    const exo::EmbeddedWindows::Info& info) {
 +  return blink::mojom::NativeWindowInfo::New(
 +      window_id, info.surface_id, info.geometry, info.surface_size,
-+      info.device_scale_factor,
++      info.min_size, info.max_size, info.device_scale_factor,
 +      base::UTF16ToUTF8(info.title), info.app_id, info.focused);
 +}
 +
@@ -1625,10 +1625,10 @@ index 91d2cc67e7..02bda366f1 100644
  #endif  // CHROME_BROWSER_EXO_PARTS_H_
 diff --git a/chrome/browser/exo_window_broker.cc b/chrome/browser/exo_window_broker.cc
 new file mode 100644
-index 0000000000..c14765e50c
+index 0000000000..2588d07170
 --- /dev/null
 +++ b/chrome/browser/exo_window_broker.cc
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,399 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1661,6 +1661,8 @@ index 0000000000..c14765e50c
 +  window.app_id = info.app_id;
 +  window.title = info.title;
 +  window.size = info.geometry.size();
++  window.min_size = info.min_size;
++  window.max_size = info.max_size;
 +  window.device_scale_factor = info.device_scale_factor;
 +  window.embedded = info.attached;
 +  window.focused = info.focused;
@@ -1675,6 +1677,8 @@ index 0000000000..c14765e50c
 +  out << "#" << window.id << " app_id=\"" << window.app_id
 +             << "\" title=\"" << base::UTF16ToUTF8(window.title)
 +             << "\" size=" << window.size.ToString()
++             << " min=" << window.min_size.ToString()
++             << " max=" << window.max_size.ToString()
 +             << " scale=" << window.device_scale_factor
 +             << " embedded=" << window.embedded
 +             << " focused=" << window.focused << " pid=" << window.pid
@@ -2026,10 +2030,10 @@ index 0000000000..c14765e50c
 +}
 diff --git a/chrome/browser/exo_window_broker.h b/chrome/browser/exo_window_broker.h
 new file mode 100644
-index 0000000000..5b5a51ae22
+index 0000000000..155535170b
 --- /dev/null
 +++ b/chrome/browser/exo_window_broker.h
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,194 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2090,6 +2094,9 @@ index 0000000000..5b5a51ae22
 +    std::u16string title;
 +    // Window geometry size in DIPs (without client-side shadows).
 +    gfx::Size size;
++    // PLUTONIUM: the app's size limits (DIPs); 0 on an axis: no limit.
++    gfx::Size min_size;
++    gfx::Size max_size;
 +    float device_scale_factor = 1.f;
 +    // State: whether a page element shows the window (it is then parked and
 +    // not on the Ash desktop), and whether it has embedded keyboard focus.
@@ -3636,10 +3643,10 @@ index 0000000000..c5f59fc176
 +#endif  // CHROME_BROWSER_PLUTONIUM_KEYS_H_
 diff --git a/chrome/browser/plutonium_shell.cc b/chrome/browser/plutonium_shell.cc
 new file mode 100644
-index 0000000000..e0b0a50053
+index 0000000000..f2270ff4c0
 --- /dev/null
 +++ b/chrome/browser/plutonium_shell.cc
-@@ -0,0 +1,1544 @@
+@@ -0,0 +1,1546 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3772,7 +3779,9 @@ index 0000000000..e0b0a50053
 +    const ExoWindowBroker::WindowInfo& window) {
 +  return blink::mojom::NativeWindowEntry::New(
 +      window.id, window.app_id, base::UTF16ToUTF8(window.title),
-+      window.size.width(), window.size.height(), window.device_scale_factor,
++      window.size.width(), window.size.height(), window.min_size.width(),
++      window.min_size.height(), window.max_size.width(),
++      window.max_size.height(), window.device_scale_factor,
 +      window.embedded, window.focused, window.pid, window.tag, window.tags,
 +      window.icon_name, window.icon_url);
 +}
