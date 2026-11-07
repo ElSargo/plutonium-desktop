@@ -60,7 +60,7 @@ and the parts in these files of:
 ---
  chrome/browser/BUILD.gn                       |  134 +-
  .../chrome_browser_interface_binders.cc       |   11 +
- .../browser/chrome_content_browser_client.cc  |   38 +-
+ .../browser/chrome_content_browser_client.cc  |   25 +-
  .../browser/chrome_content_browser_client.h   |    2 +
  ...ent_browser_client_navigation_throttles.cc |    3 +
  ...ontent_browser_client_receiver_bindings.cc |   14 +-
@@ -83,7 +83,7 @@ and the parts in these files of:
  chrome/browser/plutonium_shells.cc            |  110 ++
  chrome/browser/plutonium_shells.h             |  262 +++
  chrome/browser/prefs/browser_prefs.cc         |    8 +
- .../chrome_content_renderer_client.cc         |   50 +-
+ .../chrome_content_renderer_client.cc         |   39 +-
  chrome/test/BUILD.gn                          |   22 +
  content/browser/BUILD.gn                      |    4 +
  content/public/browser/BUILD.gn               |    1 +
@@ -91,7 +91,9 @@ and the parts in these files of:
  .../public/browser/content_browser_client.h   |    6 +
  content/public/common/content_switches.cc     |    2 +-
  content/public/common/content_switches.h      |    3 +-
- 33 files changed, 6011 insertions(+), 11 deletions(-)
+ third_party/blink/public/web/web_document.h   |    3 +
+ .../renderer/core/exported/web_document.cc    |    7 +
+ 35 files changed, 5997 insertions(+), 11 deletions(-)
  create mode 100644 chrome/browser/exo_embedder.cc
  create mode 100644 chrome/browser/exo_embedder.h
  create mode 100644 chrome/browser/exo_window_broker.cc
@@ -315,7 +317,7 @@ index ec0cde4e5e..48c875429f 100644
        &actor::ActorScriptToolReceiver::Create);
  
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 896701c5ea..802a2d3e2b 100644
+index 896701c5ea..11d5f7b994 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -511,6 +511,8 @@
@@ -327,27 +329,7 @@ index 896701c5ea..802a2d3e2b 100644
  #include "chrome/browser/ash/arc/fileapi/arc_content_file_system_backend_delegate.h"
  #include "chrome/browser/ash/arc/fileapi/arc_documents_provider_backend_delegate.h"
  #include "chrome/browser/ash/drive/fileapi/drivefs_file_system_backend_delegate.h"
-@@ -3161,6 +3163,19 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
-     }
- 
- #if BUILDFLAG(IS_CHROMEOS)
-+    // EXO-TABS: renderers only create the SurfaceEmbed plugin (for the
-+    // shell's browser tabs) in a main frame of a shell origin (EXO-SHELLS:
-+    // a comma-separated list). The browser re-checks the document before
-+    // binding the plugin's host.
-+    if (std::vector<url::Origin> shells = plutonium_shell::GetShellOrigins();
-+        !shells.empty()) {
-+      std::vector<std::string> serialized;
-+      for (const url::Origin& shell : shells) {
-+        serialized.push_back(shell.Serialize());
-+      }
-+      command_line->AppendSwitchASCII(plutonium_shell::kShellOriginSwitch,
-+                                      base::JoinString(serialized, ","));
-+    }
-     const std::string& login_profile =
-         browser_command_line.GetSwitchValueASCII(ash::switches::kLoginProfile);
-     if (!login_profile.empty()) {
-@@ -4685,7 +4700,12 @@ content::TtsPlatform* ChromeContentBrowserClient::GetTtsPlatform() {
+@@ -4685,7 +4687,12 @@ content::TtsPlatform* ChromeContentBrowserClient::GetTtsPlatform() {
        TtsExtensionEngine::GetInstance());
  #endif
  #if BUILDFLAG(IS_CHROMEOS)
@@ -361,7 +343,7 @@ index 896701c5ea..802a2d3e2b 100644
  #else
    return nullptr;
  #endif
-@@ -9994,8 +10014,24 @@ void ChromeContentBrowserClient::UpdateCorsExemptHeaderForPrefetch(
+@@ -9994,8 +10001,24 @@ void ChromeContentBrowserClient::UpdateCorsExemptHeaderForPrefetch(
    glic::UpdateCorsExemptHeaders(params);
  }
  
@@ -6342,54 +6324,25 @@ index 2dec5470a4..ac0f740f4a 100644
    ChromeOSMetricsProvider::RegisterPrefs(registry);
    ash::AudioDevicesPrefHandlerImpl::RegisterPrefs(registry);
 diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
-index 6ab4a9d9b4..4c67fe9963 100644
+index 6ab4a9d9b4..0ba127580b 100644
 --- a/chrome/renderer/chrome_content_renderer_client.cc
 +++ b/chrome/renderer/chrome_content_renderer_client.cc
-@@ -4,6 +4,7 @@
- 
- #include "chrome/renderer/chrome_content_renderer_client.h"
- 
-+#include <algorithm>
- #include <functional>
- #include <memory>
- #include <optional>
-@@ -20,10 +21,12 @@
- #include "base/functional/bind.h"
- #include "base/metrics/histogram_functions.h"
- #include "base/metrics/user_metrics_action.h"
-+#include "base/no_destructor.h"
- #include "base/notreached.h"
- #include "base/process/current_process.h"
- #include "base/profiler/thread_group_profiler.h"
- #include "base/strings/string_number_conversions.h"
-+#include "base/strings/string_split.h"
- #include "base/strings/string_util.h"
- #include "base/strings/utf_string_conversions.h"
- #include "base/task/single_thread_task_runner.h"
-@@ -975,6 +978,33 @@ v8::Local<v8::Object> ChromeContentRendererClient::GetScriptableObject(
+@@ -975,6 +975,25 @@ v8::Local<v8::Object> ChromeContentRendererClient::GetScriptableObject(
  #endif
  }
  
 +namespace {
 +
-+// EXO-TABS: whether |render_frame| is a main frame of a Plutonium shell
-+// origin, which the browser passes as --plutonium-shell-origin (EXO-SHELLS:
-+// comma-separated). Not a security check: the browser binds the
-+// SurfaceEmbed host for shell documents only.
++// EXO-TABS: whether |render_frame| is the main frame of a Plutonium shell
++// document: one the browser exposed the shell API to when it committed
++// (ShellNavigationThrottle). Asked of the document, not of a list of origins
++// given to the process when it launched: a shell turned on later can land in a
++// spare renderer that was launched before it. Not a security check: the
++// browser binds the SurfaceEmbed host for shell documents only.
 +bool IsPlutoniumShellFrame(content::RenderFrame* render_frame) {
 +#if BUILDFLAG(IS_CHROMEOS)
-+  static const base::NoDestructor<std::vector<std::string>> shell_origins(
-+      base::SplitString(
-+          base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-+              "plutonium-shell-origin"),
-+          ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY));
-+  if (shell_origins->empty() || !render_frame->IsMainFrame()) {
-+    return false;
-+  }
-+  url::Origin origin(
-+      render_frame->GetWebFrame()->GetDocument().GetSecurityOrigin());
-+  return !origin.opaque() &&
-+         std::ranges::contains(*shell_origins, origin.Serialize());
++  return render_frame->IsMainFrame() &&
++         render_frame->GetWebFrame()->GetDocument().IsPlutoniumShell();
 +#else
 +  return false;
 +#endif
@@ -6400,7 +6353,7 @@ index 6ab4a9d9b4..4c67fe9963 100644
  bool ChromeContentRendererClient::OverrideCreatePlugin(
      content::RenderFrame* render_frame,
      const WebPluginParams& params,
-@@ -984,8 +1014,11 @@ bool ChromeContentRendererClient::OverrideCreatePlugin(
+@@ -984,8 +1003,11 @@ bool ChromeContentRendererClient::OverrideCreatePlugin(
  #if !BUILDFLAG(IS_ANDROID)
    if (base::FeatureList::IsEnabled(surface_embed::features::kSurfaceEmbed)) {
      GURL url = render_frame->GetWebFrame()->GetDocument().Url();
@@ -6414,7 +6367,7 @@ index 6ab4a9d9b4..4c67fe9963 100644
        if (surface_embed::MaybeCreatePlugin(render_frame, params, plugin)) {
          return true;
        }
-@@ -1521,10 +1554,19 @@ void ChromeContentRendererClient::
+@@ -1521,10 +1543,19 @@ void ChromeContentRendererClient::
  
  // Web Share is conditionally enabled here in chrome/, to avoid it
  // being made available in WebView or Linux.
@@ -6553,3 +6506,35 @@ index d3bc2ede84..8ce47279b9 100644
  CONTENT_EXPORT extern const char kEnableSpeechDispatcher[];
  #endif
  
+diff --git a/third_party/blink/public/web/web_document.h b/third_party/blink/public/web/web_document.h
+index a730b9e53a..4cc236cb12 100644
+--- a/third_party/blink/public/web/web_document.h
++++ b/third_party/blink/public/web/web_document.h
+@@ -103,6 +103,9 @@ class BLINK_EXPORT WebDocument : public WebNode {
+   // Note: Security checks should use the getSecurityOrigin(), not url().
+   WebSecurityOrigin GetSecurityOrigin() const;
+   bool IsSecureContext() const;
++  // PLUTONIUM: whether the browser exposed the shell API to this document
++  // (the PlutoniumShell origin trial, forced when a shell document commits).
++  bool IsPlutoniumShell() const;
+ 
+   WebString Encoding() const;
+   WebString ContentLanguage() const;
+diff --git a/third_party/blink/renderer/core/exported/web_document.cc b/third_party/blink/renderer/core/exported/web_document.cc
+index ca42f2acc0..938eb7520c 100644
+--- a/third_party/blink/renderer/core/exported/web_document.cc
++++ b/third_party/blink/renderer/core/exported/web_document.cc
+@@ -141,6 +141,13 @@ bool WebDocument::IsSecureContext() const {
+   return context && context->IsSecureContext();
+ }
+ 
++bool WebDocument::IsPlutoniumShell() const {
++  const Document* document = ConstUnwrap<Document>();
++  ExecutionContext* context =
++      document ? document->GetExecutionContext() : nullptr;
++  return context && RuntimeEnabledFeatures::PlutoniumShellEnabled(context);
++}
++
+ WebString WebDocument::Encoding() const {
+   return ConstUnwrap<Document>()->EncodingName();
+ }
