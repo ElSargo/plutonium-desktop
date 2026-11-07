@@ -55,7 +55,7 @@ Folded from:
  apps/web/src/keybindings.ts                   |   25 +
  apps/web/src/lib/terminalFocus.ts             |    2 +
  apps/web/src/plutonium/AppLauncher.tsx        |  237 +++
- apps/web/src/plutonium/PlutoniumWindows.tsx   |  583 ++++++++
+ apps/web/src/plutonium/PlutoniumWindows.tsx   |  588 ++++++++
  apps/web/src/plutonium/RemoteWindowView.tsx   |  218 +++
  apps/web/src/plutonium/files/FileManager.tsx  | 1305 +++++++++++++++++
  apps/web/src/plutonium/files/FilePicker.tsx   |  313 ++++
@@ -86,7 +86,7 @@ Folded from:
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 55 files changed, 6752 insertions(+), 87 deletions(-)
+ 55 files changed, 6757 insertions(+), 87 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
@@ -1697,10 +1697,10 @@ index 0000000000..4de12eccd3
 +}
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
 new file mode 100644
-index 0000000000..1db652521d
+index 0000000000..495ffee9fe
 --- /dev/null
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,588 @@
 +// Plutonium: native windows in the right panel. The "Apps" surface lists the
 +// windows of a thread (those it started, and those added to it), and each one
 +// opens as its own tab, shown live as a <native-window> element. Below them,
@@ -1999,14 +1999,19 @@ index 0000000000..1db652521d
 +
 +/**
 + * Whether the active thread's panel is maximized. The apps and tabs it shows
-+ * carry it as their `maximized` attribute, so Super+F asks to restore it.
++ * carry it as their `maximized` attribute. Inside the router only: outside it
++ * `useParams` throws and blanks the page; use `useThreadPanelMaximized`.
 + */
 +export function usePanelMaximized(): boolean {
 +  const routeTarget = useParams({
 +    strict: false,
 +    select: (params) => resolveThreadRouteTarget(params),
 +  });
-+  const ref = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
++  return useThreadPanelMaximized(routeTarget?.kind === "server" ? routeTarget.threadRef : null);
++}
++
++/** Whether `ref`'s panel is maximized; needs no router. */
++export function useThreadPanelMaximized(ref: ScopedThreadRef | null): boolean {
 +  return useRightPanelStore(
 +    (state) => selectThreadRightPanelState(state.byThreadKey, ref).maximized === true,
 +  );
