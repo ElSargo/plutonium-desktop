@@ -1035,7 +1035,13 @@ function fitted(item, r, centered) {
   const { min, max } = limitsOf(item);
   const w = clampTo(r.w, min.w, max.w), h = clampTo(r.h, min.h, max.h);
   if (w === r.w && h === r.h) return r;
-  return centered ? { x: Math.round(r.x + (r.w - w) / 2), y: Math.round(r.y + (r.h - h) / 2), w, h } : { ...r, w, h };
+  if (!centered) return { ...r, w, h };
+  // Centered in the tile, but kept on the work area: a left tile too narrow
+  // for the app grows to the right, not off the screen.
+  const wa = workArea();
+  const x = clampTo(r.x + (r.w - w) / 2, wa.x, Math.max(wa.x, wa.x + wa.w - w));
+  const y = clampTo(r.y + (r.h - h) / 2, wa.y, Math.max(wa.y, wa.y + wa.h - h));
+  return { x: Math.round(x), y: Math.round(y), w, h };
 }
 /** The frame's rect on the desk (header bar included). */
 const rectOf = (item) => (item.tile ? fitted(item, tileRect(item.tile, wsById(item.ws)), true) : fitted(item, item.geom, false));

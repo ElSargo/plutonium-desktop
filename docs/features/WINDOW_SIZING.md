@@ -25,7 +25,7 @@ An app can say how small and how big it can be: `xdg_toplevel.set_min_size` and 
 They are what the app committed, unadjusted (`ShellSurfaceBase::requested_minimum_size()`; Ash's `GetMinimumSize()` makes an unset minimum 1×1 and raises the maximum to the minimum). Ash's log lists them with each window (`min=… max=…`).
 
 What the shells do with them:
-- **Charon** keeps a floating window's frame within them, as mutter keeps to size hints: resizing by the frame, by the app's own edges or with Alt+F8 stops at them, and a saved size that no longer fits is clamped. A window that can't be resized isn't maximized or tiled (no maximize button, no edge tiling, nothing to tile in its menu; the app's own maximize request is ignored). A tile a window can't fill gets the nearest size it takes, centered in the tile, so its frame is never bigger or smaller than what the app draws.
+- **Charon** keeps a floating window's frame within them, as mutter keeps to size hints: resizing by the frame, by the app's own edges or with Alt+F8 stops at them, and a saved size that no longer fits is clamped. A window that can't be resized isn't maximized or tiled (no maximize button, no edge tiling, nothing to tile in its menu; the app's own maximize request is ignored). A tile a window can't fill gets the nearest size it takes, centered in the tile but kept on the work area (a left tile too narrow grows to the right), so its frame is never bigger or smaller than what the app draws.
 
 ## The box is where the window is
 
