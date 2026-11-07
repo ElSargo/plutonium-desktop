@@ -888,6 +888,11 @@ function createItem(key, entry) {
   } else {
     const content = shell.tabElement(id);
     content.addEventListener("focus", () => focusItem(key, { keyboard: false }));
+    // The browser's Super+F and the switcher ask for a tab as for a window.
+    content.addEventListener("windowrequest", (e) => {
+      if (e.request === "maximize") setTile(item, "max");
+      else if (e.request === "unmaximize") setTile(item, null);
+    });
     body.append(content);
     item.content = content;
     item.backBtn = button("", { icon: "back", title: "Back", onClick: () => shell.tabCommand(id, "back") });
@@ -1006,6 +1011,8 @@ function size(item) {
   item.content.style.height = `${Math.max(1, Math.round(r.h - hbH(item)))}px`;
   const c = item.el.classList;
   c.toggle("max", item.tile === "max");
+  // Super+F (the browser's) asks to unmaximize a maximized window or tab.
+  item.content.toggleAttribute("maximized", item.tile === "max");
   c.toggle("tiled", !!item.tile && item.tile !== "max");
   for (const t of TILES) c.toggle(`tile-${t}`, item.tile === t);
   c.toggle("hidden", item.hidden);

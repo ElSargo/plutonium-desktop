@@ -7,7 +7,8 @@ The browser handles these in every shell:
 | Keys | |
 |---|---|
 | Super+Tab | The overlay, with the next shell selected. Super+Tab again or ↑/↓ moves, Enter acts, Escape closes. It switches, adds (Ctrl+N), turns off (Ctrl+O) and removes (Ctrl+Delete) shells. Its search finds any window or tab, to show in its shell, pop out, add to a thread or close |
-| Super+F | Fullscreen the focused app or tab (it's resized to the screen, not scaled) |
+| Super+F | Maximize the focused app or tab in the shell, the shell's way (niri: its column; GNOME: the whole work area; T3 Code: its panel); again to restore it. A fullscreen app or tab leaves fullscreen |
+| Super+Shift+F | Fullscreen the focused app or tab: it covers the screen and the app is told it is fullscreen (resized, not scaled) |
 | Super+Escape | Release an app's pointer lock or confinement |
 | Ctrl+Alt+F1…F12 | On DRM: switch to that VT. Switching back returns to the session as it was ([features/SEAT.md](features/SEAT.md)) |
 | Volume up/down/mute, mic mute | The default output's volume (5% a press, up to 100%) and mute, the default input's mute; the shell shows the level ([features/DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md)) |

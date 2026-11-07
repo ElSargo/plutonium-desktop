@@ -29,6 +29,7 @@ and the parts in these files of:
 - the lock screen and idle: Ash's own lock over every display, Super+L, the idle time, the wake locks and the displays' power in the Plutonium domain
 - touchpad swipes with three fingers or more go to the shell page
 - xdg_toplevel_icon_v1, apps' window icons for the shells
+- Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
  .../browser/ui/ash/main_extra_parts/BUILD.gn  |   37 +
  .../chrome_browser_main_extra_parts_ash.cc    |  113 +-
@@ -39,11 +40,11 @@ and the parts in these files of:
  .../plutonium_display_config.h                |   98 +
  .../plutonium_helper_client.cc                |  205 +
  .../plutonium_helper_client.h                 |   40 +
- .../ash/main_extra_parts/plutonium_overlay.cc | 4930 +++++++++++++++++
+ .../ash/main_extra_parts/plutonium_overlay.cc | 4954 +++++++++++++++++
  .../ash/main_extra_parts/plutonium_overlay.h  |   99 +
  .../main_extra_parts/plutonium_shells_impl.cc | 1122 ++++
  .../main_extra_parts/plutonium_shells_impl.h  |  186 +
- 13 files changed, 7780 insertions(+), 2 deletions(-)
+ 13 files changed, 7804 insertions(+), 2 deletions(-)
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_app_icons.cc
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_app_icons.h
  create mode 100644 chrome/browser/ui/ash/main_extra_parts/plutonium_display_config.cc
@@ -1643,10 +1644,10 @@ index 0000000000..bb0b13eeec
 +#endif  // CHROME_BROWSER_UI_ASH_MAIN_EXTRA_PARTS_PLUTONIUM_HELPER_CLIENT_H_
 diff --git a/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
 new file mode 100644
-index 0000000000..882f9eeead
+index 0000000000..c45e1cc804
 --- /dev/null
 +++ b/chrome/browser/ui/ash/main_extra_parts/plutonium_overlay.cc
-@@ -0,0 +1,4930 @@
+@@ -0,0 +1,4954 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3060,10 +3061,11 @@ index 0000000000..882f9eeead
 +          keys = u"Enter open it   " + keys;
 +          break;
 +        case Row::Kind::kWindow:
-+          keys = u"Enter fullscreen   Ctrl+W close   Ctrl+P pop out   " + keys;
++          keys = u"Enter show maximized   Ctrl+W close   Ctrl+P pop out   " +
++                 keys;
 +          break;
 +        case Row::Kind::kTab:
-+          keys = u"Enter fullscreen   Ctrl+W close   " + keys;
++          keys = u"Enter show maximized   Ctrl+W close   " + keys;
 +          break;
 +        case Row::Kind::kQuickSettings:
 +        case Row::Kind::kNetwork:
@@ -3169,11 +3171,13 @@ index 0000000000..882f9eeead
 +      case Row::Kind::kBrowser:
 +        OpenBackup(PlutoniumShells::Backup::kBrowser);
 +        return;
++      // EXO-MAXIMIZE: in its shell, maximized the shell's way. "Open
++      // fullscreen" (Present()) is on the item's page.
 +      case Row::Kind::kWindow:
-+        Present(row->id);
++        ShowMaximized(Row::Kind::kWindow, row->id);
 +        return;
 +      case Row::Kind::kTab:
-+        PresentTab(row->id);
++        ShowMaximized(Row::Kind::kTab, row->id);
 +        return;
 +      case Row::Kind::kQuickSettings:
 +      case Row::Kind::kNetwork:
@@ -3327,6 +3331,23 @@ index 0000000000..882f9eeead
 +    }
 +    FocusIn(kind, id, owner);
 +  }
++
++  // EXO-MAXIMIZE: shows the item in its shell (ShowItem()) and asks that
++  // shell to maximize it, as Super+F does.
++  void ShowMaximized(Row::Kind kind, int32_t id) {
++    ShowItem(kind, id);
++    if (kind == Row::Kind::kWindow) {
++      if (ExoEmbedder* embedder = ExoEmbedder::Get()) {
++        embedder->RequestMaximize(id);
++      }
++    } else {
++      PlutoniumTabs::Get()->RequestMaximize(id);
++    }
++  }
++  void ShowWindowMaximized(int32_t id) {
++    ShowMaximized(Row::Kind::kWindow, id);
++  }
++  void ShowTabMaximized(int32_t id) { ShowMaximized(Row::Kind::kTab, id); }
 +
 +  // Shows shell |shell_id| and asks its page to bring the item up.
 +  void FocusIn(Row::Kind kind, int32_t id, const std::string& shell_id) {
@@ -4416,9 +4437,11 @@ index 0000000000..882f9eeead
 +                Bind(&PlutoniumOverlayView::EndPresentation),
 +                ActionButton::Style::kPrimary);
 +    } else {
-+      AddButton(actions, u"Open fullscreen",
-+                Bind(&PlutoniumOverlayView::Present, id),
++      AddButton(actions, u"Show maximized",
++                Bind(&PlutoniumOverlayView::ShowWindowMaximized, id),
 +                ActionButton::Style::kPrimary);
++      AddButton(actions, u"Open fullscreen",
++                Bind(&PlutoniumOverlayView::Present, id));
 +    }
 +    AddButton(actions, u"Pop out to the desktop",
 +              Bind(&PlutoniumOverlayView::PopOut, id),
@@ -4552,9 +4575,11 @@ index 0000000000..882f9eeead
 +                Bind(&PlutoniumOverlayView::EndPresentation),
 +                ActionButton::Style::kPrimary);
 +    } else {
-+      AddButton(actions, u"Open fullscreen",
-+                Bind(&PlutoniumOverlayView::PresentTab, id),
++      AddButton(actions, u"Show maximized",
++                Bind(&PlutoniumOverlayView::ShowTabMaximized, id),
 +                ActionButton::Style::kPrimary);
++      AddButton(actions, u"Open fullscreen",
++                Bind(&PlutoniumOverlayView::PresentTab, id));
 +    }
 +    AddButton(actions, u"Show in its shell",
 +              Bind(&PlutoniumOverlayView::ShowTab, id));

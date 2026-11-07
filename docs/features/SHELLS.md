@@ -81,7 +81,7 @@ A group is a tag that a shell has described: `{tag, label, shellId}`.
 
 **Super+Tab** opens the switcher over whatever is in front, with the next shell selected. On the left is a sidebar, split in two, each half scrolling on its own: the shells at the top, every window and tab below. On the right, the main area shows the selected item's page. The search box filters both halves. Windows and the launcher's apps show their app's icon (the helper's `/v1/apps/<id>/icon`, a window by its app id; PNG or SVG, decoded in a background `about:blank` WebContents as Chrome's Almanac icon loader does, since an SVG needs a renderer; `PlutoniumAppIcons`).
 
-- **Left click** acts: a shell is shown, a window or tab opens fullscreen.
+- **Left click** acts: a shell is shown; a window or tab is shown in its shell (the one its group belongs to, else the visible one), maximized the shell's way, as Super+F does ([CONTROLS.md](CONTROLS.md), "Maximize"). Real fullscreen is a button on its page.
 - **Right click** only selects, so the item's page opens in the main area.
 - **Keys:** ↑/↓ (or Super+Tab again) move the selection and show its page. Enter acts as a left click does. Tab moves into the page's buttons and fields, and Escape goes back to the list, or closes the switcher from there. Ctrl+O starts or stops a shell, Ctrl+R reloads it, Ctrl+N adds one, Ctrl+W closes a window or tab, and Ctrl+P pops a window out.
 
@@ -121,14 +121,14 @@ The pages drive the helper's desktop services ([DESKTOP_SERVICES.md](DESKTOP_SER
 - **Hydra:** Displays and All settings rows in the status cluster's quick settings (T3 patch 0049).
 
 **A window's page:**
-- Open fullscreen, or Leave fullscreen.
+- Show maximized (what a left click does), Open fullscreen, or Leave fullscreen.
 - Pop out to the desktop.
 - Close.
 - **In the shells:** each running shell, whether it shows the window (has a `<native-window>` attached to it), and "Focus it in <shell>". That shows the shell and sends it a `windowfocusrequest`; a shell that doesn't listen gets the window popped out instead.
 - **Inspect:** a snapshot (taken even while the window is hidden; "New snapshot" takes another), the window and process ids, app id, size and scale, keyboard focus, where it was started, and its tags with their labels.
 - **Groups:** a toggle per group (the origin group can't be left).
 
-**A tab's page:** open it fullscreen (or leave fullscreen), show it in its shell, load its address in the backup browser, reload or close it, open its DevTools (a tab beside it), a snapshot, its details, and the same group toggles.
+**A tab's page:** show it maximized (what a left click does), open it fullscreen (or leave fullscreen), show it in its shell, load its address in the backup browser, reload or close it, open its DevTools (a tab beside it), a snapshot, its details, and the same group toggles.
 
 **Open fullscreen** (`exo::EmbeddedWindows::Present()`, EXO-PRESENT) puts the window on the desktop, fullscreen and active, even while shells' elements show it. Until it ends, those elements keep their attachments but don't park, size, focus or send input to the window. It ends:
 - with **Super+F**, which returns to the visible shell;
@@ -136,6 +136,8 @@ The pages drive the helper's desktop services ([DESKTOP_SERVICES.md](DESKTOP_SER
 - with Leave fullscreen or Focus it in….
 
 The window then goes back to its elements, at the size they last asked for. With `--plutonium-hide-windows` and no element, it leaves the desktop. One window is presented at a time.
+
+While presented, the window has Ash's backdrop (`WindowBackdrop`, black, taking no activation). Fullscreen is the window's own size, which an app with a fixed size (a dialog) keeps at the top left. Before 2026-11-07 the visible shell's window showed around it, and a click there activated the shell's window, which then covered the presented one and got the click. Reproduced on Xvfb (zenity's entry dialog, 300×260, presented over plain): a click beside the dialog, and the dialog was gone.
 
 **A tab, fullscreen** (`PlutoniumTabs::Present()`) is the tab's own page, with its state, not its address loaded again. Its `<embed>` lets go of it but keeps wanting it, and no `<embed>` can take it (a SurfaceEmbed child filter) until the presentation ends. Meanwhile Ash shows it in a fullscreen window of its own (`PlutoniumTabPresenter`, a `views::WebView`), with the keyboard. It ends the way a window's does, and then the visible shell's `<embed>` takes it back. One window or tab is presented at a time.
 

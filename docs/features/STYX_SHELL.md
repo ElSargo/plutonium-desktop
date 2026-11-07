@@ -63,7 +63,7 @@ These are niri's default `config.kdl` binds, with Mod = Super. They live in the 
 | Super+, / . | consume window into column / expel it |
 | Super+R, Super+Shift+R, Super+Ctrl+R | preset column widths (1/3, 1/2, 2/3), preset window heights, reset heights |
 | Super+- / =, +Shift | column width ∓10%, window height ∓10% |
-| Super+M | maximize column (niri's Super+F, which the browser keeps for fullscreen) |
+| Super+M | maximize column (as the browser's Super+F, which asks the shell to maximize: niri's own Super+F) |
 | Super+Shift+F | fullscreen window |
 | Super+Ctrl+F | expand column to the available width |
 | Super+C, Super+Ctrl+C | center column, center the visible columns |

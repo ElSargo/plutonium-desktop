@@ -32,11 +32,12 @@ and the parts in these files of:
 - file pickers for tabs ask the shell
 - printing in tabs goes to the shell
 - only the shell window is held fullscreen
+- Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
  chrome/browser/plutonium_tab_requests.cc      |  302 +++
  chrome/browser/plutonium_tab_requests.h       |  173 ++
- chrome/browser/plutonium_tabs.cc              | 1644 +++++++++++++++++
- chrome/browser/plutonium_tabs.h               |  317 ++++
+ chrome/browser/plutonium_tabs.cc              | 1697 +++++++++++++++++
+ chrome/browser/plutonium_tabs.h               |  326 ++++
  .../plutonium_tab_presenter.cc                |  101 +
  .../plutonium_tab_presenter.h                 |   56 +
  .../main_extra_parts/plutonium_tab_session.cc |  173 ++
@@ -49,7 +50,7 @@ and the parts in these files of:
  ...chrome_web_contents_view_delegate_views.cc |    7 +
  .../performance_manager_tab_helper.cc         |   14 +-
  .../browser/web_contents/web_contents_impl.cc |    6 +
- 16 files changed, 2888 insertions(+), 10 deletions(-)
+ 16 files changed, 2950 insertions(+), 10 deletions(-)
  create mode 100644 chrome/browser/plutonium_tab_requests.cc
  create mode 100644 chrome/browser/plutonium_tab_requests.h
  create mode 100644 chrome/browser/plutonium_tabs.cc
@@ -548,10 +549,10 @@ index 0000000000..114095bf4e
 +#endif  // CHROME_BROWSER_PLUTONIUM_TAB_REQUESTS_H_
 diff --git a/chrome/browser/plutonium_tabs.cc b/chrome/browser/plutonium_tabs.cc
 new file mode 100644
-index 0000000000..a51f3ba6e3
+index 0000000000..317d957e87
 --- /dev/null
 +++ b/chrome/browser/plutonium_tabs.cc
-@@ -0,0 +1,1644 @@
+@@ -0,0 +1,1697 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -951,6 +952,12 @@ index 0000000000..a51f3ba6e3
 +    }
 +    if (!embedded) {
 +      Park();
++    } else if (!maximize_when_embedded_until_.is_null()) {
++      const bool due = base::TimeTicks::Now() < maximize_when_embedded_until_;
++      maximize_when_embedded_until_ = base::TimeTicks();
++      if (due) {
++        RequestEmbedMaximize(/*toggle=*/false);
++      }
 +    }
 +    TabInfo info = info_;
 +    info.url = contents_->GetVisibleURL();
@@ -1199,6 +1206,29 @@ index 0000000000..a51f3ba6e3
 +
 +  bool embed_fullscreen() const { return embed_fullscreen_; }
 +
++  // EXO-MAXIMIZE: asks the page whose <embed> shows the tab to show it
++  // maximized, its way (a "windowrequest" event on the <embed>); with
++  // |toggle|, to unmaximize it if the page set the element's `maximized`
++  // attribute. False if no <embed> shows the tab.
++  bool RequestEmbedMaximize(bool toggle) {
++    content::SurfaceEmbedConnector* connector =
++        contents_->GetSurfaceEmbedConnector();
++    if (!connector || !connector->GetDelegate()) {
++      return false;
++    }
++    connector->GetDelegate()->RequestEmbedElementMaximize(toggle);
++    return true;
++  }
++
++  // As RequestEmbedMaximize(false); if no <embed> shows the tab yet, the
++  // next one to show it in the next few seconds is asked (Refresh()).
++  void RequestMaximizeWhenEmbedded() {
++    maximize_when_embedded_until_ = base::TimeTicks();
++    if (!RequestEmbedMaximize(/*toggle=*/false)) {
++      maximize_when_embedded_until_ = base::TimeTicks::Now() + base::Seconds(5);
++    }
++  }
++
 +  void OnEmbedFullscreenChanged(bool fullscreen) {
 +    VLOG(1) << "EXO-FULLSCREEN tab #" << info_.id << "'s <embed> "
 +            << (fullscreen ? "entered" : "left") << " fullscreen";
@@ -1417,6 +1447,9 @@ index 0000000000..a51f3ba6e3
 +  bool embed_fullscreen_ = false;
 +  bool page_fullscreen_ = false;
 +  bool embed_fullscreen_for_page_ = false;
++  // EXO-MAXIMIZE: the switcher asked to see the tab maximized before an
++  // <embed> showed it; until when the next <embed> to show it is asked.
++  base::TimeTicks maximize_when_embedded_until_;
 +  // Destroyed before |contents_|.
 +  std::unique_ptr<TabDevTools> devtools_;
 +  base::WeakPtrFactory<Tab> weak_factory_{this};
@@ -2122,6 +2155,27 @@ index 0000000000..a51f3ba6e3
 +  return parking_.windows().empty() ? nullptr : parking_.windows().front();
 +}
 +
++bool PlutoniumTabs::ToggleFocusedTabMaximize() {
++  for (const auto& [id, tab] : tabs_) {
++    if (tab->info().focused) {
++      VLOG(1) << "EXO-MAXIMIZE toggling tab #" << id;
++      // Fullscreen (the page asked, or Super+Shift+F): Super+F leaves it.
++      return tab->embed_fullscreen() ? tab->SetEmbedFullscreen(false)
++                                     : tab->RequestEmbedMaximize(/*toggle=*/true);
++    }
++  }
++  return false;
++}
++
++bool PlutoniumTabs::RequestMaximize(int32_t tab_id) {
++  Tab* tab = FindTab(tab_id);
++  if (!tab) {
++    return false;
++  }
++  tab->RequestMaximizeWhenEmbedded();
++  return true;
++}
++
 +bool PlutoniumTabs::ToggleFocusedTabFullscreen() {
 +  for (const auto& [id, tab] : tabs_) {
 +    if (tab->info().focused) {
@@ -2198,10 +2252,10 @@ index 0000000000..a51f3ba6e3
 +}
 diff --git a/chrome/browser/plutonium_tabs.h b/chrome/browser/plutonium_tabs.h
 new file mode 100644
-index 0000000000..20b23443a7
+index 0000000000..5536f712a4
 --- /dev/null
 +++ b/chrome/browser/plutonium_tabs.h
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,326 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2449,6 +2503,15 @@ index 0000000000..20b23443a7
 +  // EXO-FULLSCREEN: toggles fullscreen for the <embed> showing the focused
 +  // tab (see plutonium_keys.h). False if no shown tab has focus.
 +  bool ToggleFocusedTabFullscreen();
++  // EXO-MAXIMIZE (Super+F): asks the page showing the focused tab to maximize
++  // it its own way, or to unmaximize it if it shows it maximized (the
++  // <embed>'s `maximized` attribute); a fullscreen <embed> leaves fullscreen
++  // instead. False if no shown tab has focus.
++  bool ToggleFocusedTabMaximize();
++  // EXO-MAXIMIZE (the switcher): asks the page whose <embed> shows the tab to
++  // maximize it; if none shows it yet, the first that does in the next few
++  // seconds is asked. False if there is no such tab.
++  bool RequestMaximize(int32_t tab_id);
 +  // Takes every tab's <embed> out of fullscreen; false if none was.
 +  bool ExitFullscreen();
 +

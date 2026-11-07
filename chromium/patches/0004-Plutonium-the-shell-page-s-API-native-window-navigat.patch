@@ -39,26 +39,29 @@ and the parts in these files of:
 - touchpad swipes with three fingers or more go to the shell page
 - a tab dragged partly off the screen overflows instead of laying out again
 - xdg_toplevel_icon_v1, apps' window icons for the shells
+- Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
  third_party/blink/public/mojom/BUILD.gn       |   16 +
- .../mojom/native_window/native_window.mojom   |  113 ++
+ .../mojom/native_window/native_window.mojom   |  117 ++
  .../mojom/native_window/window_broker.mojom   |  506 ++++++
- third_party/blink/public/web/web_plugin.h     |    4 +
- .../blink/public/web/web_plugin_container.h   |    8 +
+ third_party/blink/public/web/web_plugin.h     |    8 +
+ .../blink/public/web/web_plugin_container.h   |   12 +
  .../renderer/bindings/generated_in_core.gni   |   32 +
  .../blink/renderer/bindings/idl_in_core.gni   |   17 +
  third_party/blink/renderer/core/BUILD.gn      |    1 +
  .../blink/renderer/core/css/fullscreen.css    |    7 +
  .../core/css/resolver/style_adjuster.cc       |    2 +
+ .../core/css/resolver/style_resolver.cc       |    6 +
  .../blink/renderer/core/dom/element.cc        |    5 +-
  .../core/events/event_target_names.json5      |    2 +
  .../core/events/event_type_names.json5        |   34 +
- .../exported/web_plugin_container_impl.cc     |   11 +
- .../core/exported/web_plugin_container_impl.h |    2 +
+ .../exported/web_plugin_container_impl.cc     |   19 +
+ .../core/exported/web_plugin_container_impl.h |    3 +
  .../renderer/core/exported/web_view_impl.cc   |   25 +
  .../renderer/core/exported/web_view_impl.h    |   13 +
  .../core/frame/web_frame_widget_impl.cc       |   65 +-
- .../renderer/core/fullscreen/fullscreen.cc    |   27 +
+ .../renderer/core/fullscreen/fullscreen.cc    |   42 +
+ .../renderer/core/fullscreen/fullscreen.h     |    6 +
  .../core/fullscreen/scoped_allow_fullscreen.h |    5 +-
  .../core/html/browser_download_event.cc       |   36 +
  .../core/html/browser_download_event.h        |   38 +
@@ -73,10 +76,10 @@ and the parts in these files of:
  .../core/html/context_menu_request_event.h    |   55 +
  .../core/html/context_menu_request_event.idl  |   29 +
  .../core/html/custom/custom_element.cc        |    2 +
- .../core/html/html_attribute_names.json5      |    5 +
- .../core/html/html_native_window_element.cc   |  933 +++++++++++
+ .../core/html/html_attribute_names.json5      |    6 +
+ .../core/html/html_native_window_element.cc   |  937 +++++++++++
  .../core/html/html_native_window_element.h    |  256 +++
- .../core/html/html_native_window_element.idl  |   48 +
+ .../core/html/html_native_window_element.idl  |   52 +
  .../renderer/core/html/html_tag_names.json5   |    4 +
  .../blink/renderer/core/html/item_group.idl   |   12 +
  .../core/html/native_display_entry.idl        |   32 +
@@ -109,7 +112,7 @@ and the parts in these files of:
  .../graphics/compositing/pending_layer.cc     |   21 +-
  .../platform/runtime_enabled_features.json5   |   11 +
  .../widget/compositing/layer_tree_view.cc     |   15 +-
- 69 files changed, 5416 insertions(+), 8 deletions(-)
+ 71 files changed, 5473 insertions(+), 8 deletions(-)
  create mode 100644 third_party/blink/public/mojom/native_window/native_window.mojom
  create mode 100644 third_party/blink/public/mojom/native_window/window_broker.mojom
  create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
@@ -180,10 +183,10 @@ index f43e0699bc..6a95e6a5ce 100644
    visibility = [
 diff --git a/third_party/blink/public/mojom/native_window/native_window.mojom b/third_party/blink/public/mojom/native_window/native_window.mojom
 new file mode 100644
-index 0000000000..03343e0e85
+index 0000000000..883c592aec
 --- /dev/null
 +++ b/third_party/blink/public/mojom/native_window/native_window.mojom
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,117 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -226,7 +229,11 @@ index 0000000000..03343e0e85
 +// EXO-EMBED: what the app asked for (its own maximize button, a drag on its
 +// title bar or edge). The app's window state doesn't change: the page
 +// decides what, if anything, to do.
-+enum NativeWindowRequest { kMaximize, kUnmaximize, kMinimize, kMove, kResize };
++// kToggleMaximize: the user pressed Super+F. The element turns it into
++// "maximize", or "unmaximize" if the page set its `maximized` attribute.
++enum NativeWindowRequest {
++  kMaximize, kUnmaximize, kMinimize, kMove, kResize, kToggleMaximize
++};
 +
 +// Window edges, for kResize.
 +const uint32 kNativeWindowEdgeTop = 1;
@@ -810,22 +817,26 @@ index 0000000000..19aa78c01f
 +      => (bool ok, string result_json);
 +};
 diff --git a/third_party/blink/public/web/web_plugin.h b/third_party/blink/public/web/web_plugin.h
-index 7c3b65d5ae..f625124939 100644
+index 7c3b65d5ae..3674b7ca2f 100644
 --- a/third_party/blink/public/web/web_plugin.h
 +++ b/third_party/blink/public/web/web_plugin.h
-@@ -133,6 +133,10 @@ class WebPlugin {
+@@ -133,6 +133,14 @@ class WebPlugin {
  
    virtual void UpdateVisibility(bool) = 0;
  
 +  // EXO-FULLSCREEN: the plugin's element became, or stopped being, its
 +  // document's fullscreen element.
 +  virtual void DidChangeFullscreen(bool fullscreen) {}
++  // EXO-FULLSCREEN: whether the plugin shows content from outside its page (a
++  // Plutonium tab). Fullscreen, its element then leaves the rest of its
++  // document interactive (Fullscreen::MakesRestOfDocumentInert()).
++  virtual bool EmbedsOutsideContent() const { return false; }
 +
    virtual void UpdateRenderThrottlingStatus(bool is_throttled,
                                              bool subtree_throttled,
                                              bool display_locked) {}
 diff --git a/third_party/blink/public/web/web_plugin_container.h b/third_party/blink/public/web/web_plugin_container.h
-index 1e1315fdfd..917ffcb5c8 100644
+index 1e1315fdfd..b6c0971fd3 100644
 --- a/third_party/blink/public/web/web_plugin_container.h
 +++ b/third_party/blink/public/web/web_plugin_container.h
 @@ -103,6 +103,11 @@ class WebPluginContainer {
@@ -840,13 +851,17 @@ index 1e1315fdfd..917ffcb5c8 100644
    // Notifies when the plugin changes the kind of touch-events it accepts.
    virtual void RequestTouchEventType(TouchEventRequestType) = 0;
  
-@@ -148,6 +153,9 @@ class WebPluginContainer {
+@@ -148,6 +153,13 @@ class WebPluginContainer {
    virtual void SetCcLayer(cc::Layer*) = 0;
  
    virtual void RequestFullscreen() = 0;
 +  // EXO-FULLSCREEN: as RequestFullscreen(), for a request the browser made
 +  // (no user activation needed; the browser checks it).
 +  virtual void RequestFullscreenForBrowser() { RequestFullscreen(); }
++  // EXO-MAXIMIZE: fires a "windowrequest" event (NativeWindowRequestEvent) on
++  // the element: "maximize", or with |toggle| "unmaximize" if the element has
++  // the `maximized` attribute.
++  virtual void DispatchMaximizeRequest(bool toggle) {}
    virtual bool IsFullscreenElement() const = 0;
    virtual void CancelFullscreen() = 0;
  
@@ -978,6 +993,23 @@ index a1f3e6c523..715b226ab3 100644
      case ElementType::kHTMLCanvasElement:
        // <canvas> has special handling for touch-action and stacking contexts
        // depending on whether it has IsContentDrawable() or not, and also
+diff --git a/third_party/blink/renderer/core/css/resolver/style_resolver.cc b/third_party/blink/renderer/core/css/resolver/style_resolver.cc
+index 7d8a52d982..9bd1037883 100644
+--- a/third_party/blink/renderer/core/css/resolver/style_resolver.cc
++++ b/third_party/blink/renderer/core/css/resolver/style_resolver.cc
+@@ -565,6 +565,12 @@ void ApplyInertness(StyleResolverState& state) {
+   const Element* modal_element = document.ActiveModalDialog();
+   if (!modal_element) {
+     modal_element = Fullscreen::FullscreenElementFrom(document);
++    // EXO-FULLSCREEN: a fullscreen <native-window> or tab leaves the shell
++    // page's own UI over it (in the top layer) interactive.
++    if (modal_element &&
++        !Fullscreen::MakesRestOfDocumentInert(*modal_element)) {
++      modal_element = nullptr;
++    }
+   }
+   if (modal_element) {
+     if (modal_element == element) {
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
 index 48dada63e7..0aef117ae3 100644
 --- a/third_party/blink/renderer/core/dom/element.cc
@@ -1060,18 +1092,21 @@ index 33896619fb..7c0c02aa6e 100644
      "write",
      "writeend",
 diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
-index ba20189f25..88e516a71b 100644
+index ba20189f25..9a6e012226 100644
 --- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
 +++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.cc
-@@ -79,6 +79,7 @@
+@@ -79,8 +79,10 @@
  #include "third_party/blink/renderer/core/frame/local_frame_view.h"
  #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
  #include "third_party/blink/renderer/core/fullscreen/fullscreen.h"
 +#include "third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h"
  #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
  #include "third_party/blink/renderer/core/html/html_plugin_element.h"
++#include "third_party/blink/renderer/core/html/native_window_request_event.h"
  #include "third_party/blink/renderer/core/html_names.h"
-@@ -441,6 +442,11 @@ void WebPluginContainerImpl::RequestFullscreen() {
+ #include "third_party/blink/renderer/core/input/event_handler.h"
+ #include "third_party/blink/renderer/core/layout/hit_test_result.h"
+@@ -441,6 +443,18 @@ void WebPluginContainerImpl::RequestFullscreen() {
    Fullscreen::RequestFullscreen(*element_);
  }
  
@@ -1080,10 +1115,17 @@ index ba20189f25..88e516a71b 100644
 +  Fullscreen::RequestFullscreen(*element_);
 +}
 +
++void WebPluginContainerImpl::DispatchMaximizeRequest(bool toggle) {
++  const bool unmaximize =
++      toggle && element_->FastHasAttribute(html_names::kMaximizedAttr);
++  element_->DispatchEvent(*MakeGarbageCollected<NativeWindowRequestEvent>(
++      String(unmaximize ? "unmaximize" : "maximize"), g_empty_string));
++}
++
  bool WebPluginContainerImpl::IsFullscreenElement() const {
    return Fullscreen::IsFullscreenElement(*element_);
  }
-@@ -1210,6 +1216,11 @@ void WebPluginContainerImpl::ComputeClipRectsForPlugin(
+@@ -1210,6 +1224,11 @@ void WebPluginContainerImpl::ComputeClipRectsForPlugin(
    }
  }
  
@@ -1096,7 +1138,7 @@ index ba20189f25..88e516a71b 100644
                                                 gfx::Rect& clip_rect,
                                                 gfx::Rect& unobscured_rect) {
 diff --git a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
-index eef6c76f8f..486676e661 100644
+index eef6c76f8f..825979d017 100644
 --- a/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
 +++ b/third_party/blink/renderer/core/exported/web_plugin_container_impl.h
 @@ -129,6 +129,7 @@ class CORE_EXPORT WebPluginContainerImpl final
@@ -1107,11 +1149,12 @@ index eef6c76f8f..486676e661 100644
    void RequestTouchEventType(TouchEventRequestType) override;
    void SetWantsWheelEvents(bool) override;
    gfx::Point RootFrameToLocalPoint(const gfx::Point&) override;
-@@ -149,6 +150,7 @@ class CORE_EXPORT WebPluginContainerImpl final
+@@ -149,6 +150,8 @@ class CORE_EXPORT WebPluginContainerImpl final
    float LayoutZoomFactor() override;
    void SetCcLayer(cc::Layer*) override;
    void RequestFullscreen() override;
 +  void RequestFullscreenForBrowser() override;
++  void DispatchMaximizeRequest(bool toggle) override;
    bool IsFullscreenElement() const override;
    void CancelFullscreen() override;
    bool IsMouseLocked() override;
@@ -1294,7 +1337,7 @@ index 7c10f4fa47..3458764555 100644
    widget_base_->LayerTreeHost()->SetMayThrottleIfUndrawnFrames(
        may_throttle_if_undrawn_frames);
 diff --git a/third_party/blink/renderer/core/fullscreen/fullscreen.cc b/third_party/blink/renderer/core/fullscreen/fullscreen.cc
-index e8c11b5d28..95dacff82a 100644
+index e8c11b5d28..a705028d4d 100644
 --- a/third_party/blink/renderer/core/fullscreen/fullscreen.cc
 +++ b/third_party/blink/renderer/core/fullscreen/fullscreen.cc
 @@ -32,6 +32,7 @@
@@ -1344,7 +1387,29 @@ index e8c11b5d28..95dacff82a 100644
    // Update IsInert() flags.
    const StyleChangeReasonForTracing& reason =
        StyleChangeReasonForTracing::Create(style_change_reason::kFullscreen);
-@@ -771,6 +790,14 @@ void Fullscreen::EnforceRequestFullscreenConditions(
+@@ -608,6 +627,21 @@ bool Fullscreen::HasFullscreenElements() {
+   return !FullscreenParamsMap().empty();
+ }
+ 
++bool Fullscreen::MakesRestOfDocumentInert(const Element& element) {
++  if (IsA<HTMLNativeWindowElement>(element)) {
++    return false;
++  }
++  if (const auto* plugin_element = DynamicTo<HTMLPlugInElement>(element)) {
++    if (WebPluginContainerImpl* container = plugin_element->OwnedPlugin()) {
++      if (WebPlugin* plugin = container->Plugin();
++          plugin && plugin->EmbedsOutsideContent()) {
++        return false;
++      }
++    }
++  }
++  return true;
++}
++
+ Element* Fullscreen::FullscreenElementFrom(Document& document) {
+   // The fullscreen element is the topmost element in the document's top layer
+   // whose fullscreen flag is set, if any, and null otherwise.
+@@ -771,6 +805,14 @@ void Fullscreen::EnforceRequestFullscreenConditions(
      return;
    }
  
@@ -1359,6 +1424,23 @@ index e8c11b5d28..95dacff82a 100644
    // The WebXR API doesn't support changing elements during the session if the
    // dom-overlay feature is in use (indicated by the IsXrOverlay property). To
    // avoid inconsistencies between implementations we need to block changes via
+diff --git a/third_party/blink/renderer/core/fullscreen/fullscreen.h b/third_party/blink/renderer/core/fullscreen/fullscreen.h
+index 4725b66140..fbc3995a4a 100644
+--- a/third_party/blink/renderer/core/fullscreen/fullscreen.h
++++ b/third_party/blink/renderer/core/fullscreen/fullscreen.h
+@@ -84,6 +84,12 @@ class CORE_EXPORT Fullscreen final : public GarbageCollected<Fullscreen>,
+   // Returns true if the Element's fullscreen flag is set. A Document may have
+   // multiple elements with the fullscreen flag set.
+   static bool IsFullscreenFlagSetFor(const Element&);
++  // EXO-FULLSCREEN: whether the rest of the document goes inert while
++  // |element| is fullscreen. Not for an element that shows content from
++  // outside the page (<native-window>, a tab's <embed>): the shell page draws
++  // its own UI over it (context menus, the dock) in the top layer, and that
++  // has to keep taking input.
++  static bool MakesRestOfDocumentInert(const Element& element);
+ 
+   static void RequestFullscreen(Element&);
+   static ScriptPromise<IDLUndefined> RequestFullscreen(
 diff --git a/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h b/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h
 index 5ce32e2271..659282106a 100644
 --- a/third_party/blink/renderer/core/fullscreen/scoped_allow_fullscreen.h
@@ -1891,7 +1973,7 @@ index ed071d9d81..44d05db3a8 100644
    return hyphenated_spec_element_names.Contains(name);
  }
 diff --git a/third_party/blink/renderer/core/html/html_attribute_names.json5 b/third_party/blink/renderer/core/html/html_attribute_names.json5
-index 23d12fae19..bdd3746efc 100644
+index 23d12fae19..09480954ea 100644
 --- a/third_party/blink/renderer/core/html/html_attribute_names.json5
 +++ b/third_party/blink/renderer/core/html/html_attribute_names.json5
 @@ -77,6 +77,9 @@
@@ -1912,7 +1994,15 @@ index 23d12fae19..bdd3746efc 100644
      "headers",
      "headingoffset",
      "headingreset",
-@@ -412,6 +416,7 @@
+@@ -166,6 +170,7 @@
+     "marginwidth",
+     "marker",
+     "max",
++    "maximized",
+     "maxlength",
+     "mayscript",
+     "media",
+@@ -412,6 +417,7 @@
      "watch",
      "webkitdirectory",
      "width",
@@ -1922,10 +2012,10 @@ index 23d12fae19..bdd3746efc 100644
    ],
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
 new file mode 100644
-index 0000000000..c5c34e2c5c
+index 0000000000..9d6eefffef
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
-@@ -0,0 +1,933 @@
+@@ -0,0 +1,937 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2273,6 +2363,10 @@ index 0000000000..c5c34e2c5c
 +      break;
 +    case mojom::blink::NativeWindowRequest::kResize:
 +      name = "resize";
++      break;
++    case mojom::blink::NativeWindowRequest::kToggleMaximize:
++      name = FastHasAttribute(html_names::kMaximizedAttr) ? "unmaximize"
++                                                          : "maximize";
 +      break;
 +  }
 +  StringBuilder edge;
@@ -3123,10 +3217,10 @@ index 0000000000..319f17c452
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_NATIVE_WINDOW_ELEMENT_H_
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.idl b/third_party/blink/renderer/core/html/html_native_window_element.idl
 new file mode 100644
-index 0000000000..b526545f13
+index 0000000000..01ba7e7e82
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.idl
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,52 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3159,6 +3253,10 @@ index 0000000000..b526545f13
 +    // client-side shadow, and presses just outside the element's content box
 +    // (where nothing of the page's covers them) reach its resize edges there.
 +    [CEReactions, Reflect] attribute boolean floating;
++    // The page shows the window maximized (its own idea: a column, a panel,
++    // the whole stage). Super+F then asks for "unmaximize" rather than
++    // "maximize" (a windowrequest event).
++    [CEReactions, Reflect] attribute boolean maximized;
 +    // The attached window's id, or 0.
 +    readonly attribute long windowId;
 +    // "none", "attaching", "attached", "taken" (another page shows it),

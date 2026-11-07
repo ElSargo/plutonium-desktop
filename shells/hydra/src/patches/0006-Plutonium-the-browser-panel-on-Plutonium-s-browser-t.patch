@@ -28,11 +28,11 @@ Folded from:
  .../components/preview/agentOpenedPreviews.ts |  17 +-
  .../src/components/preview/previewBridge.ts   |   7 +-
  .../components/preview/usePreviewSession.ts   |   8 +-
- .../src/plutonium/PlutoniumBrowserHost.tsx    | 357 +++++++++
+ .../src/plutonium/PlutoniumBrowserHost.tsx    | 369 +++++++++
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 11 files changed, 1205 insertions(+), 12 deletions(-)
+ 11 files changed, 1217 insertions(+), 12 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
  create mode 100644 apps/web/src/plutonium/previewBridge.ts
@@ -288,10 +288,10 @@ index cdd63493f9..42ae9911bc 100644
          get.refresh(sessionsAtom);
 diff --git a/apps/web/src/plutonium/PlutoniumBrowserHost.tsx b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
 new file mode 100644
-index 0000000000..d9c11d7c03
+index 0000000000..5e5b401274
 --- /dev/null
 +++ b/apps/web/src/plutonium/PlutoniumBrowserHost.tsx
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,369 @@
 +"use client";
 +
 +// Plutonium: ElectronBrowserHost's counterpart in the Plutonium shell. Each
@@ -334,7 +334,15 @@ index 0000000000..d9c11d7c03
 +import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 +import { useAtomCommand } from "~/state/use-atom-command";
 +
++import { forwardMaximizeRequest, usePanelMaximized } from "./PlutoniumWindows";
 +import { isBlank, plutoniumPreview, type BrokerTab } from "./previewBridge";
++
++/** Super+F and the switcher ask a tab's <embed> to maximize the panel. */
++function forwardMaximizeRequests(element: HTMLElement | null) {
++  if (!element) return;
++  element.addEventListener("windowrequest", forwardMaximizeRequest);
++  return () => element.removeEventListener("windowrequest", forwardMaximizeRequest);
++}
 +
 +export function PlutoniumBrowserHost() {
 +  const previewByThreadKey = useActivePreviewSessions();
@@ -467,6 +475,7 @@ index 0000000000..d9c11d7c03
 +    (state) => (state.activityByTabId[runtimeTabId] ?? 0) > 0,
 +  );
 +  const tab = useBrokerTab(runtimeTabId);
++  const panelMaximized = usePanelMaximized();
 +  usePreviewBridge({ threadRef, tabId, runtimeTabId, serverDriven });
 +
 +  // The tab lives while the session does; the first URL is the session's.
@@ -543,6 +552,9 @@ index 0000000000..d9c11d7c03
 +      data-preview-rendering="active"
 +    >
 +      {createElement("embed", {
++        ref: forwardMaximizeRequests,
++        // Super+F asks to restore a maximized panel.
++        ...(panelMaximized ? { maximized: "" } : {}),
 +        type: "application/x-chromium-surface-embed",
 +        "data-content-id": tab.contentId,
 +        "data-preview-tab": runtimeTabId,

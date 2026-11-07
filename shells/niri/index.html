@@ -48,9 +48,10 @@
   joins this output. A window another page took (another display's shell
   shows it) leaves a placeholder; focusing it brings the window back.
 
-  The browser keeps Super+F (fullscreen), Super+Tab (shells) and Super+Escape
-  (release the pointer), so niri's Super+F (maximize column) is Super+M here,
-  and Super+Shift+F is fullscreen as in niri. Print, Ctrl+Print and
+  The browser keeps Super+F, Super+Tab (shells) and Super+Escape (release
+  the pointer). Its Super+F asks the shell to maximize the focused window or
+  tab, which here is niri's maximize column (as niri's own Super+F); Super+M
+  does the same. Super+Shift+F is fullscreen as in niri. Print, Ctrl+Print and
   Alt+Print take screenshots as in niri; Super+Shift+S, Super+Ctrl+Shift+S
   and Super+Alt+Shift+S do the same on keyboards without a Print key. The
   helper is the page URL's ?helper=<origin>, else the one the browser names
@@ -583,21 +584,6 @@ function tileFor(key) {
     // A window drawing at its new size may complete a transaction.
     content.addEventListener("windowchange", completeTransaction);
     content.addEventListener("windowfocus", () => onItemFocused(key));
-    // The app's own maximize button: niri's maximize column.
-    content.addEventListener("windowrequest", (e) => {
-      if (e.request === "move" || e.request === "resize") {
-        startAppDrag(key, e.request === "resize", e.edge);
-        return;
-      }
-      if (e.request !== "maximize" && e.request !== "unmaximize") return;
-      const where = find(key);
-      if (!where || where.ci === undefined) return;
-      const col = layout.workspaces[where.wi].columns[where.ci];
-      col.full = e.request === "maximize";
-      focusItem(key);
-      ensureVisible();
-      commit();
-    });
     content.addEventListener("windowerror", () => notice("could not show a window"));
     // Another page (another display's shell) shows it now: a placeholder until it's back.
     content.addEventListener("windowtaken", () => el.classList.add("taken"));
@@ -609,6 +595,23 @@ function tileFor(key) {
   } else {
     content = shell.tabElement(id);
   }
+  // The app's own maximize button, Super+F (the browser's) and the switcher:
+  // niri's maximize column. The element's `maximized` attribute (set where
+  // tiles are placed) makes Super+F ask to unmaximize a full column.
+  content.addEventListener("windowrequest", (e) => {
+    if (e.request === "move" || e.request === "resize") {
+      startAppDrag(key, e.request === "resize", e.edge);
+      return;
+    }
+    if (e.request !== "maximize" && e.request !== "unmaximize") return;
+    const where = find(key);
+    if (!where || where.ci === undefined) return;
+    const col = layout.workspaces[where.wi].columns[where.ci];
+    col.full = e.request === "maximize";
+    focusItem(key);
+    ensureVisible();
+    commit();
+  });
   const hit = document.createElement("div");
   hit.className = "hit";
   bindPointer(hit, key);
@@ -782,6 +785,7 @@ function render() {
         col.items.forEach((key, ii) => {
           const tile = tileFor(key);
           placeTile(tile, sx, top + g, w, H() - 2 * g);
+          tile.content.toggleAttribute("maximized", !!col.full);
           tile.el.classList.toggle("hidden", ii !== col.active);
           tile.el.classList.remove("floating");
           setFloating(tile, false);
@@ -806,6 +810,7 @@ function render() {
         col.items.forEach((key, ii) => {
           const tile = tileFor(key);
           placeTile(tile, sx, top + y, w, hs[ii]);
+          tile.content.toggleAttribute("maximized", !!col.full);
           tile.el.classList.remove("hidden", "floating");
           setFloating(tile, false);
           tile.el.style.zIndex = "";
@@ -818,6 +823,7 @@ function render() {
     ws.floating.forEach((f) => {
       const tile = tileFor(f.key);
       placeTile(tile, f.x, top + f.y, f.w, f.h);
+      tile.content.removeAttribute("maximized");
       tile.el.classList.remove("hidden");
       tile.el.classList.add("floating");
       setFloating(tile, true);
@@ -2246,7 +2252,7 @@ function showHotkeys() {
     ["Super + right-drag", "Resize Window"], ["Super + middle-drag", "Drag the View"],
     ["Three-finger swipe (or Super + two-finger scroll)", "Columns and Workspaces"],
     ["Four-finger swipe up / down", "Open / Close the Overview"],
-    ["Super + F", "Fullscreen (browser)"], ["Super + Tab", "Shells and windows (browser)"],
+    ["Super + F", "Maximize column (browser)"], ["Super + Tab", "Shells and windows (browser)"],
   ].map(([k, label]) => {
     const tr = document.createElement("tr");
     const keys = document.createElement("td");

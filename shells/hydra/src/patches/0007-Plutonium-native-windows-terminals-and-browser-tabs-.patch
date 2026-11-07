@@ -55,7 +55,7 @@ Folded from:
  apps/web/src/keybindings.ts                   |   25 +
  apps/web/src/lib/terminalFocus.ts             |    2 +
  apps/web/src/plutonium/AppLauncher.tsx        |  237 +++
- apps/web/src/plutonium/PlutoniumWindows.tsx   |  555 +++++++
+ apps/web/src/plutonium/PlutoniumWindows.tsx   |  583 ++++++++
  apps/web/src/plutonium/RemoteWindowView.tsx   |  218 +++
  apps/web/src/plutonium/files/FileManager.tsx  | 1305 +++++++++++++++++
  apps/web/src/plutonium/files/FilePicker.tsx   |  313 ++++
@@ -86,7 +86,7 @@ Folded from:
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 55 files changed, 6724 insertions(+), 87 deletions(-)
+ 55 files changed, 6752 insertions(+), 87 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
@@ -1697,10 +1697,10 @@ index 0000000000..4de12eccd3
 +}
 diff --git a/apps/web/src/plutonium/PlutoniumWindows.tsx b/apps/web/src/plutonium/PlutoniumWindows.tsx
 new file mode 100644
-index 0000000000..274ae1012e
+index 0000000000..1db652521d
 --- /dev/null
 +++ b/apps/web/src/plutonium/PlutoniumWindows.tsx
-@@ -0,0 +1,555 @@
+@@ -0,0 +1,583 @@
 +// Plutonium: native windows in the right panel. The "Apps" surface lists the
 +// windows of a thread (those it started, and those added to it), and each one
 +// opens as its own tab, shown live as a <native-window> element. Below them,
@@ -1725,7 +1725,7 @@ index 0000000000..274ae1012e
 +
 +import { Button } from "~/components/ui/button";
 +import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-+import { useRightPanelStore } from "~/rightPanelStore";
++import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
 +import { useThreadShells } from "~/state/entities";
 +import { usePrimaryEnvironmentId } from "~/state/environments";
 +import { previewEnvironment } from "~/state/preview";
@@ -1975,8 +1975,42 @@ index 0000000000..274ae1012e
 +  );
 +}
 +
-+/** Bubbles from a panel app whose own maximize button was pressed; detail: { maximized }. */
++/**
++ * Bubbles from a panel app or tab asking to maximize or restore the panel
++ * (its own maximize button, the browser's Super+F, the switcher); detail:
++ * { maximized }.
++ */
 +export const PANEL_MAXIMIZE_REQUEST_EVENT = "plutonium:panel-maximize-request";
++
++/**
++ * Turns an element's "windowrequest" event (a <native-window>'s or a tab's
++ * <embed>'s) into a panel maximize request.
++ */
++export function forwardMaximizeRequest(event: Event): void {
++  const request = (event as Event & { request?: string }).request;
++  if (request !== "maximize" && request !== "unmaximize") return;
++  event.target?.dispatchEvent(
++    new CustomEvent(PANEL_MAXIMIZE_REQUEST_EVENT, {
++      bubbles: true,
++      detail: { maximized: request === "maximize" },
++    }),
++  );
++}
++
++/**
++ * Whether the active thread's panel is maximized. The apps and tabs it shows
++ * carry it as their `maximized` attribute, so Super+F asks to restore it.
++ */
++export function usePanelMaximized(): boolean {
++  const routeTarget = useParams({
++    strict: false,
++    select: (params) => resolveThreadRouteTarget(params),
++  });
++  const ref = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
++  return useRightPanelStore(
++    (state) => selectThreadRightPanelState(state.byThreadKey, ref).maximized === true,
++  );
++}
 +
 +/** The size an agent holds `windowId` at, until the user takes control; else null. */
 +function useAgentSize(windowId: number): { width: number; height: number } | null {
@@ -2057,6 +2091,7 @@ index 0000000000..274ae1012e
 +  const [taken, setTaken] = useState(false);
 +  const agentSize = useAgentSize(windowId);
 +  const box = useBoxSize(boxRef);
++  const maximized = usePanelMaximized();
 +
 +  useEffect(() => {
 +    let cancelled = false;
@@ -2071,17 +2106,9 @@ index 0000000000..274ae1012e
 +    );
 +    const element = ref.current;
 +    const onError = () => setError("The browser refused to embed this window.");
-+    // The app's own maximize button maximizes the panel (ChatView listens).
-+    const onRequest = (event: Event) => {
-+      const request = (event as Event & { request?: string }).request;
-+      if (request !== "maximize" && request !== "unmaximize") return;
-+      element?.dispatchEvent(
-+        new CustomEvent(PANEL_MAXIMIZE_REQUEST_EVENT, {
-+          bubbles: true,
-+          detail: { maximized: request === "maximize" },
-+        }),
-+      );
-+    };
++    // The app's own maximize button, Super+F and the switcher maximize the
++    // panel (useThreadPlutonium listens).
++    const onRequest = forwardMaximizeRequest;
 +    // Another page (another display's shell) shows it now: a placeholder.
 +    const onTaken = () =>
 +      setTaken(
@@ -2125,6 +2152,7 @@ index 0000000000..274ae1012e
 +        // and its old frame fades into its new one (drags stay live; a newly
 +        // shown app doesn't fade).
 +        crossfade: "200",
++        maximized,
 +        style,
 +      })}
 +      {agentSize && !error && !taken && <AgentLock windowId={windowId} />}

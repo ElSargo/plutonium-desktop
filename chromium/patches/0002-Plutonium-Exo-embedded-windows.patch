@@ -44,6 +44,7 @@ and the parts in these files of:
 - ext_idle_notify_v1, apps hear when the user is idle
 - ext_data_control_v1, the clipboard for clipboard managers
 - a floating native window keeps its client-side resize edges
+- Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
  components/exo/BUILD.gn                       |    4 +
  components/exo/buffer.cc                      |   48 +
@@ -54,11 +55,11 @@ and the parts in these files of:
  components/exo/data_source.h                  |   11 +
  components/exo/drag_drop_operation.cc         |   18 +
  components/exo/drag_drop_operation.h          |    4 +
- components/exo/embedded_windows.cc            | 1162 +++++++++++++++++
+ components/exo/embedded_windows.cc            | 1172 +++++++++++++++++
  components/exo/embedded_windows.h             |  380 ++++++
  components/exo/keyboard.cc                    |   99 +-
  components/exo/keyboard.h                     |   17 +
- components/exo/pointer.cc                     |  291 ++++-
+ components/exo/pointer.cc                     |  291 +++-
  components/exo/pointer.h                      |   47 +-
  components/exo/pointer_constraint_delegate.h  |    4 +
  components/exo/seat.cc                        |  148 ++-
@@ -89,7 +90,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 44 files changed, 4022 insertions(+), 91 deletions(-)
+ 44 files changed, 4032 insertions(+), 91 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
 
@@ -546,10 +547,10 @@ index 1df95bbf4d..fa8d87f2b8 100644
        DataSource* source,
 diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
 new file mode 100644
-index 0000000000..e5c277dde4
+index 0000000000..93d307efca
 --- /dev/null
 +++ b/components/exo/embedded_windows.cc
-@@ -0,0 +1,1162 @@
+@@ -0,0 +1,1172 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -561,6 +562,7 @@ index 0000000000..e5c277dde4
 +#include <utility>
 +
 +#include "ash/drag_drop/drag_drop_controller.h"
++#include "ash/public/cpp/window_backdrop.h"
 +#include "base/barrier_callback.h"
 +#include "base/command_line.h"
 +#include "base/functional/bind.h"
@@ -812,6 +814,12 @@ index 0000000000..e5c277dde4
 +      widget->Restore();
 +    }
 +    widget->SetFullscreen(true);
++    // Fullscreen is the window's own size, which an app with a fixed size
++    // (a dialog) keeps: the backdrop covers the rest of the display, so the
++    // shell's window behind it is neither seen nor clicked. A click there
++    // used to activate the shell, which then hid the window.
++    ash::WindowBackdrop::Get(widget->GetNativeWindow())
++        ->SetBackdropMode(ash::WindowBackdrop::BackdropMode::kEnabled);
 +    widget->Show();
 +    widget->Activate();
 +  }
@@ -827,9 +835,12 @@ index 0000000000..e5c277dde4
 +    return;
 +  }
 +  ShellSurfaceBase* shell_surface = it->second.shell_surface;
-+  if (views::Widget* widget = shell_surface->GetWidget();
-+      widget && widget->IsFullscreen()) {
-+    widget->SetFullscreen(false);
++  if (views::Widget* widget = shell_surface->GetWidget()) {
++    ash::WindowBackdrop::Get(widget->GetNativeWindow())
++        ->SetBackdropMode(ash::WindowBackdrop::BackdropMode::kAuto);
++    if (widget->IsFullscreen()) {
++      widget->SetFullscreen(false);
++    }
 +  }
 +  if (it->second.attach_count > 0) {
 +    // Back to its elements, at the size they asked for.

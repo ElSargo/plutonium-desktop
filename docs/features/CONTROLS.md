@@ -1,8 +1,28 @@
-# Fullscreen, keys and the app launcher
+# Maximize, fullscreen, keys and the app launcher
 
 Better control of the windows and tabs a shell shows (and pointer capture for apps, below), tested on DRM (tty2, T3 Code as the shell) on 2026-10-17. Chromium's shell patch.
 
-## Fullscreen (native, any frontend)
+## Maximize: Super+F (any frontend)
+
+Super+F asks the shell to maximize the focused app or tab, and the shell decides what that means: niri maximizes its column, GNOME tiles it to the whole work area, T3 Code maximizes its panel. The shell's own UI (its bar, dock, panel tabs) stays, and so do its menus and the switcher. A shell marks what it shows maximized with the element's `maximized` attribute, and Super+F then asks it to restore. Real fullscreen is Super+Shift+F (below).
+
+It is a request, as an app's own maximize button is (`WINDOW_SIZING.md`, "Requests"): the element that shows the window or tab gets a `windowrequest` event, `request` "maximize", or "unmaximize" when it has the `maximized` attribute. A tab's `<embed>` gets the same event. A shell that doesn't handle it ignores Super+F (the plain shell, whose one app already fills the stage).
+
+| Trigger | What happens |
+|---|---|
+| **Super+F** | The element showing the focused app or tab asks to be maximized, or restored. A fullscreen element leaves fullscreen instead. If neither has the keyboard, it only leaves fullscreen. |
+| The switcher (Super+Tab), a left click or Enter on a window or tab | It is shown in its shell (as "Focus it in…"), and that shell is asked to maximize it. If the shell doesn't show it yet, the first element there that does in the next 5 s is asked. |
+| The app's own maximize button | As before: a `windowrequest` to its element. |
+
+Why not fullscreen by default: the shell's UI over a fullscreen element can't be used (below, "Menus over a fullscreen element"), the shell's bar and dock are hidden, and switching panel tabs or shells ends it. Fullscreen still has its uses, and stays one key away: the app is told it is fullscreen (a video player hides its controls, a game expects it), the whole screen is the app's, and a fullscreen window can go on a display plane.
+
+### Chromium pieces
+
+- `NativeWindowRequest.kToggleMaximize` (`native_window.mojom`): the element turns it into "maximize" or "unmaximize" by its `maximized` attribute (a reflected boolean, `HTMLNativeWindowElement.maximized`).
+- `SurfaceEmbed.RequestMaximize(toggle)` and `WebPluginContainer::DispatchMaximizeRequest()`: the same event on a tab's `<embed>`.
+- `ExoEmbedder::ToggleMaximize()` / `RequestMaximize()`, `PlutoniumTabs::ToggleFocusedTabMaximize()` / `RequestMaximize()`: the window's driver element (`WINDOW_SIZING.md`, "Several elements on one window"), or the `<embed>` that shows the tab, gets it.
+
+## Fullscreen: Super+Shift+F (native, any frontend)
 
 Fullscreen belongs to the browser, not the frontend. The element that shows an app (`<native-window>`) or a browser tab (`<embed>`) becomes the shell document's fullscreen element, through Blink's own Fullscreen API. It then covers the screen, and its size goes to the app or page: a terminal gets more rows and columns, and a page gets a bigger viewport. Nothing is scaled. The frontend needs no code for it. It sees the usual `fullscreenchange` events and can style `:fullscreen` if it wants.
 
@@ -10,7 +30,7 @@ How an element gets there:
 
 | Trigger | What happens |
 |---|---|
-| **Super+F** | Toggles fullscreen for the element showing the focused app or tab. If neither has the keyboard, it only leaves fullscreen. |
+| **Super+Shift+F** | Toggles fullscreen for the element showing the focused app or tab. If neither has the keyboard, it only leaves fullscreen. A shell may take the key instead (niri does, for the same thing). Super+F also leaves fullscreen. |
 | The app asks (`xdg_toplevel.set_fullscreen`, e.g. a game) | Its element goes fullscreen. If no element shows it yet, that happens as soon as one does. `unset_fullscreen` leaves. |
 | A tab's page asks (`requestFullscreen()`, e.g. a video) | The tab's `<embed>` goes fullscreen, then the page's element fills it. Esc in the page leaves both, as in a browser window. |
 | The page's own script | `element.requestFullscreen()` on a `<native-window>` or `<embed>` works with a user gesture, as for any element. |
@@ -18,6 +38,8 @@ How an element gets there:
 While its element is fullscreen, the app is told it is fullscreen: the `xdg_toplevel` configure carries the fullscreen state. Taking the element out of the page ends fullscreen. A window that wanted fullscreen gets real fullscreen when it is popped out to the desktop.
 
 Esc is not a way out: it belongs to the app (games use it). So the "Press Esc to exit full screen" bubble is not shown for the shell's elements.
+
+**Menus over a fullscreen element** (2026-11-07). Blink makes everything outside the fullscreen element inert, as it does for a modal dialog. The shell library draws a tab's context menu as a popover, in the top layer above the fullscreen `<embed>`, so it showed but was inert: hit testing skipped it, viz saw nothing over the tab (its hit-test region had no "ask" flag), and a click on a spelling suggestion went to the page under the menu. A fullscreen `<native-window>`, or an `<embed>` whose plugin shows content from outside the page (`WebPlugin::EmbedsOutsideContent()`, a tab), no longer makes the rest of the document inert (`Fullscreen::MakesRestOfDocumentInert()`, read where style computes inertness). Reproduced on Xvfb (plain, a tab with a textarea, its `<embed>` fullscreen): no hover on the menu, and Select all landed in the page; with the menu over the tab not fullscreen, both worked. An app's own menus (`xdg_popup`s) are Ash windows, not page content, and worked in fullscreen before and after (GTK 4, plain and niri, scale 1 and 1.78).
 
 Measured on the panel (2560×1600 at scale 16/9, so 1440×900 DIP):
 
@@ -32,7 +54,7 @@ Measured on the panel (2560×1600 at scale 16/9, so 1440×900 DIP):
 - Blink: a `ScopedAllowFullscreen::kBrowserRequest` reason lets a browser-requested element fullscreen through the renderer's activation check. `NativeWindowClient.SetFullscreen` asks a `<native-window>`; `SurfaceEmbed.SetFullscreen` asks a tab's `<embed>`. Both report changes back (`NativeWindowHost.OnFullscreenChanged`, `SurfaceEmbedHost.OnEmbedElementFullscreenChanged`).
 - Content: `ContentBrowserClient::IsFullscreenAllowedWithoutUserActivation()`. Chrome allows the shell document only, and still requires activation for its page script, which Blink checks.
 - Exo: a parked window's fullscreen is its element's. `set_fullscreen` while parked asks the element (`EmbeddedWindows::Observer::OnEmbeddedWindowFullscreenRequested`) instead of changing the Ash window. The configure reports fullscreen while the element is.
-- `chrome/browser/plutonium_keys.cc`: the Super+F handler, a pre-target handler on Ash's shell, so it sees keys before apps and pages do.
+- `chrome/browser/plutonium_keys.cc`: the Super+F and Super+Shift+F handlers, a pre-target handler on Ash's shell, so it sees keys before apps and pages do.
 
 Fixed along the way:
 - `<native-window>` sized the window to its object-fit rect, and the fullscreen UA style asks for `contain`. The window kept its aspect ratio (594×900 instead of 1440×900). It now uses the content box.
@@ -90,7 +112,7 @@ A frontend's own shortcuts used to stop working once an app or a tab had the key
 - For windows, the key handler marks the event (`exo::kShellKeyEventKey`). Exo's keyboard then leaves it to the page's view.
 - For tabs, the tab's `WebContentsDelegate::PreHandleKeyboardEvent` forwards it to the shell page.
 
-Super+F comes first and can't be taken.
+Super+F comes first and can't be taken. Super+Shift+F can: the browser's fullscreen key gives way to a shell that lists it.
 
 ## T3 Code
 
@@ -117,7 +139,7 @@ New keybinding commands. They are configurable like any other, and their default
 
 ## Not done / caveats
 
-- **Super+F on Plasma (`:0`) wasn't pressed for real.** Ash on X11 gets Super combinations unless KWin grabs them. Everything above was tested on DRM.
+- **Super+F (then fullscreen) on Plasma (`:0`) wasn't pressed for real.** Ash on X11 gets Super combinations unless KWin grabs them. Everything above was tested on DRM.
 - **Switching panel tabs while fullscreen ends fullscreen**, because the element leaves the page. The app is told so.
 - **One element per window decides.** If two elements show the same window, the fullscreen one (else the newest) answers the app's requests.
 - **A popped-out foot looked more translucent than its `alpha=0.92`** (seen once, on DRM). Not investigated, and not checked against a build from before this change.

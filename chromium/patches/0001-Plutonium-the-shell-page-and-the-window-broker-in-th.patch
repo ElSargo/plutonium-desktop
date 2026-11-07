@@ -57,6 +57,7 @@ and the parts in these files of:
 - tabs' media sessions over MPRIS
 - speechSynthesis voices from speech-dispatcher
 - desktop settings and a display configuration tool in the switcher
+- Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
  chrome/browser/BUILD.gn                       |  134 +-
  .../chrome_browser_interface_binders.cc       |   11 +
@@ -64,8 +65,8 @@ and the parts in these files of:
  .../browser/chrome_content_browser_client.h   |    2 +
  ...ent_browser_client_navigation_throttles.cc |    3 +
  ...ontent_browser_client_receiver_bindings.cc |   14 +-
- chrome/browser/exo_embedder.cc                | 1026 +++++++++++
- chrome/browser/exo_embedder.h                 |   81 +
+ chrome/browser/exo_embedder.cc                | 1080 ++++++++++++
+ chrome/browser/exo_embedder.h                 |   90 +
  chrome/browser/exo_parts.cc                   |    9 +
  chrome/browser/exo_parts.h                    |   13 +
  chrome/browser/exo_window_broker.cc           |  395 +++++
@@ -75,8 +76,8 @@ and the parts in these files of:
  chrome/browser/plutonium_agent.h              |   72 +
  chrome/browser/plutonium_groups.cc            |  237 +++
  chrome/browser/plutonium_groups.h             |  114 ++
- chrome/browser/plutonium_keys.cc              |  435 +++++
- chrome/browser/plutonium_keys.h               |   90 +
+ chrome/browser/plutonium_keys.cc              |  483 ++++++
+ chrome/browser/plutonium_keys.h               |  100 ++
  chrome/browser/plutonium_shell.cc             | 1544 +++++++++++++++++
  chrome/browser/plutonium_shell.h              |  189 ++
  chrome/browser/plutonium_shell_unittest.cc    |  528 ++++++
@@ -93,7 +94,7 @@ and the parts in these files of:
  content/public/common/content_switches.h      |    3 +-
  third_party/blink/public/web/web_document.h   |    3 +
  .../renderer/core/exported/web_document.cc    |    7 +
- 35 files changed, 5997 insertions(+), 11 deletions(-)
+ 35 files changed, 6118 insertions(+), 11 deletions(-)
  create mode 100644 chrome/browser/exo_embedder.cc
  create mode 100644 chrome/browser/exo_embedder.h
  create mode 100644 chrome/browser/exo_window_broker.cc
@@ -436,10 +437,10 @@ index 180db63d39..58c011e8eb 100644
                surface_embed::SurfaceEmbedHost::Create(render_frame_host,
 diff --git a/chrome/browser/exo_embedder.cc b/chrome/browser/exo_embedder.cc
 new file mode 100644
-index 0000000000..3df905e95c
+index 0000000000..282dfaaaa2
 --- /dev/null
 +++ b/chrome/browser/exo_embedder.cc
-@@ -0,0 +1,1026 @@
+@@ -0,0 +1,1080 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -610,6 +611,15 @@ index 0000000000..3df905e95c
 +
 +NativeWindowHostImpl* Driver(int32_t window_id);
 +void UpdateDriver(int32_t window_id);
++
++// EXO-MAXIMIZE: windows the switcher asked to see maximized before any
++// element in the visible shell showed them, until when.
++std::map<int32_t, base::TimeTicks>& PendingMaximize() {
++  static base::NoDestructor<std::map<int32_t, base::TimeTicks>> pending;
++  return *pending;
++}
++// How long a shell has to show a window the switcher asked for.
++constexpr base::TimeDelta kPendingMaximizeTimeout = base::Seconds(5);
 +void UpdateShown(int32_t window_id);
 +void ReclaimFreed(int32_t window_id);
 +
@@ -835,6 +845,18 @@ index 0000000000..3df905e95c
 +  void SetElementFullscreen(bool fullscreen) {
 +    if (client_ && HasValidGrant()) {
 +      client_->SetFullscreen(fullscreen);
++    }
++  }
++
++  // EXO-MAXIMIZE: asks the page to show the window maximized, its way (a
++  // "windowrequest" event); with |toggle|, to unmaximize it if the page set
++  // the element's `maximized` attribute.
++  void RequestMaximize(bool toggle) {
++    if (client_ && HasValidGrant() && !taken_) {
++      client_->OnRequest(
++          toggle ? blink::mojom::NativeWindowRequest::kToggleMaximize
++                 : blink::mojom::NativeWindowRequest::kMaximize,
++          0);
 +    }
 +  }
 +  int32_t window_id() const { return window_id_; }
@@ -1227,6 +1249,15 @@ index 0000000000..3df905e95c
 +  if (driver) {
 +    Drivers()[window_id] = driver;
 +    driver->ApplyLastSize();
++    // EXO-MAXIMIZE: the shell the switcher showed it in shows it now.
++    if (auto pending = PendingMaximize().find(window_id);
++        pending != PendingMaximize().end()) {
++      const bool due = base::TimeTicks::Now() < pending->second;
++      PendingMaximize().erase(pending);
++      if (due) {
++        driver->RequestMaximize(/*toggle=*/false);
++      }
++    }
 +  } else {
 +    Drivers().erase(window_id);
 +  }
@@ -1328,6 +1359,30 @@ index 0000000000..3df905e95c
 +  }
 +  target->SetElementFullscreen(!target->fullscreen());
 +  return true;
++}
++
++bool ExoEmbedder::ToggleMaximize(int32_t window_id) {
++  NativeWindowHostImpl* target = Driver(window_id);
++  if (!target) {
++    return false;
++  }
++  // Fullscreen (the app asked, or Super+Shift+F): Super+F leaves it.
++  if (target->fullscreen()) {
++    target->SetElementFullscreen(false);
++  } else {
++    target->RequestMaximize(/*toggle=*/true);
++  }
++  return true;
++}
++
++void ExoEmbedder::RequestMaximize(int32_t window_id) {
++  if (NativeWindowHostImpl* target = Driver(window_id)) {
++    PendingMaximize().erase(window_id);
++    target->RequestMaximize(/*toggle=*/false);
++    return;
++  }
++  PendingMaximize()[window_id] =
++      base::TimeTicks::Now() + kPendingMaximizeTimeout;
 +}
 +
 +bool ExoEmbedder::ExitFullscreen(content::WebContents* page) {
@@ -1468,10 +1523,10 @@ index 0000000000..3df905e95c
 +}
 diff --git a/chrome/browser/exo_embedder.h b/chrome/browser/exo_embedder.h
 new file mode 100644
-index 0000000000..e9bcc77b73
+index 0000000000..2118154809
 --- /dev/null
 +++ b/chrome/browser/exo_embedder.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,90 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1520,6 +1575,15 @@ index 0000000000..e9bcc77b73
 +  // EXO-FULLSCREEN: toggles fullscreen for the element showing |window_id|
 +  // (see plutonium_keys.h). False if no element shows it.
 +  bool ToggleFullscreen(int32_t window_id);
++  // EXO-MAXIMIZE (Super+F): asks the page showing |window_id| to maximize it
++  // its own way, or to unmaximize it if it shows it maximized (the element's
++  // `maximized` attribute). An element that is fullscreen leaves fullscreen
++  // instead. False if no element shows it.
++  bool ToggleMaximize(int32_t window_id);
++  // EXO-MAXIMIZE (the switcher): asks the visible shell's element showing
++  // |window_id| to maximize it; if none shows it yet, the first that does in
++  // the next few seconds is asked.
++  void RequestMaximize(int32_t window_id);
 +  // Takes every element showing a window (in |page|, if given) out of
 +  // fullscreen; false if none was fullscreen.
 +  bool ExitFullscreen(content::WebContents* page = nullptr);
@@ -3099,10 +3163,10 @@ index 0000000000..d5e5baec32
 +#endif  // CHROME_BROWSER_PLUTONIUM_GROUPS_H_
 diff --git a/chrome/browser/plutonium_keys.cc b/chrome/browser/plutonium_keys.cc
 new file mode 100644
-index 0000000000..11227d9327
+index 0000000000..5d56a7e0e0
 --- /dev/null
 +++ b/chrome/browser/plutonium_keys.cc
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,483 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3295,9 +3359,17 @@ index 0000000000..11227d9327
 +         (event.flags() & kModifiers) == ui::EF_COMMAND_DOWN;
 +}
 +
-+bool IsToggleFullscreen(const ui::KeyEvent& event) {
++bool IsToggleMaximize(const ui::KeyEvent& event) {
 +  return event.key_code() == ui::VKEY_F &&
 +         (event.flags() & kModifiers) == ui::EF_COMMAND_DOWN;
++}
++
++// Unless the shell takes it (niri's own Super+Shift+F does the same).
++bool IsToggleFullscreen(const ui::KeyEvent& event) {
++  return event.key_code() == ui::VKEY_F &&
++         (event.flags() & kModifiers) ==
++             (ui::EF_COMMAND_DOWN | ui::EF_SHIFT_DOWN) &&
++         !IsShellShortcut(event.code(), event.flags());
 +}
 +
 +class HandlerImpl : public Handler, public ui::EventHandler {
@@ -3329,6 +3401,14 @@ index 0000000000..11227d9327
 +        event->StopPropagation();
 +      } else if (to_shell_.erase(code)) {
 +        MarkForShell(event);
++      }
++      return;
++    }
++    if (IsToggleMaximize(*event)) {
++      consumed_.insert(code);
++      event->StopPropagation();
++      if (!event->is_repeat()) {
++        ToggleMaximize();
 +      }
 +      return;
 +    }
@@ -3505,20 +3585,56 @@ index 0000000000..11227d9327
 +  }
 +}
 +
-+void ToggleFullscreen() {
-+  // EXO-PRESENT: a window or tab the shells overlay showed fullscreen
-+  // leaves it, back to the visible shell.
-+  if (exo::EmbeddedWindows::Get()->presented_window_id() ||
-+      PlutoniumTabs::Get()->presented_tab_id()) {
-+    PlutoniumShells* shells = PlutoniumShells::Get();
-+    for (const PlutoniumShells::Shell& shell :
-+         shells ? shells->GetShells() : std::vector<PlutoniumShells::Shell>()) {
-+      if (shell.visible) {
-+        shells->Show(shell.id);
-+      }
++namespace {
++
++// EXO-PRESENT: a window or tab the shells overlay showed fullscreen leaves
++// it, back to the visible shell. False if none was.
++bool EndPresentation() {
++  if (!exo::EmbeddedWindows::Get()->presented_window_id() &&
++      !PlutoniumTabs::Get()->presented_tab_id()) {
++    return false;
++  }
++  PlutoniumShells* shells = PlutoniumShells::Get();
++  for (const PlutoniumShells::Shell& shell :
++       shells ? shells->GetShells() : std::vector<PlutoniumShells::Shell>()) {
++    if (shell.visible) {
++      shells->Show(shell.id);
 +    }
-+    exo::EmbeddedWindows::Get()->EndPresentation();
-+    PlutoniumTabs::Get()->EndPresentation();
++  }
++  exo::EmbeddedWindows::Get()->EndPresentation();
++  PlutoniumTabs::Get()->EndPresentation();
++  return true;
++}
++
++// Neither a window nor a tab has the keyboard (e.g. the shell page has):
++// only leaving fullscreen makes sense.
++void ExitAnyFullscreen() {
++  ExoEmbedder* embedder = ExoEmbedder::Get();
++  if (!(embedder && embedder->ExitFullscreen())) {
++    PlutoniumTabs::Get()->ExitFullscreen();
++  }
++}
++
++}  // namespace
++
++void ToggleMaximize() {
++  if (EndPresentation()) {
++    return;
++  }
++  ExoEmbedder* embedder = ExoEmbedder::Get();
++  if (int32_t window_id = exo::EmbeddedWindows::Get()->focused_window_id();
++      window_id && embedder && embedder->ToggleMaximize(window_id)) {
++    VLOG(1) << "EXO-MAXIMIZE toggled window #" << window_id;
++    return;
++  }
++  if (PlutoniumTabs::Get()->ToggleFocusedTabMaximize()) {
++    return;
++  }
++  ExitAnyFullscreen();
++}
++
++void ToggleFullscreen() {
++  if (EndPresentation()) {
 +    return;
 +  }
 +  ExoEmbedder* embedder = ExoEmbedder::Get();
@@ -3530,20 +3646,16 @@ index 0000000000..11227d9327
 +  if (PlutoniumTabs::Get()->ToggleFocusedTabFullscreen()) {
 +    return;
 +  }
-+  // Neither has focus (e.g. the shell page has): only leaving fullscreen
-+  // makes sense.
-+  if (!(embedder && embedder->ExitFullscreen())) {
-+    PlutoniumTabs::Get()->ExitFullscreen();
-+  }
++  ExitAnyFullscreen();
 +}
 +
 +}  // namespace plutonium_keys
 diff --git a/chrome/browser/plutonium_keys.h b/chrome/browser/plutonium_keys.h
 new file mode 100644
-index 0000000000..c5f59fc176
+index 0000000000..c101d68e3b
 --- /dev/null
 +++ b/chrome/browser/plutonium_keys.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,100 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3571,13 +3683,21 @@ index 0000000000..c5f59fc176
 +//            after the next click on it.
 +//   Super+Tab, Super+Shift+Tab  show the next or previous shell
 +//            (EXO-SHELLS, shell mode with more than one shell).
-+//   Super+F  toggles fullscreen for the focused embedded window or tab
-+//            (EXO-FULLSCREEN): the element showing it becomes the shell
-+//            document's fullscreen element, so the app or page is resized
-+//            to the whole screen. With neither focused, it leaves
-+//            fullscreen if an element is fullscreen.
++//   Super+F  maximizes the focused embedded window or tab in the shell
++//            (EXO-MAXIMIZE): the element showing it gets a "windowrequest"
++//            event, "maximize", or "unmaximize" if the page set its
++//            `maximized` attribute; the shell decides what that means (its
++//            column, its panel). A fullscreen element leaves fullscreen
++//            instead. With neither focused, it leaves fullscreen if an
++//            element is fullscreen.
 +//            A window the shells overlay opened fullscreen
 +//            (EXO-PRESENT) goes back to the visible shell instead.
++//   Super+Shift+F  toggles fullscreen for the focused embedded window or
++//            tab (EXO-FULLSCREEN): the element showing it becomes the shell
++//            document's fullscreen element, so the app or page is resized
++//            to the whole screen, and is told it is fullscreen. Otherwise
++//            as Super+F. Unless the visible shell took the key
++//            (SetShellShortcuts).
 +//   Super+Shift+Left, Super+Shift+Right  move keyboard focus to the display
 +//            to the left or right (EXO-DISPLAYS, with several displays).
 +//   Super+Ctrl+Shift+Left, Super+Ctrl+Shift+Right  move the focused window
@@ -3611,6 +3731,8 @@ index 0000000000..c5f59fc176
 +bool IsShellShortcut(const input::NativeWebKeyboardEvent& event);
 +
 +// What Super+F does.
++void ToggleMaximize();
++// What Super+Shift+F does.
 +void ToggleFullscreen();
 +
 +// EXO-CHROME: DevTools' keys, for pages without a browser window (tabs, and a
