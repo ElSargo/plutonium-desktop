@@ -29,6 +29,7 @@ Hydra's dock ([HYDRA_DOCK.md](HYDRA_DOCK.md)) and GNOME's Dash to Dock in one. T
 - **Slots** on Super+1…9, each a terminal, an app or a site. A slot holds one window or tab, the one tagged `<ns>:dock/<slot id>`, not every one that looks like it. With nothing held, its key starts the app or opens the site and tags what that made. With "Use an open window" on, a pinned app's open window in the scope is taken first, as Dash to Dock raises one.
 - **Scopes:** `thread` (in Styx and Charon, a workspace: one copy each) or `global` (one copy, which follows you). Hydra also has `project`.
 - **Layouts:** Normal, or Maximized (Hydra's split and fold). Styx maximizes the column, Charon tiles the window to fill the screen.
+- **A press isn't drawn over.** A press on a slot may be a click, and a browser sends no click to a button replaced since the press, so the dock doesn't redraw between press and release: a change that comes then is drawn after the click.
 - **Pressing a slot's key:** shows what it holds, or starts it. Pressed again, it goes back to where you were. Clicking the icon works as the settings say: focus, minimize or list its windows (Dash to Dock's default), focus, minimize or cycle, or focus and go back.
 - **Running apps** that nothing pins follow a separator. Drag one onto the dock to pin it. Drag a slot off the dock to remove it (with Undo). A trailing **+** adds a slot.
 - **Settings** (`DOCK_DEFAULTS`, `dockSettingsSchema()`): click, middle-click, Shift+click and wheel actions; show running apps; only this workspace's windows; use an open window; group an app's windows; slot numbers (while Super is held, always, never); icon size.
@@ -61,4 +62,4 @@ In an X11 test session (2026-11-02), with real keys and clicks:
 - **Charon:** the dash shows Web, Foot and Claude Code. Super+2 starts foot, and Super+1 opens a Web tab through Charon's launcher and binds that tab, with going back between them. Clicks focus, then minimize. The Settings pages that changed work, and so does dragging an app from the grid onto the dash.
 - **Plain:** the indicators load from the library.
 
-Helper tests: `helper/test/uiDock.test.ts` (the dock model) and `helper/test/uiLibrary.test.ts` (keys, settings, drag geometry, the route).
+Helper tests: `helper/test/uiDock.test.ts` (the dock model), `helper/test/uiDockView.test.ts` (a press on a slot: click or drag, over a small DOM) and `helper/test/uiLibrary.test.ts` (keys, settings, drag geometry, the route).
