@@ -3,10 +3,11 @@ From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
 Subject: [PATCH 05/13] Plutonium: DRM: shell mode on the display hardware
 
-Running on the hardware: the display-plane path, logind seats (also on a VT that isn't in front), evdev and libinput fixes, touchpad swipes for the shell, and the GPU details (Vulkan device ids, shm buffers the GPU can't import).
+Running on the hardware: the display-plane path, logind seats (also on a VT that isn't in front), evdev and libinput fixes, touchpad swipes for the shell, and the GPU details (Vulkan device ids, the GPU's PCI ids without libpci, shm buffers the GPU can't import).
 
 It holds these changes:
 - set the DRM device id for a Vulkan device shared with ANGLE
+- the GPUs' PCI ids from sysfs where ANGLE has none (no libpci): the GPU list's exceptions match, and GPU rasterization isn't blocklisted
 - seat management through logind
 - shm buffers the GPU can't import don't stall the display; EXO-DIAG logs at VLOG(1)
 - start a logind session on a VT that isn't in front
@@ -23,6 +24,7 @@ and the parts in these files of:
  .../ozone_image_backing_factory.cc            |   4 +
  .../shared_image/shared_image_factory.cc      |  30 ++
  .../service/shared_memory_region_wrapper.cc   |  29 +-
+ gpu/config/gpu_info_collector_linux.cc        |  68 +++
  .../common/shared_image_capabilities.mojom    |   1 +
  .../shared_image_capabilities_mojom_traits.cc |   3 +
  .../shared_image_capabilities_mojom_traits.h  |   5 +
@@ -65,7 +67,7 @@ and the parts in these files of:
  .../drm/host/drm_native_display_delegate.h    |   2 +
  ui/ozone/platform/drm/ozone_platform_drm.cc   |   6 +
  ui/ozone/platform/x11/ozone_platform_x11.cc   |   2 +
- 46 files changed, 1219 insertions(+), 57 deletions(-)
+ 47 files changed, 1287 insertions(+), 57 deletions(-)
  create mode 100644 ui/events/ozone/device/logind_session.cc
  create mode 100644 ui/events/ozone/device/logind_session.h
 
@@ -206,6 +208,99 @@ index abe91d0a04..b3f16fafc6 100644
 +  }
  
    return true;
+ }
+diff --git a/gpu/config/gpu_info_collector_linux.cc b/gpu/config/gpu_info_collector_linux.cc
+index 428dc7369c..a2f93a7176 100644
+--- a/gpu/config/gpu_info_collector_linux.cc
++++ b/gpu/config/gpu_info_collector_linux.cc
+@@ -2,6 +2,13 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <string_view>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
+ #include "build/chromecast_buildflags.h"
+@@ -12,6 +19,58 @@
+ 
+ namespace gpu {
+ 
++namespace {
++
++// A hex number in a sysfs file ("0x1002\n"), or 0.
++uint32_t ReadSysfsHex(const base::FilePath& path) {
++  std::string text;
++  uint32_t value = 0;
++  if (!base::ReadFileToString(path, &text)) {
++    return 0;
++  }
++  std::string_view trimmed =
++      base::TrimWhitespaceASCII(text, base::TRIM_ALL);
++  if (base::StartsWith(trimmed, "0x")) {
++    trimmed.remove_prefix(2);
++  }
++  return base::HexStringToUInt(trimmed, &value) ? value : 0;
++}
++
++// Plutonium: the GPUs' PCI ids from sysfs, where ANGLE found none. ANGLE
++// reads them with libpci, which it dlopen()s, and a host without it (NixOS)
++// left the ids 0: the GPU blocklist's exceptions (ChromeOS's allows GPU
++// rasterization on AMD and Intel by vendor id) then never matched, and pages
++// were rastered on the CPU. The DRM devices' PCI functions have the same ids,
++// with no library. The active GPU is the one the firmware booted on
++// (boot_vga), else the first.
++void CollectPCIDevicesFromSysfs(angle::SystemInfo* info) {
++  // card0, card1, ...: links to the devices (not their connectors, card0-DP-1).
++  for (int index = 0; index < 16; ++index) {
++    const base::FilePath device(
++        base::StringPrintf("/sys/class/drm/card%d/device", index));
++    // Display controllers only (PCI class 0x03).
++    if ((ReadSysfsHex(device.Append("class")) >> 16) != 0x03) {
++      continue;
++    }
++    angle::GPUDeviceInfo gpu;
++    gpu.vendorId = ReadSysfsHex(device.Append("vendor"));
++    gpu.deviceId = ReadSysfsHex(device.Append("device"));
++    gpu.revisionId = ReadSysfsHex(device.Append("revision"));
++    if (!gpu.vendorId) {
++      continue;
++    }
++    if (ReadSysfsHex(device.Append("boot_vga")) == 1) {
++      info->activeGPUIndex = static_cast<int>(info->gpus.size());
++    }
++    info->gpus.push_back(std::move(gpu));
++  }
++  if (!info->gpus.empty() && info->activeGPUIndex < 0) {
++    info->activeGPUIndex = 0;
++  }
++}
++
++}  // namespace
++
+ bool CollectContextGraphicsInfo(GPUInfo* gpu_info) {
+   DCHECK(gpu_info);
+ 
+@@ -32,6 +91,15 @@ bool CollectBasicGraphicsInfo(GPUInfo* gpu_info) {
+ 
+   angle::SystemInfo system_info;
+   bool success = angle::GetSystemInfo(&system_info);
++  if (system_info.gpus.empty() || !system_info.gpus[0].vendorId) {
++    angle::SystemInfo from_sysfs;
++    CollectPCIDevicesFromSysfs(&from_sysfs);
++    if (!from_sysfs.gpus.empty()) {
++      system_info.gpus = std::move(from_sysfs.gpus);
++      system_info.activeGPUIndex = from_sysfs.activeGPUIndex;
++      success = true;
++    }
++  }
+   FillGPUInfoFromSystemInfo(gpu_info, &system_info);
+   return success;
  }
 diff --git a/gpu/ipc/common/shared_image_capabilities.mojom b/gpu/ipc/common/shared_image_capabilities.mojom
 index 95943e1ad5..df8d972957 100644

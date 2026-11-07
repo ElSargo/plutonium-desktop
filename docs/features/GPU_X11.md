@@ -77,3 +77,12 @@ The helper asks Exo what a GL client would be told (`helper/src/gpu.ts`, a small
 The `EXO-DIAG` logging from the viability work is now `VLOG(1)`. It was `LOG(ERROR)` on hot paths, such as overlay candidates per frame and `IsSupported` checks per shared image. Turn it back on with `--vmodule=*=1` or a narrower pattern.
 
 **Verified** on the slot's Xvfb session, with foot and kwrite in the plain shell: kwrite draws, the page's screenshot returns at once, and the Ash log has none of the errors. kwrite still uses `XRGB8888` (`WAYLAND_DEBUG`).
+
+## The GPU's PCI ids without libpci (2026-11-07)
+
+Chromium learns the GPU's PCI vendor and device ids from ANGLE, which reads them with libpci, `dlopen()`ed (or, failing that, from Vulkan). A host without libpci, such as NixOS (nix-ld has none), left them 0. The GPU list for ChromeOS turns GPU rasterization off for every GPU except a few it names by vendor id (entry 137: Intel, AMD, ...), so with an id of 0 every page was rastered on the CPU: `gpu_compositing` enabled but `rasterization` `unavailable_off` in `SystemInfo.getInfo`, and Charon's overview at 20 to 30 fps on a 180 Hz display.
+
+Where ANGLE finds no GPU or an id of 0, the GPU process now reads the ids from sysfs (`/sys/class/drm/cardN/device/{class,vendor,device,revision}`, display controllers only; the active GPU is the one with `boot_vga`, else the first), before its sandbox starts (patch 0005, `gpu/config/gpu_info_collector_linux.cc`). So neither the release nor the NixOS module needs libpci, a GPL library, which the bundle would otherwise have had to carry.
+
+Checked in an X11 session in the build container with its libpci and Vulkan drivers moved away (so ANGLE could get the ids neither way): the GPU was `0x1002:0x1586` (the Radeon 8060S) and rasterization `enabled`; before, the same set-up gave 0 and `unavailable_off`.
+
