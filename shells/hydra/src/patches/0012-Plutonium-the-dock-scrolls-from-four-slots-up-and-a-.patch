@@ -24,14 +24,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/web/src/components/RightPanelTabs.tsx    |   7 +-
  apps/web/src/keybindings.ts                   |   8 +
- .../plutonium/PlutoniumDock.browser.test.tsx  |  81 +++++
- apps/web/src/plutonium/PlutoniumDock.test.ts  |  31 +-
- apps/web/src/plutonium/PlutoniumDock.tsx      | 321 ++++++++++++++++--
+ .../plutonium/PlutoniumDock.browser.test.tsx  |  81 ++++
+ apps/web/src/plutonium/PlutoniumDock.test.ts  |  38 +-
+ apps/web/src/plutonium/PlutoniumDock.tsx      | 380 ++++++++++++++++--
  apps/web/src/plutonium/dock.test.ts           |  71 +++-
- apps/web/src/plutonium/dock.ts                | 187 +++++++++-
+ apps/web/src/plutonium/dock.ts                | 187 ++++++++-
  packages/contracts/src/keybindings.ts         |  50 +--
  packages/shared/src/keybindings.ts            |   7 +-
- 9 files changed, 679 insertions(+), 84 deletions(-)
+ 9 files changed, 744 insertions(+), 85 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumDock.browser.test.tsx
 
 diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
@@ -172,7 +172,7 @@ index 0000000000..1dbce10539
 +  });
 +});
 diff --git a/apps/web/src/plutonium/PlutoniumDock.test.ts b/apps/web/src/plutonium/PlutoniumDock.test.ts
-index c41024bd83..9a4b972007 100644
+index c41024bd83..05229f10f4 100644
 --- a/apps/web/src/plutonium/PlutoniumDock.test.ts
 +++ b/apps/web/src/plutonium/PlutoniumDock.test.ts
 @@ -1,6 +1,6 @@
@@ -183,7 +183,7 @@ index c41024bd83..9a4b972007 100644
  
  describe("the dock editor's address", () => {
    it("adds https to a bare address", () => {
-@@ -18,3 +18,32 @@ describe("the dock editor's address", () => {
+@@ -18,3 +18,39 @@ describe("the dock editor's address", () => {
      expect(normalizeSiteUrl("not a url")).toBeNull();
    });
  });
@@ -211,13 +211,20 @@ index c41024bd83..9a4b972007 100644
 +    expect(dockGrid(at(6), 7, rem)).toMatchObject({ columns: 4, rows: 2 });
 +  });
 +
-+  it("grows a slot up to 1.75rem, and shrinks it to fit four", () => {
-+    expect(dockGrid(400, 4, rem).size).toBe(28);
++  it("grows a slot up to 2rem, and shrinks it to fit four", () => {
++    expect(dockGrid(400, 4, rem).size).toBe(32);
 +    expect(dockGrid(66, 4, rem).size).toBe(15);
++  });
++
++  it("spreads the room left between the slots, not around them", () => {
++    // 4 × 32 in 216: 88 over three gaps.
++    expect(dockGrid(216, 4, rem)).toMatchObject({ size: 32, columnGap: 88 / 3, gap: 2 });
++    // Where slots shrink to fit, the gap is the least one.
++    expect(dockGrid(66, 4, rem).columnGap).toBe(2);
 +  });
 +});
 diff --git a/apps/web/src/plutonium/PlutoniumDock.tsx b/apps/web/src/plutonium/PlutoniumDock.tsx
-index 16a6438c6b..e37a50b4f6 100644
+index 16a6438c6b..1dcfadb40c 100644
 --- a/apps/web/src/plutonium/PlutoniumDock.tsx
 +++ b/apps/web/src/plutonium/PlutoniumDock.tsx
 @@ -1,10 +1,13 @@
@@ -504,7 +511,21 @@ index 16a6438c6b..e37a50b4f6 100644
                "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
                state === "empty" && "opacity-35",
                state === "idle" && "opacity-60",
-@@ -654,13 +829,13 @@ const DockButton = memo(function DockButton(props: {
+@@ -639,7 +814,12 @@ const DockButton = memo(function DockButton(props: {
+             )}
+           >
+             {slot ? (
+-              <SlotIcon slot={slot} active={props.active} live={props.liveIcon} />
++              <SlotIcon
++                slot={slot}
++                active={props.active}
++                live={props.liveIcon}
++                className="size-[min(1.25rem,65%)]"
++              />
+             ) : (
+               <span className="size-1 rounded-full bg-current" />
+             )}
+@@ -654,13 +834,13 @@ const DockButton = memo(function DockButton(props: {
        />
        <TooltipPopup side="top">
          <div className="font-medium">
@@ -520,7 +541,7 @@ index 16a6438c6b..e37a50b4f6 100644
          </div>
        </TooltipPopup>
      </Tooltip>
-@@ -673,8 +848,54 @@ export const PlutoniumDock = memo(function PlutoniumDock() {
+@@ -673,8 +853,104 @@ export const PlutoniumDock = memo(function PlutoniumDock() {
    return <Dock />;
  });
  
@@ -531,20 +552,70 @@ index 16a6438c6b..e37a50b4f6 100644
 + * The dock's grid for `count` slots in `width` pixels (`rem` pixels to the
 + * rem): as many to a row as fit at 1.375rem each, but never fewer than four,
 + * and the rows split evenly, so every row is full when the count allows
-+ * (ten slots where eight fit: two rows of five). A slot grows up to 1.75rem;
-+ * past that the grid centers.
++ * (ten slots where eight fit: two rows of five). A slot grows up to 2rem;
++ * past that the room left goes between the slots (`columnGap`), so the first
++ * and last sit at the dock's edges. Rows stay `gap` apart.
 + */
 +export function dockGrid(
 +  width: number,
 +  count: number,
 +  rem: number,
-+): { columns: number; rows: number; size: number; gap: number } {
++): { columns: number; rows: number; size: number; gap: number; columnGap: number } {
 +  const gap = 0.125 * rem;
 +  const fit = Math.max(DOCK_MIN_SLOTS, Math.floor((width + gap) / (1.375 * rem + gap)));
 +  const rows = Math.max(1, Math.ceil(count / fit));
 +  const columns = Math.max(DOCK_MIN_SLOTS, Math.ceil(count / rows));
-+  const size = Math.max(0, Math.min(1.75 * rem, (width - gap * (columns - 1)) / columns));
-+  return { columns, rows, size, gap };
++  const size = Math.max(0, Math.min(2 * rem, (width - gap * (columns - 1)) / columns));
++  const columnGap = Math.max(gap, (width - size * columns) / (columns - 1));
++  return { columns, rows, size, gap, columnGap };
++}
++
++const prefersReducedMotion = () =>
++  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
++
++/**
++ * Slots glide to their new places when the grid reflows (`layout` changes: a
++ * slot added or removed, a row more or less), and a new one grows in. Places
++ * are offsets in the grid (which is positioned), so its scrolling doesn't
++ * count as a move; resizing the sidebar within a layout just follows it.
++ */
++function useDockReflow(list: React.RefObject<HTMLElement | null>, layout: string) {
++  const places = useRef(new Map<string, { x: number; y: number; size: number }>());
++  const lastLayout = useRef(layout);
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the slots' DOM boxes after each commit and runs Web Animations on them
++  useLayoutEffect(() => {
++    const element = list.current;
++    if (!element) return;
++    const before = places.current;
++    const animate = lastLayout.current !== layout && before.size > 0 && !prefersReducedMotion();
++    lastLayout.current = layout;
++    const after = new Map<string, { x: number; y: number; size: number }>();
++    const timing: KeyframeAnimationOptions = {
++      duration: 260,
++      easing: "cubic-bezier(0.2, 0, 0, 1)",
++    };
++    for (const button of element.querySelectorAll<HTMLElement>("[data-dock-slot]")) {
++      const id = button.dataset.dockSlot!;
++      const place = { x: button.offsetLeft, y: button.offsetTop, size: button.offsetWidth };
++      after.set(id, place);
++      if (!animate) continue;
++      const was = before.get(id);
++      if (!was) {
++        button.animate([{ opacity: 0, transform: "scale(0.5)" }, {}], timing);
++        continue;
++      }
++      // Its old box, from its new one (scaled about the center).
++      const scale = place.size > 0 ? was.size / place.size : 1;
++      const dx = was.x + was.size / 2 - (place.x + place.size / 2);
++      const dy = was.y + was.size / 2 - (place.y + place.size / 2);
++      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(scale - 1) < 0.01) continue;
++      button.animate(
++        [{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }],
++        timing,
++      );
++    }
++    places.current = after;
++  });
 +}
 +
 +/** The width of `ref`'s content box, kept up to date. */
@@ -575,7 +646,7 @@ index 16a6438c6b..e37a50b4f6 100644
    // The windows and the browser's tabs, which hold the slots' tags.
    const world = useDockWorld();
    const active = useActiveDockStore((state) => state.active);
-@@ -683,38 +904,78 @@ function Dock() {
+@@ -683,38 +959,80 @@ function Dock() {
      number: DockSlotNumber;
      anchor: HTMLElement;
    } | null>(null);
@@ -584,6 +655,7 @@ index 16a6438c6b..e37a50b4f6 100644
 +  const width = useContentWidth(frame);
 +  const grid = dockGrid(width || 224, count, rootRem());
 +  const scrolls = grid.rows > DOCK_VISIBLE_ROWS;
++  useDockReflow(list, `${count}:${grid.columns}`);
 +  const [edges, setEdges] = useState({ above: false, below: false });
 +  const updateEdges = () => {
 +    const element = list.current;
@@ -637,11 +709,12 @@ index 16a6438c6b..e37a50b4f6 100644
 -            "grid justify-center gap-0.5",
 -            "grid-cols-[repeat(3,min(1.75rem,calc((100cqw_-_0.25rem)/3)))]",
 -            "@[13.375rem]/dock:grid-cols-[repeat(9,min(1.75rem,calc((100cqw_-_1rem)/9)))]",
-+            "grid justify-center [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
++            "relative grid [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
 +            scrolls && "snap-y snap-mandatory overflow-y-auto overscroll-contain",
            )}
 +          style={{
-+            gap: grid.gap,
++            rowGap: grid.gap,
++            columnGap: grid.columnGap,
 +            gridTemplateColumns: `repeat(${grid.columns}, ${grid.size}px)`,
 +            ...(scrolls
 +              ? {
@@ -665,7 +738,7 @@ index 16a6438c6b..e37a50b4f6 100644
                onEdit={(slot, anchor) => setEditing({ number: slot, anchor })}
              />
            ))}
-@@ -732,7 +993,13 @@ function Dock() {
+@@ -732,7 +1050,13 @@ function Dock() {
            width="md"
            data-dock-editor
          >
