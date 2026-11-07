@@ -45,7 +45,7 @@ This is Chromium's **SurfaceEmbed** (`components/surface_embed`), written for th
 - `plutonium_shell.cc`: the broker's tab methods and tab observer.
   - `IsShellDocument()` now also refuses tabs. A tab has no outer `WebContents`, so before this a tab navigated to the shell's URL would have counted as the shell.
 - `chrome_content_browser_client_receiver_bindings.cc`: the SurfaceEmbed host is bound for the shell document too, not only `chrome://webui-browser`.
-- `chrome_content_renderer_client.cc`: the plugin is created in main frames of the shell origin (passed to renderers as `--plutonium-shell-origin`). This gate is defense in depth; the browser-side binding check is the boundary.
+- `chrome_content_renderer_client.cc`: the plugin is created in the main frame of a shell document: one the browser force-enabled the `PlutoniumShell` origin trial for when it committed (`WebDocument::IsPlutoniumShell()`, the same signal that exposes `navigator.windowBroker`). It's asked of the document and not of a list given to the renderer at launch, because a shell turned on mid-session can land in a spare renderer started before it; such a list left that shell's tabs showing "This plugin is not supported". This gate is defense in depth; the browser-side binding check is the boundary.
 - Blink: the methods, the `BrowserTabEntry` dictionary and the `BrowserTabEvent` interface on `NativeWindowBroker`.
 
 Hidden tabs needed two fixes:
