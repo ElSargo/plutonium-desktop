@@ -341,7 +341,7 @@ plutonium doctor                    <span class="c"># checks everything is in pl
 
 <script>
 // The installer is served next to this page
-for (const el of document.querySelectorAll(".site-origin")) if (location.protocol.startsWith("http")) el.textContent = location.origin;
+for (const el of document.querySelectorAll(".site-origin")) if (location.protocol.startsWith("http")) el.textContent = location.origin + location.pathname.replace(/\/[^/]*$/, "");
 </script>
 
 </body>
