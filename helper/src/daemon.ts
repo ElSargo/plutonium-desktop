@@ -1973,10 +1973,11 @@ export class Daemon {
         response.end(readFileSync(SHELL_LIBRARY));
         return;
       }
-      // The shells' UI library, beside it (uiLibrary.ts).
-      if (method === "GET" && path.startsWith("/v1/ui/")) {
-        const file = uiLibraryFile(join(dirname(SHELL_LIBRARY), "ui"), path.slice("/v1/ui/".length));
-        if (!file) throw new HttpError(404, "No such file in the UI library.");
+      // The shells' UI library, beside it (uiLibrary.ts), and Pluto Vim's engine (PLUTO_VIM.md).
+      if (method === "GET" && (path.startsWith("/v1/ui/") || path.startsWith("/v1/vim/"))) {
+        const library = path.startsWith("/v1/ui/") ? "ui" : "vim";
+        const file = uiLibraryFile(join(dirname(SHELL_LIBRARY), library), path.slice(`/v1/${library}/`.length));
+        if (!file) throw new HttpError(404, `No such file in ${library === "ui" ? "the UI library" : "Pluto Vim"}.`);
         response.writeHead(200, {
           "Content-Type": file.contentType,
           "Access-Control-Allow-Origin": "*",

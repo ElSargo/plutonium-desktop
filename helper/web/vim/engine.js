@@ -359,7 +359,7 @@ export class Session {
   }
 
   #caret() {
-    try { this.buffer.setCaret?.(CARETS[this.displayMode] ?? "block"); } catch { /* a caret is cosmetic */ }
+    try { this.buffer.setCaret?.(CARETS[this.displayMode] ?? "block", this.displayMode); } catch { /* a caret is cosmetic */ }
   }
 
   /** The sync half of a command: the mode it leaves, then its effect on the queue. */
@@ -415,10 +415,15 @@ export class Session {
     if (this.insert) this.insert.checkpoint = this.buffer.text().text;
   }
 
-  /** A change ends: it's one step for `u`. */
-  #endChange(steps = this.edits) {
+  /**
+   * A change ends: one step for `u`. It keeps the field's text before and
+   * after, so `u` can undo until the text is back, however the field groups
+   * its own undo steps (ProseMirror groups by time); `steps` is how many the
+   * field likely has, a bound on how far `u` goes.
+   */
+  #endChange(steps = this.edits, before = this.changeBefore) {
     if (steps > 0) {
-      this.undoSteps.push(steps);
+      this.undoSteps.push({ steps, before, after: this.buffer.text().text });
       this.redoSteps = [];
     }
     this.edits = 0;
@@ -428,6 +433,7 @@ export class Session {
 
   async #run(cmd) {
     this.edits = 0;
+    this.changeBefore = this.buffer.text().text;
     switch (cmd.type) {
       case "motion": await this.#runMotion(cmd); break;
       case "operator": await this.#runOperator(cmd); break;
@@ -799,9 +805,20 @@ export class Session {
 
   async #undo(redo, count) {
     for (let k = 0; k < count; k++) {
-      const steps = (redo ? this.redoSteps : this.undoSteps).pop() ?? 1;
-      for (let s = 0; s < steps; s++) await (redo ? this.buffer.redo() : this.buffer.undo());
-      (redo ? this.undoSteps : this.redoSteps).push(steps);
+      const change = (redo ? this.redoSteps : this.undoSteps).pop();
+      if (!change) {
+        await (redo ? this.buffer.redo() : this.buffer.undo());
+        continue;
+      }
+      // Undo (or redo) until the text is what it was, stopping when the field has nothing more to undo.
+      const target = redo ? change.after : change.before;
+      for (let s = 0; s < change.steps + 3; s++) {
+        const now = this.buffer.text().text;
+        if (now === target) break;
+        await (redo ? this.buffer.redo() : this.buffer.undo());
+        if (this.buffer.text().text === now) break;
+      }
+      (redo ? this.undoSteps : this.redoSteps).push(change);
     }
     const { text, cursor } = this.#read();
     await this.#move(T.clampNormal(text, cursor));
@@ -846,7 +863,7 @@ export class Session {
       return;
     }
     const { text, cursor } = this.#read();
-    this.insert = { cmd, before: text, at: cursor, checkpoint: text, typed: 0, edits: this.edits };
+    this.insert = { cmd, before: text, at: cursor, checkpoint: text, typed: 0, edits: this.edits, changeBefore: cmd ? this.changeBefore : text };
     this.edits = 0;
     this.vim.emit("InsertEnter", { session: this });
   }
@@ -879,7 +896,7 @@ export class Session {
       }
       await this.vim.registers.setSpecial(".", { text: inserted, linewise: false });
       if (cmd && this.vim.lastChange?.cmd === cmd) this.vim.lastChange.inserted = inserted;
-      this.#endChange(steps);
+      this.#endChange(steps, session.changeBefore);
       this.vim.emit("InsertLeave", { session: this, inserted });
     }
     if (!keepCursor) {
