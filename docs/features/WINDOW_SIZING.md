@@ -16,6 +16,17 @@ While a page shows a window, nothing else sizes it (0017):
 
 Before 0017, an app's maximize button made Ash resize the window to the work area while its element kept its size. A 1600×1000 window then drew inside a 1380×875 element.
 
+## The app's size limits
+
+An app can say how small and how big it can be: `xdg_toplevel.set_min_size` and `set_max_size`, or an X11 app's `WM_NORMAL_HINTS`, which xwayland-satellite turns into the same requests. A dialog, a game or an installer that can't be resized sets its minimum to its maximum. The element and the broker give the page those limits, so it can lay the window out at a size the app will take. Otherwise the app answers with a size other than the box, and `object-fit` places its frame in a box it doesn't fill (below):
+- **The element:** `windowMinWidth`, `windowMinHeight`, `windowMaxWidth` and `windowMaxHeight`, in CSS pixels at zoom 1 (DIPs) like `windowWidth`. 0 on an axis means no limit on it, as in xdg-shell. They change with a `windowchange` event.
+- **The broker's entries:** `minWidth`, `minHeight`, `maxWidth` and `maxHeight`, the same values, so a shell can decide how to place a window before it shows it.
+
+They are what the app committed, unadjusted (`ShellSurfaceBase::requested_minimum_size()`; Ash's `GetMinimumSize()` makes an unset minimum 1×1 and raises the maximum to the minimum). Ash's log lists them with each window (`min=… max=…`).
+
+What the shells do with them:
+- **Charon** keeps a floating window's frame within them, as mutter keeps to size hints: resizing by the frame, by the app's own edges or with Alt+F8 stops at them, and a saved size that no longer fits is clamped. A window that can't be resized isn't maximized or tiled (no maximize button, no edge tiling, nothing to tile in its menu; the app's own maximize request is ignored). A tile a window can't fill gets the nearest size it takes, centered in the tile but kept on the work area (a left tile too narrow grows to the right), so its frame is never bigger or smaller than what the app draws.
+
 ## The box is where the window is
 
 The page's content box is always where the window is drawn, as Hyprland draws a window it is resizing (0020):
@@ -130,6 +141,7 @@ Before this, a parked window's popups were drawn wherever the window was last pa
 | Same, dragged onto the second display | stays on its display and drops back, as niri's Super+drag (moving to another display is HTML drag and drop, `MULTI_MONITOR.md`); the second display's page unaffected |
 | niri, floating GTK Demo (`floating`, box 416–1184 px), xdotool on Xvfb (slot 21, build ba339e3a9a31, 2026-10-28): press at x 1188 (4 px right of the box) and drag right | renderer hit `#world` → press on the resize edge → `down` routed to the window, GTK asks to resize → `drag … handed to the page`; niri widens it 768 → 876 px |
 | Same session: press 4 px right of a tiled window (no `floating`) | the browser doesn't ask the renderer; the press stays with the page, nothing resizes |
+| Size limits, Charon on Xvfb (slot 49, out/S49, 2026-11-08), a GTK 3 test app: one window not resizable at 420×260, one with a 700×500 minimum | broker and element report min = max = 420×260, and 700×500 with no max; frames 420×298 and 700×538 (header bar 38); the left edge dragged 300 px in: stays 700 and doesn't move; the right edge +150 then −400: 850, then 700; the fixed window ignores a header double-click and its menu has no Maximize or Tile; the other maximizes to 1600×930; tiled left at split 0.3 (a 480 px tile): 700×930 at the screen's left edge; at 0.5: 800×930 (screenshot: no bars) |
 | Tiled GTK Demo (screenshot) | square corners, no shadow, as before. Floating, its resize edge outside the box took the press (above), so GTK had its shadow back |
 
 Not verified: pointer input on a scaled (`contain`) window, and the "last pressed" rule. On Xvfb, neither DevTools nor xdotool input reaches embedded apps. A press-driven driver change needs a session with real input (DRM, `tools/uinput.py`).

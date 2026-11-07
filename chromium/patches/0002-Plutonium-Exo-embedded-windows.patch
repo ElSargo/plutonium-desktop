@@ -55,8 +55,8 @@ and the parts in these files of:
  components/exo/data_source.h                  |   11 +
  components/exo/drag_drop_operation.cc         |   18 +
  components/exo/drag_drop_operation.h          |    4 +
- components/exo/embedded_windows.cc            | 1172 +++++++++++++++++
- components/exo/embedded_windows.h             |  380 ++++++
+ components/exo/embedded_windows.cc            | 1174 +++++++++++++++++
+ components/exo/embedded_windows.h             |  386 ++++++
  components/exo/keyboard.cc                    |   99 +-
  components/exo/keyboard.h                     |   17 +
  components/exo/pointer.cc                     |  291 +++-
@@ -68,7 +68,7 @@ and the parts in these files of:
  components/exo/shell_surface.cc               |   95 +-
  components/exo/shell_surface.h                |    6 +
  components/exo/shell_surface_base.cc          |  491 ++++++-
- components/exo/shell_surface_base.h           |  142 +-
+ components/exo/shell_surface_base.h           |  153 ++-
  components/exo/shell_surface_unittest.cc      |  187 +++
  components/exo/surface.cc                     |   19 +-
  components/exo/surface.h                      |    6 +
@@ -90,7 +90,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 44 files changed, 4032 insertions(+), 91 deletions(-)
+ 44 files changed, 4051 insertions(+), 91 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
 
@@ -547,10 +547,10 @@ index 1df95bbf4d..fa8d87f2b8 100644
        DataSource* source,
 diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
 new file mode 100644
-index 0000000000..93d307efca
+index 0000000000..f91e10df55
 --- /dev/null
 +++ b/components/exo/embedded_windows.cc
-@@ -0,0 +1,1172 @@
+@@ -0,0 +1,1174 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1684,6 +1684,8 @@ index 0000000000..93d307efca
 +  info.surface_id = surface_id;
 +  info.geometry = shell_surface->GetEmbedGeometry();
 +  info.surface_size = shell_surface->host_window()->bounds().size();
++  info.min_size = shell_surface->requested_minimum_size();
++  info.max_size = shell_surface->requested_maximum_size();
 +  info.device_scale_factor =
 +      shell_surface->host_window()->layer()->device_scale_factor();
 +  info.app_id = shell_surface->GetEmbedName();
@@ -1725,10 +1727,10 @@ index 0000000000..93d307efca
 +}  // namespace exo
 diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
 new file mode 100644
-index 0000000000..b5e32b501c
+index 0000000000..2d25c0e69b
 --- /dev/null
 +++ b/components/exo/embedded_windows.h
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,386 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1806,6 +1808,12 @@ index 0000000000..b5e32b501c
 +    gfx::Rect geometry;
 +    // The whole surface (the geometry plus client-side shadows), DIPs.
 +    gfx::Size surface_size;
++    // PLUTONIUM: the app's size limits for its geometry, DIPs, as it
++    // committed them (ShellSurfaceBase::requested_minimum_size()). 0 on an
++    // axis: no limit. A window whose minimum equals its maximum can't be
++    // resized.
++    gfx::Size min_size;
++    gfx::Size max_size;
 +    float device_scale_factor = 1.f;
 +    std::string app_id;
 +    std::u16string title;
@@ -4107,7 +4115,7 @@ index 152d08a9de..078ed11dbb 100644
 +
  }  // namespace exo
 diff --git a/components/exo/shell_surface_base.h b/components/exo/shell_surface_base.h
-index 90b3b9b4a0..0c391175f4 100644
+index 90b3b9b4a0..acce6d1753 100644
 --- a/components/exo/shell_surface_base.h
 +++ b/components/exo/shell_surface_base.h
 @@ -11,10 +11,13 @@
@@ -4136,7 +4144,7 @@ index 90b3b9b4a0..0c391175f4 100644
  #include "ui/gfx/geometry/rect.h"
  #include "ui/gfx/geometry/rounded_corners_f.h"
  #include "ui/views/view.h"
-@@ -253,6 +258,84 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+@@ -253,6 +258,95 @@ class ShellSurfaceBase : public SurfaceTreeHost,
    // this will unset the window shape.
    void SetShape(std::optional<cc::Region> shape);
  
@@ -4153,6 +4161,17 @@ index 90b3b9b4a0..0c391175f4 100644
 +  void SetToplevelIcon(const std::string& name, const std::string& png_url);
 +  const std::string& toplevel_icon_name() const { return toplevel_icon_name_; }
 +  const std::string& toplevel_icon_url() const { return toplevel_icon_url_; }
++  // PLUTONIUM: the size limits the app committed (xdg_toplevel.set_min_size
++  // and set_max_size, or an X11 app's WM_NORMAL_HINTS through
++  // xwayland-satellite), in window geometry DIPs. 0 on an axis means no
++  // limit on it. Unlike GetMinimumSize()/GetMaximumSize(), nothing is
++  // adjusted: the page sees what the app asked for.
++  const gfx::Size& requested_minimum_size() const {
++    return requested_minimum_size_;
++  }
++  const gfx::Size& requested_maximum_size() const {
++    return requested_maximum_size_;
++  }
 +  // The window geometry in host window (surface) coordinates, DIPs.
 +  gfx::Rect GetEmbedGeometry() const;
 +  // A parked window keeps drawing but is invisible, can't be activated and
@@ -4221,7 +4240,7 @@ index 90b3b9b4a0..0c391175f4 100644
    // SurfaceDelegate:
    void OnSurfaceCommit() override;
    bool IsInputEnabled(Surface* surface) const override;
-@@ -455,6 +538,13 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+@@ -455,6 +549,13 @@ class ShellSurfaceBase : public SurfaceTreeHost,
    // Start the event capture on this surface.
    void StartCapture();
  
@@ -4235,7 +4254,7 @@ index 90b3b9b4a0..0c391175f4 100644
    const gfx::Rect& geometry() const { return geometry_; }
    aura::Window* parent() const { return parent_; }
  
-@@ -479,8 +569,6 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+@@ -479,8 +580,6 @@ class ShellSurfaceBase : public SurfaceTreeHost,
    // maximize request. Currently only true for Lacros.
    bool ShouldExitFullscreenFromRestoreOrMaximized();
  
@@ -4244,7 +4263,7 @@ index 90b3b9b4a0..0c391175f4 100644
    raw_ptr<views::Widget> widget_ = nullptr;
    bool movement_disabled_ = false;
    // This value is in the screen coordinates.
-@@ -581,6 +669,54 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+@@ -581,6 +680,54 @@ class ShellSurfaceBase : public SurfaceTreeHost,
  
    raw_ptr<aura::Window> parent_ = nullptr;
    bool activatable_ = true;
@@ -4299,7 +4318,7 @@ index 90b3b9b4a0..0c391175f4 100644
    bool can_minimize_ = true;
    bool has_frame_colors_ = false;
    SkColor active_frame_color_ = SK_ColorBLACK;
-@@ -631,6 +767,8 @@ class ShellSurfaceBase : public SurfaceTreeHost,
+@@ -631,6 +778,8 @@ class ShellSurfaceBase : public SurfaceTreeHost,
        chromeos::WindowPinType::kNone;
    chromeos::WindowPinType pending_pinned_state_ =
        chromeos::WindowPinType::kNone;

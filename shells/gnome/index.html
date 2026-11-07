@@ -879,6 +879,15 @@ function createItem(key, entry) {
     const update = () => root.classList.toggle("is-taken", content.windowState === "taken");
     content.addEventListener("windowtaken", update);
     content.addEventListener("windowchange", update);
+    // The app set or changed its size limits: keep the frame within them.
+    let limits = "";
+    content.addEventListener("windowchange", () => {
+      const now = [content.windowMinWidth, content.windowMinHeight, content.windowMaxWidth, content.windowMaxHeight].join();
+      if (now === limits) return;
+      limits = now;
+      if (item.tile && fixedSize(item)) item.tile = null;
+      if (items.has(key)) render();
+    });
     body.append(content, taken);
     item.content = content;
     shell.grantFor(id).then((grant) => {
@@ -1001,8 +1010,46 @@ function tileRect(tile, ws) {
   return null;
 }
 const wsById = (id) => workspaces.find((w) => w.id === id);
+/**
+ * The sizes a frame (header bar included) can take: the app's own limits
+ * (windowMinWidth…, 0 for none), as mutter keeps a window within its size
+ * hints, and Charon's minimum where the app allows it. Tabs: Charon's only.
+ */
+function limitsOf(item) {
+  const c = item.kind === "w" ? item.content : null;
+  const hb = hbH(item);
+  const max = { w: c?.windowMaxWidth || Infinity, h: c?.windowMaxHeight ? c.windowMaxHeight + hb : Infinity };
+  const min = {
+    w: Math.max(c?.windowMinWidth || 0, Math.min(MIN_W, max.w)),
+    h: Math.max((c?.windowMinHeight || 0) + hb, Math.min(MIN_H, max.h)),
+  };
+  return { min, max: { w: Math.max(max.w, min.w), h: Math.max(max.h, min.h) } };
+}
+/** An app that can't be resized (its minimum is its maximum): it isn't maximized or tiled, as in mutter. */
+function fixedSize(item) {
+  const c = item.kind === "w" ? item.content : null;
+  return !!(c?.windowMaxWidth && c.windowMaxHeight && c.windowMinWidth === c.windowMaxWidth && c.windowMinHeight === c.windowMaxHeight);
+}
+const clampTo = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+/**
+ * `r` within the item's limits. A floating frame keeps its top left; a tile
+ * the app can't fill takes the nearest size it can, centered in the tile, so
+ * the frame is always the size the app draws at, with no bars beside it.
+ */
+function fitted(item, r, centered) {
+  const { min, max } = limitsOf(item);
+  const w = clampTo(r.w, min.w, max.w), h = clampTo(r.h, min.h, max.h);
+  if (w === r.w && h === r.h) return r;
+  if (!centered) return { ...r, w, h };
+  // Centered in the tile, but kept on the work area: a left tile too narrow
+  // for the app grows to the right, not off the screen.
+  const wa = workArea();
+  const x = clampTo(r.x + (r.w - w) / 2, wa.x, Math.max(wa.x, wa.x + wa.w - w));
+  const y = clampTo(r.y + (r.h - h) / 2, wa.y, Math.max(wa.y, wa.y + wa.h - h));
+  return { x: Math.round(x), y: Math.round(y), w, h };
+}
 /** The frame's rect on the desk (header bar included). */
-const rectOf = (item) => (item.tile ? tileRect(item.tile, wsById(item.ws)) : item.geom);
+const rectOf = (item) => (item.tile ? fitted(item, tileRect(item.tile, wsById(item.ws)), true) : fitted(item, item.geom, false));
 
 /** Sizes the content (the app takes that size) and the frame's classes. */
 function size(item) {
@@ -1019,6 +1066,7 @@ function size(item) {
   c.toggle("notitle", item.notitle);
   c.toggle("dragging", drag?.item === item && drag.mode === "move" && drag.moved);
   item.minBtn.hidden = item.maxBtn.hidden = prefs.titlebarButtons !== "all";
+  if (fixedSize(item)) item.maxBtn.hidden = true;
   item.maxBtn.innerHTML = icon(item.tile === "max" ? "restore" : "maximize");
   savedGeom[item.key] = { geom: item.geom, tile: item.tile, hidden: item.hidden, above: item.above, notitle: item.notitle };
 }
@@ -1110,6 +1158,7 @@ function reclaim(item) {
 
 function setTile(item, tile) {
   if (!item) return;
+  if (tile && fixedSize(item)) tile = null;
   item.tile = tile;
   item.hidden = false;
   focusItem(item.key);
@@ -1780,7 +1829,7 @@ let drag = null;
 const { edgeCode, resizeRect } = ui.drag;
 function beginDrag(item, mode, x, y) {
   if (overview()) return;
-  drag = { item, mode, sx: x, sy: y, g0: { ...item.geom }, tile0: item.tile, moved: false, zone: null };
+  drag = { item, mode, sx: x, sy: y, g0: { ...(item.tile ? item.geom : rectOf(item)) }, tile0: item.tile, moved: false, zone: null };
   item.el.classList.add(mode === "move" ? "dragging" : "resizing");
 }
 addEventListener("pointermove", (e) => {
@@ -1808,14 +1857,14 @@ addEventListener("pointermove", (e) => {
     // Past an edge with another display beyond it: no edge tiling (that edge
     // isn't the desktop's), and a release there sends it to that display.
     const away = shell?.otherDisplayAt(e.clientX, e.clientY);
-    showSnap(prefs.edgeTiling && !away ? snapZone(e.clientX - d.left, e.clientY - d.top, e.clientY < d.top + 2) : null);
+    showSnap(prefs.edgeTiling && !away && !fixedSize(item) ? snapZone(e.clientX - d.left, e.clientY - d.top, e.clientY < d.top + 2) : null);
   } else if (item.tile && item.tile !== "max") {
     // A tiled window's inner edge: both sides of the split follow.
     const ws = wsById(item.ws);
     if (mode.includes("e") || mode.includes("w")) ws.split = Math.max(0.2, Math.min(0.8, (e.clientX - d.left - wa.x) / wa.w));
     if (mode.includes("n") || mode.includes("s")) ws.vsplit = Math.max(0.2, Math.min(0.8, (e.clientY - d.top - wa.y) / wa.h));
   } else {
-    item.geom = resizeRect(drag.g0, mode, dx, dy, { min: { w: MIN_W, h: MIN_H } });
+    item.geom = resizeRect(drag.g0, mode, dx, dy, limitsOf(item));
   }
   render();
 });
@@ -1910,6 +1959,7 @@ function keyboardMove(mode) {
   const item = items.get(focused);
   if (!item || overview()) return;
   if (item.tile) { const r = rectOf(item); item.geom = { ...r }; item.tile = null; }
+  item.geom = rectOf(item);
   kbMode = { item, mode, g0: { ...item.geom } };
   takeKeyboard($("kbd-sink"));
   const hint = $("kbd-hint");
@@ -2476,9 +2526,12 @@ function windowMenu(item, at) {
   const i = wsIndex(item.ws);
   menu([
     { label: "Minimize", icon: "minimize", action: () => minimize(item) },
-    item.tile === "max" ? { label: "Unmaximize", icon: "restore", action: () => setTile(item, null) } : { label: "Maximize", icon: "maximize", action: () => setTile(item, "max") },
-    { label: "Tile Left", icon: "tile-left", checked: item.tile === "l", action: () => setTile(item, item.tile === "l" ? null : "l") },
-    { label: "Tile Right", icon: "tile-right", checked: item.tile === "r", action: () => setTile(item, item.tile === "r" ? null : "r") },
+    // An app that can't be resized can't be maximized or tiled either.
+    ...(fixedSize(item) ? [] : [
+      item.tile === "max" ? { label: "Unmaximize", icon: "restore", action: () => setTile(item, null) } : { label: "Maximize", icon: "maximize", action: () => setTile(item, "max") },
+      { label: "Tile Left", icon: "tile-left", checked: item.tile === "l", action: () => setTile(item, item.tile === "l" ? null : "l") },
+      { label: "Tile Right", icon: "tile-right", checked: item.tile === "r", action: () => setTile(item, item.tile === "r" ? null : "r") },
+    ]),
     "-",
     { label: "Always on Top", icon: "above", checked: item.above, action: () => { item.above = !item.above; restack(); render(); } },
     { label: "Title Bar", icon: "title", checked: !item.notitle, action: () => toggleTitle(item) },
@@ -2728,7 +2781,7 @@ addEventListener("keydown", (e) => {
     const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.code];
     if (d) {
       const g = kbMode.item.geom;
-      kbMode.item.geom = kbMode.mode === "move" ? { ...g, x: g.x + d[0], y: Math.max(-4, g.y + d[1]) } : { ...g, w: Math.max(MIN_W, g.w + d[0]), h: Math.max(MIN_H, g.h + d[1]) };
+      kbMode.item.geom = kbMode.mode === "move" ? { ...g, x: g.x + d[0], y: Math.max(-4, g.y + d[1]) } : fitted(kbMode.item, { ...g, w: g.w + d[0], h: g.h + d[1] }, false);
       render();
     } else if (e.code === "Enter") endKeyboardMove(true);
     else if (e.code === "Escape") endKeyboardMove(false);
