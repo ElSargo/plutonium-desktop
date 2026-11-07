@@ -25,6 +25,13 @@ export const DEFAULT_OPTIONS = {
   /** "unnamedplus": the unnamed register is the system clipboard. */
   clipboard: "",
   shiftwidth: 2,
+  /**
+   * Keys Pluto Vim takes before the page's own handlers in a field it's on
+   * in: Ctrl+[, so normal mode is always reachable, even where the page
+   * takes Escape (ProseMirror's keymap, Hydra's composer) and Ctrl+[ (T3's
+   * navigation.back). Every other key is the page's first (Principle 1).
+   */
+  claim: ["<C-[>"],
 };
 
 const CARETS = { normal: "block", visual: "block", vline: "block", insert: "bar", replace: "underline", pending: "underline" };

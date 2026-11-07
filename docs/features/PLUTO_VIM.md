@@ -1,6 +1,6 @@
 # Pluto Vim: vim mode in every text field, one engine, JS for config
 
-**Status: step 1 built (the engine, tested over a string; no field uses it yet)** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
+**Status: steps 1 and 2 built: the engine, and a stand-in web backend in page JS, tested in Chromium and in Hydra's composer on a slot** (2026-11-08). Pluto Vim is the desktop's vim mode. Its names: `~/.pluto/vim/` for the config, `plutonium vim` for the CLI, `plutonium_vim` / `PlutoniumVim` inside Chromium (as `plutonium_keys.cc`), and the short `pvim` where pages can see it (`data-pvim-*` attributes, `pvim:*` events), so it can't clash with a page's own vim (CodeMirror's, Monaco's). Inside `init.js` the API is `vim` (the argument `setup` gets), so neovim habits carry over. The goals:
 - vim's modal editing in every text field: web pages, shell pages and native apps;
 - one engine everywhere, so keymaps, registers, marks and macros work the same in every field;
 - configured and extended in JavaScript, as neovim is in Lua: `~/.pluto/vim/init.js`, with an API close to neovim's, so habits and plugin ideas carry over;
@@ -296,12 +296,30 @@ What it settled:
 - **`.` replays the command, then the text typed.** What was typed is the difference between the field's text when insert mode started and when it ended, so it works whatever the field did with the keys (an IME, autocorrect).
 - **What's not in it yet:** user mappings (`jk`, step 4), `"=` and `"#n` (step 5), `gv`, macros, search, marks, the `:` line (step 9), and counts on `iw`/`ip` beyond words.
 
+### Step 2: the stand-in web backend (built)
+
+`helper/web/vim/dom.js`: `attach(document)` puts Pluto Vim in every field of a page, in ordinary page JS. The helper serves the engine at `/v1/vim/` (beside `/v1/ui/`), so a shell page loads it with `import("<helper>/v1/vim/dom.js")`. Tests: `helper/test/vimDom.test.ts`, real key events in headless Chromium into a `<textarea>`, an `<input>`, a contenteditable and a ProseMirror editor (from T3 Code's checkout).
+
+- **Keys:** a keydown listener on the window in the bubble phase, so the page's handlers on the field and the document see a key first, and a key one of them took is never vim's. The keys in `vim.opt.claim` (Ctrl+[) are taken in the capture phase instead, before the page.
+- **Text and edits:** an `<input>`'s or `<textarea>`'s value and selection; a contenteditable's text with a line per block and per `<br>` (not the placeholder `<br>` that holds an empty line open), no-break spaces read as spaces. Edits are `execCommand`, so pages get `beforeinput` and `input`. A newline is `insertParagraph`, or `insertLineBreak` first in a field of one paragraph (a composer); whichever the editor keeps, checked after its mutation observer has run (a microtask, still before the next key). At a block's end Chrome adds a second `<br>` to hold the line open, which ProseMirror keeps as a real break, so the extra one is deleted.
+- **Editors with a model** (ProseMirror, Lexical) only learn of a selection change on the next `selectionchange`; the backend fires one after each move, or an edit lands at the editor's old selection. Undo and redo are a synthetic Ctrl+Z (Ctrl+Shift+Z, Ctrl+Y) to the editor's own history, falling back to the browser's.
+- **The caret:** `caret-shape` (Plutonium's Chromium has it), and `data-pvim-mode` on the field, and `pvim:mode` events.
+
+What it found:
+- **Pages take Escape.** ProseMirror's base keymap binds it (select the parent node), and Hydra's composer takes it, so by Principle 1 Escape never reaches vim there, in insert mode or normal. T3 also binds Ctrl+[ (`navigation.back`). Hence `vim.opt.claim`: Ctrl+[ is Pluto Vim's in any field it's on in, before the page, so normal mode is always one key away. Hydra's integration (step 6) gives Escape back in the composer.
+- **`u` can't rely on counting the field's undo steps.** ProseMirror's history groups everything within 500 ms into one step, so `u` undoes until the field's text is what it was before the change, and stops when it is. Changes made faster than that (a test, a macro) still undo together in such editors; an editor's integration can close its history group per change.
+- **Hydra's composer is one paragraph** (lines are hard breaks; a paragraph split is joined back), so `o` and puts of lines use line breaks there.
+- **Hydra's composer groups its own undo history widely:** keys under ~500 ms apart (a script) undo together; at a person's pace `u` undoes one change at a time, as it should.
+- **Verified in Hydra's composer** on a slot (Plutonium's Chromium, a release Hydra): Ctrl+[ to normal mode with a block caret, `b`, `dw`, `u`, `cw`, `o`, `yy` and `p`, `dd`, `u u`, `viw` then `U`, `A`; the composer's own text matched the engine's after each.
+- **A Blink DCHECK in a dev build:** in two of five runs with spellcheck on, vim's edits in Hydra's composer crashed its renderer, painting a stale spelling marker (`fragment_item.cc:1189`, `start_offset >= StartOffset()`, from `HighlightPainter::PaintOneSpellingGrammarDecoration`). Typing and deleting the same misspelled words without vim didn't. It's intermittent, and never happened in four runs with spellcheck off. Release builds don't check it, so the live desktop paints a wrong underline at worst. Step 3's edits go through the same editing code, so it needs a look there, with a repro.
+
 ## Decisions
 
 - 2026-11-08: the name is **Pluto Vim** (`pvim` where pages see it, `plutonium_vim` in Chromium). Kerberos, a moon of Pluto, was considered and dropped: Chromium's ash already has Kerberos authentication code, and the clash would muddy search and patches.
 - 2026-11-08: single-line inputs start in insert mode, Escape stays the page's, and Ctrl+[ enters normal mode (`vim.opt.inputs = "manual"`). Insert mode gets extras (Ctrl+R {register}, Ctrl+O) in every field.
 - 2026-11-08: Hydra's composer integrates properly rather than relying on Principle 1: it can start in normal mode, Enter sends from either mode, and everything it does is reachable from normal mode and the `:` line. The protocol is open to any page.
 - 2026-11-08: clipboard history is `"#1`…`"#9`. `"#` is vim's alternate file register, which has no meaning here yet; it can move if something comes along that maps onto it.
+- 2026-11-08 (to confirm): Ctrl+[ is Pluto Vim's before the page in a field it's on in (`vim.opt.claim`), because ProseMirror and Hydra's composer take Escape and T3 takes Ctrl+[.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions

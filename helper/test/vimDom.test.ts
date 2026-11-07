@@ -61,6 +61,7 @@ const PAGE = (pm: boolean) => `<!doctype html>
 <input id="pw" type="password">
 <div id="ce" contenteditable="true"><p>one two</p><p>three</p></div>
 <div id="pm"></div>
+<div id="composer"></div>
 <script type="module">
   import { attach, bufferFor } from "/vim/dom.js";
   window.submitted = [];
@@ -94,6 +95,17 @@ const PAGE = (pm: boolean) => `<!doctype html>
     state: EditorState.create({ doc, plugins: [history(), keymap({ "Mod-z": undo, "Mod-y": redo }), keymap(baseKeymap)] }),
   });
   window.pmText = () => { const d = window.pmView.state.doc; return d.textBetween(0, d.content.size, "\\n"); };
+  // Like Hydra's composer: one paragraph, lines are hard breaks, Enter isn't a new paragraph.
+  const one = new Schema({ nodes: {
+    doc: { content: "paragraph" },
+    paragraph: { content: "inline*", toDOM: () => ["p", 0], parseDOM: [{ tag: "p" }] },
+    text: { group: "inline" },
+    hard_break: { inline: true, group: "inline", selectable: false, toDOM: () => ["br"], parseDOM: [{ tag: "br" }], leafText: () => "\\n" },
+  } });
+  window.composerView = new EditorView(document.getElementById("composer"), {
+    state: EditorState.create({ doc: one.node("doc", null, [one.node("paragraph")]), plugins: [history(), keymap({ "Mod-z": undo, "Mod-y": redo, Enter: () => true }), keymap(baseKeymap)] }),
+  });
+  window.composerDoc = () => window.composerView.state.doc.toJSON();
   ` : ""}
   window.ready = true;
 </script>`;
@@ -282,5 +294,17 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal(await pmText(), "delta\ngamma");
     await keys(host, "g", "g", "d", "d");
     assert.equal(await pmText(), "gamma");
+  });
+
+  test("a one-paragraph composer: lines are hard breaks, with no stray break at the end", { skip: pm ? false : "no T3 Code checkout for ProseMirror" }, async () => {
+    const host = "#composer > .ProseMirror";
+    await page.locator(host).click();
+    await keys(host, "one", "Control+BracketLeft", "o", "two", "Control+BracketLeft");
+    const doc = await page.evaluate(() => (window as any).composerDoc());
+    const inline = doc.content[0].content.map((n: any) => n.type === "text" ? n.text : `<${n.type}>`);
+    assert.deepEqual(inline, ["one", "<hard_break>", "two"]);
+    await keys(host, "y", "y", "P");
+    const again = await page.evaluate(() => (window as any).composerDoc());
+    assert.deepEqual(again.content[0].content.map((n: any) => n.type === "text" ? n.text : `<${n.type}>`), ["one", "<hard_break>", "two", "<hard_break>", "two"]);
   });
 });

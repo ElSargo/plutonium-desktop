@@ -248,7 +248,7 @@ export class EditableBuffer {
     this.#selectionChanged();
   }
 
-  edit({ from, to }, insert) {
+  async edit({ from, to }, insert) {
     if (from === to && insert === "") return;
     const doc = this.#doc();
     const model = editableModel(this.root);
@@ -260,10 +260,10 @@ export class EditableBuffer {
     // A newline is a new paragraph, as Enter makes it: an editor's own model sees a split, not a "\n" in a text node.
     const lines = insert.split("\n");
     if (from !== to) doc.execCommand("delete");
-    lines.forEach((line, k) => {
-      if (k > 0) doc.execCommand("insertParagraph");
+    for (const [k, line] of lines.entries()) {
+      if (k > 0) await this.#newline();
       if (line) doc.execCommand("insertText", false, line);
-    });
+    }
   }
 
   /**
@@ -271,6 +271,34 @@ export class EditableBuffer {
    * it to Ctrl+Z: the key goes to it first. A plain contenteditable has no
    * handler, and gets the browser's own undo.
    */
+  /**
+   * A new paragraph; where the editor refuses one (a chat composer whose
+   * document is one paragraph), a line break, as Shift+Enter. An editor with
+   * a model undoes what its schema refuses from its mutation observer, a
+   * microtask later: still before the next key's event.
+   */
+  async #newline() {
+    const doc = this.#doc();
+    const lines = () => editableModel(this.root).text.split("\n").length;
+    // A field of one paragraph is likely a composer that keeps it one (lines are line breaks); try that first.
+    const blocks = [...this.root.children].filter((child) => BLOCK.test(child.tagName)).length;
+    const order = blocks <= 1 ? ["insertLineBreak", "insertParagraph"] : ["insertParagraph", "insertLineBreak"];
+    const before = lines();
+    for (const command of order) {
+      doc.execCommand(command);
+      await settled();
+      const added = lines() - before;
+      if (added <= 0) continue;
+      // At the end of a block Chrome adds a second <br> to hold the new line open; an editor with a model
+      // (ProseMirror) keeps it as a real break, and it holds its own line open. One newline was asked for.
+      if (added > 1) {
+        doc.execCommand("forwardDelete");
+        await settled();
+      }
+      return;
+    }
+  }
+
   undo() { this.#historyKey([{ key: "z", code: "KeyZ", ctrlKey: true }], "undo"); }
   redo() { this.#historyKey([{ key: "Z", code: "KeyZ", ctrlKey: true, shiftKey: true }, { key: "y", code: "KeyY", ctrlKey: true }], "redo"); }
 
@@ -285,6 +313,11 @@ export class EditableBuffer {
   }
 
   setCaret(shape, mode) { setCaret(this.root, shape, mode); }
+}
+
+/** After the microtasks an edit queued: mutation observers, and what editors do from them. */
+async function settled() {
+  for (let k = 0; k < 3; k++) await Promise.resolve();
 }
 
 /** The Buffer for a field fieldOf() returned. */
@@ -322,18 +355,22 @@ export function attach(doc = globalThis.document, options = {}) {
     if (field) sessionOf(field);
   };
 
-  const onKey = (event) => {
+  const handle = (event, claimed) => {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (!event.isTrusted && !options.untrusted) return;
     const field = fieldOf(target(event));
     if (!field) return;
     const key = keyFromEvent(event);
-    if (!key) return;
+    if (!key || vim.opt.claim.includes(key) !== claimed) return;
     if (sessionOf(field).feed(key)) {
       event.preventDefault();
       event.stopImmediatePropagation();
     }
   };
+  // The claimed keys, before anything of the page's (the window's capture phase is the first to see a key).
+  const onClaimed = (event) => handle(event, true);
+  // The rest, after the page's own handlers on the field and the document.
+  const onKey = (event) => handle(event, false);
 
   const onMode = ({ session, to }) => {
     const el = session.buffer.el ?? session.buffer.root;
@@ -342,6 +379,7 @@ export function attach(doc = globalThis.document, options = {}) {
   };
 
   doc.addEventListener("focusin", onFocus, true);
+  view.addEventListener("keydown", onClaimed, true);
   view.addEventListener("keydown", onKey);
   const unlisten = vim.on("ModeChanged", onMode);
   const active = fieldOf(doc.activeElement);
@@ -352,6 +390,7 @@ export function attach(doc = globalThis.document, options = {}) {
     sessionOf,
     detach() {
       doc.removeEventListener("focusin", onFocus, true);
+      view.removeEventListener("keydown", onClaimed, true);
       view.removeEventListener("keydown", onKey);
       unlisten();
     },
