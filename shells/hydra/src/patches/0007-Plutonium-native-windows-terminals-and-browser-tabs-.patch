@@ -33,12 +33,12 @@ Folded from:
 ---
  apps/web/src/components/AppSidebarLayout.tsx  |    4 +
  apps/web/src/components/ChatView.logic.ts     |    3 +
- apps/web/src/components/ChatView.tsx          |   65 +-
+ apps/web/src/components/ChatView.tsx          |   57 +-
  .../src/components/CommandPalette.logic.ts    |    3 +-
  apps/web/src/components/CommandPalette.tsx    |   14 +-
- .../components/PersistentThreadTerminals.tsx  |    7 +-
+ .../components/PersistentThreadTerminals.tsx  |   28 +-
  apps/web/src/components/RightPanelTabs.tsx    |  161 +-
- .../src/components/ThreadTerminalDrawer.tsx   |   21 +-
+ .../src/components/ThreadTerminalDrawer.tsx   |  129 +-
  .../components/chat/ChatTerminalDrawers.tsx   |    3 +
  .../chat/QueuedRunsControl.browser.test.tsx   |    2 +-
  .../src/components/chat/QueuedRunsControl.tsx |    2 +-
@@ -47,55 +47,59 @@ Folded from:
  .../chat/TimelineToolActivityIcon.tsx         |    4 +-
  .../chat/TimelineUserMessageRow.tsx           |    2 +-
  .../src/components/chat/guestMessageStyle.tsx |    2 +-
+ .../components/chat/useChatTerminalActions.ts |   15 +-
  .../src/components/files/FilePreviewPanel.tsx |    2 +-
  .../pullRequest/PullRequestsPage.tsx          |    2 +
  .../settings/KeybindingsSettings.logic.ts     |    1 +
  .../web/src/components/ui/standalone-page.tsx |    6 +-
- apps/web/src/keybindings.ts                   |   20 +
+ apps/web/src/keybindings.ts                   |   25 +
+ apps/web/src/lib/terminalFocus.ts             |    2 +
  apps/web/src/plutonium/AppLauncher.tsx        |  237 +++
  apps/web/src/plutonium/PlutoniumWindows.tsx   |  555 +++++++
  apps/web/src/plutonium/RemoteWindowView.tsx   |  218 +++
- apps/web/src/plutonium/files/FileManager.tsx  | 1292 +++++++++++++++++
+ apps/web/src/plutonium/files/FileManager.tsx  | 1305 +++++++++++++++++
  apps/web/src/plutonium/files/FilePicker.tsx   |  313 ++++
  .../src/plutonium/files/HydraFilesPanel.tsx   |   56 +
- .../plutonium/files/PlutoniumFilesDrawer.tsx  |  107 ++
- .../src/plutonium/files/PlutoniumFilesRow.tsx |  132 ++
+ .../src/plutonium/files/PlutoniumFilePane.tsx |   80 +
  apps/web/src/plutonium/files/SplitRow.tsx     |   95 ++
- apps/web/src/plutonium/files/carry.ts         |   55 +
+ apps/web/src/plutonium/files/carry.ts         |   81 +
  apps/web/src/plutonium/files/fileKeys.test.ts |   74 +
  apps/web/src/plutonium/files/fileKeys.ts      |   47 +
+ .../web/src/plutonium/files/filePanes.test.ts |   43 +
+ apps/web/src/plutonium/files/filePanes.ts     |  100 ++
  apps/web/src/plutonium/files/filesCore.ts     |  145 ++
- apps/web/src/plutonium/files/filesStore.ts    |  289 ++++
- apps/web/src/plutonium/files/ownsKey.test.ts  |   17 +
- apps/web/src/plutonium/files/ownsKey.ts       |   16 +
- .../web/src/plutonium/files/useFileManager.ts |  854 +++++++++++
+ apps/web/src/plutonium/files/filesStore.ts    |  242 +++
+ apps/web/src/plutonium/files/ownsKey.test.ts  |   24 +
+ apps/web/src/plutonium/files/ownsKey.ts       |   40 +
+ .../web/src/plutonium/files/useFileManager.ts |  866 +++++++++++
  apps/web/src/plutonium/files/useFilesHome.ts  |   20 +
  apps/web/src/plutonium/importTab.ts           |   67 +
  apps/web/src/plutonium/openedItems.test.ts    |  176 +++
  apps/web/src/plutonium/openedItems.ts         |  255 ++++
- apps/web/src/plutonium/panelKeys.ts           |  302 ++++
+ apps/web/src/plutonium/panelKeys.ts           |  303 ++++
  apps/web/src/plutonium/remoteWindows.test.ts  |   64 +
  apps/web/src/plutonium/remoteWindows.ts       |  187 +++
  apps/web/src/plutonium/threadTag.ts           |   41 +
- apps/web/src/plutonium/useThreadPlutonium.ts  |  188 +++
+ apps/web/src/plutonium/useThreadPlutonium.ts  |  191 +++
  apps/web/src/plutonium/windowStore.ts         |  380 +++++
  apps/web/src/reopenClosedView.ts              |    3 +
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 52 files changed, 6592 insertions(+), 53 deletions(-)
+ 55 files changed, 6724 insertions(+), 87 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
  create mode 100644 apps/web/src/plutonium/files/FileManager.tsx
  create mode 100644 apps/web/src/plutonium/files/FilePicker.tsx
  create mode 100644 apps/web/src/plutonium/files/HydraFilesPanel.tsx
- create mode 100644 apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
- create mode 100644 apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
+ create mode 100644 apps/web/src/plutonium/files/PlutoniumFilePane.tsx
  create mode 100644 apps/web/src/plutonium/files/SplitRow.tsx
  create mode 100644 apps/web/src/plutonium/files/carry.ts
  create mode 100644 apps/web/src/plutonium/files/fileKeys.test.ts
  create mode 100644 apps/web/src/plutonium/files/fileKeys.ts
+ create mode 100644 apps/web/src/plutonium/files/filePanes.test.ts
+ create mode 100644 apps/web/src/plutonium/files/filePanes.ts
  create mode 100644 apps/web/src/plutonium/files/filesCore.ts
  create mode 100644 apps/web/src/plutonium/files/filesStore.ts
  create mode 100644 apps/web/src/plutonium/files/ownsKey.test.ts
@@ -149,19 +153,18 @@ index 4e17fdebf7..308b50c62f 100644
      activeElement.getAttribute("role") === "textbox"
    ) {
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index d1225065ae..123690bf15 100644
+index d1225065ae..8a9ddc7c34 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -40,6 +40,8 @@ import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnviron
+@@ -40,6 +40,7 @@ import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnviron
  import { useStableCallback } from "../hooks/useStableCallback";
  import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
  import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
-+import { PlutoniumFilesRow } from "../plutonium/files/PlutoniumFilesRow";
 +import { useThreadPlutonium } from "../plutonium/useThreadPlutonium";
  import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
  import { isScratchProject } from "@t3tools/client-runtime/state/projects";
  import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
-@@ -1887,6 +1889,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1887,6 +1888,7 @@ export default function ChatView(props: ChatViewProps) {
      runShellCommandStable,
      splitPanelTerminalStable,
      splitPanelTerminalVerticalStable,
@@ -169,13 +172,14 @@ index d1225065ae..123690bf15 100644
      toggleTerminalVisibilityStable,
      shortcuts: terminalShortcuts,
    } = useChatTerminalActions({
-@@ -2385,6 +2388,24 @@ export default function ChatView(props: ChatViewProps) {
+@@ -2385,6 +2387,25 @@ export default function ChatView(props: ChatViewProps) {
      closeRightPanelSurface,
    });
    const pullRequestSurfaceAvailable = supportsPullRequests && pullRequestPanelTarget !== null;
 +  const plutonium = useThreadPlutonium({
 +    threadRef: activeThreadRef,
 +    projectId: activeProject?.id ?? null,
++    projectFolder: activeProject?.workspaceRoot ?? null,
 +    keybindings,
 +    canOperatePreview,
 +    surfaces: renderedRightPanelSurfaces,
@@ -216,7 +220,7 @@ index d1225065ae..123690bf15 100644
            <ThreadFindCanvas
              findOptions={{
                skills: timelineSkills,
-@@ -3923,18 +3950,27 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3923,18 +3950,19 @@ export default function ChatView(props: ChatViewProps) {
          </div>
  
          {embedded ? null : (
@@ -232,13 +236,6 @@ index d1225065ae..123690bf15 100644
 -            keybindings={keybindings}
 -            onAddTerminalContext={addTerminalContextToDraftStable}
 -          />
-+          <PlutoniumFilesRow
-+            threadRef={activeThreadRef}
-+            projectFolder={activeWorkspaceRoot ?? null}
-+            terminalOpen={Boolean(terminalUiState.terminalOpen)}
-+            terminalFills={plutonium.terminalFoldedAway}
-+            setTerminalOpen={setTerminalOpenStable}
-+          >
 +            <ChatTerminalDrawers
 +              activeThreadKey={activeThreadKey}
 +              activeTerminalOpen={Boolean(terminalUiState.terminalOpen)}
@@ -252,11 +249,10 @@ index d1225065ae..123690bf15 100644
 +              onAddTerminalContext={addTerminalContextToDraftStable}
 +              fillActive={plutonium.terminalFoldedAway}
 +            />
-+          </PlutoniumFilesRow>
          )}
        </div>
  
-@@ -3945,6 +3981,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3945,6 +3973,7 @@ export default function ChatView(props: ChatViewProps) {
            widthStorageKey={`t3code:preview-panel-width:${activeThreadKey}`}
            sheetAnimationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
            onCloseSheet={closePreviewPanelStable}
@@ -264,7 +260,7 @@ index d1225065ae..123690bf15 100644
            open={rightPanelOpen}
            keybindings={keybindings}
            getShortcutContext={getShortcutContextStable}
-@@ -3987,6 +4024,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3987,6 +4016,7 @@ export default function ChatView(props: ChatViewProps) {
            onAddPullRequest={addPullRequestSurfaceStable}
            onAddPullRequests={addPullRequestsSurfaceStable}
            onAddDevice={addDeviceSurfaceStable}
@@ -272,7 +268,7 @@ index d1225065ae..123690bf15 100644
            onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
            browserAvailable={canOperatePreview && browserAvailable}
            terminalAvailable={activeProject !== null && canOperateTerminal}
-@@ -3995,6 +4033,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3995,6 +4025,7 @@ export default function ChatView(props: ChatViewProps) {
            pullRequestAvailable={pullRequestSurfaceAvailable}
            pullRequestsAvailable={pullRequestsSurfaceAvailable}
            deviceAvailable={activeThreadRef !== null}
@@ -348,10 +344,18 @@ index f14a483d53..a6fd8d0056 100644
          <OpenCommandPaletteDialog
            key={props.session}
 diff --git a/apps/web/src/components/PersistentThreadTerminals.tsx b/apps/web/src/components/PersistentThreadTerminals.tsx
-index a387349b4c..eea544162d 100644
+index a387349b4c..b09661879e 100644
 --- a/apps/web/src/components/PersistentThreadTerminals.tsx
 +++ b/apps/web/src/components/PersistentThreadTerminals.tsx
-@@ -85,12 +85,15 @@ interface PersistentThreadTerminalDrawerProps {
+@@ -23,6 +23,7 @@ import { useProject, useQuietThreadShell } from "../state/entities";
+ import { useEnvironmentScope } from "../state/session";
+ import { useKnownTerminalSessions } from "../state/terminalSessions";
+ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
++import { closeFilePane, isFilePane } from "../plutonium/files/filePanes";
+ import { useThreadTerminalActions } from "./terminal/useThreadTerminalActions";
+ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
+ import { resolveTerminalWorktreePath } from "./ChatView.logic";
+@@ -85,12 +86,15 @@ interface PersistentThreadTerminalDrawerProps {
    closeShortcutLabel: string | undefined;
    keybindings: ResolvedKeybindingsConfig;
    onAddTerminalContext: (selection: TerminalContextSelection) => void;
@@ -367,7 +371,42 @@ index a387349b4c..eea544162d 100644
    composerHeight,
    launchContext,
    splitShortcutLabel,
-@@ -241,7 +244,8 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+@@ -161,19 +165,20 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+   const storeSetActiveTerminal = useTerminalUiStateStore((state) => state.setActiveTerminal);
+   const storeCloseTerminal = useTerminalUiStateStore((state) => state.closeTerminal);
+   const reconcileTerminalIds = useTerminalUiStateStore((state) => state.reconcileTerminalIds);
++  // Plutonium: file panes share the drawer's ids, and the server has never heard of them.
++  const filePaneIds = terminalUiState.terminalIds.filter(isFilePane);
++  const sessionTerminalIds = terminalUiState.terminalIds.filter((id) => !isFilePane(id));
+ 
+   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reconciles the terminal UI store's ids with the server's terminal list when they diverge
+   useEffect(() => {
+-    if (terminalIdListsEqual(serverOrderedTerminalIds, terminalUiState.terminalIds)) {
++    if (terminalIdListsEqual(serverOrderedTerminalIds, sessionTerminalIds)) {
+       return;
+     }
+-    if (
+-      serverTerminalIdsStrictSubsetOfClient(serverOrderedTerminalIds, terminalUiState.terminalIds)
+-    ) {
++    if (serverTerminalIdsStrictSubsetOfClient(serverOrderedTerminalIds, sessionTerminalIds)) {
+       return;
+     }
+-    reconcileTerminalIds(threadRef, serverOrderedTerminalIds);
+-  }, [reconcileTerminalIds, serverOrderedTerminalIds, terminalUiState.terminalIds, threadRef]);
++    reconcileTerminalIds(threadRef, [...serverOrderedTerminalIds, ...filePaneIds]);
++  }, [filePaneIds, reconcileTerminalIds, serverOrderedTerminalIds, sessionTerminalIds, threadRef]);
+   const worktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
+   const effectiveWorktreePath = launchContext !== null ? launchContext.worktreePath : worktreePath;
+   const cwd =
+@@ -221,6 +226,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+   };
+ 
+   const closeTerminal = useStableCallback((terminalId: string) => {
++    if (isFilePane(terminalId)) return closeFilePane(threadRef, terminalId);
+     if (!terminalActions.canWrite()) return;
+     terminalActions.closeTerminalSession(terminalId);
+     storeCloseTerminal(threadRef, terminalId);
+@@ -241,7 +247,8 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
    return (
      <div
        className={cn(
@@ -377,7 +416,7 @@ index a387349b4c..eea544162d 100644
          active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
          active &&
            "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
-@@ -256,6 +260,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
+@@ -256,10 +263,15 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
            worktreePath={effectiveWorktreePath}
            runtimeEnv={runtimeEnv}
            visible={visible}
@@ -385,6 +424,15 @@ index a387349b4c..eea544162d 100644
            height={terminalUiState.terminalHeight}
            composerHeight={composerHeight}
            // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
+-          terminalIds={canOperateTerminal ? terminalUiState.terminalIds : serverOrderedTerminalIds}
++          terminalIds={
++            canOperateTerminal
++              ? terminalUiState.terminalIds
++              : [...serverOrderedTerminalIds, ...filePaneIds]
++          }
+           activeTerminalId={terminalUiState.activeTerminalId}
+           terminalGroups={terminalUiState.terminalGroups}
+           activeTerminalGroupId={terminalUiState.activeTerminalGroupId}
 diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
 index 596bdee96a..c310a8b0d8 100644
 --- a/apps/web/src/components/RightPanelTabs.tsx
@@ -780,10 +828,32 @@ index 596bdee96a..c310a8b0d8 100644
              sideChatDisabledReason={props.sideChatDisabledReason ?? null}
            />
 diff --git a/apps/web/src/components/ThreadTerminalDrawer.tsx b/apps/web/src/components/ThreadTerminalDrawer.tsx
-index 88a945becc..2e20e90167 100644
+index 88a945becc..7addb2d094 100644
 --- a/apps/web/src/components/ThreadTerminalDrawer.tsx
 +++ b/apps/web/src/components/ThreadTerminalDrawer.tsx
-@@ -1179,6 +1179,8 @@ interface ThreadTerminalDrawerProps {
+@@ -12,6 +12,8 @@ import {
+   type TerminalSessionState,
+ } from "@t3tools/client-runtime/state/terminal";
+ import {
++  Folder,
++  FolderPlus,
+   Plus,
+   Square,
+   SquareSplitHorizontal,
+@@ -57,7 +59,12 @@ import {
+   type GhosttyTerminalSurfaceOptions,
+ } from "~/terminal/ghostty/surface";
+ import { type GhosttyColor, type GhosttyTheme } from "~/terminal/ghostty/core";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+ import { useOpenInPreferredEditor } from "../editorPreferences";
++import { isFilePane, openFilePane } from "../plutonium/files/filePanes";
++import { useFilesStore } from "../plutonium/files/filesStore";
++import { PlutoniumFilePane } from "../plutonium/files/PlutoniumFilePane";
++import { usePlutoniumWindowStore } from "../plutonium/windowStore";
+ import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+ import { isTerminalUrl } from "../terminal-links";
+ import {
+@@ -1179,6 +1186,8 @@ interface ThreadTerminalDrawerProps {
    worktreePath?: string | null;
    runtimeEnv?: Record<string, string>;
    visible?: boolean;
@@ -792,7 +862,115 @@ index 88a945becc..2e20e90167 100644
    height: number;
    /** Space the chat column keeps for the composer overlay; only read in drawer mode. */
    composerHeight?: number;
-@@ -1436,6 +1438,7 @@ export default function ThreadTerminalDrawer({
+@@ -1248,6 +1257,8 @@ function TerminalActionButton({
+ 
+ function TerminalSplitPanes({
+   terminalIds,
++  keptFilePanes,
++  projectFolder,
+   splitDirection,
+   activeTerminalId,
+   terminalLabelById,
+@@ -1262,6 +1273,9 @@ function TerminalSplitPanes({
+   keybindings,
+ }: {
+   terminalIds: readonly string[];
++  /** Plutonium: file panes not on show, kept as they were: a terminal lives on its server. */
++  keptFilePanes: readonly string[];
++  projectFolder: string;
+   splitDirection: "horizontal" | "vertical";
+   activeTerminalId: string;
+   terminalLabelById: ReadonlyMap<string, string>;
+@@ -1288,12 +1302,13 @@ function TerminalSplitPanes({
+             }
+       }
+     >
+-      {terminalIds.map((terminalId) => {
++      {[...terminalIds, ...keptFilePanes].map((terminalId) => {
+         const terminalLaunchLocation = resolveLaunchLocation(terminalId);
++        const away = !terminalIds.includes(terminalId);
+         return (
+           <div
+             key={terminalId}
+-            className={`min-h-0 min-w-0 ${
++            className={`min-h-0 min-w-0 ${away ? "hidden" : ""} ${
+               splitDirection === "vertical"
+                 ? "border-t first:border-t-0"
+                 : "border-l first:border-l-0"
+@@ -1305,24 +1320,33 @@ function TerminalSplitPanes({
+             }}
+           >
+             <div className="h-full">
+-              <TerminalViewport
+-                advancedTypography={advancedTypography}
+-                threadRef={threadRef}
+-                threadId={threadId}
+-                terminalId={terminalId}
+-                terminalLabel={terminalLabelById.get(terminalId) ?? "Terminal"}
+-                cwd={terminalLaunchLocation.cwd}
+-                {...(terminalLaunchLocation.worktreePath !== undefined
+-                  ? { worktreePath: terminalLaunchLocation.worktreePath }
+-                  : {})}
+-                {...(terminalLaunchLocation.runtimeEnv
+-                  ? { runtimeEnv: terminalLaunchLocation.runtimeEnv }
+-                  : {})}
+-                onSessionExited={() => onCloseTerminal(terminalId, threadRef)}
+-                onAddTerminalContext={onAddTerminalContext}
+-                visible={visible}
+-                keybindings={keybindings}
+-              />
++              {isFilePane(terminalId) ? (
++                <PlutoniumFilePane
++                  threadRef={threadRef}
++                  paneId={terminalId}
++                  projectFolder={projectFolder}
++                  shown={visible && !away}
++                />
++              ) : (
++                <TerminalViewport
++                  advancedTypography={advancedTypography}
++                  threadRef={threadRef}
++                  threadId={threadId}
++                  terminalId={terminalId}
++                  terminalLabel={terminalLabelById.get(terminalId) ?? "Terminal"}
++                  cwd={terminalLaunchLocation.cwd}
++                  {...(terminalLaunchLocation.worktreePath !== undefined
++                    ? { worktreePath: terminalLaunchLocation.worktreePath }
++                    : {})}
++                  {...(terminalLaunchLocation.runtimeEnv
++                    ? { runtimeEnv: terminalLaunchLocation.runtimeEnv }
++                    : {})}
++                  onSessionExited={() => onCloseTerminal(terminalId, threadRef)}
++                  onAddTerminalContext={onAddTerminalContext}
++                  visible={visible}
++                  keybindings={keybindings}
++                />
++              )}
+             </div>
+           </div>
+         );
+@@ -1389,6 +1413,7 @@ function TerminalSidebarGroup({
+         {terminalGroup.terminalIds.map((terminalId) => {
+           const isActive = terminalId === activeTerminalId;
+           const terminalLabel = terminalLabelById.get(terminalId) ?? "Terminal";
++          const EntryIcon = isFilePane(terminalId) ? Folder : TerminalSquare;
+           const closeTerminalLabel = `Close ${terminalLabel}${
+             isActive && closeShortcutLabel ? ` (${closeShortcutLabel})` : ""
+           }`;
+@@ -1408,10 +1433,10 @@ function TerminalSidebarGroup({
+                   onClick={() => onCloseTerminal(terminalId)}
+                   tooltip={closeTerminalLabel}
+                 >
+-                  <TerminalSquare className="size-3 shrink-0" />
++                  <EntryIcon className="size-3 shrink-0" />
+                 </PanelTabCloseButton>
+               ) : (
+-                <TerminalSquare className="size-3 shrink-0" />
++                <EntryIcon className="size-3 shrink-0" />
+               )}
+               <button
+                 type="button"
+@@ -1436,6 +1461,7 @@ export default function ThreadTerminalDrawer({
    worktreePath,
    runtimeEnv,
    visible = true,
@@ -800,7 +978,52 @@ index 88a945becc..2e20e90167 100644
    height,
    composerHeight = 0,
    terminalIds,
-@@ -1748,11 +1751,15 @@ export default function ThreadTerminalDrawer({
+@@ -1459,7 +1485,9 @@ export default function ThreadTerminalDrawer({
+ }: ThreadTerminalDrawerProps) {
+   const canOperateTerminal = useEnvironmentScope(threadRef.environmentId, AuthTerminalOperateScope);
+   const terminalArea = workspaceAreaProps("terminal", 5, "Terminal");
++  const filePaneDirs = useFilesStore((state) => state.paneDirs[scopedThreadKey(threadRef)]);
+   const isPanel = mode === "panel";
++  const filesAvailable = usePlutoniumWindowStore((state) => state.available) && !isPanel;
+   const [advancedTypography] = useLocalStorage(
+     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
+     false,
+@@ -1573,6 +1601,11 @@ export default function ThreadTerminalDrawer({
+   const terminalLabelById = (() => {
+     const next = new Map<string, string>();
+     for (const terminalId of normalizedTerminalIds) {
++      if (isFilePane(terminalId)) {
++        const folder = filePaneDirs?.[terminalId]?.split("/").filter(Boolean).pop();
++        next.set(terminalId, folder ?? "Files");
++        continue;
++      }
+       next.set(terminalId, terminalLabelsById?.get(terminalId) ?? getTerminalLabel(terminalId));
+     }
+     return next;
+@@ -1598,7 +1631,13 @@ export default function ThreadTerminalDrawer({
+     (normalizedTerminalIds.length > 0 ? [resolvedActiveTerminalId] : []);
+   const splitDirection =
+     resolvedTerminalGroups[resolvedActiveGroupIndex]?.splitDirection ?? "horizontal";
+-  const hasTerminalSidebar = normalizedTerminalIds.length > 1;
++  // Plutonium: a file pane has a toolbar of its own where the floating buttons would go.
++  const hasTerminalSidebar =
++    normalizedTerminalIds.length > 1 || normalizedTerminalIds.some(isFilePane);
++  const keptFilePanes = normalizedTerminalIds.filter(
++    (terminalId) => isFilePane(terminalId) && !visibleTerminalIds.includes(terminalId),
++  );
++  const filesActionLabel = "New File Manager";
+   const showGroupHeaders =
+     resolvedTerminalGroups.length > 1 ||
+     resolvedTerminalGroups.some((terminalGroup) => terminalGroup.terminalIds.length > 1);
+@@ -1638,6 +1677,7 @@ export default function ThreadTerminalDrawer({
+     onNewTerminal();
+   };
+   const confirmCloseTerminal = (terminalId: string) => {
++    if (isFilePane(terminalId)) return onCloseTerminal(terminalId, threadRef);
+     if (!canOperateTerminal) return;
+     const label = terminalLabelById.get(terminalId) ?? getTerminalLabel(terminalId);
+     void confirmTerminalClose([label]).then((confirmed) => {
+@@ -1748,11 +1788,15 @@ export default function ThreadTerminalDrawer({
          data-terminal-owner={isPanel ? "right-panel" : "drawer"}
          className={cn(
            "relative flex min-w-0 flex-col overflow-hidden bg-background",
@@ -819,7 +1042,7 @@ index 88a945becc..2e20e90167 100644
            <div
              className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
              onPointerDown={handleResizePointerDown}
-@@ -1785,11 +1792,13 @@ export default function ThreadTerminalDrawer({
+@@ -1785,11 +1829,13 @@ export default function ThreadTerminalDrawer({
        data-terminal-owner={isPanel ? "right-panel" : "drawer"}
        className={cn(
          "relative flex min-w-0 flex-col overflow-hidden bg-background",
@@ -836,6 +1059,53 @@ index 88a945becc..2e20e90167 100644
          <div
            className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
            onPointerDown={handleResizePointerDown}
+@@ -1837,6 +1883,18 @@ export default function ThreadTerminalDrawer({
+             >
+               <Plus className="size-3.25" />
+             </TerminalActionButton>
++            {filesAvailable ? (
++              <>
++                <div className="h-4 w-px bg-border/80" />
++                <TerminalActionButton
++                  className="p-1 text-foreground/90 transition-colors hover:bg-accent"
++                  onClick={() => openFilePane(threadRef)}
++                  label={filesActionLabel}
++                >
++                  <FolderPlus className="size-3.25" />
++                </TerminalActionButton>
++              </>
++            ) : null}
+             <div className="h-4 w-px bg-border/80" />
+             <TerminalActionButton
+               disabled={!canOperateTerminal}
+@@ -1860,6 +1918,8 @@ export default function ThreadTerminalDrawer({
+           <div className="min-w-0 flex-1">
+             <TerminalSplitPanes
+               terminalIds={visibleTerminalIds}
++              keptFilePanes={keptFilePanes}
++              projectFolder={cwd}
+               splitDirection={splitDirection}
+               activeTerminalId={resolvedActiveTerminalId}
+               terminalLabelById={terminalLabelById}
+@@ -1911,8 +1971,17 @@ export default function ThreadTerminalDrawer({
+                   >
+                     <Plus className="size-3.25" />
+                   </TerminalActionButton>
++                  {filesAvailable ? (
++                    <TerminalActionButton
++                      className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
++                      onClick={() => openFilePane(threadRef)}
++                      label={filesActionLabel}
++                    >
++                      <FolderPlus className="size-3.25" />
++                    </TerminalActionButton>
++                  ) : null}
+                   <TerminalActionButton
+-                    disabled={!canOperateTerminal}
++                    disabled={!canOperateTerminal && !isFilePane(resolvedActiveTerminalId)}
+                     className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
+                     onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+                     label={closeTerminalActionLabel}
 diff --git a/apps/web/src/components/chat/ChatTerminalDrawers.tsx b/apps/web/src/components/chat/ChatTerminalDrawers.tsx
 index c6e14b90ec..8cc800c1b2 100644
 --- a/apps/web/src/components/chat/ChatTerminalDrawers.tsx
@@ -994,6 +1264,59 @@ index 90e49994f8..7c7fbc178f 100644
  export function GuestMessageName({ name }: { readonly name: string }) {
    return (
      <p className="me-1 text-2xs text-guest-foreground">
+diff --git a/apps/web/src/components/chat/useChatTerminalActions.ts b/apps/web/src/components/chat/useChatTerminalActions.ts
+index 55c2a8380d..7855b1483b 100644
+--- a/apps/web/src/components/chat/useChatTerminalActions.ts
++++ b/apps/web/src/components/chat/useChatTerminalActions.ts
+@@ -23,6 +23,7 @@ import {
+   squashAtomCommandFailure,
+ } from "@t3tools/client-runtime/state/runtime";
+ import { MAX_TERMINALS_PER_GROUP } from "../../types";
++import { filesCoverTerminals, isFilePane } from "../../plutonium/files/filePanes";
+ import {
+   selectThreadRightPanelState,
+   type RightPanelSurface,
+@@ -142,14 +143,17 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
+   const setTerminalOpenStable = useStableCallback(setTerminalOpen);
+   const toggleTerminalVisibility = () => {
+     if (!activeThreadRef) return;
+-    const nextOpen = !terminalUiState.terminalOpen;
++    // Plutonium: over a file pane this key means the terminals, and there may be none yet.
++    const overFiles = filesCoverTerminals(terminalUiState);
++    const terminalIds = terminalUiState.terminalIds.filter((id) => !isFilePane(id));
++    const nextOpen = !terminalUiState.terminalOpen || overFiles;
+     if (
+       nextOpen &&
+       !readEnvironmentScope(environmentId, AuthTerminalReadScope) &&
+       !hasTerminalWriteAccess()
+     )
+       return;
+-    if (nextOpen && hasTerminalWriteAccess() && terminalUiState.terminalIds.length === 0) {
++    if (nextOpen && hasTerminalWriteAccess() && terminalIds.length === 0) {
+       // Server-created setup terminals exist before this client's drawer mounts.
+       // Reuse them before allocating a shell from the still-empty UI state.
+       const existingTerminalId =
+@@ -166,6 +170,8 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
+       focusActiveDrawerTerminal(activeThreadRef);
+       return;
+     }
++    const terminal = overFiles ? terminalIds.at(-1) : undefined;
++    if (terminal) useTerminalUiStateStore.getState().setActiveTerminal(activeThreadRef, terminal);
+     setTerminalOpen(nextOpen);
+   };
+   const toggleTerminalVisibilityStable = useStableCallback(toggleTerminalVisibility);
+@@ -226,7 +232,10 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
+             // Server sessions cover drawer terminals this client has not opened yet, such as a
+             // worktree setup shell; the helper drops the panel-owned ones.
+             drawerTerminalIds: [
+-              ...new Set([...terminalUiState.terminalIds, ...activeServerOrderedTerminalIds]),
++              ...new Set([
++                ...terminalUiState.terminalIds.filter((id) => !isFilePane(id)),
++                ...activeServerOrderedTerminalIds,
++              ]),
+             ],
+             activeTerminalId: terminalUiState.activeTerminalId,
+             panelTerminalIds,
 diff --git a/apps/web/src/components/files/FilePreviewPanel.tsx b/apps/web/src/components/files/FilePreviewPanel.tsx
 index b88d92fc4e..af100571d8 100644
 --- a/apps/web/src/components/files/FilePreviewPanel.tsx
@@ -1056,15 +1379,19 @@ index 0881b84c52..da50c294c2 100644
          </span>
          {context ? <span className="text-sm">{context}</span> : null}
 diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
-index fc96aa1f85..438c865d71 100644
+index fc96aa1f85..4be11d671e 100644
 --- a/apps/web/src/keybindings.ts
 +++ b/apps/web/src/keybindings.ts
-@@ -1,3 +1,4 @@
-+import { isFileManagerBinding, plutoniumFilesFocused } from "./plutonium/files/ownsKey";
+@@ -1,3 +1,8 @@
++import {
++  isFileManagerBinding,
++  plutoniumFilesFocused,
++  plutoniumFuzzyOwnsKey,
++} from "./plutonium/files/ownsKey";
  import {
    type KeybindingCommand,
    type KeybindingShortcut,
-@@ -58,6 +59,8 @@ function resolvePlatform(options: ShortcutMatchOptions | undefined): string {
+@@ -58,6 +63,8 @@ function resolvePlatform(options: ShortcutMatchOptions | undefined): string {
    return options?.platform ?? navigator.platform;
  }
  
@@ -1073,7 +1400,7 @@ index fc96aa1f85..438c865d71 100644
  function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatchContext {
    return {
      terminalFocus: false,
-@@ -67,6 +70,8 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
+@@ -67,6 +74,8 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
      isWeb: !isElectron,
      isDesktop: isElectron,
      editableFocus: false,
@@ -1082,10 +1409,11 @@ index fc96aa1f85..438c865d71 100644
      ...options?.context,
    };
  }
-@@ -180,6 +185,17 @@ export function resolveShortcutCommand(
+@@ -180,6 +189,18 @@ export function resolveShortcutCommand(
    keybindings: ResolvedKeybindingsConfig,
    options?: ShortcutMatchOptions,
  ): KeybindingCommand | null {
++  if (plutoniumFuzzyOwnsKey(event)) return null;
 +  // The file manager's keys are its own while it has the keyboard (Ctrl+D isn't the diff).
 +  if (
 +    plutoniumFilesFocused() &&
@@ -1100,7 +1428,7 @@ index fc96aa1f85..438c865d71 100644
    const platform = resolvePlatform(options);
    const context = resolveContext(options);
    if (options?.context?.editableFocus === undefined && typeof document !== "undefined") {
-@@ -228,6 +244,10 @@ export function formatShortcutLabel(
+@@ -228,6 +249,10 @@ export function formatShortcutLabel(
    shortcut: KeybindingShortcut,
    platform = navigator.platform,
  ): string {
@@ -1111,6 +1439,19 @@ index fc96aa1f85..438c865d71 100644
    const keyLabel = formatShortcutKeyLabel(shortcut.key);
    const useMetaForMod = isMacPlatform(platform);
    const showMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
+diff --git a/apps/web/src/lib/terminalFocus.ts b/apps/web/src/lib/terminalFocus.ts
+index 6752063a7f..0b52155c85 100644
+--- a/apps/web/src/lib/terminalFocus.ts
++++ b/apps/web/src/lib/terminalFocus.ts
+@@ -10,6 +10,8 @@ export function getTerminalFocusOwner(): TerminalFocusOwner | null {
+   const activeElement = document.activeElement;
+   if (!(activeElement instanceof HTMLElement)) return null;
+   if (!activeElement.isConnected) return null;
++  // Plutonium: a file manager in the drawer isn't a terminal: its keys are its own.
++  if (activeElement.closest("[data-plutonium-files]")) return null;
+   const owner = activeElement.closest<HTMLElement>("[data-terminal-owner]")?.dataset.terminalOwner;
+   if (owner === "drawer" || owner === "right-panel") return owner;
+   return null;
 diff --git a/apps/web/src/plutonium/AppLauncher.tsx b/apps/web/src/plutonium/AppLauncher.tsx
 new file mode 100644
 index 0000000000..4de12eccd3
@@ -2141,10 +2482,10 @@ index 0000000000..ce66d4b17f
 +}
 diff --git a/apps/web/src/plutonium/files/FileManager.tsx b/apps/web/src/plutonium/files/FileManager.tsx
 new file mode 100644
-index 0000000000..74bf5fe70d
+index 0000000000..c1fcfad0a2
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/FileManager.tsx
-@@ -0,0 +1,1292 @@
+@@ -0,0 +1,1305 @@
 +// Plutonium: the file manager (docs/features/FILE_MANAGER.md): a tree, Yazi's three
 +// columns or a grid, with a fuzzy finder, driven by the mouse or by keys from Hydra's
 +// keybindings. The drawer, the Files panel and the picker are this in different
@@ -2163,7 +2504,6 @@ index 0000000000..74bf5fe70d
 +  HardDriveIcon,
 +  HouseIcon,
 +  ImageIcon,
-+  KeyboardIcon,
 +  LayoutGridIcon,
 +  ListTreeIcon,
 +  type LucideIcon,
@@ -2189,6 +2529,7 @@ index 0000000000..74bf5fe70d
 +import { PierreEntryIcon } from "~/components/chat/PierreEntryIcon";
 +import { DelimitedTablePreview } from "~/components/files/DelimitedTablePreview";
 +import { Button } from "~/components/ui/button";
++import { ToggleGroup, ToggleGroupItem } from "~/components/ui/toggle-group";
 +import { useRenderedAppearance } from "~/hooks/useTheme";
 +import { formatShortcutLabel } from "~/keybindings";
 +import { observeResize } from "~/lib/observeResize";
@@ -2205,6 +2546,7 @@ index 0000000000..74bf5fe70d
 +  type FileRow,
 +  ROW_HEIGHT,
 +  useFileManager,
++  takeKeyboard,
 +} from "./useFileManager";
 +
 +const ChatMarkdown = lazy(() => import("~/components/ChatMarkdown"));
@@ -2805,6 +3147,7 @@ index 0000000000..74bf5fe70d
 +    matched: number;
 +    total: number;
 +    scanning: boolean;
++    indexed?: number;
 +  } | null>(null);
 +  const [index, setIndex] = useState(0);
 +  const [marked, setMarked] = useState<ReadonlySet<string>>(new Set());
@@ -2862,6 +3205,16 @@ index 0000000000..74bf5fe70d
 +    state.setFuzzyOpen(false);
 +    state.focusRoot();
 +  };
++  const leave = () => (state.fuzzyOnly && state.cancelPick ? state.cancelPick() : close());
++
++  const input = useRef<HTMLInputElement>(null);
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the keyboard is the browser's, outside React
++  useEffect(() => {
++    takeKeyboard(input.current);
++    // Opened by a key from a tab or an app, whatever had it may hand it on a frame later.
++    const again = setTimeout(() => takeKeyboard(input.current), 120);
++    return () => clearTimeout(again);
++  }, []);
 +
 +  const onKeyDown = (event: React.KeyboardEvent) => {
 +    const down =
@@ -2884,11 +3237,14 @@ index 0000000000..74bf5fe70d
 +      if (marked.size > 0 && state.pickAll) state.pickAll([...marked].map(absolute));
 +      else if (event.ctrlKey || entry.kind === "dir") state.reveal(entry.path);
 +      else state.activate(entry);
-+    } else if (event.ctrlKey && event.key === "b" && chosen && !state.picking) {
++    } else if (event.ctrlKey && event.key === "b" && chosen && state.canCarry) {
++      const paths = pathsFor(chosen);
 +      close();
-+      void carryFiles(pathsFor(chosen));
++      state.cancelPick?.();
++      // After a floating finder has gone, so the pointer is over what's under it.
++      requestAnimationFrame(() => void carryFiles(paths));
 +    } else if (event.key === "Escape") {
-+      close();
++      leave();
 +    } else {
 +      event.stopPropagation();
 +      return;
@@ -2902,7 +3258,8 @@ index 0000000000..74bf5fe70d
 +      <div className="flex shrink-0 items-center gap-2.5 border-b border-border/70 px-3.5 py-2.5">
 +        <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
 +        <input
-+          autoFocus
++          ref={input}
++          data-plutonium-fuzzy=""
 +          value={query}
 +          aria-label="Fuzzy find"
 +          placeholder={`Search in ${dir.split("/").pop() || "/"}…`}
@@ -2915,7 +3272,9 @@ index 0000000000..74bf5fe70d
 +          onKeyDown={onKeyDown}
 +        />
 +        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-+          {found?.scanning ? "Indexing… " : ""}
++          {found?.scanning && found.total === 0
++            ? `Indexing${found.indexed ? ` ${found.indexed.toLocaleString()} files` : ""}… `
++            : ""}
 +          {(found?.matched ?? 0).toLocaleString()} of {(found?.total ?? 0).toLocaleString()}
 +        </span>
 +      </div>
@@ -2973,7 +3332,7 @@ index 0000000000..74bf5fe70d
 +        <KeyHint keys="Enter">open</KeyHint>
 +        <KeyHint keys="Tab">mark</KeyHint>
 +        <KeyHint keys="Ctrl+Enter">go to</KeyHint>
-+        {state.picking ? null : <KeyHint keys="Ctrl+B">pick up</KeyHint>}
++        {state.canCarry ? <KeyHint keys="Ctrl+B">pick up</KeyHint> : null}
 +        <span className="ml-auto">Drag a result to use it anywhere</span>
 +      </div>
 +    </div>
@@ -3107,7 +3466,7 @@ index 0000000000..74bf5fe70d
 +    </Button>
 +  );
 +  return (
-+    <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 px-1.5">
++    <div className="@container/toolbar flex h-10 shrink-0 items-center gap-1 border-b border-border/70 px-1.5">
 +      {tool("Back", ArrowLeftIcon, "back", false, !state.canGoBack)}
 +      {tool("Forward", ArrowRightIcon, "forward", false, !state.canGoForward)}
 +      {tool("Parent folder", ArrowUpIcon, "parent", false, state.dir === "/")}
@@ -3121,33 +3480,29 @@ index 0000000000..74bf5fe70d
 +        <SearchIcon className="size-3.5" />
 +        Search
 +      </button>
-+      <div
-+        className="flex shrink-0 items-center rounded-md bg-muted/50 p-0.5"
-+        role="group"
++      <ToggleGroup
 +        aria-label="View"
++        className="mx-1 shrink-0"
++        value={[settings.view]}
++        onValueChange={(next: string[]) => {
++          // One of the three is always on: pressing it again changes nothing.
++          const chosen = VIEWS.find(({ view }) => view === next[0]);
++          if (chosen) state.run(chosen.command);
++          state.focusRoot();
++        }}
 +      >
-+        {VIEWS.map(({ view, command, icon: Icon, label }) => (
-+          <button
++        {VIEWS.map(({ view, icon: Icon, label }) => (
++          <ToggleGroupItem
 +            key={view}
-+            type="button"
-+            tabIndex={-1}
++            value={view}
 +            aria-label={label}
-+            aria-pressed={settings.view === view}
-+            className={cn(
-+              "flex size-6 items-center justify-center rounded transition-colors",
-+              settings.view === view
-+                ? "bg-background text-foreground shadow-sm"
-+                : "text-muted-foreground hover:text-foreground",
-+            )}
-+            onClick={() => {
-+              state.run(command);
-+              state.focusRoot();
-+            }}
++            title={label}
 +          >
 +            <Icon className="size-3.5" />
-+          </button>
++            <span className="hidden @2xl/toolbar:inline">{label}</span>
++          </ToggleGroupItem>
 +        ))}
-+      </div>
++      </ToggleGroup>
 +      {tool(
 +        settings.hidden ? "Hide dot files" : "Show dot files",
 +        settings.hidden ? EyeIcon : EyeOffIcon,
@@ -3158,7 +3513,6 @@ index 0000000000..74bf5fe70d
 +        ? null
 +        : tool("Preview", PanelRightIcon, "togglePreview", settings.preview)}
 +      {state.canSplit ? tool("Open another beside this", SplitIcon, "split") : null}
-+      {tool("Keys", KeyboardIcon, "help")}
 +    </div>
 +  );
 +}
@@ -3358,8 +3712,8 @@ index 0000000000..74bf5fe70d
 +  readonly className?: string;
 +  /** Places down the side: where there's the width for it. */
 +  readonly showPlaces?: boolean;
-+  /** Takes the keyboard when it appears. */
-+  readonly autoFocus?: boolean;
++  /** Truthy takes the keyboard once it's ready; a new value takes it again. */
++  readonly autoFocus?: boolean | number;
 +  /** Reports the state, for a picker's footer. */
 +  readonly stateRef?: React.RefObject<FileManagerState | null>;
 +}
@@ -3439,7 +3793,7 @@ index 0000000000..74bf5fe70d
 +}
 diff --git a/apps/web/src/plutonium/files/FilePicker.tsx b/apps/web/src/plutonium/files/FilePicker.tsx
 new file mode 100644
-index 0000000000..a52dd2e451
+index 0000000000..c036a09361
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/FilePicker.tsx
 @@ -0,0 +1,313 @@
@@ -3501,7 +3855,7 @@ index 0000000000..a52dd2e451
 +  useEffect(() => {
 +    // Chrome's default for a page that never chose is its profile folder: not a place to start.
 +    const asked = detail.currentFolder?.includes("/plutonium/profile") ? "" : detail.currentFolder;
-+    const folder = asked || lastPickerFolder.current;
++    const folder = asked || (detail.home ? "" : lastPickerFolder.current);
 +    if (folder) {
 +      // oxlint-disable-next-line react/set-state-in-effect -- what the helper or the page says, set once it has answered
 +      setHome(folder);
@@ -3511,7 +3865,7 @@ index 0000000000..a52dd2e451
 +      const places = await filesClient()?.places();
 +      setHome(places?.places.find((place) => place.kind === "home")?.path ?? "/");
 +    });
-+  }, [detail.currentFolder]);
++  }, [detail.currentFolder, detail.home]);
 +
 +  const finish = (paths: readonly string[] | null) => {
 +    if (paths) {
@@ -3594,8 +3948,8 @@ index 0000000000..a52dd2e451
 +            instance="picker"
 +            className="flex-1"
 +            initialDir={home}
-+            // A save starts with the name; everything else with the list.
-+            autoFocus={mode !== "save"}
++            // A save starts with the name, the finder with its search, the rest with the list.
++            autoFocus={mode !== "save" && !detail.fuzzy}
 +            showPlaces
 +            stateRef={stateRef}
 +            pick={{
@@ -3818,255 +4172,90 @@ index 0000000000..0ab2d853ca
 +    />
 +  );
 +}
-diff --git a/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx b/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
+diff --git a/apps/web/src/plutonium/files/PlutoniumFilePane.tsx b/apps/web/src/plutonium/files/PlutoniumFilePane.tsx
 new file mode 100644
-index 0000000000..20169dc362
+index 0000000000..36235a079e
 --- /dev/null
-+++ b/apps/web/src/plutonium/files/PlutoniumFilesDrawer.tsx
-@@ -0,0 +1,107 @@
-+// Plutonium: the file manager in a thread's bottom drawer (files.toggle). It takes the
-+// terminal's place, not a place beside it (PlutoniumFilesRow says which is on show), and
-+// stays mounted while it's away. It can hold several side by side (files.split), each
-+// with its own view.
-+import { useRef, useState } from "react";
-+
-+import { FileManager } from "./FileManager";
-+import { useFilesStore } from "./filesStore";
-+import { SplitRow } from "./SplitRow";
-+import { useFilesHome } from "./useFilesHome";
-+
-+const HEIGHT_KEY = "plutonium:file-drawer-height";
-+
-+function storedHeight() {
-+  try {
-+    return Number(localStorage.getItem(HEIGHT_KEY)) || 320;
-+  } catch {
-+    return 320;
-+  }
-+}
-+
-+export function PlutoniumFilesDrawer(props: {
-+  readonly threadKey: string | null;
-+  readonly threadId: string;
-+  readonly projectFolder: string | null;
-+  /** Terminals are open beside it: it takes their height. */
-+  readonly besideTerminal: boolean;
-+  readonly onOpenFile?: (path: string) => void;
-+  readonly onAddToChat?: (path: string) => void;
-+}) {
-+  const { threadKey, projectFolder, besideTerminal } = props;
-+  const panes = useFilesStore((state) => (threadKey ? state.drawers[threadKey] : undefined));
-+  const shown = useFilesStore((state) => Boolean(threadKey && state.shown[threadKey]));
-+  const splitDrawer = useFilesStore((state) => state.splitDrawer);
-+  const closePane = useFilesStore((state) => state.closePane);
-+  const showDrawer = useFilesStore((state) => state.showDrawer);
-+  const setPaneSizes = useFilesStore((state) => state.setPaneSizes);
-+  const home = useFilesHome(projectFolder);
-+  const [height, setHeight] = useState(storedHeight);
-+  const drag = useRef<{ startY: number; startHeight: number } | null>(null);
-+
-+  const onPointerMove = (event: React.PointerEvent) => {
-+    if (!drag.current) return;
-+    setHeight(
-+      Math.max(
-+        160,
-+        Math.min(
-+          window.innerHeight - 160,
-+          drag.current.startHeight + drag.current.startY - event.clientY,
-+        ),
-+      ),
-+    );
-+  };
-+
-+  if (!panes || !home || !threadKey) return null;
-+  return (
-+    <aside
-+      data-plutonium-files-drawer=""
-+      className="relative z-45 min-w-0 shrink-0 overflow-hidden data-[away]:hidden data-[beside]:border-r data-[beside]:[contain:size]"
-+      data-beside={besideTerminal ? "" : undefined}
-+      data-away={shown ? undefined : ""}
-+      style={besideTerminal ? undefined : { height }}
-+    >
-+      {besideTerminal ? null : (
-+        <div
-+          className="absolute inset-x-0 top-0 z-30 h-1.5 cursor-row-resize"
-+          onPointerDown={(event) => {
-+            drag.current = { startY: event.clientY, startHeight: height };
-+            event.currentTarget.setPointerCapture(event.pointerId);
-+          }}
-+          onPointerMove={onPointerMove}
-+          onPointerUp={() => {
-+            drag.current = null;
-+            try {
-+              localStorage.setItem(HEIGHT_KEY, String(height));
-+            } catch {
-+              // A private window: it lasts this session.
-+            }
-+          }}
-+        />
-+      )}
-+      <SplitRow
-+        className="h-full"
-+        ratios={panes.map((pane) => pane.size)}
-+        defaults={panes.map(() => 1)}
-+        onCommit={(sizes) => setPaneSizes(threadKey, sizes)}
-+      >
-+        {panes.map((pane) => (
-+          <FileManager
-+            key={pane.slot}
-+            instance={`drawer:${pane.slot}`}
-+            className="h-full"
-+            initialDir={pane.dir ?? home}
-+            project={projectFolder}
-+            thread={props.threadId}
-+            autoFocus={shown}
-+            onOpenFile={props.onOpenFile}
-+            onAddToChat={props.onAddToChat}
-+            onSplit={(dir) => splitDrawer(threadKey, dir)}
-+            onHide={() => showDrawer(threadKey, false)}
-+            onClose={() => closePane(threadKey, pane.slot)}
-+          />
-+        ))}
-+      </SplitRow>
-+    </aside>
-+  );
-+}
-diff --git a/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx b/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
-new file mode 100644
-index 0000000000..494d100d3a
---- /dev/null
-+++ b/apps/web/src/plutonium/files/PlutoniumFilesRow.tsx
-@@ -0,0 +1,132 @@
-+// Plutonium: what ChatView puts around its terminal drawers. The bottom of a thread shows
-+// the terminal or the file manager, one at a time, with a switch between them; both stay
-+// as they were while they're away. The switch can also put them side by side.
++++ b/apps/web/src/plutonium/files/PlutoniumFilePane.tsx
+@@ -0,0 +1,80 @@
++// Plutonium: the file manager as an entry in the terminal drawer (filePanes.ts). It stays
++// mounted while another entry is on show, and comes back where it was after a reload.
 +import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 +import type { ScopedThreadRef } from "@t3tools/contracts";
 +import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
-+import { ColumnsIcon, FolderIcon, TerminalSquareIcon } from "lucide-react";
-+import type { ReactNode } from "react";
-+import { useEffect, useRef } from "react";
++import { useEffect, useRef, useState } from "react";
 +
-+import { Button } from "~/components/ui/button";
 +import { useComposerHandleContext } from "~/composerHandleContext";
-+import { cn } from "~/lib/utils";
++import { consumePendingTerminalFocus, registerTerminalFocusTarget } from "~/lib/terminalFocus";
 +import { useRightPanelStore } from "~/rightPanelStore";
 +
++import { closeFilePane, filePaneSlot, hideDrawer, openFilePane } from "./filePanes";
++import { FileManager } from "./FileManager";
 +import { useFilesStore } from "./filesStore";
-+import { PlutoniumFilesDrawer } from "./PlutoniumFilesDrawer";
++import { useFilesHome } from "./useFilesHome";
 +
-+function SwitchTab(props: {
-+  readonly active: boolean;
-+  readonly label: string;
-+  readonly icon: ReactNode;
-+  readonly onClick: () => void;
++export function PlutoniumFilePane(props: {
++  readonly threadRef: ScopedThreadRef;
++  readonly paneId: string;
++  readonly projectFolder: string;
++  /** In the open drawer, in the group on show. */
++  readonly shown: boolean;
 +}) {
-+  return (
-+    <button
-+      type="button"
-+      aria-pressed={props.active}
-+      className={cn(
-+        "flex h-6 items-center gap-1.5 rounded-md px-2 text-xs transition-colors",
-+        props.active
-+          ? "bg-accent text-accent-foreground"
-+          : "text-muted-foreground hover:text-foreground",
-+      )}
-+      onClick={props.onClick}
-+    >
-+      {props.icon}
-+      {props.label}
-+    </button>
-+  );
-+}
-+
-+export function PlutoniumFilesRow(props: {
-+  readonly threadRef: ScopedThreadRef | null;
-+  readonly projectFolder: string | null;
-+  readonly terminalOpen: boolean;
-+  /** The chat is folded away for the terminal: the terminal has the column. */
-+  readonly terminalFills: boolean;
-+  readonly setTerminalOpen: (open: boolean) => void;
-+  readonly children: ReactNode;
-+}) {
-+  const { threadRef, terminalOpen, setTerminalOpen } = props;
-+  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
-+  const filesShown = useFilesStore(
-+    (state) => threadKey !== null && Boolean(state.shown[threadKey]),
-+  );
-+  const showDrawer = useFilesStore((state) => state.showDrawer);
-+  const sideBySide = useFilesStore((state) => state.beside);
-+  const setBeside = useFilesStore((state) => state.setBeside);
++  const { threadRef, paneId, projectFolder, shown } = props;
++  const threadKey = scopedThreadKey(threadRef);
++  const dir = useFilesStore((state) => state.paneDirs[threadKey]?.[paneId]);
++  const setPaneDir = useFilesStore((state) => state.setPaneDir);
++  const home = useFilesHome(projectFolder);
 +  const composer = useComposerHandleContext();
-+  const beside = sideBySide && filesShown && terminalOpen && !props.terminalFills;
++  // Each request for the keyboard, for the file manager to take it once it's ready.
++  const [focusRequest, setFocusRequest] = useState(0);
++  const shownNow = useRef(shown);
 +
-+  // One at a time: whichever just came up sends the other away.
-+  const before = useRef({ filesShown, terminalOpen });
-+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the terminal's open state is T3's store, and either side can change it
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the terminal drawer's focus requests, outside React
 +  useEffect(() => {
-+    const was = before.current;
-+    before.current = { filesShown, terminalOpen };
-+    if (sideBySide || !filesShown || !terminalOpen || !threadKey) return;
-+    if (!was.filesShown) setTerminalOpen(false);
-+    else showDrawer(threadKey, false);
-+  }, [filesShown, setTerminalOpen, showDrawer, sideBySide, terminalOpen, threadKey]);
++    shownNow.current = shown;
++    if (shown) consumePendingTerminalFocus(threadRef, paneId);
++  }, [paneId, shown, threadRef]);
 +
-+  const switcher = threadKey && (filesShown || terminalOpen) && !props.terminalFills;
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the terminal drawer's focus requests, outside React
++  useEffect(
++    () =>
++      registerTerminalFocusTarget({
++        threadRef,
++        terminalId: paneId,
++        focus: () => {
++          if (!shownNow.current) return false;
++          setFocusRequest((count) => count + 1);
++          return true;
++        },
++      }),
++    [paneId, threadRef],
++  );
++
++  if (!home) return null;
 +  return (
-+    <>
-+      {switcher ? (
-+        <div className="flex h-8 shrink-0 items-center gap-1 border-t border-border/80 bg-background px-2">
-+          <SwitchTab
-+            active={terminalOpen}
-+            label="Terminal"
-+            icon={<TerminalSquareIcon className="size-3.5" />}
-+            onClick={() => setTerminalOpen(sideBySide ? !terminalOpen : true)}
-+          />
-+          <SwitchTab
-+            active={filesShown}
-+            label="Files"
-+            icon={<FolderIcon className="size-3.5" />}
-+            onClick={() => showDrawer(threadKey, sideBySide ? !filesShown : true)}
-+          />
-+          <Button
-+            size="icon-xs"
-+            variant={sideBySide ? "secondary" : "ghost"}
-+            aria-label="Terminal and files side by side"
-+            aria-pressed={sideBySide}
-+            className="ml-auto"
-+            onClick={() => setBeside(!sideBySide)}
-+          >
-+            <ColumnsIcon />
-+          </Button>
-+        </div>
-+      ) : null}
-+      <div
-+        className={
-+          beside
-+            ? "grid min-h-0 min-w-0 shrink-0 grid-cols-2 border-t border-border/80"
-+            : "contents"
-+        }
-+      >
-+        {threadRef ? (
-+          <PlutoniumFilesDrawer
-+            threadKey={threadKey}
-+            threadId={threadRef.threadId}
-+            projectFolder={props.projectFolder}
-+            besideTerminal={beside}
-+            onOpenFile={(path) => {
-+              const panel = useRightPanelStore.getState();
-+              panel.openFile(threadRef, path);
-+              panel.show(threadRef);
-+            }}
-+            onAddToChat={(path) =>
-+              composer?.current?.insertTextAtEnd(`${serializeComposerFileLink(path)} `, {
-+                ensureLeadingBoundary: true,
-+              })
-+            }
-+          />
-+        ) : null}
-+        {props.children}
-+      </div>
-+    </>
++    <FileManager
++      instance={`drawer:${filePaneSlot(paneId)}`}
++      className="h-full"
++      initialDir={dir ?? home}
++      project={projectFolder}
++      thread={threadRef.threadId}
++      autoFocus={focusRequest}
++      onDirChange={(next) => setPaneDir(threadKey, paneId, next)}
++      onOpenFile={(path) => {
++        const panel = useRightPanelStore.getState();
++        panel.openFile(threadRef, path);
++        panel.show(threadRef);
++      }}
++      onAddToChat={(path) =>
++        composer?.current?.insertTextAtEnd(`${serializeComposerFileLink(path)} `, {
++          ensureLeadingBoundary: true,
++        })
++      }
++      onSplit={(from) => openFilePane(threadRef, { split: true, dir: from })}
++      onHide={() => hideDrawer(threadRef)}
++      onClose={() => closeFilePane(threadRef, paneId)}
++    />
 +  );
 +}
 diff --git a/apps/web/src/plutonium/files/SplitRow.tsx b/apps/web/src/plutonium/files/SplitRow.tsx
@@ -4172,10 +4361,10 @@ index 0000000000..8d85bb72a3
 +}
 diff --git a/apps/web/src/plutonium/files/carry.ts b/apps/web/src/plutonium/files/carry.ts
 new file mode 100644
-index 0000000000..4b2f117ce5
+index 0000000000..172ce6cae2
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/carry.ts
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,81 @@
 +// Plutonium: carrying files with no mouse: they ride on the pointer until they're
 +// dropped (docs/features/FILE_MANAGER.md, "With no mouse"), and the key that picks them.
 +import { plutoniumShell } from "../windowStore";
@@ -4217,17 +4406,43 @@ index 0000000000..4b2f117ce5
 +
 +let nextCarry = 1_000_000;
 +
-+/** The carry key: pick something, and it rides on the pointer. */
-+export function pickAndCarry() {
++/** The carry key: pick something, and it rides on the pointer. `fuzzy` opens on the finder. */
++export function pickAndCarry({ fuzzy = false } = {}) {
 +  const store = useFilesStore.getState();
 +  if (store.picker) return;
 +  store.setPicker({
 +    id: nextCarry++,
-+    detail: { mode: "open-multiple", title: "Pick up", acceptLabel: "Pick up" },
++    detail: {
++      mode: "open-multiple",
++      title: "Pick up",
++      acceptLabel: "Pick up",
++      ...(fuzzy ? { fuzzy, home: true } : {}),
++    },
 +    asker: "",
 +    answer: (answer) => {
 +      // After the dialog has gone, so the pointer is over what's under it.
 +      if (answer?.paths.length) requestAnimationFrame(() => void carryFiles(answer.paths));
++    },
++  });
++}
++
++/** The floating fuzzy finder, over `dir` or the home folder. What's chosen goes to `open`. */
++export function findFloating(dir: string | null, open: (paths: readonly string[]) => void) {
++  const store = useFilesStore.getState();
++  if (store.picker) return;
++  store.setPicker({
++    id: nextCarry++,
++    detail: {
++      mode: "open-multiple",
++      title: "Find",
++      acceptLabel: "Open",
++      fuzzy: true,
++      find: true,
++      ...(dir ? { currentFolder: dir } : { home: true }),
++    },
++    asker: dir ?? "",
++    answer: (answer) => {
++      if (answer?.paths.length) open(answer.paths);
 +    },
 +  });
 +}
@@ -4363,6 +4578,161 @@ index 0000000000..5a5d478cf8
 +  }
 +  // A wrong second key ends the sequence, and is used up by it.
 +  return { command: null, pending: "", handled: pending !== "" };
++}
+diff --git a/apps/web/src/plutonium/files/filePanes.test.ts b/apps/web/src/plutonium/files/filePanes.test.ts
+new file mode 100644
+index 0000000000..c8f9acb47a
+--- /dev/null
++++ b/apps/web/src/plutonium/files/filePanes.test.ts
+@@ -0,0 +1,43 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { filePaneToShow, filesCoverTerminals, isFilePane, nextFilePaneId } from "./filePanes";
++
++const drawer = (
++  groups: readonly (readonly string[])[],
++  activeTerminalId: string,
++  terminalOpen = true,
++) => ({
++  terminalOpen,
++  terminalIds: groups.flat(),
++  activeTerminalId,
++  terminalGroups: groups.map((terminalIds, index) => ({
++    id: `group-${index}`,
++    terminalIds: [...terminalIds],
++  })),
++  activeTerminalGroupId: `group-${groups.findIndex((ids) => ids.includes(activeTerminalId))}`,
++});
++
++describe("file panes", () => {
++  it("takes the lowest free slot", () => {
++    expect(nextFilePaneId(["default"])).toBe("files:0");
++    expect(nextFilePaneId(["files:0", "default", "files:2"])).toBe("files:1");
++    expect(isFilePane("files:1")).toBe(true);
++    expect(isFilePane("default")).toBe(false);
++  });
++
++  it("has the terminal key bring up a terminal only over files alone", () => {
++    expect(filesCoverTerminals(drawer([["default"], ["files:0"]], "files:0"))).toBe(true);
++    expect(filesCoverTerminals(drawer([["default", "files:0"]], "files:0"))).toBe(false);
++    expect(filesCoverTerminals(drawer([["default"], ["files:0"]], "default"))).toBe(false);
++  });
++
++  it("goes to the pane on show, else the newest", () => {
++    expect(filePaneToShow(drawer([["default"]], "default"))).toBeNull();
++    expect(filePaneToShow(drawer([["files:0"], ["default", "files:1"]], "default"))).toBe(
++      "files:1",
++    );
++    expect(filePaneToShow(drawer([["files:0"], ["files:2"], ["default"]], "default"))).toBe(
++      "files:2",
++    );
++  });
++});
+diff --git a/apps/web/src/plutonium/files/filePanes.ts b/apps/web/src/plutonium/files/filePanes.ts
+new file mode 100644
+index 0000000000..6d1aeb3d41
+--- /dev/null
++++ b/apps/web/src/plutonium/files/filePanes.ts
+@@ -0,0 +1,100 @@
++// Plutonium: a file manager as an entry in a thread's terminal drawer. It's in the same
++// groups as the terminals, under a reserved id, so it gets their sidebar, splits, height
++// and place in the dock; it has no session on the server.
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import type { ScopedThreadRef } from "@t3tools/contracts";
++
++import { focusActiveDrawerTerminal, focusTerminal } from "~/lib/terminalFocus";
++import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
++import { MAX_TERMINALS_PER_GROUP, type ThreadTerminalGroup } from "~/types";
++
++import { usePlutoniumWindowStore } from "../windowStore";
++import { useFilesStore } from "./filesStore";
++
++const PANE_PREFIX = "files:";
++
++export const isFilePane = (terminalId: string) => terminalId.startsWith(PANE_PREFIX);
++
++/** Which of the file managers' saved views this one uses. */
++export const filePaneSlot = (terminalId: string) => terminalId.slice(PANE_PREFIX.length);
++
++/** The lowest free one, so a thread's first pane always has the first view. */
++export function nextFilePaneId(terminalIds: readonly string[]): string {
++  let slot = 0;
++  while (terminalIds.includes(`${PANE_PREFIX}${slot}`)) slot += 1;
++  return `${PANE_PREFIX}${slot}`;
++}
++
++interface DrawerState {
++  readonly terminalOpen: boolean;
++  readonly terminalIds: readonly string[];
++  readonly activeTerminalId: string;
++  readonly terminalGroups: readonly ThreadTerminalGroup[];
++  readonly activeTerminalGroupId: string;
++}
++
++function activeGroupIds(state: DrawerState): readonly string[] {
++  const group =
++    state.terminalGroups.find((entry) => entry.id === state.activeTerminalGroupId) ??
++    state.terminalGroups.find((entry) => entry.terminalIds.includes(state.activeTerminalId));
++  return group?.terminalIds ?? [];
++}
++
++/** The drawer's active entry shows files and no terminal: the terminal key has one to bring up. */
++export function filesCoverTerminals(state: DrawerState): boolean {
++  return isFilePane(state.activeTerminalId) && activeGroupIds(state).every(isFilePane);
++}
++
++/** The pane the files key goes to: one on show, else the newest. */
++export function filePaneToShow(state: DrawerState): string | null {
++  return activeGroupIds(state).find(isFilePane) ?? state.terminalIds.findLast(isFilePane) ?? null;
++}
++
++const drawerState = (threadRef: ScopedThreadRef) =>
++  selectThreadTerminalUiState(
++    useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
++    threadRef,
++  );
++
++export function openFilePane(
++  threadRef: ScopedThreadRef,
++  { split = false, dir }: { readonly split?: boolean; readonly dir?: string } = {},
++): void {
++  if (!usePlutoniumWindowStore.getState().available) return;
++  const state = drawerState(threadRef);
++  const id = nextFilePaneId(state.terminalIds);
++  if (dir) useFilesStore.getState().setPaneDir(scopedThreadKey(threadRef), id, dir);
++  const store = useTerminalUiStateStore.getState();
++  // A full group would ignore it: then it has an entry of its own.
++  if (split && activeGroupIds(state).length < MAX_TERMINALS_PER_GROUP) {
++    store.splitTerminal(threadRef, id);
++  } else store.newTerminal(threadRef, id);
++  focusTerminal(threadRef, id);
++}
++
++export function hideDrawer(threadRef: ScopedThreadRef): void {
++  useTerminalUiStateStore.getState().setTerminalOpen(threadRef, false);
++  // A closed drawer is clipped, not gone, and what's in it would keep the keys.
++  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
++}
++
++/** files.toggle: goes to the files, or, already there, puts the drawer away. */
++export function toggleFilePane(threadRef: ScopedThreadRef): void {
++  const state = drawerState(threadRef);
++  const pane = filePaneToShow(state);
++  if (!pane) return openFilePane(threadRef);
++  const hasKeyboard = document.activeElement?.closest(
++    "[data-thread-terminal-drawer] [data-plutonium-files]",
++  );
++  if (state.terminalOpen && hasKeyboard) return hideDrawer(threadRef);
++  const store = useTerminalUiStateStore.getState();
++  store.setActiveTerminal(threadRef, pane);
++  store.setTerminalOpen(threadRef, true);
++  focusTerminal(threadRef, pane);
++}
++
++export function closeFilePane(threadRef: ScopedThreadRef, id: string): void {
++  useFilesStore.getState().setPaneDir(scopedThreadKey(threadRef), id, null);
++  useTerminalUiStateStore.getState().closeTerminal(threadRef, id);
++  if (drawerState(threadRef).terminalOpen) focusActiveDrawerTerminal(threadRef);
 +}
 diff --git a/apps/web/src/plutonium/files/filesCore.ts b/apps/web/src/plutonium/files/filesCore.ts
 new file mode 100644
@@ -4517,12 +4887,12 @@ index 0000000000..e48a349331
 +}
 diff --git a/apps/web/src/plutonium/files/filesStore.ts b/apps/web/src/plutonium/files/filesStore.ts
 new file mode 100644
-index 0000000000..1cb4e9f38a
+index 0000000000..961402cfb5
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/filesStore.ts
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,242 @@
 +// Plutonium: what every file manager in the page shares: the settings, what's
-+// copied or cut, running jobs and undo, the open drawers, and the picker a page,
++// copied or cut, running jobs and undo, where the panes are, and the picker a page,
 +// tab or app is waiting on (docs/features/FILE_MANAGER.md).
 +import { create } from "zustand";
 +
@@ -4574,25 +4944,18 @@ index 0000000000..1cb4e9f38a
 +  }
 +}
 +
-+/** A file manager in a thread's drawer: `slot` names its settings, `dir` where it opens. */
-+export interface DrawerPane {
-+  readonly slot: number;
-+  readonly dir: string | null;
-+  /** Its share of the drawer's width. */
-+  readonly size: number;
-+}
++const PANE_DIRS_KEY = "plutonium:file-pane-dirs";
 +
-+const BESIDE_KEY = "plutonium:file-drawer-beside";
++/** Where each file pane in a terminal drawer is: by thread key, then pane. */
++type PaneDirs = Readonly<Record<string, Readonly<Record<string, string>>>>;
 +
-+function loadBeside(): boolean {
++function loadPaneDirs(): PaneDirs {
 +  try {
-+    return localStorage.getItem(BESIDE_KEY) === "1";
++    return JSON.parse(localStorage.getItem(PANE_DIRS_KEY) ?? "{}") as PaneDirs;
 +  } catch {
-+    return false;
++    return {};
 +  }
 +}
-+
-+const MAX_DRAWER_PANES = 4;
 +
 +/** A filter as a picker's request gives it. */
 +export interface PickerFilter {
@@ -4618,6 +4981,12 @@ index 0000000000..1cb4e9f38a
 +  readonly currentFolder?: string;
 +  readonly acceptLabel?: string;
 +  readonly choices?: readonly PickerChoice[];
++  /** Opens on the fuzzy finder, and leaving it leaves the picker. */
++  readonly fuzzy?: boolean;
++  /** Starts in the home folder, not where the last picker was. */
++  readonly home?: boolean;
++  /** The floating finder, not a request: what it finds can be picked up as well. */
++  readonly find?: boolean;
 +}
 +
 +export interface PickerAnswer {
@@ -4644,23 +5013,14 @@ index 0000000000..1cb4e9f38a
 +  readonly clipboard: FileClipboard | null;
 +  readonly jobs: readonly FileJob[];
 +  readonly undo: readonly (FileJobRequest | FileJobRequest[] | RenameUndo)[];
-+  /** Each thread's drawer, by thread key: its panes, left to right, kept while it's away. */
-+  readonly drawers: Readonly<Record<string, readonly DrawerPane[]>>;
-+  /** Thread keys whose drawer is on show. */
-+  readonly shown: Readonly<Record<string, true>>;
-+  /** Files and the terminal share the bottom side by side, not one at a time. */
-+  readonly beside: boolean;
++  readonly paneDirs: PaneDirs;
 +  readonly picker: PickerRequest | null;
 +  /** What's riding on the pointer, for the hint. */
 +  readonly carrying: readonly string[] | null;
 +  setView(instance: string, change: Partial<FileViewSettings>): void;
 +  setClipboard(clipboard: FileClipboard | null): void;
-+  toggleDrawer(threadKey: string): void;
-+  showDrawer(threadKey: string, show: boolean): void;
-+  setBeside(beside: boolean): void;
-+  setPaneSizes(threadKey: string, sizes: readonly number[]): void;
-+  splitDrawer(threadKey: string, dir: string): void;
-+  closePane(threadKey: string, slot: number): void;
++  /** `dir` null forgets the pane. */
++  setPaneDir(threadKey: string, pane: string, dir: string | null): void;
 +  setPicker(picker: PickerRequest | null): void;
 +  setCarrying(paths: readonly string[] | null): void;
 +  pushUndo(entry: RenameUndo): void;
@@ -4688,9 +5048,7 @@ index 0000000000..1cb4e9f38a
 +  clipboard: null,
 +  jobs: [],
 +  undo: [],
-+  drawers: {},
-+  shown: {},
-+  beside: loadBeside(),
++  paneDirs: loadPaneDirs(),
 +  picker: null,
 +  carrying: null,
 +  setView: (instance, change) => {
@@ -4703,54 +5061,19 @@ index 0000000000..1cb4e9f38a
 +    set({ views });
 +  },
 +  setClipboard: (clipboard) => set({ clipboard }),
-+  toggleDrawer: (threadKey) => get().showDrawer(threadKey, !get().shown[threadKey]),
-+  showDrawer: (threadKey, show) =>
-+    set((state) => {
-+      const { [threadKey]: _was, ...others } = state.shown;
-+      return {
-+        shown: show ? { ...others, [threadKey]: true } : others,
-+        drawers: state.drawers[threadKey]
-+          ? state.drawers
-+          : show
-+            ? { ...state.drawers, [threadKey]: [{ slot: 0, dir: null, size: 1 }] }
-+            : state.drawers,
-+      };
-+    }),
-+  setBeside: (beside) => {
++  setPaneDir: (threadKey, pane, dir) => {
++    const { [pane]: _was, ...others } = get().paneDirs[threadKey] ?? {};
++    const paneDirs = {
++      ...get().paneDirs,
++      [threadKey]: dir === null ? others : { ...others, [pane]: dir },
++    };
 +    try {
-+      localStorage.setItem(BESIDE_KEY, beside ? "1" : "0");
++      localStorage.setItem(PANE_DIRS_KEY, JSON.stringify(paneDirs));
 +    } catch {
-+      // A private window: it lasts this session.
++      // A private window: they last this session.
 +    }
-+    set({ beside });
++    set({ paneDirs });
 +  },
-+  setPaneSizes: (threadKey, sizes) =>
-+    set((state) => ({
-+      drawers: {
-+        ...state.drawers,
-+        [threadKey]: (state.drawers[threadKey] ?? []).map((pane, index) => ({
-+          ...pane,
-+          size: sizes[index] ?? pane.size,
-+        })),
-+      },
-+    })),
-+  splitDrawer: (threadKey, dir) =>
-+    set((state) => {
-+      const panes = state.drawers[threadKey] ?? [];
-+      if (panes.length >= MAX_DRAWER_PANES) return state;
-+      const used = new Set(panes.map((pane) => pane.slot));
-+      let slot = 0;
-+      while (used.has(slot)) slot += 1;
-+      return { drawers: { ...state.drawers, [threadKey]: [...panes, { slot, dir, size: 1 }] } };
-+    }),
-+  closePane: (threadKey, slot) =>
-+    set((state) => {
-+      const { [threadKey]: panes = [], ...others } = state.drawers;
-+      const left = panes.filter((pane) => pane.slot !== slot);
-+      if (left.length > 0) return { drawers: { ...others, [threadKey]: left } };
-+      const { [threadKey]: _was, ...shown } = state.shown;
-+      return { drawers: others, shown };
-+    }),
 +  setPicker: (picker) => set({ picker }),
 +  setCarrying: (carrying) => set({ carrying }),
 +  pushUndo: (entry) => set((state) => ({ undo: [...state.undo, entry].slice(-50) })),
@@ -4812,17 +5135,21 @@ index 0000000000..1cb4e9f38a
 +export const lastPickerFolder = { current: "" };
 diff --git a/apps/web/src/plutonium/files/ownsKey.test.ts b/apps/web/src/plutonium/files/ownsKey.test.ts
 new file mode 100644
-index 0000000000..7b23ceebf9
+index 0000000000..cc595f5582
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/ownsKey.test.ts
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,24 @@
 +import { describe, expect, it } from "vite-plus/test";
 +
-+import { isFileManagerBinding, plutoniumFilesFocused } from "./ownsKey";
++import { isFileManagerBinding, plutoniumFilesFocused, plutoniumFuzzyOwnsKey } from "./ownsKey";
 +
 +describe("the file manager's keys", () => {
 +  it("are its own only while it has the keyboard", () => {
 +    expect(plutoniumFilesFocused()).toBe(false);
++  });
++
++  it("leaves the fuzzy finder's keys to the page outside its search", () => {
++    expect(plutoniumFuzzyOwnsKey({ ctrlKey: true, key: "b" })).toBe(false);
 +  });
 +
 +  it("leaves out the rules that open it from anywhere", () => {
@@ -4830,15 +5157,18 @@ index 0000000000..7b23ceebf9
 +    expect(isFileManagerBinding({ command: "files.toggle" })).toBe(false);
 +    expect(isFileManagerBinding({ command: "files.toggleRight" })).toBe(false);
 +    expect(isFileManagerBinding({ command: "files.carry" })).toBe(false);
++    expect(isFileManagerBinding({ command: "files.carryFuzzy" })).toBe(false);
++    expect(isFileManagerBinding({ command: "files.findHome" })).toBe(false);
++    expect(isFileManagerBinding({ command: "files.openBeside" })).toBe(false);
 +    expect(isFileManagerBinding({ command: "filePicker.toggle" })).toBe(false);
 +  });
 +});
 diff --git a/apps/web/src/plutonium/files/ownsKey.ts b/apps/web/src/plutonium/files/ownsKey.ts
 new file mode 100644
-index 0000000000..cfec9493f4
+index 0000000000..0e9b6c92a2
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/ownsKey.ts
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,40 @@
 +// Plutonium: while the file manager has the keyboard its keys are its own, whatever
 +// else they mean to the page.
 +export function plutoniumFilesFocused(): boolean {
@@ -4846,21 +5176,45 @@ index 0000000000..cfec9493f4
 +  return active?.hasAttribute?.("data-plutonium-files") === true;
 +}
 +
++const FUZZY_KEYS = new Set(["b", "j", "k", "n", "p"]);
++
++/** Ctrl+J, K, N, P and B move and pick up in the fuzzy finder's search, not the page's rules. */
++export function plutoniumFuzzyOwnsKey(event: {
++  readonly ctrlKey: boolean;
++  readonly key: string;
++}): boolean {
++  const active = typeof document === "undefined" ? null : document.activeElement;
++  return (
++    event.ctrlKey &&
++    FUZZY_KEYS.has(event.key) &&
++    active?.hasAttribute?.("data-plutonium-fuzzy") === true
++  );
++}
++
++/** The file manager's rules that work from anywhere: they open it. */
++export const FILE_MANAGER_OPENERS = [
++  "files.toggle",
++  "files.openBeside",
++  "files.toggleRight",
++  "files.carry",
++  "files.carryFuzzy",
++  "files.findProject",
++  "files.findHome",
++] as const;
++
 +/** A rule for inside the file manager, not one that opens it from anywhere. */
 +export function isFileManagerBinding(binding: { readonly command: string }): boolean {
 +  return (
 +    binding.command.startsWith("files.") &&
-+    binding.command !== "files.toggle" &&
-+    binding.command !== "files.toggleRight" &&
-+    binding.command !== "files.carry"
++    !(FILE_MANAGER_OPENERS as readonly string[]).includes(binding.command)
 +  );
 +}
 diff --git a/apps/web/src/plutonium/files/useFileManager.ts b/apps/web/src/plutonium/files/useFileManager.ts
 new file mode 100644
-index 0000000000..cd89735caf
+index 0000000000..bed2c9cd6c
 --- /dev/null
 +++ b/apps/web/src/plutonium/files/useFileManager.ts
-@@ -0,0 +1,854 @@
+@@ -0,0 +1,866 @@
 +// Plutonium: one file manager's state and commands: the folder, the cursor and
 +// selection, the keys, the clipboard, dragging in and out, and picking. The three
 +// views, the drawer, the Files panel and the picker all sit on this
@@ -4927,6 +5281,8 @@ index 0000000000..cd89735caf
 +  readonly onHide?: (() => void) | undefined;
 +  /** files.closePane: closes this one. */
 +  readonly onClose?: (() => void) | undefined;
++  /** It moved to another folder. */
++  readonly onDirChange?: ((dir: string) => void) | undefined;
 +  /** Opens another file manager beside this one, at `dir`. */
 +  readonly onSplit?: ((dir: string) => void) | undefined;
 +  /** Puts a mention of `path` in the composer, if this thread has one. */
@@ -4976,7 +5332,7 @@ index 0000000000..cd89735caf
 +  const [filter, setFilter] = useState("");
 +  const [findQuery, setFindQuery] = useState("");
 +  const [prompt, setPrompt] = useState<Prompt | null>(null);
-+  const [fuzzyOpen, setFuzzyOpen] = useState(false);
++  const [fuzzyOpen, setFuzzyOpen] = useState(Boolean(pick?.detail.fuzzy));
 +  const [helpOpen, setHelpOpen] = useState(false);
 +  const [pending, setPending] = useState("");
 +  const [places, setPlaces] = useState<readonly Place[]>([]);
@@ -4995,6 +5351,12 @@ index 0000000000..cd89735caf
 +  const focusRoot = () => rootRef.current?.focus();
 +  const takeRootKeyboard = () => takeKeyboard(rootRef.current);
 +  const shell = useRef<Awaited<ReturnType<typeof plutoniumShell>>>(null);
++  const { onDirChange } = options;
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells what's outside this file manager, as the prop's job
++  useEffect(() => {
++    onDirChange?.(dir);
++    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new callback isn't a new folder
++  }, [dir]);
 +
 +  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- follows the helper, the page's focus or the DOM, which are outside React
 +  useEffect(() => {
@@ -5693,6 +6055,10 @@ index 0000000000..cd89735caf
 +    armPaths,
 +    canSplit: Boolean(options.onSplit),
 +    picking: Boolean(pick),
++    /** Opened on the fuzzy finder: leaving it leaves the picker. */
++    fuzzyOnly: Boolean(pick?.detail.fuzzy),
++    canCarry: !pick || Boolean(pick.detail.find),
++    cancelPick: pick?.cancel,
 +    compact: Boolean(options.compact),
 +    keybindings,
 +    cancelPrompt,
@@ -6259,10 +6625,10 @@ index 0000000000..720579de8a
 +}
 diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
 new file mode 100644
-index 0000000000..8ea02ec27d
+index 0000000000..e2d9372939
 --- /dev/null
 +++ b/apps/web/src/plutonium/panelKeys.ts
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,303 @@
 +// Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
 +// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
 +// dock.ts), and moving keyboard focus into a tab's content (an app's window,
@@ -6297,8 +6663,9 @@ index 0000000000..8ea02ec27d
 +  runDockSlot,
 +  toggleDockLayout,
 +} from "./dock";
-+import { pickAndCarry } from "./files/carry";
-+import { useFilesStore } from "./files/filesStore";
++import { findFloating, pickAndCarry } from "./files/carry";
++import { openFilePane, toggleFilePane } from "./files/filePanes";
++import { FILE_MANAGER_OPENERS } from "./files/ownsKey";
 +import { plutoniumShell } from "./windowStore";
 +
 +const TAB_JUMP: readonly KeybindingCommand[] = RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS;
@@ -6313,9 +6680,7 @@ index 0000000000..8ea02ec27d
 +  "rightPanel.previousTab",
 +  "preview.newTab",
 +  "appLauncher.toggle",
-+  "files.toggle",
-+  "files.toggleRight",
-+  "files.carry",
++  ...FILE_MANAGER_OPENERS,
 +  ...DOCK_SLOT,
 +  ...DOCK_SLOT_OTHER,
 +  ...DOCK_ASSIGN,
@@ -6477,6 +6842,8 @@ index 0000000000..8ea02ec27d
 +  readonly newBrowserTab: () => void;
 +  /** The thread's panel and terminal, for the dock; null without a thread. */
 +  readonly dock: DockContext | null;
++  /** Where the floating finder looks first. */
++  readonly projectFolder: string | null;
 +}): void {
 +  const latest = useRef(input);
 +  useEffect(() => {
@@ -6499,22 +6866,22 @@ index 0000000000..8ea02ec27d
 +        activate(surface);
 +        void focusRightPanelSurface(surface);
 +      };
-+      if (
-+        command === "files.toggle" ||
-+        command === "files.toggleRight" ||
-+        command === "files.carry"
-+      ) {
++      if ((FILE_MANAGER_OPENERS as readonly KeybindingCommand[]).includes(command)) {
 +        event.preventDefault();
 +        event.stopPropagation();
 +        if (event.repeat) return;
-+        if (command === "files.carry") pickAndCarry();
-+        else if (command === "files.toggle") {
-+          useFilesStore.getState().toggleDrawer(scopedThreadKey(threadRef));
-+        } else {
-+          const panel = useRightPanelStore.getState();
-+          panel.openFile(threadRef, ".");
++        const panel = useRightPanelStore.getState();
++        const open = (paths: readonly string[]) => {
++          for (const path of paths) panel.openFile(threadRef, path);
 +          panel.show(threadRef);
-+        }
++        };
++        if (command === "files.carry") pickAndCarry();
++        else if (command === "files.carryFuzzy") pickAndCarry({ fuzzy: true });
++        else if (command === "files.findProject") findFloating(latest.current.projectFolder, open);
++        else if (command === "files.findHome") findFloating(null, open);
++        else if (command === "files.toggle") toggleFilePane(threadRef);
++        else if (command === "files.openBeside") openFilePane(threadRef, { split: true });
++        else open(["."]);
 +        return;
 +      }
 +      const dock = latest.current.dock;
@@ -6877,10 +7244,10 @@ index 0000000000..10b488e399
 +}
 diff --git a/apps/web/src/plutonium/useThreadPlutonium.ts b/apps/web/src/plutonium/useThreadPlutonium.ts
 new file mode 100644
-index 0000000000..25676c6f32
+index 0000000000..ef448c8914
 --- /dev/null
 +++ b/apps/web/src/plutonium/useThreadPlutonium.ts
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,191 @@
 +// Plutonium: what a thread's chat view adds in the Plutonium shell, kept out
 +// of ChatView so a T3 Code upgrade only meets a few lines there: the Apps tab,
 +// the dock's context (its sites, tabs and terminal), the panel's keys, an
@@ -6918,6 +7285,8 @@ index 0000000000..25676c6f32
 +export interface ThreadPlutoniumInput {
 +  readonly threadRef: ScopedThreadRef | null;
 +  readonly projectId: string | null;
++  /** Where the floating finder looks first. */
++  readonly projectFolder: string | null;
 +  readonly keybindings: ResolvedKeybindingsConfig;
 +  readonly canOperatePreview: boolean;
 +  readonly surfaces: readonly RightPanelSurface[];
@@ -7027,6 +7396,7 @@ index 0000000000..25676c6f32
 +    activate: input.activate,
 +    newBrowserTab: input.newBrowserTab,
 +    dock,
++    projectFolder: input.projectFolder,
 +  });
 +
 +  // An app in the panel pressed its own maximize (or restore) button.

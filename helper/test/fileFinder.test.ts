@@ -77,6 +77,50 @@ describe("FileFinders", () => {
     quick.close();
   });
 
+  test("an old index is rebuilt, and new files turn up while it's searched", async () => {
+    const quick = new FileFinders({ refreshMs: 1 });
+    await quick.find(root, { query: "needle", hidden: false });
+    writeFileSync(join(root, "src/freshly-made.ts"), "");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    let found;
+    for (let tries = 0; tries < 100; tries += 1) {
+      found = await quick.find(root, { query: "freshly", hidden: false });
+      assert.ok(!("superseded" in found));
+      if (found.paths.includes("src/freshly-made.ts")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(found && !("superseded" in found) && found.paths.includes("src/freshly-made.ts"));
+    quick.close();
+  });
+
+  test("short of memory, the indexes go; a later search starts again", async () => {
+    let memory = Number.POSITIVE_INFINITY;
+    const quick = new FileFinders({ memory: () => memory, memoryCheckMs: 20 });
+    await quick.find(root, { query: "needle", hidden: false });
+    memory = 0;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal((quick as unknown as { worker: unknown }).worker, null);
+    memory = Number.POSITIVE_INFINITY;
+    const again = await quick.find(root, { query: "needle", hidden: false });
+    assert.ok(!("superseded" in again) && again.paths.length > 0);
+    quick.close();
+  });
+
+  test("a new session indexes what was searched lately, in its own scope", async () => {
+    const first = new FileFinders({ scope: "warm-test" });
+    await first.find(root, { query: "needle", hidden: false });
+    first.close();
+    const second = new FileFinders({ scope: "warm-test" });
+    await second.warm();
+    const worker = () => (second as unknown as { worker: unknown }).worker;
+    assert.ok(worker(), "indexed at the start");
+    second.close();
+    const other = new FileFinders({ scope: "another-slot" });
+    await other.warm();
+    assert.equal((other as unknown as { worker: unknown }).worker, null);
+    other.close();
+  });
+
   test("refuses a relative folder", () => {
     assert.throws(() => finders.find("relative", { query: "", hidden: false }), /absolute/);
   });

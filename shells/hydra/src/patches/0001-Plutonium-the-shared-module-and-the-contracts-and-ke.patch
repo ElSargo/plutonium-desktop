@@ -26,15 +26,15 @@ Folded from:
 ---
  packages/contracts/src/desktopBrowser.ts      |  40 ++++++
  packages/contracts/src/ipc.ts                 |   2 +
- packages/contracts/src/keybindings.ts         | 122 +++++++++++++++++
+ packages/contracts/src/keybindings.ts         | 126 ++++++++++++++++++
  packages/contracts/src/orchestratorMcp.ts     |  16 +++
  packages/contracts/src/previewAutomation.ts   |  92 ++++++++++++-
  .../provider-core/src/server/mcpSession.ts    |  12 +-
  packages/shared/package.json                  |   8 ++
- packages/shared/src/keybindings.ts            | 107 +++++++++++++++
- packages/shared/src/plutonium.ts              | 124 ++++++++++++++++++
+ packages/shared/src/keybindings.ts            | 111 +++++++++++++++
+ packages/shared/src/plutonium.ts              | 124 +++++++++++++++++
  packages/shared/src/plutoniumWindowTabs.ts    |  25 ++++
- 10 files changed, 541 insertions(+), 7 deletions(-)
+ 10 files changed, 549 insertions(+), 7 deletions(-)
  create mode 100644 packages/shared/src/plutonium.ts
  create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
 
@@ -109,7 +109,7 @@ index 5aa9acf277..0ebd7d50cf 100644
  
  export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
 diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
-index 714e0a1d48..df55888a00 100644
+index 714e0a1d48..cd422343c1 100644
 --- a/packages/contracts/src/keybindings.ts
 +++ b/packages/contracts/src/keybindings.ts
 @@ -34,6 +34,58 @@ export const MODEL_PICKER_JUMP_KEYBINDING_COMMANDS = [
@@ -185,15 +185,19 @@ index 714e0a1d48..df55888a00 100644
    "pullRequest.copyNumber",
    "diff.toggle",
    "preview.toggle",
-@@ -79,6 +138,67 @@ export const STATIC_KEYBINDING_COMMANDS = [
+@@ -79,6 +138,71 @@ export const STATIC_KEYBINDING_COMMANDS = [
    "preview.zoomIn",
    "preview.zoomOut",
    "preview.resetZoom",
 +  "preview.newTab",
 +  "appLauncher.toggle",
 +  "files.toggle",
++  "files.openBeside",
 +  "files.toggleRight",
 +  "files.carry",
++  "files.carryFuzzy",
++  "files.findProject",
++  "files.findHome",
 +  "files.down",
 +  "files.up",
 +  "files.left",
@@ -253,7 +257,7 @@ index 714e0a1d48..df55888a00 100644
    "commandPalette.toggle",
    "filePicker.toggle",
    "projectSearch.toggle",
-@@ -153,6 +273,8 @@ export type KeybindingsConfig = typeof KeybindingsConfig.Type;
+@@ -153,6 +277,8 @@ export type KeybindingsConfig = typeof KeybindingsConfig.Type;
  
  export const KeybindingShortcut = Schema.Struct({
    key: KeybindingValue,
@@ -486,7 +490,7 @@ index 19542c4459..82baedba2a 100644
    },
    "scripts": {
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index 32292c0f9e..3526c7c42b 100644
+index 32292c0f9e..ec2f968ae0 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
 @@ -5,6 +5,10 @@ import {
@@ -500,7 +504,7 @@ index 32292c0f9e..3526c7c42b 100644
    type ResolvedKeybindingRule,
    type ResolvedKeybindingsConfig,
    THREAD_JUMP_KEYBINDING_COMMANDS,
-@@ -157,6 +161,103 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -157,6 +161,107 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "mod+alt+b", command: "rightPanel.toggle" },
    { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
    { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
@@ -516,8 +520,12 @@ index 32292c0f9e..3526c7c42b 100644
 +  { key: "meta+space", command: "appLauncher.toggle" },
 +  { key: "mod+e", command: "files.toggle", when: "!terminalFocus" },
 +  { key: "meta+e", command: "files.toggle" },
++  { key: "meta+alt+e", command: "files.openBeside" },
 +  { key: "meta+shift+e", command: "files.toggleRight" },
 +  { key: "meta+o", command: "files.carry" },
++  { key: "meta+shift+o", command: "files.carryFuzzy" },
++  { key: "meta+p", command: "files.findProject" },
++  { key: "meta+shift+p", command: "files.findHome" },
 +  // The file manager's keys: Yazi's, while it has the keyboard. "g g" is a sequence.
 +  { key: "j", command: "files.down", when: "filesFocus" },
 +  { key: "arrowdown", command: "files.down", when: "filesFocus" },
@@ -604,7 +612,7 @@ index 32292c0f9e..3526c7c42b 100644
    { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
    { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
    { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
-@@ -245,6 +346,12 @@ function normalizeKeyToken(token: string): string {
+@@ -245,6 +350,12 @@ function normalizeKeyToken(token: string): string {
  }
  
  export function parseKeybindingShortcut(value: string): KeybindingShortcut | null {

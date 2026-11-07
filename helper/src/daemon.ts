@@ -386,7 +386,7 @@ export class Daemon {
   readonly apps = new DesktopApps();
   readonly siteIcons = new SiteIcons();
   readonly fileJobs = new FileJobs();
-  readonly fileFinders = new FileFinders();
+  readonly fileFinders: FileFinders;
   /** EXO-LOCK: the lock screen and idle (services/session.ts). */
   readonly session: SessionService;
   readonly terminals: Terminals;
@@ -433,6 +433,7 @@ export class Daemon {
   private readonly threadsToForget = new Set<string>();
 
   constructor(options: DaemonOptions) {
+    this.fileFinders = new FileFinders({ scope: String(options.port) });
     this.options = options;
     // Started from a Plutonium terminal (not by `plutonium run`, which unsets
     // it), the helper has PLUTONIUM_SHOW=1, and would pass it on: everything
@@ -2920,6 +2921,8 @@ export class Daemon {
         .state("notifications")
         .catch((error: unknown) => console.warn(`plutoniumd: no notifications: ${(error as Error).message}`));
     }
+    // The fuzzy finder's folders, once the session has settled.
+    if (this.options.cdp) setTimeout(() => void this.fileFinders.warm(), 20_000).unref();
     // EXO-LOCK: idle, logind and apps' inhibitors from the start.
     if (this.options.cdp) {
       this.services.state("session").catch((error: unknown) => console.warn(`plutoniumd: no session: ${(error as Error).message}`));
