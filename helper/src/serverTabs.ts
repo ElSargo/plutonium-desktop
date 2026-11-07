@@ -285,6 +285,8 @@ interface AttachedTab {
   readonly children: Set<string>;
   /** While the server's input keeps the tab drawing (keepAwake): the timer that lets it sleep. */
   awake: ReturnType<typeof setTimeout> | null;
+  /** Whether the server asked for focus emulation (Emulation.setFocusEmulationEnabled), which the page gets while awake. */
+  focusEmulation: boolean;
   /** The last grantPermissions the user refused, and when. */
   refused: { key: string; at: number } | null;
   /** The capture of the server's recording of it ("recording"), once registered. */
@@ -299,6 +301,15 @@ export interface PermissionAnswer {
 
 /** How long a tab the server sent input to stays at full frame rate. */
 const AWAKE_MS = 60_000;
+
+/**
+ * Focus emulation, which Playwright turns on for every page it attaches to,
+ * makes the browser count the page as captured and visible: it ran at full
+ * frame rate, timers unthrottled, for as long as the server stayed connected,
+ * whether or not anything showed it (seven idle tabs, two of them YouTube, on
+ * the live desktop). The page gets it only while the tab is awake.
+ */
+const FOCUS_EMULATION = "Emulation.setFocusEmulationEnabled";
 
 /**
  * How long Page.captureScreenshot gets before the browser's own tab capture
@@ -392,6 +403,7 @@ export class ServerTabs {
       sessionId: null,
       children: new Set(),
       awake: null,
+      focusEmulation: false,
       refused: null,
       captureId: null,
     });
@@ -516,7 +528,9 @@ export class ServerTabs {
     if (tab.awake) clearTimeout(tab.awake);
     tab.awake = setTimeout(() => this.sleep(tab), AWAKE_MS);
     tab.awake.unref();
-    if (asleep) await this.keepAwake(tab.info.browserTabId, true).catch(() => {});
+    if (!asleep) return;
+    await this.keepAwake(tab.info.browserTabId, true).catch(() => {});
+    if (tab.focusEmulation) await this.setFocusEmulation(tab, true);
   }
 
   private sleep(tab: AttachedTab): void {
@@ -524,6 +538,14 @@ export class ServerTabs {
     clearTimeout(tab.awake);
     tab.awake = null;
     void this.keepAwake(tab.info.browserTabId, false).catch(() => {});
+    if (tab.focusEmulation) void this.setFocusEmulation(tab, false);
+  }
+
+  private async setFocusEmulation(tab: AttachedTab, enabled: boolean): Promise<void> {
+    if (!tab.session) return;
+    await this.pageSession(tab)
+      .then((sessionId) => this.cdp.send(FOCUS_EMULATION, { enabled }, sessionId))
+      .catch(() => {});
   }
 
   private relayFor(tab: AttachedTab): RelayConnection {
@@ -532,6 +554,10 @@ export class ServerTabs {
       {
         send: async (method, params, child) => {
           if (child !== undefined && !tab.children.has(child)) throw new Error(`No session ${child} in this tab.`);
+          if (child === undefined && method === FOCUS_EMULATION) {
+            tab.focusEmulation = params?.["enabled"] === true;
+            if (tab.focusEmulation && tab.awake === null) return {};
+          }
           if (child === undefined && method.startsWith("Input.")) await this.wake(tab);
           const sent = this.cdp.send(method, params, child ?? (await this.pageSession(tab)));
           if (child === undefined && method === "Page.captureScreenshot") return this.screenshot(tab, params, sent);

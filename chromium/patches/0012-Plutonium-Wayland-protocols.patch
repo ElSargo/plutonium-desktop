@@ -24,7 +24,7 @@ and the parts in these files of:
  components/exo/wayland/ext_data_control.h     |  29 ++
  components/exo/wayland/ext_idle_notify.cc     | 185 +++++++
  components/exo/wayland/ext_idle_notify.h      |  28 +
- .../wayland/org_kde_kwin_server_decoration.cc | 114 +++++
+ .../wayland/org_kde_kwin_server_decoration.cc | 129 +++++
  .../wayland/org_kde_kwin_server_decoration.h  |  24 +
  components/exo/wayland/wp_cursor_shape.cc     | 179 +++++++
  components/exo/wayland/wp_cursor_shape.h      |  27 +
@@ -34,7 +34,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_text_input_manager.h      |   6 +
  .../zwp_text_input_manager_unittest.cc        | 221 ++++++++
  third_party/wayland-protocols/BUILD.gn        |  21 +
- 17 files changed, 1931 insertions(+), 1 deletion(-)
+ 17 files changed, 1946 insertions(+), 1 deletion(-)
  create mode 100644 components/exo/session_idle.cc
  create mode 100644 components/exo/session_idle.h
  create mode 100644 components/exo/wayland/ext_data_control.cc
@@ -757,10 +757,10 @@ index 0000000000..9311dd2947
 +#endif  // COMPONENTS_EXO_WAYLAND_EXT_IDLE_NOTIFY_H_
 diff --git a/components/exo/wayland/org_kde_kwin_server_decoration.cc b/components/exo/wayland/org_kde_kwin_server_decoration.cc
 new file mode 100644
-index 0000000000..9f57301b5d
+index 0000000000..8251c7cd51
 --- /dev/null
 +++ b/components/exo/wayland/org_kde_kwin_server_decoration.cc
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,129 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -769,7 +769,9 @@ index 0000000000..9f57301b5d
 +
 +#include <server-decoration-server-protocol.h>
 +
++#include <cstdint>
 +#include <memory>
++#include <optional>
 +
 +#include "base/memory/raw_ptr.h"
 +#include "components/exo/surface.h"
@@ -796,7 +798,19 @@ index 0000000000..9f57301b5d
 +    }
 +  }
 +
-+  // Every request gets the server's mode back.
++  // The server's mode, also when the client asks for its own again: it gets
++  // the mode back once per change of what it asks for. GTK 3 asks for its own
++  // mode again on every mode event that isn't it (a window with a client-side
++  // title bar, such as Firefox's), so answering every request would make the
++  // two ping-pong for as long as the window lives (EXO-DECOR).
++  void RequestMode(uint32_t mode) {
++    if (requested_mode_ == mode) {
++      return;
++    }
++    requested_mode_ = mode;
++    SendServerMode();
++  }
++
 +  void SendServerMode() {
 +    if (surface_) {
 +      surface_->SetFrame(SurfaceFrameType::NORMAL);
@@ -814,6 +828,7 @@ index 0000000000..9f57301b5d
 + private:
 +  const raw_ptr<wl_resource> resource_;
 +  raw_ptr<Surface> surface_;
++  std::optional<uint32_t> requested_mode_;
 +};
 +
 +void server_decoration_release(wl_client* client, wl_resource* resource) {
@@ -822,8 +837,8 @@ index 0000000000..9f57301b5d
 +
 +void server_decoration_request_mode(wl_client* client,
 +                                    wl_resource* resource,
-+                                    uint32_t /*mode*/) {
-+  GetUserDataAs<ServerDecoration>(resource)->SendServerMode();
++                                    uint32_t mode) {
++  GetUserDataAs<ServerDecoration>(resource)->RequestMode(mode);
 +}
 +
 +const struct org_kde_kwin_server_decoration_interface

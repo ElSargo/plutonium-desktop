@@ -297,6 +297,35 @@ test("the server's input keeps a tab no page shows drawing, until it is let go",
   assert.deepEqual(awake, [[2, true], [2, false]]);
 });
 
+test("focus emulation reaches the page only while the server's input keeps it awake", async () => {
+  const cdp = new FakeCdp();
+  const tabs = new ServerTabs(cdp as unknown as BrowserCdp);
+  tabs.keepAwake = async () => {};
+  const socket = new FakeSocket();
+  tabs.serve(socket as unknown as Socket);
+  const key = { threadId: "t", tabId: "a" };
+  tabs.attach(key, { targetId: "shown", browserTabId: 2, page: "shell", url: () => "", title: () => "" }, () => true);
+  const send = (id: number, method: string, params: Record<string, unknown> = {}) =>
+    socket.command({ type: "cdp", ...key, message: JSON.stringify({ id, method, params, sessionId: "plutonium-tab-page" }) });
+  const focus = () =>
+    cdp.sent.filter((sent) => sent.method === "Emulation.setFocusEmulationEnabled").map((sent) => sent.params?.["enabled"]);
+  // Playwright asks as it attaches: a page nothing drives stays hidden.
+  send(1, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  await settle();
+  assert.deepEqual(focus(), []);
+  const replies = socket.events.filter((event) => event["type"] === "cdp").map((event) => JSON.parse(event["message"] as string));
+  assert.ok(replies.some((reply) => reply["id"] === 1 && "result" in reply));
+  send(2, "Input.dispatchKeyEvent", { type: "keyDown" });
+  await settle();
+  assert.deepEqual(focus(), [true]);
+  // Focused before the key reached it.
+  const methods = cdp.methods();
+  assert.ok(methods.indexOf("Emulation.setFocusEmulationEnabled") < methods.indexOf("Input.dispatchKeyEvent"));
+  tabs.detach(key);
+  await settle();
+  assert.deepEqual(focus(), [true, false]);
+});
+
 describe("the server's recordings as captures", () => {
   const key = { threadId: "thread-1", tabId: "tab-1" };
   const recording = () => {
