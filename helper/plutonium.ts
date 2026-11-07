@@ -9,6 +9,8 @@
 //   plutonium.ts open <url|file>…           xdg-open for a thread's apps: web links
 //                                           become tabs in $PLUTONIUM_THREAD_ID
 //   plutonium.ts shells <command>           the installed shells (shellsCli.ts)
+//   plutonium.ts appearance [light|dark|toggle|default]
+//                                           light or dark for the whole desktop
 //   plutonium.ts stop-x-displays            stops the threads' X servers a stopped
 //                                           helper left running (plutonium stop)
 //
@@ -65,6 +67,7 @@ function usage(): never {
       "       plutonium.ts launch <thread-id> <program> [args…]\n" +
       "       plutonium.ts mcp\n" +
       "       plutonium.ts open <url|file>…\n" +
+      "       plutonium.ts appearance [light|dark|toggle|default]\n" +
       "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
@@ -149,6 +152,21 @@ switch (command) {
   case "shells":
     process.exitCode = runShellsCommand(rest);
     break;
+  case "appearance": {
+    // Light or dark (docs/features/APPEARANCE.md): prints the scheme, after setting it if asked.
+    const [choice] = positionals;
+    const base = "/v1/system/services/appearance";
+    type State = { colorScheme: string; chosen: boolean };
+    let state: State;
+    if (!choice) state = await helperJson<State>(socketPath, "GET", base);
+    else if (choice === "toggle") state = (await helperJson<{ value: State }>(socketPath, "POST", `${base}/toggle`, {})).value;
+    else if (choice === "light" || choice === "dark" || choice === "default") {
+      const colorScheme = choice === "default" ? null : choice;
+      state = (await helperJson<{ value: State }>(socketPath, "POST", `${base}/set`, { colorScheme })).value;
+    } else usage();
+    console.log(`${state.colorScheme}${state.chosen ? "" : " (the default)"}`);
+    break;
+  }
   case "stop-x-displays":
     // The helper keeps them running across its restarts.
     stopXDisplays(xDisplayStatePath(waylandDisplay, socketPath));

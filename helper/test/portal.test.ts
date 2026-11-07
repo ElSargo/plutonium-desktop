@@ -10,8 +10,10 @@ import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { DBusConnection } from "../src/dbus.ts";
 import { type DesktopCapture } from "../src/desktop.ts";
+import { type Variant } from "../src/dbus.ts";
 import {
   findRestoredWindow,
+  namespaceMatches,
   parseRestoreData,
   PORTAL_NAME,
   Portal,
@@ -424,5 +426,87 @@ describe("global shortcuts on a bus", { skip: dbusDaemon ? false : "no dbus-daem
     assert.equal(request.source.pid, process.pid);
     answer = null;
     assert.equal((await open("i", new Map()))[0], 1);
+  });
+});
+
+describe("the settings portal", () => {
+  test("ReadAll's namespaces: all for none, a trailing * a prefix", () => {
+    assert.ok(namespaceMatches("org.freedesktop.appearance", []));
+    assert.ok(namespaceMatches("org.freedesktop.appearance", [""]));
+    assert.ok(namespaceMatches("org.freedesktop.appearance", ["org.freedesktop.*"]));
+    assert.ok(namespaceMatches("org.freedesktop.appearance", ["org.gnome.*", "org.freedesktop.appearance"]));
+    assert.ok(!namespaceMatches("org.freedesktop.appearance", ["org.gnome.*"]));
+    assert.ok(!namespaceMatches("org.freedesktop.appearance", ["org.freedesktop"]));
+  });
+});
+
+describe("the settings portal on a bus", { skip: dbusDaemon ? false : "no dbus-daemon" }, () => {
+  let dir: string;
+  let daemon: ChildProcess;
+  let portal: Portal;
+  let client: DBusConnection;
+  let scheme = 1;
+  const listeners: (() => void)[] = [];
+  const SETTINGS = "org.freedesktop.impl.portal.Settings";
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), "plutonium-settings-"));
+    const address = `unix:path=${join(dir, "bus")}`;
+    daemon = spawn(dbusDaemon, ["--session", "--nofork", `--address=${address}`], { stdio: "ignore" });
+    for (let i = 0; i < 50 && !existsSync(join(dir, "bus")); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    portal = new Portal({
+      desktop: new FakeDesktop() as never,
+      apps: { list: () => [] } as never,
+      threadForPid: () => undefined,
+      address,
+      print: false,
+      settings: {
+        values: () =>
+          new Map([
+            ["org.freedesktop.appearance", new Map<string, Variant>([["color-scheme", ["u", scheme]], ["contrast", ["u", 0]]])],
+          ]),
+        onChange: (listener) => listeners.push(listener),
+      },
+    });
+    await portal.start();
+    client = await DBusConnection.connect(address);
+  });
+
+  after(() => {
+    client?.close();
+    portal?.stop();
+    daemon?.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const call = (member: string, signature: string, body: unknown[]) =>
+    client.call({ destination: PORTAL_NAME, path: "/org/freedesktop/portal/desktop", interface: SETTINGS, member, signature, body });
+
+  test("Read and ReadAll give the scheme; others aren't found", async () => {
+    assert.deepEqual(await call("Read", "ss", ["org.freedesktop.appearance", "color-scheme"]), [1]);
+    const [all] = (await call("ReadAll", "as", [["org.freedesktop.*"]])) as [Map<string, Map<string, unknown>>];
+    assert.equal(all.get("org.freedesktop.appearance")?.get("color-scheme"), 1);
+    const [none] = (await call("ReadAll", "as", [["org.gnome.*"]])) as [Map<string, unknown>];
+    assert.equal(none.size, 0);
+    await assert.rejects(call("Read", "ss", ["org.gnome.desktop.interface", "gtk-theme"]), /not found/);
+  });
+
+  test("a change is SettingChanged, for the keys that changed", async () => {
+    const seen: unknown[][] = [];
+    client.onSignal = (message) => {
+      if (message.member === "SettingChanged") seen.push([...(message.body ?? [])]);
+    };
+    await client.call({
+      destination: "org.freedesktop.DBus",
+      path: "/org/freedesktop/DBus",
+      interface: "org.freedesktop.DBus",
+      member: "AddMatch",
+      signature: "s",
+      body: [`type='signal',interface='${SETTINGS}'`],
+    });
+    scheme = 2;
+    for (const listener of listeners) listener();
+    for (let i = 0; i < 50 && !seen.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(seen, [["org.freedesktop.appearance", "color-scheme", 2]]);
   });
 });

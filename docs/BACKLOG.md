@@ -436,6 +436,19 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   setting, not the desktop's (the portal's `color-scheme`). Done 2026-10-27
   (`LINUX_COMPAT.md`): the portal's setting, else GNOME's dconf key, watched
   and set as Ash's dark mode.
+- [x] **Light and dark as a desktop setting.** M · Done 2026-11-07
+  ([APPEARANCE.md](features/APPEARANCE.md)): the appearance service keeps the
+  choice; Ash's dark mode for shells and tabs, the settings portal's
+  `org.freedesktop.appearance` for libadwaita, GTK 4, Qt 6 (threads get
+  `QT_QPA_PLATFORMTHEME=xdgdesktopportal`), browsers and Flatpaks, GNOME's
+  dconf keys and `settings.ini` for GTK 3; Charon's Style and Dark Style;
+  `plutonium appearance`.
+- [ ] **Light and dark follow-ups.** S each
+  ([APPEARANCE.md](features/APPEARANCE.md), "Not covered"): a Dark Style
+  control in Hydra's quick settings (T3 patch) and in the switcher's
+  settings; GNOME's `org.gnome.desktop.interface` keys through our Settings
+  portal (from dconf), for GTK 3 Flatpaks; an XSETTINGS manager per thread
+  Xwayland for X11 GTK apps; KDE's `kdeglobals` color scheme; accent colors.
 - [x] **Port the real shell web app** onto `<native-window>` and the broker.
   Done twice: T3 Code (`T3_SHELL_TEST.md`) and the plain shell (`shells/plain/`).
 - [x] **Browser tabs as elements.** Real pages as SurfaceEmbed `<embed>`s,
@@ -543,7 +556,8 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   `plutonium.portal` and `plutonium-portals.conf`, which then prefer us for
   more interfaces. The UI is drawn by the shell rather than GTK or KDE
   dialogs: FileChooser, OpenURI (Flatpak link opening, see
-  `features/OPENING_LINKS.md`), Settings (color scheme, accent),
+  `features/OPENING_LINKS.md`), Settings (color scheme: built,
+  `APPEARANCE.md`; accent),
   Notification, Inhibit, Print, Account, Access and Background.
   FileChooser and Print are built (below, "The FileChooser portal on the
   same picker", "The Print portal on the same dialog"); FileChooser's dialog opens over the app's window, found by the request's
