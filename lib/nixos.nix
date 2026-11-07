@@ -11,7 +11,7 @@ let
   dest = "/opt/plutonium";
   session = (pkgs.writeTextDir "share/wayland-sessions/plutonium.desktop" ''
     [Desktop Entry]
-    Name=Plutonium
+    Name=Pluto
     Comment=A web-based desktop (from ${dest})
     Exec=${dest}/bin/plutonium session start
     TryExec=${dest}/bin/plutonium

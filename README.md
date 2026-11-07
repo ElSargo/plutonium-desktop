@@ -1,8 +1,8 @@
-# Plutonium
+# Pluto
 
 A web-based desktop environment for Linux.
 
-In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real browser tabs are elements in that page, which you can lay out, style and script like any other part of the page. So a window manager, a launcher or a whole desktop shell is just a web app.
+In Pluto, the desktop is a web page. Native apps (Wayland and X11) and real browser tabs are elements in that page, which you can lay out, style and script like any other part of the page. So a window manager, a launcher or a whole desktop shell is just a web app.
 
 ![Styx: a terminal and a browser tab side by side](docs/images/niri.png)
 
@@ -12,7 +12,7 @@ In Plutonium, the desktop is a web page. Native apps (Wayland and X11) and real 
 - **Built for agents.** An agent can see, launch, screenshot and drive its own thread's apps and tabs over MCP.
 - **A desktop in Hydra.** A [file manager](docs/features/FILE_MANAGER.md) that's also the file picker, a dock of apps, sites and terminals, and [windows streamed](docs/features/REMOTE_WINDOWS.md) to T3 Code clients on other devices. It has no telemetry, ads or upsells, and update checks are opt-in.
 
-Plutonium is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (Exo). It runs directly on the display hardware, like any Wayland compositor, or in a window on your current desktop.
+Pluto is built on Chromium's ChromeOS desktop (Ash) and its Wayland server (Exo). It runs directly on the display hardware, like any Wayland compositor, or in a window on your current desktop.
 
 ## Status
 
@@ -26,7 +26,7 @@ A public beta: usable day to day by its developer, new to everyone else. Working
 
 The release is one package, with no podman or checkout. [INSTALL.md](INSTALL.md) says what it needs and explains each step.
 
-1. Install it. The installer puts it in `/opt/plutonium` and adds Plutonium to your login screen, and says if anything is missing. On NixOS, it ends with the module to add to your configuration (INSTALL.md).
+1. Install it. The installer puts it in `/opt/plutonium` and adds Pluto to your login screen, and says if anything is missing. On NixOS, it ends with the module to add to your configuration (INSTALL.md).
 
    ```sh
    curl -fsSL https://elsargo.github.io/pluto/install.sh | sh     # or: sh install.sh --from plutonium-<version>-x86_64.tar.xz
@@ -39,17 +39,17 @@ The release is one package, with no podman or checkout. [INSTALL.md](INSTALL.md)
    plutonium run --x11 :0 niri   # Styx; plutonium stop --x11 ends it
    ```
 
-3. To run it as your whole desktop, log out and pick Plutonium at the login screen. Or switch to a text console (Ctrl+Alt+F2), log in, and run `plutonium run`.
+3. To run it as your whole desktop, log out and pick Pluto at the login screen. Or switch to a text console (Ctrl+Alt+F2), log in, and run `plutonium run`.
 
 In Styx, Super+T opens a terminal, Super+D the launcher, and Super+Shift+/ lists every key. Super+Tab switches shells. Ctrl+Alt+Backspace ends the session.
 
 The first run installs the shells in `~/.pluto/shells`. From then on, `plutonium run` with no shells runs the ones you left on in the switcher. To change a shell, pick it in the switcher (Super+Tab) and choose **Copy a prompt for your agent** (paste it into whatever agent you use) or **Open a terminal**. **New shell…** under Add a shell makes your own. A change that breaks it is rolled back. `plutonium run --safe` always gets you the plain shell.
 
-**If it hangs,** `plutonium stop --drm` over ssh ends it, and the text console comes back. **Logs** are in `~/.local/share/plutonium/logs` (a checkout: `logs/`). To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug"). `sh install.sh --uninstall` removes Plutonium; your data stays.
+**If it hangs,** `plutonium stop --drm` over ssh ends it, and the text console comes back. **Logs** are in `~/.local/share/plutonium/logs` (a checkout: `logs/`). To **report a bug**, open an issue with what `plutonium doctor` says and those logs (INSTALL.md, "Reporting a bug"). `sh install.sh --uninstall` removes Pluto; your data stays.
 
 ## Developing
 
-To work on Plutonium itself, run it from a checkout, with Plutonium's Chromium [built from source](docs/BUILDING.md) in a podman container. [INSTALL.md](INSTALL.md) walks through it (podman, Node.js 24, `plutonium container create`, `plutonium chromium build`), and [docs/DEVELOPING.md](docs/DEVELOPING.md) covers testing, worktrees, and making a release.
+To work on Pluto itself, run it from a checkout, with Pluto's Chromium [built from source](docs/BUILDING.md) in a podman container. [INSTALL.md](INSTALL.md) walks through it (podman, Node.js 24, `plutonium container create`, `plutonium chromium build`), and [docs/DEVELOPING.md](docs/DEVELOPING.md) covers testing, worktrees, and making a release.
 
 ## Repository
 
@@ -58,7 +58,7 @@ To work on Plutonium itself, run it from a checkout, with Plutonium's Chromium [
 | `bin/plutonium`, `lib/` | The command for sessions and setup (`plutonium help`): what a release install has |
 | `chromium/` | The Chromium revision, patches and build settings ([README](chromium/README.md)) |
 | `helper/` | `plutoniumd`: threads, app launching, links, the agent bridge ([README](helper/README.md)) |
-| `shells/` | The shells Plutonium ships (installed into `~/.pluto/shells`) |
+| `shells/` | The shells Pluto ships (installed into `~/.pluto/shells`) |
 | `skill/` | The skill agents read to work on your desktop (written to `~/.pluto/SKILL.md`) |
 | `shells/hydra/` | Hydra, all of it: its launcher (`plutonium hydra`), and in `src/` the patches that turn T3 Code into it ([README](shells/hydra/README.md)) |
 | `dev/` | A checkout's own commands and files, which a release install doesn't have: Chromium builds, the container (`dev/container/`), `HOST=1`'s Nix build (`dev/nix/`), worktrees, and the release bundle (`dev/bundle/`, [DEVELOPING.md](docs/DEVELOPING.md#the-release-bundle)) |
