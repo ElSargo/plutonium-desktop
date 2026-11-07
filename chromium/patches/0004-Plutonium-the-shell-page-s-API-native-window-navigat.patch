@@ -16,6 +16,7 @@ It holds these changes:
 - windowBroker.getHelperUrl()
 - a floating native window keeps its client-side resize edges
 - a page painting where nothing may draw it doesn't let viz slow it
+- a native window's surface range doesn't hold the page's frames
 
 and the parts in these files of:
 - report Wayland client pid through the window broker
@@ -73,7 +74,7 @@ and the parts in these files of:
  .../core/html/context_menu_request_event.idl  |   29 +
  .../core/html/custom/custom_element.cc        |    2 +
  .../core/html/html_attribute_names.json5      |    5 +
- .../core/html/html_native_window_element.cc   |  927 +++++++++++
+ .../core/html/html_native_window_element.cc   |  933 +++++++++++
  .../core/html/html_native_window_element.h    |  256 +++
  .../core/html/html_native_window_element.idl  |   48 +
  .../renderer/core/html/html_tag_names.json5   |    4 +
@@ -108,7 +109,7 @@ and the parts in these files of:
  .../graphics/compositing/pending_layer.cc     |   21 +-
  .../platform/runtime_enabled_features.json5   |   11 +
  .../widget/compositing/layer_tree_view.cc     |   15 +-
- 69 files changed, 5410 insertions(+), 8 deletions(-)
+ 69 files changed, 5416 insertions(+), 8 deletions(-)
  create mode 100644 third_party/blink/public/mojom/native_window/native_window.mojom
  create mode 100644 third_party/blink/public/mojom/native_window/window_broker.mojom
  create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
@@ -1921,10 +1922,10 @@ index 23d12fae19..bdd3746efc 100644
    ],
 diff --git a/third_party/blink/renderer/core/html/html_native_window_element.cc b/third_party/blink/renderer/core/html/html_native_window_element.cc
 new file mode 100644
-index 0000000000..d506fe990c
+index 0000000000..c5c34e2c5c
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/html_native_window_element.cc
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,933 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1982,7 +1983,10 @@ index 0000000000..d506fe990c
 +
 +// The element embeds the window's surface range [current, current + this],
 +// so viz keeps drawing the window's latest surface as it resizes without the
-+// page having to follow every new surface id.
++// page having to follow every new surface id. The range's end is a bound that
++// is never drawn, so it mustn't be an activation dependency of the page's
++// frames: whenever another layer (a tab whose surface changed) asked for a
++// deadline, viz would hold each frame for the whole deadline, waiting for it.
 +constexpr uint32_t kSurfaceRangeSpan = 1u << 30;
 +
 +// How long the app's frame is stretched to the content box, waiting for it to
@@ -2375,6 +2379,8 @@ index 0000000000..d506fe990c
 +  layer->SetOldestAcceptableFallback(info_->surface_id);
 +  layer->SetStretchContentToFillBounds(true);
 +  layer->SetSurfaceHitTestable(false);
++  // Nothing to wait for: it's already drawn (and may go before the fade ends).
++  layer->SetBlocksActivation(false);
 +  layer->SetIsDrawable(true);
 +  fade_.emplace();
 +  fade_->frame.layer = std::move(layer);
@@ -2840,6 +2846,7 @@ index 0000000000..d506fe990c
 +    surface_layer_ = cc::SurfaceLayer::Create();
 +    surface_layer_->SetStretchContentToFillBounds(false);
 +    surface_layer_->SetSurfaceHitTestable(true);
++    surface_layer_->SetBlocksActivation(false);
 +    surface_layer_->SetIsDrawable(true);
 +  }
 +  surface_layer_->SetOldestAcceptableFallback(current);

@@ -13,6 +13,7 @@ It holds these changes:
 - an app's interactive move or resize hands the drag to the page
 - a tab dragged partly off the screen overflows instead of laying out again
 - a tab's <embed> ignores surface ids from its last embedding
+- a surface layer can embed a range without waiting for its end (SetBlocksActivation)
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -28,6 +29,11 @@ and the parts in these files of:
 - several displays, a shell per display, one window in one place
 - a floating native window keeps its client-side resize edges
 ---
+ cc/layers/surface_layer.cc                    |  11 +
+ cc/layers/surface_layer.h                     |   9 +
+ cc/layers/surface_layer_impl.cc               |  37 +-
+ cc/layers/surface_layer_impl.h                |   5 +
+ cc/mojo_embedder/viz_layer_context.cc         |   1 +
  cc/trees/presentation_time_callback_buffer.cc |  13 +-
  components/input/cursor_manager.cc            |  14 +
  components/input/cursor_manager.h             |   8 +
@@ -47,12 +53,181 @@ and the parts in these files of:
  .../overlay_processor_using_strategy.cc       |  61 +++
  .../overlay_processor_using_strategy.h        |   4 +
  .../service/hit_test/hit_test_aggregator.cc   |  38 +-
+ .../viz/service/layers/layer_context_impl.cc  |   1 +
  ...widget_host_input_event_router_unittest.cc | 158 +++++++
  .../surface_embed_connector_impl.cc           |  10 +
  .../surface_embed_connector_impl.h            |   3 +-
  .../public/browser/surface_embed_connector.h  |  12 +
- 23 files changed, 1207 insertions(+), 17 deletions(-)
+ .../viz/public/mojom/compositing/layer.mojom  |   4 +
+ 30 files changed, 1263 insertions(+), 29 deletions(-)
 
+diff --git a/cc/layers/surface_layer.cc b/cc/layers/surface_layer.cc
+index c0d84edb08..071688ef22 100644
+--- a/cc/layers/surface_layer.cc
++++ b/cc/layers/surface_layer.cc
+@@ -29,6 +29,7 @@ scoped_refptr<SurfaceLayer> SurfaceLayer::Create(
+ SurfaceLayer::SurfaceLayer()
+     : deadline_in_frames_(0u),
+       stretch_content_to_fill_bounds_(false),
++      blocks_activation_(true),
+       surface_hit_testable_(false),
+       has_pointer_events_none_(false),
+       is_reflection_(false),
+@@ -40,6 +41,7 @@ SurfaceLayer::SurfaceLayer(
+           std::move(update_submission_state_callback)),
+       deadline_in_frames_(0u),
+       stretch_content_to_fill_bounds_(false),
++      blocks_activation_(true),
+       surface_hit_testable_(false),
+       has_pointer_events_none_(false),
+       is_reflection_(false),
+@@ -115,6 +117,14 @@ void SurfaceLayer::SetStretchContentToFillBounds(
+   SetNeedsPushProperties();
+ }
+ 
++void SurfaceLayer::SetBlocksActivation(bool blocks_activation) {
++  if (blocks_activation_.Read(*this) == blocks_activation) {
++    return;
++  }
++  blocks_activation_.Write(*this) = blocks_activation;
++  SetNeedsPushProperties();
++}
++
+ void SurfaceLayer::SetSurfaceHitTestable(bool surface_hit_testable) {
+   if (surface_hit_testable_.Read(*this) == surface_hit_testable)
+     return;
+@@ -199,6 +209,7 @@ void SurfaceLayer::PushDirtyPropertiesTo(LayerImpl* layer,
+         override_child_paint_flags_.Read(*this));
+     layer_impl->SetStretchContentToFillBounds(
+         stretch_content_to_fill_bounds_.Read(*this));
++    layer_impl->SetBlocksActivation(blocks_activation_.Read(*this));
+     layer_impl->SetSurfaceHitTestable(surface_hit_testable_.Read(*this));
+     layer_impl->SetHasPointerEventsNone(has_pointer_events_none_.Read(*this));
+ 
+diff --git a/cc/layers/surface_layer.h b/cc/layers/surface_layer.h
+index 28bd1bb0ee..020c30fb35 100644
+--- a/cc/layers/surface_layer.h
++++ b/cc/layers/surface_layer.h
+@@ -55,6 +55,14 @@ class CC_EXPORT SurfaceLayer : public Layer {
+ 
+   void SetSurfaceHitTestable(bool surface_hit_testable);
+ 
++  // Whether the frames this layer is drawn in may wait for the range's end
++  // to arrive (an activation dependency, up to the frame's deadline). True by
++  // default. A layer whose range ends at a bound that is never drawn sets it
++  // to false: as a dependency, that end would hold every frame it is in
++  // until the deadline another layer asked for passes.
++  void SetBlocksActivation(bool blocks_activation);
++  bool blocks_activation() const { return blocks_activation_.Read(*this); }
++
+   void SetHasPointerEventsNone(bool has_pointer_events_none);
+ 
+   void SetIsReflection(bool is_reflection);
+@@ -98,6 +106,7 @@ class CC_EXPORT SurfaceLayer : public Layer {
+   ProtectedSequenceWritable<std::optional<uint32_t>> deadline_in_frames_;
+ 
+   ProtectedSequenceReadable<bool> stretch_content_to_fill_bounds_;
++  ProtectedSequenceReadable<bool> blocks_activation_;
+ 
+   // Whether or not the surface should submit hit test data when submitting
+   // compositor frame. The bit represents that the surface layer may be
+diff --git a/cc/layers/surface_layer_impl.cc b/cc/layers/surface_layer_impl.cc
+index 462f3485da..67c6ff64dd 100644
+--- a/cc/layers/surface_layer_impl.cc
++++ b/cc/layers/surface_layer_impl.cc
+@@ -103,6 +103,15 @@ void SurfaceLayerImpl::SetStretchContentToFillBounds(bool stretch_content) {
+   NoteLayerPropertyChanged();
+ }
+ 
++void SurfaceLayerImpl::SetBlocksActivation(bool blocks_activation) {
++  if (blocks_activation_ == blocks_activation) {
++    return;
++  }
++
++  blocks_activation_ = blocks_activation;
++  NoteLayerPropertyChanged();
++}
++
+ void SurfaceLayerImpl::SetSurfaceHitTestable(bool surface_hit_testable) {
+   if (surface_hit_testable_ == surface_hit_testable)
+     return;
+@@ -146,6 +155,7 @@ void SurfaceLayerImpl::CopyPropertiesTo(LayerImpl* layer) const {
+   LayerImpl::CopyPropertiesTo(layer);
+   SurfaceLayerImpl* layer_impl = static_cast<SurfaceLayerImpl*>(layer);
+   layer_impl->SetStretchContentToFillBounds(stretch_content_to_fill_bounds_);
++  layer_impl->SetBlocksActivation(blocks_activation_);
+   layer_impl->SetSurfaceHitTestable(surface_hit_testable_);
+   layer_impl->SetHasPointerEventsNone(has_pointer_events_none_);
+   layer_impl->SetIsReflection(is_reflection_);
+@@ -228,18 +238,21 @@ void SurfaceLayerImpl::AppendQuads(const AppendQuadsContext& context,
+       quad->override_child_filter_quality = GetFilterQuality();
+       quad->override_child_dynamic_range_limit = GetDynamicRangeLimit();
+     }
+-    // Add the primary surface ID as a dependency.
+-    append_quads_data->activation_dependencies.emplace_back(
+-        surface_range_.end(), features::UsePerDependencyDeadlines()
+-                                  ? deadline_in_frames_
+-                                  : std::nullopt);
+-    if (deadline_in_frames_) {
+-      if (!append_quads_data->deadline_in_frames)
+-        append_quads_data->deadline_in_frames = 0u;
+-      append_quads_data->deadline_in_frames = std::max(
+-          *append_quads_data->deadline_in_frames, *deadline_in_frames_);
+-    } else {
+-      append_quads_data->use_default_lower_bound_deadline = true;
++    // Add the primary surface ID as a dependency, unless this layer's range
++    // ends at a bound that's never drawn (SetBlocksActivation()).
++    if (blocks_activation_) {
++      append_quads_data->activation_dependencies.emplace_back(
++          surface_range_.end(), features::UsePerDependencyDeadlines()
++                                    ? deadline_in_frames_
++                                    : std::nullopt);
++      if (deadline_in_frames_) {
++        if (!append_quads_data->deadline_in_frames)
++          append_quads_data->deadline_in_frames = 0u;
++        append_quads_data->deadline_in_frames = std::max(
++            *append_quads_data->deadline_in_frames, *deadline_in_frames_);
++      } else {
++        append_quads_data->use_default_lower_bound_deadline = true;
++      }
+     }
+   } else {
+     auto* quad =
+diff --git a/cc/layers/surface_layer_impl.h b/cc/layers/surface_layer_impl.h
+index c10a0d1dc5..e55c6b474f 100644
+--- a/cc/layers/surface_layer_impl.h
++++ b/cc/layers/surface_layer_impl.h
+@@ -51,6 +51,10 @@ class CC_EXPORT SurfaceLayerImpl : public LayerImpl {
+     return stretch_content_to_fill_bounds_;
+   }
+ 
++  // See SurfaceLayer::SetBlocksActivation().
++  void SetBlocksActivation(bool blocks_activation);
++  bool blocks_activation() const { return blocks_activation_; }
++
+   void SetSurfaceHitTestable(bool surface_hit_testable);
+   bool surface_hit_testable() const { return surface_hit_testable_; }
+ 
+@@ -96,6 +100,7 @@ class CC_EXPORT SurfaceLayerImpl : public LayerImpl {
+   std::optional<uint32_t> deadline_in_frames_;
+ 
+   bool stretch_content_to_fill_bounds_ = false;
++  bool blocks_activation_ = true;
+   bool surface_hit_testable_ = false;
+   bool has_pointer_events_none_ = false;
+   bool is_reflection_ = false;
+diff --git a/cc/mojo_embedder/viz_layer_context.cc b/cc/mojo_embedder/viz_layer_context.cc
+index d5efadefe0..16b4caf33d 100644
+--- a/cc/mojo_embedder/viz_layer_context.cc
++++ b/cc/mojo_embedder/viz_layer_context.cc
+@@ -921,6 +921,7 @@ void SerializeSurfaceLayerExtra(SurfaceLayerImpl& layer,
+   // TODO(zmo): This is never `true` on the active tree
+   extra->will_draw_needs_reset = layer.will_draw_needs_reset();
+   extra->override_child_paint_flags = layer.override_child_paint_flags();
++  extra->blocks_activation = layer.blocks_activation();
+ }
+ 
+ void SerializeLayer(LayerImpl& layer,
 diff --git a/cc/trees/presentation_time_callback_buffer.cc b/cc/trees/presentation_time_callback_buffer.cc
 index c3957ea519..0a3158daf6 100644
 --- a/cc/trees/presentation_time_callback_buffer.cc
@@ -1699,6 +1874,18 @@ index becbe53926..15494f885e 100644
        return base::unexpected(AggregationError::INVALID_CHILD_REGION);
      }
  
+diff --git a/components/viz/service/layers/layer_context_impl.cc b/components/viz/service/layers/layer_context_impl.cc
+index e247185a0c..0ece003189 100644
+--- a/components/viz/service/layers/layer_context_impl.cc
++++ b/components/viz/service/layers/layer_context_impl.cc
+@@ -953,6 +953,7 @@ void UpdateSurfaceLayerExtra(const mojom::SurfaceLayerExtraPtr& extra,
+     layer.ResetStateForUpdateSubmissionStateCallback();
+   }
+   layer.SetOverrideChildPaintFlags(extra->override_child_paint_flags);
++  layer.SetBlocksActivation(extra->blocks_activation);
+ }
+ 
+ void UpdateViewTransitionContentLayerExtra(
 diff --git a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc b/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
 index 54ec67760c..db0e3625ad 100644
 --- a/content/browser/renderer_host/render_widget_host_input_event_router_unittest.cc
@@ -1945,3 +2132,18 @@ index 95b2b18de7..6cb3284900 100644
    // Called when the visibility of the parent frame changes.
    virtual void OnVisibilityChanged(
        blink::mojom::FrameVisibility visibility) = 0;
+diff --git a/services/viz/public/mojom/compositing/layer.mojom b/services/viz/public/mojom/compositing/layer.mojom
+index a9d284d87c..62cfa94350 100644
+--- a/services/viz/public/mojom/compositing/layer.mojom
++++ b/services/viz/public/mojom/compositing/layer.mojom
+@@ -84,6 +84,10 @@ struct SurfaceLayerExtra {
+   // This flag indicates whether child paint flags (filter quality and
+   // dynamic range limit) should be overridden or not.
+   bool override_child_paint_flags;
++
++  // Whether frames may wait for the end of |surface_range| to arrive
++  // (cc::SurfaceLayer::SetBlocksActivation()).
++  bool blocks_activation = true;
+ };
+ 
+ // Extra fields in a cc::TextureLayerImpl that has been added to a tree or

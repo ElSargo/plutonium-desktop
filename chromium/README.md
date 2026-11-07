@@ -3,7 +3,7 @@
 Plutonium is a set of patches on Chromium's ChromeOS shell (Ash) and its Wayland server (Exo), built as a Linux ChromeOS (`target_os = "chromeos"`) that runs on an ordinary Linux machine.
 
 - **`BASE`**: the upstream commit the patches apply to. It is `9f2eedcd653d` (2026-10-14, Chrome 158.0.8106.0).
-- **`patches/`**: the patch series, in order (`git am`). Together they change 365 files (about 42,500 lines, almost all of it new files).
+- **`patches/`**: the patch series, in order (`git am`). Together they change 372 files (about 42,600 lines, almost all of it new files).
 - **`args.gn`**: the build arguments.
 
 `plutonium chromium fetch` checks out `BASE`, `plutonium chromium patch` applies the series on a branch `plutonium`, and `plutonium chromium build` builds `chrome`. See [docs/BUILDING.md](../docs/BUILDING.md).
