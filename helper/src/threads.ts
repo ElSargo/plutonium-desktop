@@ -250,6 +250,10 @@ export class Threads {
       WAYLAND_DISPLAY: this.waylandDisplay,
       GDK_BACKEND: "wayland",
       QT_QPA_PLATFORM: "wayland",
+      // GTK 4 speaks text-input-v3 (IME.md, and Pluto Vim's native fields) only with its
+      // Wayland input method; without it, it binds no text input at all. An IM the user
+      // chose (ibus, fcitx) stays.
+      ...(process.env.GTK_IM_MODULE ? {} : { GTK_IM_MODULE: "wayland" }),
       // Qt 6 follows the settings portal's light or dark (APPEARANCE.md) only
       // with this platform theme; its generic one never does. Its file dialogs
       // go through the portal too, like GTK's below. A theme the user chose

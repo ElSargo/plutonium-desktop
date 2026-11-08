@@ -165,12 +165,18 @@ What it lacks, and what's done instead:
   `caps.exactMotions` is false for this backend; operators (`dw`, `ciw`) still use offsets computed from the surrounding text, so what they delete is vim's idea wherever the text is known.
 - **No text past 4 KB.** `gg` and `G` use Ctrl+Home and Ctrl+End; searching past the window isn't possible (`caps.wholeText` is false).
 - **No undo request.** Undo and redo send Ctrl+Z and Ctrl+Shift+Z (`caps.undo` is `"keys"`). A delete and commit is one edit for most toolkits.
-- **No caret shape.** The mode shows in a small badge by the cursor, drawn by the browser at the text-input cursor rectangle the client reports.
+- **No caret shape.** The mode shows in a small badge by the cursor, outside insert mode. The shell draws it (the shell library's `_vimBadge`, from the helper's `vim_mode` notice) over the element that shows the window, at the cursor rectangle the client reports, since a native window is drawn inside the shell's page. A shell can draw its own (`vimmode` event, `preventDefault()`).
 
-**Where the engine runs.** One background "vim host" page in the browser, running the same engine and `init.js` (in an isolated world of its own). Exo already holds a key while an IME answers asynchronously, and passes it on after ([IME.md](IME.md), patch 0065). Vim is a stage in that same path:
-- in normal mode, the key goes to the vim host, which consumes it, typically within a millisecond;
-- in insert mode, keys go on to the real IME unchanged, so a Chinese IME composes as before, and vim only sees Escape and the keys it maps;
-- the IME's own composition always wins: while a preedit is showing, vim takes nothing.
+**Where the engine runs: in the helper** (`helper/src/vimNative.ts`), the same engine and `init.js` as the pages', in a vm context, sharing the register store directly. Exo (`components/exo/plutonium_vim.cc`) talks to it over the Plutonium DevTools domain:
+- **Fields:** each text-input-v3 field that's enabled is announced on every commit (`vimFieldChanged`: its surrounding text, cursor and anchor in UTF-16, content hint and purpose, window, and cursor rectangle), and its end (`vimFieldGone`). Password, PIN, sensitive, hidden-text and terminal fields are never announced.
+- **Keys:** Exo's `Keyboard::OnKeyEvent` holds a key the field wants (`setVimHold`: every key outside insert mode; in insert mode Escape, Ctrl+[ and the first keys of `init.js`'s insert mappings), and every key behind it, in order, until `answerVimKey`. A key the engine took is swallowed with its release and repeats (so holding `j` repeats `j` in the engine); one it left goes on to the app through the agents' key path (`EmbeddedWindows::InjectKeyEvents`), its release after it. Super's keys, modifiers, shell shortcuts and keys the IME has are never held. A key not answered in 100 ms goes on by itself, and nothing is held while no helper listens.
+- **Order:** a key the engine takes is answered at once. One it leaves is answered once the engine's edits for the keys before it are out, so `cw` then typing puts the typed text after the change. While the engine works, every key waits behind the last.
+- **The IME's composition always wins:** while a preedit is showing, vim takes nothing.
+- **Edits** are `editVimField`: delete around the cursor and commit, then `done`, one edit the app can undo.
+- **Motions** are arrow presses (`dispatchWindowKeyEvents`), counted in graphemes, as toolkits move: one batch, then one correction. An app reports each press in turn, so a motion waits until the app reports the target, or goes quiet for 10 ms after a report, or 60 ms pass; only then does it correct.
+- **Undo and redo** are the app's own Ctrl+Z and Ctrl+Shift+Z, with the app's own steps: in GTK a change (`cw`) is a delete and an insert, and `u` takes back the insert first. GTK reports no new state after its undo, so if the app is silent, a Shift+arrow there and back (selecting a character and letting it go) makes it report.
+- **Every native field is multi-line** to the engine (the first Escape is vim's): GTK's text views don't send the MULTILINE hint, so its absence says nothing.
+- **GTK 4 needs its Wayland input method** to use text-input-v3 at all: the thread environment (`helper/src/threads.ts`) sets `GTK_IM_MODULE=wayland` unless the user chose one (ibus, fcitx).
 
 **A Plutonium extension protocol, later:** `plutonium_text_input_v1` with `set_selection(cursor, anchor)` and the whole text on request. Toolkits won't implement it, but our own clients (the terminal drawer, foot builds we patch) could, and the engine would then use exact motions there.
 
@@ -296,7 +302,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 4. **The `init.js` API** on the engine: `opt`, `keymap.set`, `motion`, `operator`, `textobject`, `command`, events; reload on save; `plutonium vim check`.
 5. **The register store** (built, below) in the helper, in memory only; scopes; `"+` and `"=`.
 6. **Pages that integrate** (built, below), and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
-7. **text-input-v3:** the vim host page, the async key path, best-effort motions, the mode badge, the native insert mode extras.
+7. **text-input-v3** (built, below): the engine in the helper, the async key path, best-effort motions, the mode badge.
 8. **`zwp_primary_selection_v1`** in Exo, for `"*` and middle-click paste.
 9. **Across the desktop:** marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
 10. **AT-SPI,** for apps without text-input-v3.
@@ -365,6 +371,15 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **Hydra:** T3 patch 0013 (`shells/hydra/src/patches/`).
 - **Tests:** `helper/test/vimApi.test.ts` (actions, commands, menus, `start` rules), `helper/test/vimDom.test.ts` (a page that integrates, in Chromium), `helper/test/vimConfig.test.ts` (the page hears `pvim:action` and `pvim:mode` from the engine's isolated world). In Hydra on an X11 slot, driven over DevTools: the composer declares its actions, a `/` menu adds the menu actions and yields Ctrl+N (which then didn't open a new thread), Ctrl+Y picked the item, and `k` and `j` sent `history.prev` and `history.next`.
 
+### Step 7: native apps over text-input-v3 (built)
+
+- **Chromium** (build 62ca0f70c0b8): `components/exo/plutonium_vim.{h,cc}` and its hook in `Keyboard::OnKeyEvent`, `EmbeddedWindows::WindowIdForSurface` (patch 0002); the text-input-v3 delegate as a Pluto Vim field (patch 0012); `setVimEnabled`, `setVimHold`, `answerVimKey`, `editVimField` and the `vimFieldChanged`, `vimFieldGone`, `vimKey` events (patch 0010).
+- **The helper:** `helper/src/vimNative.ts` (the engine in a vm context, a session per field, `NativeBuffer`, holds and answers), wired in `daemon.ts` with the register store and the windows' threads; the badge in the shell library (`_vimBadge`, the `vim_mode` notice). `PLUTONIUM_VIM_DEBUG=1` logs fields, keys, edits and arrows.
+- **Tests:** `helper/test/vimNative.test.ts` against a fake Exo that reports each arrow press in turn and stays silent after its undo, as GTK does: holds in each mode, `dw`, `cw` then typing, `jk`, registers, the badge, `u` then `yy` `p`.
+- **On an X11 slot** (Xvfb, niri, GNOME Text Editor 50.1 with `GTK_IM_MODULE=wayland`, real keys through Ash with xdotool): typing in insert mode went to the app unchanged; Escape entered normal mode and the shell drew the NORMAL badge; `b` `dw` turned "hello big world" into "hello big "; `0` `cw` `hi` Escape gave "hi big "; `0` `dw` `u` `yy` `p` gave "one two" twice.
+- **What testing changed:** the motion waits for the app to arrive or go quiet (its first report, one press of four, had set off a correction that overshot); every native field is multi-line; undo makes a silent app report; GTK needs `GTK_IM_MODULE=wayland`.
+- **Not yet:** the badge's place is approximate (GTK's cursor rectangle and the element's scale aren't reconciled), Qt 6 apps, a DRM session with a real keyboard, an IME composing while in normal mode, and the fail-open timeout under a stalled helper (by design; not exercised).
+
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
@@ -386,9 +401,11 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - 2026-11-09: the page protocol's names are settled with Hydra's integration (`data-pvim-start`, `-actions`, `-commands`, `-yield`, `-mode`; `pvim:mode`, `pvim:action`). `data-pvim-yield` takes vim's notation and holds while the page declares it, in any mode, rather than "in normal mode": the page knows its own state (Hydra's menu) better than a fixed rule.
 - 2026-11-09: "Composer starts in normal mode" is a config rule (`vim.enable({ shell, selector, start })`), not a Hydra setting: it's where every other vim choice lives, and it works for any site's fields.
 - 2026-11-09: a page's menus are driven from insert mode with vim's completion keys (Ctrl+N, Ctrl+P, Ctrl+Y, Ctrl+E), not `j`, `k` and Enter in normal mode: the menu belongs to the text being typed, and entering normal mode moves the cursor off its trigger.
+- 2026-11-09: native apps' engine runs in the helper, not in a "vim host" page in the browser: the helper already has the engine, `init.js` and the register store, the DevTools domain already connects it to Exo, and there's no extra renderer. A held key costs one round trip on a local socket.
+- 2026-11-09 (open question 1): in native apps, insert mode takes only Escape, Ctrl+[ (Caps Lock) and the first keys of `init.js`'s insert mappings. Ctrl+R, Ctrl+O, Ctrl+W and Ctrl+U stay the app's: they're common app keys (Ctrl+W closes, Ctrl+R reloads), and native fields have their own word and line deletion.
+- 2026-11-09 (open question 2): the motion budget is one batch of arrows, one correction, and 25 ms waiting on the app each; a held key the helper doesn't answer in 100 ms goes on to the app.
+- 2026-11-09: the native mode badge is the shell's to draw, over the element showing the window: a native window is drawn inside the shell page, so the browser can't place it on screen by itself.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions
 
-1. **Ctrl+R and Ctrl+O in native apps.** Taking them in insert mode hides the app's own keys; which ones to take by default (step 7).
-2. **The motion budget** for native apps: how many milliseconds and corrections before accepting the toolkit's cursor (step 7).

@@ -35,6 +35,7 @@ import { uiLibraryFile } from "./uiLibrary.ts";
 import { vimBundle } from "./vimBundle.ts";
 import { VimConfig } from "./vimConfig.ts";
 import { VimInjector } from "./vimInject.ts";
+import { NativeVim } from "./vimNative.ts";
 import { RegisterStore, wlClipboard } from "./vimRegisters.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
@@ -593,11 +594,15 @@ export class Daemon {
       const log = (message: string) => console.error(`plutoniumd: ${message}`);
       const shells = options.shells;
       let injector: VimInjector | null = null;
-      // init.js (vimConfig.ts): each good version goes into every page.
+      let native: NativeVim | null = null;
+      // init.js (vimConfig.ts): each good version goes into every page, and native apps' engine.
       const config = new VimConfig({
         home: shells?.home ?? plutoHome(),
         engineDir: vimDir,
-        onChange: () => void injector?.reconfigure(),
+        onChange: () => {
+          void injector?.reconfigure();
+          native?.configure();
+        },
         notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
         log,
       });
@@ -619,7 +624,22 @@ export class Daemon {
           return origins;
         },
       });
-      const start = () => void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
+      // Native apps' fields (vimNative.ts): the engine here, over Exo's text-input-v3.
+      native = new NativeVim(cdp, {
+        bundle: () => vimBundle(vimDir),
+        config: () => config.expression,
+        registers,
+        placeOf: (windowId) => ({ thread: desktop?.windows().find((window) => window.id === windowId)?.tags[0] ?? null }),
+        // The shells draw the mode over the window (the shell library's vim badge).
+        showMode: (shown) => this.relay.notifyAll("vim_mode", { ...shown }),
+        log,
+      });
+      const nativeVim = native;
+      const start = () => {
+        void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
+        // A browser without Pluto Vim's Exo side has no Plutonium.setVimEnabled: pages only.
+        void nativeVim.start().catch((error) => log(`pluto vim: no native fields (${(error as Error).message})`));
+      };
       // Again each time the helper connects to the browser (as watchCrashes does): a new connection has no sessions.
       this.desktop?.enableListeners.add(start);
       start();
