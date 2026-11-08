@@ -7,9 +7,29 @@
 // An injected script lasts as long as the DevTools session that added it, so
 // the helper keeps one session per page. Off unless PLUTONIUM_VIM=1, while
 // it's young.
+//
+// A script added to a page while its document commits reaches neither that
+// document nor, as a new one, the next: Chromium's runImmediately misses a
+// document mid-commit, and waitForDebuggerOnStart doesn't always hold the
+// first commit back. So after adding it, the injector also runs it in the
+// page's world as it is now (ensure): a document made after the script went
+// in gets it as a new document, and one made before is the one it runs in.
+// The script skips itself where the engine already is.
+//
+// New pages are auto-attached and wait (waitForDebuggerOnStart) until their
+// script is in, so mostly the engine is in before the page's own scripts.
+// Pages open at start are attached as they are. Every page gets the script,
+// and it goes on only in http(s) documents, so a tab that starts at
+// about:blank still gets it.
+//
+// The script also carries init.js (vimConfig.ts), configured before the
+// engine attaches. A new version replaces each page's script, for its next
+// document, and is configured into the world the page has now.
 import type { BrowserCdp } from "./cdp.ts";
 
 const WORLD = "pluto-vim";
+/** When a page open at start is checked again for the engine (ensure). */
+const ENSURE_AGAIN_MS = 1000;
 
 interface TargetInfo {
   readonly targetId: string;
@@ -17,26 +37,60 @@ interface TargetInfo {
   readonly url: string;
 }
 
-/** Pages the engine goes into: http(s) and the shells' own, not the browser's chrome:// and devtools:// pages. */
-export function wantsVim(target: TargetInfo): boolean {
-  return target.type === "page" && /^https?:/.test(target.url);
+/** Documents the engine goes on in: http(s), the shells' own included, not chrome://, devtools:// or about:. */
+export function wantsVim(url: string): boolean {
+  return /^https?:/.test(url);
+}
+
+export interface VimInjectorOptions {
+  /** init.js as an expression (vimConfig.ts's configExpression): its setup function, or null. */
+  readonly config?: () => string;
+  /** The installed shells by origin, for vim.disable({ shell }). */
+  readonly shellOrigins?: () => Record<string, string>;
+}
+
+interface PageSession {
+  readonly sessionId: string;
+  identifier: string;
+  url: string;
 }
 
 export class VimInjector {
-  private readonly sessions = new Map<string, string>();
+  private readonly sessions = new Map<string, PageSession>();
   private readonly attaching = new Set<string>();
+  private listening = false;
 
   private readonly cdp: BrowserCdp;
   private readonly source: () => string;
   private readonly log: (message: string) => void;
+  private readonly options: VimInjectorOptions;
 
-  constructor(cdp: BrowserCdp, source: () => string, log: (message: string) => void = () => {}) {
+  constructor(cdp: BrowserCdp, source: () => string, log: (message: string) => void = () => {}, options: VimInjectorOptions = {}) {
     this.cdp = cdp;
     this.source = source;
     this.log = log;
+    this.options = options;
   }
 
-  private listening = false;
+  /** The script every page's world runs: in an http(s) document, the engine, init.js configured into a Vim, and the Vim attached. */
+  pageScript(): string {
+    const config = this.options.config?.() ?? "null";
+    let shells = "{}";
+    try {
+      shells = JSON.stringify(this.options.shellOrigins?.() ?? {});
+    } catch {
+      // No shells' names: vim.disable({ shell }) matches nothing.
+    }
+    return [
+      "if (/^https?:$/.test(location.protocol) && !globalThis.plutoVimPage) {",
+      this.source(),
+      "  const vim = new globalThis.plutoVim.Vim();",
+      `  try { globalThis.plutoVim.configure(vim, ${config}); } catch (error) { console.error("pluto vim: init.js:", error); }`,
+      `  globalThis.plutoVimPage = globalThis.plutoVim.attach(document, { vim, shell: (${shells})[location.origin] ?? null });`,
+      "}",
+      "",
+    ].join("\n");
+  }
 
   /**
    * Watches for pages, and puts the engine into the ones open now. Call it
@@ -47,43 +101,105 @@ export class VimInjector {
     if (!this.listening) this.listen();
     this.sessions.clear();
     await this.cdp.send("Target.setDiscoverTargets", { discover: true });
+    await this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
     const { targetInfos } = (await this.cdp.send("Target.getTargets")) as { targetInfos: TargetInfo[] };
-    await Promise.all(targetInfos.map((target) => this.consider(target)));
+    await Promise.all(targetInfos.map((target) => this.attachOpen(target)));
   }
 
   private listen(): void {
     this.listening = true;
     this.cdp.addEventListener(({ method, params, sessionId }) => {
       if (sessionId) return;
-      const value = params as { targetInfo?: TargetInfo; targetId?: string; sessionId?: string };
-      if ((method === "Target.targetCreated" || method === "Target.targetInfoChanged") && value.targetInfo) {
-        void this.consider(value.targetInfo);
+      const value = params as { targetInfo?: TargetInfo; targetId?: string; sessionId?: string; waitingForDebugger?: boolean };
+      if (method === "Target.attachedToTarget" && value.waitingForDebugger && value.sessionId && value.targetInfo) {
+        void this.attachNew(value.sessionId, value.targetInfo);
+      } else if (method === "Target.targetInfoChanged" && value.targetInfo) {
+        const known = this.sessions.get(value.targetInfo.targetId);
+        if (known) known.url = value.targetInfo.url;
       } else if (method === "Target.targetDestroyed" && value.targetId) {
         this.sessions.delete(value.targetId);
       } else if (method === "Target.detachedFromTarget" && value.sessionId) {
-        for (const [target, session] of this.sessions) if (session === value.sessionId) this.sessions.delete(target);
+        for (const [target, page] of this.sessions) if (page.sessionId === value.sessionId) this.sessions.delete(target);
       }
     });
   }
 
-  /** The pages that have the engine. */
+  /** The pages that have the engine's script. */
   get pages(): number {
     return this.sessions.size;
   }
 
-  private async consider(target: TargetInfo): Promise<void> {
-    if (!wantsVim(target) || this.sessions.has(target.targetId) || this.attaching.has(target.targetId)) return;
+  /** A new target, waiting for us: a page gets its script; then it runs, whatever happened. */
+  private async attachNew(sessionId: string, target: TargetInfo): Promise<void> {
+    try {
+      if (target.type === "page" && !this.sessions.has(target.targetId)) {
+        const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD }, sessionId)) as { identifier: string };
+        this.sessions.set(target.targetId, { sessionId, identifier, url: target.url });
+        if (wantsVim(target.url)) this.log(`pluto vim: in ${target.url}`);
+      }
+    } catch (error) {
+      this.log(`pluto vim: couldn't go into ${target.url || target.type}: ${(error as Error).message}`);
+    } finally {
+      await this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => {});
+      const page = this.sessions.get(target.targetId);
+      if (!page || page.sessionId !== sessionId) await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      // Waiting doesn't always hold back the first document's commit: run it there too.
+      else await this.ensure(target.targetId, page);
+    }
+  }
+
+  /** A page open when we started: attached as it is, the script run in its document now too. */
+  private async attachOpen(target: TargetInfo): Promise<void> {
+    if (target.type !== "page" || this.sessions.has(target.targetId) || this.attaching.has(target.targetId)) return;
     this.attaching.add(target.targetId);
     try {
       const { sessionId } = (await this.cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true })) as { sessionId: string };
-      const source = `${this.source()}\nglobalThis.plutoVimPage ??= globalThis.plutoVim.attach(document);\n`;
-      await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source, worldName: WORLD, runImmediately: true }, sessionId);
-      this.sessions.set(target.targetId, sessionId);
-      this.log(`pluto vim: in ${target.url}`);
+      const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD, runImmediately: true }, sessionId)) as { identifier: string };
+      const page = { sessionId, identifier, url: target.url };
+      this.sessions.set(target.targetId, page);
+      if (wantsVim(target.url)) this.log(`pluto vim: in ${target.url}`);
+      await this.ensure(target.targetId, page);
+      setTimeout(() => void this.ensure(target.targetId, page), ENSURE_AGAIN_MS).unref?.();
     } catch (error) {
       this.log(`pluto vim: couldn't go into ${target.url}: ${(error as Error).message}`);
     } finally {
       this.attaching.delete(target.targetId);
     }
+  }
+
+  /** Runs the script in the page's world now, if it's still ours; it does nothing where the engine already is. */
+  private async ensure(targetId: string, page: PageSession): Promise<void> {
+    if (this.sessions.get(targetId) !== page) return;
+    try {
+      const { executionContextId } = (await this.cdp.send("Page.createIsolatedWorld", { frameId: targetId, worldName: WORLD }, page.sessionId)) as { executionContextId: number };
+      await this.cdp.send("Runtime.evaluate", { contextId: executionContextId, expression: this.pageScript() }, page.sessionId);
+    } catch {
+      // The page went, or is between documents: its next document gets the script anyway.
+    }
+  }
+
+  /**
+   * init.js changed: each page's script is replaced (for its next document),
+   * and the new version is configured into the world it has now.
+   */
+  async reconfigure(): Promise<void> {
+    const config = this.options.config?.() ?? "null";
+    const source = this.pageScript();
+    await Promise.all([...this.sessions].map(async ([targetId, page]) => {
+      try {
+        await this.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.identifier }, page.sessionId);
+        const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source, worldName: WORLD }, page.sessionId)) as { identifier: string };
+        page.identifier = identifier;
+        if (!wantsVim(page.url)) return;
+        const { executionContextId } = (await this.cdp.send("Page.createIsolatedWorld", { frameId: targetId, worldName: WORLD }, page.sessionId)) as { executionContextId: number };
+        const { exceptionDetails } = (await this.cdp.send("Runtime.evaluate", {
+          contextId: executionContextId,
+          expression: `globalThis.plutoVimPage && globalThis.plutoVim.configure(globalThis.plutoVimPage.vim, ${config}), true`,
+        }, page.sessionId)) as { exceptionDetails?: { exception?: { description?: string }; text?: string } };
+        if (exceptionDetails) this.log(`pluto vim: init.js failed in ${page.url}: ${exceptionDetails.exception?.description ?? exceptionDetails.text}`);
+      } catch (error) {
+        this.log(`pluto vim: couldn't reconfigure ${page.url}: ${(error as Error).message}`);
+      }
+    }));
   }
 }

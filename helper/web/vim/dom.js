@@ -330,7 +330,8 @@ export function bufferFor(el) {
 /**
  * Pluto Vim in every field of `doc`. Returns { vim, sessionOf, detach }.
  * `options.vim` shares a Vim (and its registers) between documents; otherwise
- * `options.opt` sets the new one's options.
+ * `options.opt` sets the new one's options. `options.shell` names the shell
+ * the page is, for vim.disable({ shell }).
  */
 export function attach(doc = globalThis.document, options = {}) {
   const vim = options.vim ?? new Vim({ opt: options.opt });
@@ -350,15 +351,30 @@ export function attach(doc = globalThis.document, options = {}) {
 
   const target = (event) => event.composedPath?.()[0] ?? event.target;
 
+  /** The field at `el`, if Pluto Vim is on for it (vim.disable and vim.enable). */
+  const vimField = (el) => {
+    const field = fieldOf(el);
+    return field && vim.enabledFor({ site: doc.location?.hostname, shell: options.shell, el: field }) ? field : null;
+  };
+
   const onFocus = (event) => {
-    const field = fieldOf(target(event));
-    if (field) sessionOf(field);
+    const field = vimField(target(event));
+    if (field) vim.emit("FieldEnter", { session: sessionOf(field) });
+  };
+
+  const onBlur = (event) => {
+    const field = vimField(target(event));
+    const session = field && sessions.get(field);
+    if (!session) return;
+    // Keys held for a mapping would land wherever focus went: they're dropped.
+    session.cancelPending();
+    vim.emit("FieldLeave", { session });
   };
 
   const handle = (event, claimed) => {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (!event.isTrusted && !options.untrusted) return;
-    const field = fieldOf(target(event));
+    const field = vimField(target(event));
     if (!field) return;
     const key = keyFromEvent(event);
     if (!key || vim.opt.claim.includes(key) !== claimed) return;
@@ -383,12 +399,13 @@ export function attach(doc = globalThis.document, options = {}) {
   };
 
   doc.addEventListener("focusin", onFocus, true);
+  doc.addEventListener("focusout", onBlur, true);
   view.addEventListener("keydown", onClaimed, true);
   view.addEventListener("keydown", onKey);
   view.addEventListener("plutoniumvimready", onReady);
   view.addEventListener("plutoniumvimkey", onOffer);
   const unlisten = vim.on("ModeChanged", onMode);
-  const active = fieldOf(doc.activeElement);
+  const active = vimField(doc.activeElement);
   if (active) sessionOf(active);
 
   return {
@@ -398,6 +415,7 @@ export function attach(doc = globalThis.document, options = {}) {
     get hooked() { return hooked; },
     detach() {
       doc.removeEventListener("focusin", onFocus, true);
+      doc.removeEventListener("focusout", onBlur, true);
       view.removeEventListener("keydown", onClaimed, true);
       view.removeEventListener("keydown", onKey);
       view.removeEventListener("plutoniumvimkey", onOffer);

@@ -232,7 +232,7 @@ An agent running in a thread can read and write that thread's registers, and glo
 export default function setup(vim) {
   vim.opt.startInInsert = true;
   vim.opt.clipboard = "unnamedplus";
-  vim.opt.inputs = false;
+  vim.opt.inputs = "off";
 
   vim.keymap.set("i", "jk", "<Esc>");
   vim.keymap.set("n", "Y", "y$");
@@ -241,6 +241,7 @@ export default function setup(vim) {
   vim.textobject("u", (buf, around) => buf.matchAround(/https?:\/\/\S+/, around));   // iu, au: a URL
   vim.operator("gq", (buf, range) => buf.edit(range, wrap(buf.slice(range), 80)));
   vim.command("Upper", (buf) => buf.edit(buf.line(), buf.line().text.toUpperCase()));
+  vim.keymap.set("n", "<leader>u", "<Cmd>Upper<CR>");
 
   vim.on("InsertLeave", ({ field }) => { /* … */ });
   vim.disable({ site: "docs.google.com" });
@@ -250,20 +251,27 @@ export default function setup(vim) {
 
 | | |
 |---|---|
-| `vim.opt` | Options: `startInInsert`, `clipboard`, `clipboardHistory`, `inputs`, `timeoutlen`, `whichwrap`, `iskeyword`, … |
-| `vim.keymap.set(modes, lhs, rhs, opts)` / `.del` | Mappings, in neovim's notation (`<Esc>`, `<C-w>`, `<leader>`); `rhs` is keys or a function |
-| `vim.motion`, `vim.operator`, `vim.textobject` | New ones, as functions over the Buffer |
-| `vim.command(name, fn)` | A `:` command |
-| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave` |
-| `vim.registers` | `get`, `set`, `scope` |
-| `vim.disable` / `vim.enable` | By site, app id, shell, or field selector |
-| `vim.desktop.call(name, args)` | A call to a function `config.js` exports; a promise |
+| `vim.opt` | Options: `startInInsert`, `inputs` (`"manual"`, `"on"`, `"off"`), `clipboard` (`""`, `"unnamedplus"`), `shiftwidth`, `claim`, `timeoutlen`, `mapleader`. Each is checked as it's set; `clipboardHistory`, `whichwrap` and `iskeyword` come with later steps |
+| `vim.keymap.set(modes, lhs, rhs, opts)` / `.del` | Mappings, in neovim's notation (`<Esc>`, `<C-w>`, `<leader>`). Modes `"n"`, `"i"`, `"v"` (`"x"` is `"v"`, `""` is both), or a list. `rhs` is keys or a function; `<Cmd>Name args<CR>` runs a command. `opts`: `remap` (default false, as in neovim), `expr` (the function's result is the keys), `nowait`, `desc` |
+| `vim.motion(lhs, fn, { kind, arg })` | `fn(buf, { count, hasCount, arg, operator })` returns where the cursor goes, or null. Works after operators too, by `kind`: `"exclusive"`, `"inclusive"`, `"linewise"` |
+| `vim.operator(lhs, fn)` | `fn(buf, range, { count, register })` changes the range with `buf.edit()`. Works with motions, text objects, its doubled form (`gqq`), visual mode and `.` |
+| `vim.textobject(key, fn)` | `i{key}` and `a{key}`: `fn(buf, around, { count })` returns a range, or null |
+| `vim.command(name, fn)` / `vim.cmd(line)` | A command (a capital first letter, as in neovim): `fn(buf, { args, bang })`. Run from a mapping's `<Cmd>…<CR>`, or `vim.cmd`; the `:` line comes at step 9 |
+| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave`; `fn` gets `{ field, mode, … }` |
+| `vim.registers` | `get` (a promise), `set` (a capital letter appends), `scope` (kept until the register store, step 5, keeps them apart) |
+| `vim.disable` / `vim.enable` | Rules by `site` (a host and its subdomains), `shell`, `selector`, or `app` (native apps, step 7); the last rule that matches wins |
+| `vim.mode()`, `vim.selection()`, `vim.feedkeys(keys, { remap })` | In a mapping's function: the field's mode, its selected text (visual mode's, or the field's own), keys into it |
+| `vim.desktop.call(name, args)` | A call to a function `config.js` exports; a promise. Rejects until KEYS.md's `config.js` is built |
+
+The `buf` a function gets (`helper/web/vim/userBuffer.js`) is the field's text as offsets: `text`, `cursor`, `slice(range)`, `line(n)` and `lineAt(offset)` (ranges with `text` and `number`), `lineCount`, `search(re, { from, backward })`, `matchAround(re, around)`, and for operators and commands `edit(range, text)` and `move(offset)`. A range is `{ from, to, linewise }`, `to` exclusive.
+
+**Mappings wait as vim's do.** A key that starts a mapping is held, unseen by the page, until the mapping is complete, until a key that can't continue it (then the held keys are typed, in order), or until `timeoutlen` (1000 ms) passes. So with `jk` mapped in insert mode, `j` appears when the next key isn't `k`, or after a second. A held key is dropped if the field loses focus. Normal and visual mappings apply at the start of a command, after a register and a count, not after an operator or `f`, `t`, `r`; operator-pending mappings (`"o"`) aren't supported yet.
 
 Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, the event names), so habits carry over. Once plugins exist, this API is a public contract, so it should be settled with the engine, before plugins.
 
-**Plugins** are ES modules `init.js` imports, from `~/.pluto/vim/` (`import surround from "./plugins/surround.js"`). The isolated world has no network access of its own, so a plugin is whatever files you put there.
+**Plugins** are ES modules `init.js` imports, from `~/.pluto/vim/` (`import surround from "./plugins/surround.js"`). The isolated world has no network access of its own, so a plugin is whatever files you put there, imported by a relative path. The helper bundles them into one script, as it does the engine, and reads `import x / { a, b } / * as ns from "./file.js"`, `export default`, `export function / class / const / let` and `export { a, b }`; anything else (a bare `"lodash"`, a re-export) is an error that says so. Lines stay where they were, so an error names the file's own line.
 
-**Reloading.** Saving `init.js` reloads it: in the vim host at once, and in each frame's world at its next field focus. An `init.js` that throws while loading is replaced by the last good one, with a notification of the error, and good versions are committed in `~/.pluto/vim/.git`, as for `config.js`. `plutonium vim check` loads it in a dry run and reports errors and mapping conflicts.
+**Reloading.** Saving anything in `~/.pluto/vim/` checks it first: the helper loads it in Node against the engine, as a page would. A version that loads is committed in `~/.pluto/vim/.git` (made with a starter `init.js` the first time) and goes into every page at once, its old mappings and commands gone. One that throws keeps the last good one running, with a notification of the error; a session that starts with a broken `init.js` runs the newest committed version that loads. `plutonium vim check` is the same dry run: what the config sets up, errors with their file and line, and warnings (a mapping that makes a built-in wait, like `xx` making `x` wait; one mapping that's a prefix of another; something set twice; a built-in replaced).
 
 ## Trust
 
@@ -294,7 +302,7 @@ What it settled:
 - **Deciding and doing are split.** `session.feed(key)` answers at once from the mode and the pending keys; the command runs on a queue. The mode a command leaves is set at once too, so the next key is decided right even while the field is still catching up. A backend holds keys the engine didn't take until `session.idle()`, so text typed after `cw` lands after the delete.
 - **`u` undoes a whole change.** The engine counts the field's undo steps each change made (its own edits, plus a step for what was typed), and `u` undoes that many. This assumes a field groups a run of typing into one step, as browsers do; step 3 checks it against Blink.
 - **`.` replays the command, then the text typed.** What was typed is the difference between the field's text when insert mode started and when it ended, so it works whatever the field did with the keys (an IME, autocorrect).
-- **What's not in it yet:** user mappings (`jk`, step 4), `"=` and `"#n` (step 5), `gv`, macros, search, marks, the `:` line (step 9), and counts on `iw`/`ip` beyond words.
+- **What's not in it yet:** `"=` and `"#n` (step 5), `gv`, macros, search, marks, the `:` line (step 9), and counts on `iw`/`ip` beyond words.
 
 ### Step 2: the stand-in web backend (built)
 
@@ -323,6 +331,17 @@ Step 2 showed that the engine needs nothing from Blink to read text, move and ed
 
 Verified on a slot (out/Cros, main's series plus 0014; a release Hydra): the engine in Hydra's page in its own world, `plutoniumvimready` received, Ctrl+[ to normal mode, `b dw`, `x`, `u`, `A`, `o`, `k J` in the composer, again after the session restarted. A window keydown listener the page added after the engine took `x`, and vim left it alone, which the step 2 backend couldn't do.
 
+A script added to a page while its document commits reaches neither that document nor, as a new one, the next (Chromium's `runImmediately` misses a document mid-commit), so a tab opened as the helper attached could go without the engine. The injector now auto-attaches to new pages with `waitForDebuggerOnStart`, so mostly the engine is in before the page's own scripts. Waiting doesn't always hold the first commit back, though, so after adding the script it also runs it in the page's world as it is (it skips itself where the engine already is). Every page gets the script, which goes on only in http(s) documents, so a tab that starts at `about:blank` gets it too. Found by step 4's test, which drives a real headless Chromium through the injector.
+
+Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach` on each page), registers shared between pages (each world has its own until step 5's store), and Blink-side motions (`gj` over wrapped lines) for later.
+
+### Step 4: `init.js` (built)
+
+- **The API** (`helper/web/vim/api.js`): `configure(vim, setup)` runs `init.js`'s default export on a Vim from its built-ins, so running it again leaves nothing of the last version. Every call is checked and throws with what was wrong. Tests: `helper/test/vimApi.test.ts`.
+- **The engine** (`engine.js`): mappings with vim's typeahead (held keys, `timeoutlen`, `remap`, `nowait`, a limit on mappings expanding each other), init.js's motions, operators and text objects in the command tables (ahead of the built-ins, so the same keys are init.js's), commands, and the rules for where Pluto Vim is on. `UserBuffer` (`userBuffer.js`) is what init.js's functions see.
+- **The helper** (`helper/src/vimConfig.ts`): bundling `init.js` and its plugins, the dry run, the watched folder and its git, the last good version. The injector carries the good version in each page's script, and a new one into each page's world over DevTools (`Page.createIsolatedWorld` finds the world the page has; a world is its DevTools session's, so it's the injector's session that does it). Tests: `helper/test/vimConfig.test.ts`, including `init.js` in a real Chromium's page, reconfigured live.
+- **`plutonium vim check`** (`helper/plutonium.ts vim check`).
+
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
@@ -330,7 +349,6 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - **Everywhere else,** pages see an Escape (a page that reads `code` sees `CapsLock`), and native apps get the Escape key: Exo gives them the Escape key's code, not Caps Lock's.
 - **Chromium:** `KeyboardModifierEventRewriter::RemapPressKey` in shell mode (patch 0006), ahead of the user's modifier remapping, so `CapsLockEventRewriter` never toggles the lock; `ClientCode` in `components/exo/keyboard.cc` (patch 0002). There is no way to turn Caps Lock on.
 
-Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach` on each page), registers shared between pages (each world has its own until step 5's store), and Blink-side motions (`gj` over wrapped lines) for later.
 
 ## Decisions
 
@@ -340,6 +358,7 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - 2026-11-08: clipboard history is `"#1`…`"#9`. `"#` is vim's alternate file register, which has no meaning here yet; it can move if something comes along that maps onto it.
 - 2026-11-08 (to confirm): Ctrl+[ is Pluto Vim's before the page in a field it's on in (`vim.opt.claim`), because ProseMirror and Hydra's composer take Escape and T3 takes Ctrl+[.
 - 2026-11-08: Caps Lock is Pluto Vim's Escape, and there's no Caps Lock: Ash makes it an Escape with code `CapsLock`, which the engine claims before the page as Ctrl+[, and everything else sees as Escape. Nobody uses Caps Lock as a lock.
+- 2026-11-08: a saved `init.js` goes into every page at once, not at each frame's next field focus: the helper checks it in Node first, so a page never runs one that doesn't load. Mappings follow neovim's (`remap` off by default, `<Cmd>`, `expr`, `nowait`); operator-pending mappings wait.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions

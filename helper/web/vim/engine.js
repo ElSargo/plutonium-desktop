@@ -16,6 +16,7 @@ import * as T from "./text.js";
 import { isPrintable, parseKeys } from "./keys.js";
 import { Registers, REGISTER_NAMES } from "./registers.js";
 import { ACTIONS, MOTIONS, OBJECTS, OPERATORS, VISUAL_ACTIONS, compile } from "./commands.js";
+import { UserBuffer } from "./userBuffer.js";
 
 export const DEFAULT_OPTIONS = {
   /** Fields start in insert mode (Principle 2). */
@@ -32,7 +33,17 @@ export const DEFAULT_OPTIONS = {
    * navigation.back). Every other key is the page's first (Principle 1).
    */
   claim: ["<C-[>"],
+  /** How long a key that starts a mapping waits for the rest of it, in milliseconds. */
+  timeoutlen: 1000,
+  /** What <leader> stands for in a mapping, when it's made. */
+  mapleader: "\\",
 };
+
+/** The modes a mapping can be for: normal, insert, and visual (visual and visual line). */
+export const MAP_MODES = ["n", "i", "v"];
+
+/** How deep mappings with remap may expand each other before it's taken as a loop. */
+const MAX_MAP_DEPTH = 100;
 
 const CARETS = { normal: "block", visual: "block", vline: "block", insert: "bar", replace: "underline", pending: "underline" };
 
@@ -46,26 +57,79 @@ export class Vim {
    * @param {Registers} [options.registers]
    */
   constructor({ opt = {}, registers } = {}) {
-    this.opt = { ...DEFAULT_OPTIONS, ...opt };
+    /** Options the backend set (a test's, a page's), under init.js's. */
+    this.baseOpt = opt;
     this.registers = registers ?? new Registers({ clipboard: () => this.opt.clipboard });
     /** The last change, for `.`: { cmd, inserted }. */
     this.lastChange = null;
     /** The last f, t, F or T, for ; and ,. */
     this.lastFind = null;
+    this.listeners = new Map();
+    /** The session a mapping's function runs for (api.js's vim.selection(), vim.feedkeys()). */
+    this.current = null;
+    this.reset();
+  }
+
+  /**
+   * Back to the built-in commands and options, with no mappings and nothing
+   * of init.js's: before init.js runs, and again before it runs anew.
+   */
+  reset() {
+    for (const unlisten of this.user?.unlisten ?? []) unlisten();
+    this.opt = { ...DEFAULT_OPTIONS, ...this.baseOpt };
+    /** Mappings by mode, by their keys joined: { lhs, rhs, opts }. */
+    this.keymaps = Object.fromEntries(MAP_MODES.map((mode) => [mode, new Map()]));
+    /** What init.js added (api.js): motions and operators as table entries, text objects by key, operators' and commands' functions by name. */
+    this.user = { motions: [], operators: [], objects: {}, ops: new Map(), commands: new Map(), unlisten: [] };
+    /** vim.disable and vim.enable, in order: { on, site?, shell?, app?, selector? }. */
+    this.rules = [];
+    /** vim.registers.scope: register → "global", "project" or "thread" (the register store's, step 5). */
+    this.registerScopes = new Map();
+    this.rebuild();
+  }
+
+  /** The command tables from the built-in ones and init.js's, which come first, so the same keys are init.js's. */
+  rebuild() {
+    const motions = [...this.user.motions, ...compile(MOTIONS)].map((e) => ({ ...e, type: "motion" }));
+    const operators = [...this.user.operators, ...compile(OPERATORS)];
     this.tables = {
       normal: [
-        ...compile(MOTIONS).map((e) => ({ ...e, type: "motion" })),
-        ...compile(OPERATORS).map((e) => ({ ...e, type: "operator" })),
+        ...motions,
+        ...operators.map((e) => ({ ...e, type: "operator" })),
         ...compile(ACTIONS).map((e) => ({ ...e, type: "action" })),
       ],
       visual: [
-        ...compile(MOTIONS).map((e) => ({ ...e, type: "motion" })),
+        ...motions,
+        ...this.user.operators.map((e) => ({ keys: e.keys, op: e.op, type: "visualOp" })),
         ...compile(VISUAL_ACTIONS).map((e) => ({ ...e, type: e.op ? "visualOp" : "action" })),
       ],
-      motions: compile(MOTIONS).map((e) => ({ ...e, type: "motion" })),
+      motions,
     };
-    this.objects = { ...OBJECTS };
-    this.listeners = new Map();
+    /** The keys an operator starts with: the caret shows "pending" after one. */
+    this.operatorKeys = new Set(operators.map((e) => e.keys[0]));
+    this.objects = { ...OBJECTS, ...this.user.objects };
+  }
+
+  /** Runs `fn` with `session` as the current one, for a mapping's function. */
+  withSession(session, fn) {
+    const before = this.current;
+    this.current = session;
+    try {
+      return fn();
+    } finally {
+      this.current = before;
+    }
+  }
+
+  /**
+   * Whether Pluto Vim is on for a field: the last of vim.disable's and
+   * vim.enable's rules that matches it decides; on if none does.
+   * @param {{ site?: string, shell?: string, app?: string, el?: Element }} where
+   */
+  enabledFor(where) {
+    let on = true;
+    for (const rule of this.rules) if (ruleMatches(rule, where)) on = rule.on;
+    return on;
   }
 
   /** A field's session. `options.startInInsert` overrides the option for this field (a page's data-pvim-start). */
@@ -86,6 +150,14 @@ export class Vim {
       try { fn(data); } catch (error) { if (event !== "error") this.emit("error", error); }
     }
   }
+}
+
+function ruleMatches(rule, where) {
+  if (rule.site != null && !(where.site && (where.site === rule.site || where.site.endsWith(`.${rule.site}`)))) return false;
+  if (rule.shell != null && where.shell !== rule.shell) return false;
+  if (rule.app != null && where.app !== rule.app) return false;
+  if (rule.selector != null && !where.el?.closest?.(rule.selector)) return false;
+  return true;
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────
@@ -231,6 +303,10 @@ export class Session {
     this.redoSteps = [];
     this.edits = 0;
     this.replaced = null;
+    /** Keys held while they might start a mapping: { key, live }; live is the key feed() was just given. */
+    this.typeahead = [];
+    this.mapTimer = null;
+    this.mapDepth = 0;
     if (this.off) return;
     this.#caret();
     if (this.mode === "insert") this.#enqueue(() => this.#beginInsert(null));
@@ -246,7 +322,7 @@ export class Session {
   get displayMode() {
     if ((this.mode === "normal" || this.mode === "visual" || this.mode === "vline") && this.pending.length) {
       return parseCommand(this.vim, this.pending, this.mode !== "normal").status === "more" &&
-        this.pending.some((k) => "dcy<>".includes(k) || k === "g") ? "pending" : this.mode;
+        this.pending.some((k) => this.vim.operatorKeys.has(k)) ? "pending" : this.mode;
     }
     return this.mode;
   }
@@ -257,14 +333,227 @@ export class Session {
    */
   feed(key) {
     if (this.off || key == null) return false;
-    if (this.mode === "insert") return this.#feedInsert(key);
-    if (this.mode === "replace") return this.#feedReplace(key);
-    return this.#feedNormal(key);
+    clearTimeout(this.mapTimer);
+    this.mapTimer = null;
+    this.mapDepth = 0;
+    if (!this.typeahead.length && !this.#mightMap(key)) return this.#feedRaw(key);
+    // Keys held before this one: their events are gone, so whatever they turn out to be, it's ours to do.
+    for (const held of this.typeahead) held.live = false;
+    this.typeahead.push({ key, live: true });
+    return this.#drain(false);
   }
 
   /** Every key of a string in notation; what feed() said for each. */
   feedKeys(notation) {
     return parseKeys(notation).map((key) => this.feed(key));
+  }
+
+  /**
+   * Keys from init.js (vim.feedkeys): as typed, through the mappings with
+   * `remap`, else as vim's own keys. Keys vim leaves are typed into the field.
+   */
+  sendKeys(notation, { remap = false } = {}) {
+    if (this.off) return;
+    const keys = parseKeys(notation);
+    if (!remap) return this.#feedKeysRaw(keys);
+    this.typeahead.push(...keys.map((key) => ({ key, live: false })));
+    this.#drain(false);
+  }
+
+  /** Drops keys held for a mapping (the field lost focus). */
+  cancelPending() {
+    clearTimeout(this.mapTimer);
+    this.mapTimer = null;
+    this.typeahead = [];
+  }
+
+  // ── Mappings ───────────────────────────────────────────────────────────
+
+  /** The keymap that applies now: "i" in insert mode, "n" or "v" at the start of a command (after a register and a count); null otherwise. */
+  #mapMode() {
+    if (this.mode === "insert") return this.insertRegister ? null : "i";
+    if (this.mode === "replace") return null;
+    let i = 0;
+    if (this.pending[0] === '"') {
+      if (this.pending.length < 2) return null;
+      i = 2;
+    }
+    for (; i < this.pending.length; i++) if (!/^[0-9]$/.test(this.pending[i])) return null;
+    return this.mode === "normal" ? "n" : "v";
+  }
+
+  #mightMap(key) {
+    const mode = this.#mapMode();
+    if (!mode) return false;
+    for (const m of this.vim.keymaps[mode].values()) if (m.lhs[0] === key) return true;
+    return false;
+  }
+
+  /**
+   * Runs what the held keys make, as vim does with its typeahead: the longest
+   * mapping they complete, unless a longer one could still come (then they
+   * wait, up to timeoutlen); else the first key, as itself. Returns whether
+   * the live key is vim's: held and taken by a mapping are; one fed as
+   * itself is what the mode makes of it.
+   */
+  #drain(timedOut) {
+    let live = true;
+    let typed = false;
+    while (this.typeahead.length) {
+      const mode = this.#mapMode();
+      const keys = this.typeahead.map((t) => t.key);
+      let exact = null;
+      let more = false;
+      if (mode) {
+        for (const m of this.vim.keymaps[mode].values()) {
+          if (m.lhs.length <= keys.length) {
+            if (m.lhs.every((k, j) => k === keys[j]) && (!exact || m.lhs.length > exact.lhs.length)) exact = m;
+          } else if (!timedOut && keys.every((k, j) => k === m.lhs[j])) more = true;
+        }
+      }
+      if (more && !exact?.opts.nowait) {
+        this.mapTimer = setTimeout(() => this.#timeout(), this.vim.opt.timeoutlen);
+        return true;
+      }
+      if (exact) {
+        this.typeahead.splice(0, exact.lhs.length);
+        this.#runMapping(exact);
+        continue;
+      }
+      const item = this.typeahead.shift();
+      if (item.key === "<Cmd>") {
+        const end = this.typeahead.findIndex((t) => t.key === "<CR>");
+        const line = this.typeahead.splice(0, end < 0 ? this.typeahead.length : end + 1).map((t) => t.key);
+        this.runCommand(cmdLine(line));
+        continue;
+      }
+      const taken = this.#feedRaw(item.key);
+      if (item.live) {
+        // Held keys typed by us go on the queue: so must this one, or it would land before them.
+        live = taken || (typed && this.#type(item.key));
+      } else if (!taken && this.#type(item.key)) {
+        typed = true;
+      }
+    }
+    return live;
+  }
+
+  #timeout() {
+    this.mapTimer = null;
+    this.mapDepth = 0;
+    for (const held of this.typeahead) held.live = false;
+    this.#drain(true);
+  }
+
+  #runMapping(m) {
+    let rhs = m.rhs;
+    if (typeof rhs === "function") {
+      let result;
+      try {
+        result = this.vim.withSession(this, () => rhs());
+      } catch (error) {
+        this.vim.emit("error", error);
+        return;
+      }
+      if (result && typeof result.then === "function") {
+        result.then(null, (error) => this.vim.emit("error", error));
+        return;
+      }
+      if (!m.opts.expr) return;
+      rhs = typeof result === "string" ? result : "";
+    }
+    const keys = parseKeys(rhs);
+    if (!m.opts.remap) return this.#feedKeysRaw(keys);
+    if (++this.mapDepth > MAX_MAP_DEPTH) {
+      this.typeahead = [];
+      this.vim.emit("error", new Error(`pluto vim: mappings expand each other without end (${m.lhs.join("")})`));
+      return;
+    }
+    this.typeahead.unshift(...keys.map((key) => ({ key, live: false })));
+  }
+
+  /** Keys as vim's own, not mapped; <Cmd>…<CR> runs a command. A key vim leaves is typed into the field. */
+  #feedKeysRaw(keys) {
+    for (let j = 0; j < keys.length; j++) {
+      if (keys[j] === "<Cmd>") {
+        let end = keys.indexOf("<CR>", j);
+        if (end < 0) end = keys.length;
+        this.runCommand(cmdLine(keys.slice(j + 1, end)));
+        j = end;
+        continue;
+      }
+      if (!this.#feedRaw(keys[j])) this.#type(keys[j]);
+    }
+  }
+
+  /**
+   * A key vim didn't take, which no key event will carry to the field (it was
+   * held, or a mapping made it): typed by us, in insert mode. True if it was.
+   */
+  #type(key) {
+    if (this.mode !== "insert") return false;
+    const single = Boolean(this.buffer.field?.singleLine);
+    const ch = isPrintable(key) ? key : key === "<Tab>" ? "\t" : key === "<CR>" && !single ? "\n" : null;
+    if (ch != null) {
+      this.#enqueue(() => this.#typeText(ch));
+      return true;
+    }
+    if (key === "<BS>") {
+      this.#enqueue(() => this.#backspace());
+      return true;
+    }
+    return false;
+  }
+
+  async #typeText(ch) {
+    const { cursor, anchor } = this.#read();
+    const [from, to] = [Math.min(cursor, anchor), Math.max(cursor, anchor)];
+    await this.#edit(from, to, ch);
+    await this.#move(from + ch.length);
+  }
+
+  async #backspace() {
+    const { text, cursor, anchor } = this.#read();
+    let [from, to] = [Math.min(cursor, anchor), Math.max(cursor, anchor)];
+    if (from === to) {
+      if (from === 0) return;
+      from = T.prev(text, from);
+    }
+    await this.#edit(from, to, "");
+    await this.#move(from);
+  }
+
+  /** A command (init.js's vim.command), from a mapping's <Cmd>…<CR> or vim.cmd(): "Name[!] args". */
+  runCommand(line) {
+    const m = /^\s*:?\s*([A-Za-z][A-Za-z0-9]*)(!?)\s*(.*)$/.exec(line);
+    const command = m && this.vim.user.commands.get(m[1]);
+    if (!command) {
+      this.vim.emit("error", new Error(`pluto vim: not a command: :${line.trim()}`));
+      return;
+    }
+    this.#enqueue(async () => {
+      this.edits = 0;
+      this.changeBefore = this.buffer.text().text;
+      const { text, cursor } = this.#read();
+      const buf = this.#userBuffer(text, T.clampNormal(text, cursor));
+      await command.fn(buf, { args: m[3], bang: m[2] === "!" });
+      this.#endChange();
+    });
+  }
+
+  /** A UserBuffer (init.js's view of the field) whose edits and moves are the field's. */
+  #userBuffer(text, pos) {
+    return new UserBuffer(text, pos, {
+      edit: (from, to, insert) => this.#edit(from, to, insert),
+      move: (offset) => this.#move(offset),
+      mode: this.mode,
+    });
+  }
+
+  #feedRaw(key) {
+    if (this.mode === "insert") return this.#feedInsert(key);
+    if (this.mode === "replace") return this.#feedReplace(key);
+    return this.#feedNormal(key);
   }
 
   // ── Keys ───────────────────────────────────────────────────────────────
@@ -569,6 +858,19 @@ export class Session {
             : T.clampNormal(text, from);
           await this.#move(at);
         }
+        return;
+      }
+      default: {
+        // An operator of init.js's (vim.operator).
+        const user = this.vim.user.ops.get(op);
+        if (!user) return;
+        const buf = this.#userBuffer(text, pos);
+        await user.fn(buf, { from, to, linewise }, { count: cmd.count, register: cmd.register });
+        if (!buf.moved) {
+          const now = this.#read();
+          await this.#move(T.clampNormal(now.text, Math.min(from, now.text.length)));
+        }
+        this.#endChange();
         return;
       }
       case ">":
@@ -1004,6 +1306,11 @@ export class Session {
     await this.#run(replay);
     // An insert's replay ends its own change; an operator's has already ended.
   }
+}
+
+/** A <Cmd>…<CR> mapping's keys as the command line they spell. */
+function cmdLine(keys) {
+  return keys.filter((k) => k !== "<CR>").map((k) => (isPrintable(k) ? k : k === "<lt>" ? "<" : "")).join("");
 }
 
 /** What was typed between two versions of a field's text: the part that's new. */

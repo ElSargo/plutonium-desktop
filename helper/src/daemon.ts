@@ -33,6 +33,7 @@ import { DesktopApps } from "./apps.ts";
 import { SiteIcons } from "./siteIcons.ts";
 import { uiLibraryFile } from "./uiLibrary.ts";
 import { vimBundle } from "./vimBundle.ts";
+import { VimConfig } from "./vimConfig.ts";
 import { VimInjector } from "./vimInject.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
@@ -74,7 +75,7 @@ import { SessionService } from "./services/session.ts";
 import { AppearanceService } from "./services/appearance.ts";
 import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
-import { plutoHome, ShellError } from "./shells.ts";
+import { installedShells, plutoHome, ShellError } from "./shells.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, type PermissionAnswer, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -588,7 +589,29 @@ export class Daemon {
     // Pluto Vim in every page (vimInject.ts), while it's young only when asked for.
     if (cdp && process.env.PLUTONIUM_VIM === "1") {
       const vimDir = join(dirname(SHELL_LIBRARY), "vim");
-      const injector = new VimInjector(cdp, () => vimBundle(vimDir), (message) => console.error(`plutoniumd: ${message}`));
+      const log = (message: string) => console.error(`plutoniumd: ${message}`);
+      const shells = options.shells;
+      let injector: VimInjector | null = null;
+      // init.js (vimConfig.ts): each good version goes into every page.
+      const config = new VimConfig({
+        home: shells?.home ?? plutoHome(),
+        engineDir: vimDir,
+        onChange: () => void injector?.reconfigure(),
+        notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
+        log,
+      });
+      config.start();
+      injector = new VimInjector(cdp, () => vimBundle(vimDir), log, {
+        config: () => config.expression,
+        shellOrigins: () => {
+          const origins: Record<string, string> = {};
+          for (const shell of shells ? installedShells(shells.home) : []) {
+            const origin = shells!.originOf(shell);
+            if (origin) origins[origin] = shell.name;
+          }
+          return origins;
+        },
+      });
       const start = () => void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
       // Again each time the helper connects to the browser (as watchCrashes does): a new connection has no sessions.
       this.desktop?.enableListeners.add(start);
