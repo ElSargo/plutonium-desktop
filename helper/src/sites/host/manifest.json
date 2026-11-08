@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Plutonium site extensions",
+  "description": "Applies the network rules of the user's site extensions (~/.pluto/sites). Written by the Plutonium helper.",
+  "version": "1.0",
+  "permissions": ["declarativeNetRequest", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" }
+}

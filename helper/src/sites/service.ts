@@ -13,7 +13,8 @@
 //   GET  /v1/sites/presets                  the presets: { id, title, description }
 //   GET  /v1/sites/log                      the folder's history
 //   POST /v1/sites/reload                   read every site again
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,7 @@ import type { BrowserCdp } from "../cdp.ts";
 import type { Desktop } from "../desktop.ts";
 import { ContextSource, type ThreadDirectory } from "./context.ts";
 import { SiteInjector, type SiteEvent, type TabReport } from "./injector.ts";
+import { blockRules, type DnrRule } from "./block.ts";
 import { fixRequest, SiteHealth, type StaleReason } from "./health.ts";
 import { installPresets, listPresets } from "./presets.ts";
 import { isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./store.ts";
@@ -49,8 +51,19 @@ export interface SiteRequest {
   readonly prompt: string;
 }
 
+/** Chrome's id for an unpacked extension: its path's SHA-256, in the letters a to p. */
+export function unpackedExtensionId(path: string): string {
+  return [...createHash("sha256").update(path).digest("hex").slice(0, 32)]
+    .map((digit) => String.fromCharCode(97 + Number.parseInt(digit, 16)))
+    .join("");
+}
+
+const HOST_POLL_MS = 25_000;
+
 export interface SitesOptions {
   readonly cdp: BrowserCdp;
+  /** The helper's shell API port, which the sites host extension asks for its rules. */
+  readonly port?: number;
   readonly desktop: Desktop;
   /** $PLUTO_HOME (a test slot's own). */
   readonly home: string;
@@ -61,11 +74,19 @@ export class SitesService {
   readonly store: SiteStore;
   readonly injector: SiteInjector;
   readonly health: SiteHealth;
+  /** The sites host extension's folder (the session loads it) and id. */
+  readonly hostDir: string;
+  readonly hostId: string;
+  /** What the host sends to be let in: a secret in its folder, which pages can't read. */
+  private readonly hostToken = randomBytes(24).toString("hex");
+  private readonly hostWaiters = new Set<() => void>();
   private readonly logDir: string;
   private readonly desktop: Desktop;
 
   constructor(options: SitesOptions) {
     this.logDir = join(options.home, "logs", "sites");
+    this.hostDir = join(options.home, "sites-host");
+    this.hostId = unpackedExtensionId(this.hostDir);
     this.desktop = options.desktop;
     this.store = new SiteStore({
       dir: join(options.home, "sites"),
@@ -76,6 +97,7 @@ export class SitesService {
           if (changed.has(reason.part.split("/")[0]!)) this.health.forget(reason.part);
         }
         this.injector.storeChanged();
+        for (const wake of this.hostWaiters) wake();
       },
     });
     this.injector = new SiteInjector(
@@ -95,6 +117,7 @@ export class SitesService {
     this.injector.onReport = (_tab, report) => this.health.update(report);
     this.store.start();
     this.installSkill(options.home);
+    this.installHost(options.port);
     try {
       const written = installPresets(this.presetsDir, join(this.store.dir, ".data", "presets.json"));
       if (written.length) console.log(`plutoniumd: sites: presets ${written.join(", ")} installed`);
@@ -120,6 +143,66 @@ export class SitesService {
     } catch (error) {
       console.warn(`plutoniumd: sites: can't write the skill: ${(error as Error).message}`);
     }
+  }
+
+  /** Writes the sites host extension where the session loads it from (lib/session.sh). */
+  private installHost(port: number | undefined): void {
+    if (!port) return;
+    try {
+      mkdirSync(this.hostDir, { recursive: true });
+      // A changed background script gets a new name: Chromium keeps a service worker
+      // registered for its script's URL, whatever the manifest's version says.
+      const manifest = JSON.parse(readFileSync(new URL("./host/manifest.json", import.meta.url), "utf8")) as {
+        version: string;
+        background: { service_worker: string };
+      };
+      const script = readFileSync(new URL("./host/background.js", import.meta.url), "utf8");
+      const digest = createHash("sha256").update(script).digest();
+      const name = `background-${digest.toString("hex").slice(0, 8)}.js`;
+      manifest.version = `1.${digest.readUInt16BE(0)}.${digest.readUInt16BE(2)}`;
+      manifest.background.service_worker = name;
+      writeIfChanged(join(this.hostDir, name), script);
+      writeIfChanged(join(this.hostDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+      for (const file of readdirSync(this.hostDir)) {
+        if (/^background.*\.js$/.test(file) && file !== name) rmSync(join(this.hostDir, file), { force: true });
+      }
+      writeFileSync(join(this.hostDir, "config.json"), `${JSON.stringify({ helper: `http://127.0.0.1:${port}`, token: this.hostToken })}\n`, { mode: 0o600 });
+    } catch (error) {
+      console.warn(`plutoniumd: sites: can't write the sites host extension: ${(error as Error).message}`);
+    }
+  }
+
+  /** The host's rules now: every site's "block" list, and a version that changes with them. */
+  hostRules(): { version: string; rules: DnrRule[]; errors: Record<string, string[]> } {
+    const { rules, errors } = blockRules(this.store.sites());
+    const version = createHash("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+    return { version, rules, errors };
+  }
+
+  /** Whether a request carries the host's token (Authorization: Bearer <token>). */
+  isHost(authorization: string | undefined): boolean {
+    const given = Buffer.from(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "");
+    const token = Buffer.from(this.hostToken);
+    return given.length === token.length && timingSafeEqual(given, token);
+  }
+
+  /** GET /v1/sites/host/rules?since=<version>: answers when the rules differ from `since`, or after a while. */
+  async hostRoute(path: string, since: string | null): Promise<unknown> {
+    if (path !== "/v1/sites/host/rules") return undefined;
+    let state = this.hostRules();
+    if (since !== null && since === state.version) {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          clearTimeout(timer);
+          this.hostWaiters.delete(wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, HOST_POLL_MS);
+        this.hostWaiters.add(wake);
+      });
+      state = this.hostRules();
+    }
+    return { version: state.version, rules: state.rules };
   }
 
   get presetsDir(): string {
@@ -160,7 +243,7 @@ export class SitesService {
       })),
       tabs: this.injector.tabsFor(site.name),
       stale: this.health.reasons(site.name),
-      ...(site.manifest.block.length ? { blockIgnored: "block rules need the sites host extension (not built yet)" } : {}),
+      ...(this.hostRules().errors[site.name] ? { blockErrors: this.hostRules().errors[site.name] } : {}),
     };
   }
 

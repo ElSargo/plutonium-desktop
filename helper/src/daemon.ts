@@ -588,7 +588,7 @@ export class Daemon {
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
     this.sites =
       cdp && this.desktop && process.env.PLUTONIUM_SITES !== "0"
-        ? new SitesService({ cdp, desktop: this.desktop, home: options.shells?.home ?? plutoHome() })
+        ? new SitesService({ cdp, desktop: this.desktop, home: options.shells?.home ?? plutoHome(), port: options.port })
         : null;
     if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
     if (this.serverTabs) {
@@ -1995,6 +1995,18 @@ export class Daemon {
       }
       const origin = request.headers.origin;
       const uid = loopbackPeerUid(request.socket.remotePort ?? 0, this.options.port);
+      // The sites host extension asks for its network rules (sites/service.ts), with the
+      // token the helper wrote into its folder (its fetches carry no Origin).
+      if (
+        method === "GET" &&
+        path.startsWith("/v1/sites/host/") &&
+        this.sites?.isHost(request.headers.authorization) &&
+        uid === process.getuid?.()
+      ) {
+        const value = await this.sites.hostRoute(path, url.searchParams.get("since"));
+        if (value === undefined) throw new HttpError(404, "No such sites host route.");
+        return sendJson(response, 200, value);
+      }
       if (!origin || !this.isShellOrigin(origin) || uid !== process.getuid?.()) {
         throw new HttpError(403, "Only the Plutonium shell may use this.");
       }

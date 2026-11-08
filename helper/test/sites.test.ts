@@ -344,3 +344,53 @@ describe("stale parts", () => {
     assert.equal(again.reasons().length, 0);
   });
 });
+
+describe("block rules", () => {
+  const siteWith = (block: string[], matches = ["*://example.com/*", "*://*.example.com/*"]) => ({
+    name: "example.com",
+    dir: "/x",
+    manifest: parseSiteManifest(JSON.stringify({ block, matches }), "example.com"),
+    parts: [],
+  });
+
+  test("filters become declarativeNetRequest rules, scoped to the site's pages", async () => {
+    const { blockRules } = await import("../src/sites/block.ts");
+    const { rules, errors } = blockRules([
+      siteWith(["||ads.example.net^$script,third-party", "@@||ads.example.net/ok.js", "/track?", "example.com##.ad", "||x$popup"]),
+    ]);
+    assert.deepEqual(rules[0], {
+      id: 1,
+      priority: 1,
+      action: { type: "block" },
+      condition: {
+        urlFilter: "||ads.example.net^",
+        resourceTypes: ["script"],
+        domainType: "thirdParty",
+        initiatorDomains: ["example.com"],
+      },
+    });
+    assert.equal(rules[1]!.action.type, "allow");
+    assert.equal(rules[1]!.priority, 2);
+    assert.equal(rules[2]!.condition.urlFilter, "/track?");
+    assert.ok(!rules[2]!.condition.resourceTypes!.includes("main_frame"));
+    assert.equal(rules.length, 3);
+    assert.deepEqual(errors["example.com"], ["example.com##.ad: cosmetic filters go in a part's stylesheet", "||x$popup: unsupported option $popup"]);
+  });
+
+  test("a site on every host blocks for every page", async () => {
+    const { blockRules } = await import("../src/sites/block.ts");
+    const { rules } = blockRules([siteWith(["||t.example^"], ["<all_urls>"])]);
+    assert.equal(rules[0]!.condition.initiatorDomains, undefined);
+  });
+
+  test("an unpacked extension's id, as Chrome makes it", async () => {
+    const { unpackedExtensionId } = await import("../src/sites/service.ts");
+    // tools/ime-test.sh's algorithm: SHA-256 of the path, the first 32 hex digits as a-p.
+    const id = unpackedExtensionId("/home/u/.pluto/sites-host");
+    assert.match(id, /^[a-p]{32}$/);
+    const expected = [...(await import("node:crypto")).createHash("sha256").update("/home/u/.pluto/sites-host").digest("hex").slice(0, 32)]
+      .map((c) => String.fromCharCode(97 + parseInt(c, 16)))
+      .join("");
+    assert.equal(id, expected);
+  });
+});
