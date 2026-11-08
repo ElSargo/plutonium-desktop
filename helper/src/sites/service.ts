@@ -22,6 +22,8 @@ import { isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./st
 
 /** The checkout (or install) the helper runs from. */
 const PLUTONIUM = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+/** The helper's CLI, for agents without the site tools (`plutonium.ts sites`). */
+const CLI = join(PLUTONIUM, "helper", "plutonium.ts");
 
 /** Writes `text` to `file` if it's different (so the folder's watcher doesn't see a change). */
 function writeIfChanged(file: string, text: string): void {
@@ -178,7 +180,7 @@ export class SitesService {
       preset ? `Preset: ${preset} (write the "${preset}" part).` : part ? `Edit the "${part}" part.` : "Pick the part from the request and the parts already there (or add one).",
       "",
       `The site's folder is ${dir}; what was asked before is in its requests.md.`,
-      `The tab is ${tabId} (${tab.url}), lent to this thread: check each change with site_apply on it, then look at it (snapshot_tab).`,
+      `The tab is ${tabId} (${tab.url}), lent to this thread. Look at the page before writing selectors, and check each change on that tab: with the site_apply, site_read and site_snapshot tools (T3's MCP server, or Plutonium's), or in a shell with \`node ${CLI} sites apply|read|snapshot ${tabId}\`.`,
       context?.project ? `The tab is in project "${context.project.title ?? context.project.id}" (id ${context.project.id}).` : "",
       "Saving applies the change to every tab of the site at once; there's no need to reload.",
     ]

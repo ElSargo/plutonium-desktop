@@ -1,6 +1,6 @@
 # Site extensions: describe a change to a site, an agent writes it
 
-**Status: steps 1 and 2 built on branch `site-extensions`, not merged** (2026-11-08): the folder, the DevTools backend, `site.context`, the agent's tools and skill, and the request a button makes. Not built: the buttons themselves, presets as files, stale detection, the sites host extension. The goals:
+**Status: steps 1 to 3 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. Not built yet: presets as files, stale detection, the sites host extension, import. The goals:
 - from any browser tab, one button: describe a change to the site ("hide the sidebar", "j/k between results", "make it match my desktop's dark theme"), and an agent writes it as an extension;
 - it applies to that tab while the agent writes it, and to every matching tab, now and on later visits, once it's done;
 - extensions are small and readable (a CSS file, a JS module, a manifest), kept in git, undone in one click, and editable by hand or by asking again;
@@ -263,7 +263,12 @@ A fix is never started without you: it's an agent reading a page you might be si
 
 1. **The folder and the DevTools backend.** Built (`helper/src/sites/`): `~/.pluto/sites/`, git with a commit per settled save, every `.css` and `.js` a part, the runtime in an isolated world (parts compiled into the injected source, so the page's CSP doesn't apply; a part that doesn't parse is left out and reported), apply and remove in place, `site.context` from tags and Hydra's database with the project's site settings, `site.storage`, `site.fetch`, logs and errors in `$PLUTO_HOME/logs/sites/<site>.log`, and `/v1/sites`.
 2. **The run.** Built in the helper: `POST /v1/sites/request` (the site's folder, `requests.md`, the prompt), the agent's `site_apply` and `site_report` (its thread's tabs only), `skill/SITES.md` written to the sites folder with `site.d.ts`, and `shell.sites` in the shell library (`forTab`, `request`, `setPart`, `lend`, `giveBack`). Not built: the Sites project, and starting the thread (Hydra's page starts it, below).
-3. **The button:** Hydra's toolbar button and popover (a T3 patch: it calls `shell.sites.request`, starts a thread in a Sites project with the prompt, lends the tab, gives it back when the run ends), the library's popover for other shells, the `site.change` action.
+3. **The button.** Built:
+   - **Hydra** (T3 patch 0006, `plutonium/SiteButton.tsx`): a button in the browser panel's toolbar, with a dot when a part on the tab threw. Its popover lists the parts of the sites matching the tab, each with a switch, a box for a request, and the presets. A request calls `shell.sites.request`, starts a thread in the **Sites** project (a T3 project whose folder is the sites folder, made on first use), with the helper's prompt as its first message, in the model and mode of the thread you're in (or your latest thread, from a draft), lends the tab (`t3:thread/<id>`), and gives it back when the run ends. The popover then links to the thread.
+   - **Hydra's agents** (T3 patch 0010): `site_apply`, `site_report`, `site_read` and `site_snapshot` in T3's MCP server, on the browser tab id the request names, through the helper (its thread-scoped routes, so only on a lent tab).
+   - **Any agent:** `node <plutonium>/helper/plutonium.ts sites apply|report|read|snapshot <tab>` in a shell (in its thread; outside one, `apply` and `report` only). The prompt names both ways: in the first live run (Codex), the agent didn't find the MCP tools and guessed a selector from memory; with the shell form in the prompt and "read the page before writing a selector" in the skill, the second run read the page and verified on the tab.
+   - **Other shells:** `shell.sites.showPopover({ tabId, anchor, run })` in the library: the same popover; `run(request)` starts the agent, or without it the prompt is copied. The plain shell has a ✎ beside the address, which starts Claude Code in the thread with the prompt.
+   - **`site.change`** waits for KEYS.md's catalogue (its step 2): the shells have no shared actions to add it to yet.
 4. **Presets** as files in `presets/` (the skill describes Theme, Keys and Declutter for now); the keys reported to the which-key overlay once KEYS.md's catalogue exists.
 5. **Stale detection and Fix.** `site_report` already counts each `site.observe` selector's matches.
 6. **The sites host extension:** `userScripts.register` with the world's CSP, and `block` rules, beside DevTools; then, with EXTENSIONS.md's tab ids, live changes, user stylesheets, the context from the registry, and DevTools off.
@@ -282,6 +287,8 @@ A fix is never started without you: it's an agent reading a page you might be si
 | `site_apply` through a thread's route: refused for a thread the tab isn't in; after lending (a tag), it applies and reports (10 matches), and is refused again after the tab is given back | ✅ |
 | `POST /v1/sites/request` from the shell page: makes `wikipedia.org/`, appends to `requests.md`, returns the prompt | ✅ |
 | Helper tests (`npm test`): 320 pass, with `test/sites.test.ts` (16) | ✅ |
+| Hydra (2026-11-09, slot 52, its own `T3_HOME`): the button in the browser panel's toolbar; its popover lists example.com's parts with their switches and marks the one that threw | ✅ |
+| A request from the popover: `requests.md`, the Sites project made, a thread started with the prompt (Codex), the tab tagged with the new thread, a `learn-more` part written and applied (the link a green pill, white text), the tab given back when the run ended | ✅ |
 
 ## Open questions
 
@@ -291,4 +298,5 @@ A fix is never started without you: it's an agent reading a page you might be si
 ## Decisions
 
 - 2026-11-08: runs are kept automatically, with Undo (`askOn` for hosts that should ask); one extension per site, made of parts that switch on and off separately; the Sites project's threads show in Hydra's sidebar; v2 is a Chrome extension of ours on EXTENSIONS.md, not a Chromium registry of its own.
+- 2026-11-09: a request runs in a real thread of a T3 project, **Sites**, whose folder is the sites folder (not a side chat, which would fork the current conversation); it uses the model and mode of the thread the user is in; tools for the agent come both as MCP tools and as `plutonium.ts sites`, since not every agent finds MCP tools; `site.change` waits for KEYS.md's catalogue.
 - 2026-11-08: scripts get the tab's context (`site.context`: thread, project, the project's settings for the site, the shell), synchronously at document start and updated when the tab moves; the sites host extension comes in beside the DevTools backend (registered scripts, `block` rules) rather than after it, and DevTools keeps open tabs and the context until tabs have ids. Scripts shouldn't write the context into the page.

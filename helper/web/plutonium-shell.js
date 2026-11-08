@@ -2834,6 +2834,156 @@ class ShellSites {
   giveBack(tabId, threadId) {
     return this.shell.tagTab(tabId, [], [threadId]);
   }
+  /**
+   * The library's popover for tab `tabId` (SITE_EXTENSIONS.md, "The button"), for
+   * shells without their own: the site's parts with a switch each, a box to
+   * describe a change, and the presets. A request goes to `run(request, preset)`
+   * if given (start an agent with request.prompt), else its prompt is copied
+   * for whichever agent the user runs. Clicking `anchor` again closes it.
+   */
+  showPopover({ tabId, anchor, run } = {}) {
+    const open = this._popover;
+    open?.close();
+    if (open && anchor && open.anchor === anchor && open.tabId === tabId) return;
+    this._popover = new SitePopover(this, tabId, anchor ?? null, run ?? null);
+  }
+}
+
+const SITE_PRESETS = [
+  ["theme", "Theme"],
+  ["keys", "Keys"],
+  ["declutter", "Declutter"],
+  ["readable", "Readable"],
+  ["dark", "Dark"],
+];
+
+class SitePopover {
+  constructor(sites, tabId, anchor, run) {
+    ensureDialogStyle();
+    this.sites = sites;
+    this.tabId = tabId;
+    this.anchor = anchor;
+    this.run = run;
+    this.element = document.createElement("div");
+    this.element.className = "plutonium-dialog plutonium-sites";
+    this.element.popover = "manual";
+    this.element.style.cssText = "position:fixed;margin:0;width:320px;display:flex;flex-direction:column;gap:8px;";
+    this._listeners = [];
+    const on = (target, type, handler, options) => {
+      target.addEventListener(type, handler, options);
+      this._listeners.push(() => target.removeEventListener(type, handler, options));
+    };
+    on(window, "pointerdown", (event) => {
+      if (!this.element.contains(event.target) && !this.anchor?.contains(event.target)) this.close();
+    }, true);
+    on(window, "keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.close();
+    }, true);
+    document.body.append(this.element);
+    this.element.showPopover();
+    const box = anchor?.getBoundingClientRect();
+    if (box) {
+      this.element.style.left = `${Math.max(8, Math.min(box.right - 320, innerWidth - 328))}px`;
+      this.element.style.top = `${box.bottom + 4}px`;
+    } else {
+      this.element.style.right = "12px";
+      this.element.style.top = "12px";
+    }
+    this.render(null, []);
+    void this.load();
+  }
+
+  async load() {
+    try {
+      const [report, all] = await Promise.all([this.sites.forTab(this.tabId), this.sites.list()]);
+      const parts = all.sites
+        .filter((site) => site.tabs.some((tab) => tab.id === this.tabId))
+        .flatMap((site) => site.parts.map((part) => ({ site: site.name, ...part })));
+      if (!this.closed) this.render(report, parts);
+    } catch (error) {
+      if (!this.closed) this.render(null, [], error.message);
+    }
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const remove of this._listeners) remove();
+    if (this.sites._popover === this) this.sites._popover = null;
+    this.element.remove();
+  }
+
+  render(report, parts, error = "") {
+    const host = (() => {
+      try {
+        return new URL(report?.url ?? this.sites.shell.tabs.get(this.tabId)?.url ?? "").hostname.replace(/^www\./, "");
+      } catch {
+        return "";
+      }
+    })();
+    this.element.replaceChildren();
+    const title = document.createElement("h2");
+    title.textContent = host ? `Change ${host}` : "Change this site";
+    this.element.append(title);
+    for (const part of parts) {
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;justify-content:space-between;gap:8px;align-items:center;";
+      const name = document.createElement("span");
+      const running = report?.parts.find((candidate) => candidate.id === `${part.site}/${part.name}`);
+      name.textContent = part.title + (running?.errors.length ? " · error" : "");
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = part.enabled;
+      toggle.addEventListener("change", () => void this.sites.setPart(part.site, part.name, toggle.checked));
+      row.append(name, toggle);
+      this.element.append(row);
+    }
+    const text = document.createElement("textarea");
+    text.rows = 3;
+    text.placeholder = host ? `Describe a change to ${host}…` : "Describe a change…";
+    this.element.append(text);
+    const presets = document.createElement("div");
+    presets.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;";
+    const status = document.createElement("small");
+    status.textContent = error;
+    const submit = async (preset) => {
+      if (!text.value.trim() && !preset) return;
+      status.textContent = "…";
+      try {
+        const request = await this.sites.request(this.tabId, text.value, preset ? { preset } : {});
+        if (this.run) {
+          await this.run(request, preset ?? null);
+          status.textContent = "An agent is writing it.";
+        } else {
+          await navigator.clipboard.writeText(request.prompt);
+          status.textContent = "Copied a prompt for your agent.";
+        }
+        text.value = "";
+      } catch (cause) {
+        status.textContent = cause.message;
+      }
+    };
+    for (const [id, label] of SITE_PRESETS) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.addEventListener("click", () => void submit(id));
+      presets.append(button);
+    }
+    const go = document.createElement("button");
+    go.className = "primary";
+    go.textContent = this.run ? "Change" : "Copy a prompt";
+    go.addEventListener("click", () => void submit());
+    text.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        void submit();
+      }
+    });
+    this.element.append(presets, go, status);
+    text.focus();
+  }
 }
 
 const storagePath = (key) => `/v1/shell/storage/${encodeURIComponent(key)}`;

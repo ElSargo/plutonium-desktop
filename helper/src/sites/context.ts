@@ -2,8 +2,8 @@
 // context"): its thread and project, from its tags, and each site's settings
 // in that project.
 //
-// A tab's thread is a tag with no prefix (Hydra's thread ids, the plain
-// shell's own); a tab kept per project carries `t3:project/<id>`. Until the
+// A tab's thread is Hydra's `t3:thread/<id>` tag, or a tag with no prefix
+// (the plain shell's own); a tab kept per project carries `t3:project/<id>`. Until the
 // helper keeps projects itself (PROJECTS.md, step 1), threads' titles and
 // projects come from Hydra's (T3 Code's) state database, read only. Settings
 // come from the user's own file for the project, ~/.pluto/projects/<id>.json
@@ -109,6 +109,8 @@ export class T3Directory implements ThreadDirectory {
 }
 
 const PROJECT_TAG = "t3:project/";
+/** Hydra's thread tags (@t3tools/shared/plutonium's plutoniumThreadTag). */
+const THREAD_TAG = "t3:thread/";
 
 /** Reads a project's site settings from ~/.pluto/projects/<id>.json. */
 export function projectSiteSettings(plutoHome: string, projectId: string): Record<string, Record<string, unknown>> {
@@ -141,7 +143,15 @@ export class ContextSource {
     let projectId: string | null = null;
     let fromHydra = false;
     for (const tag of tags) {
-      if (tag.startsWith(PROJECT_TAG)) {
+      if (tag.startsWith(THREAD_TAG)) {
+        const id = tag.slice(THREAD_TAG.length);
+        fromHydra = true;
+        if (id && !thread) {
+          const row = this.directory.thread(id);
+          thread = { id, title: row?.title ?? null };
+          if (row) projectId ??= row.projectId;
+        }
+      } else if (tag.startsWith(PROJECT_TAG)) {
         projectId ??= tag.slice(PROJECT_TAG.length) || null;
         fromHydra = true;
       } else if (tag.startsWith("t3:")) {

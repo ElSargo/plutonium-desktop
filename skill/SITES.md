@@ -30,7 +30,7 @@ The folder is a git repository: **every settled save is committed and applied to
 5. **Keys belong to the page first.** `site.keys.bind` never takes a key with Super (the desktop's), never in a text field, and never when the page handled it. Don't fight the site's own shortcuts: learn them first and keep the good ones.
 6. **Keep the context in the script.** `site.context` (thread, project, settings) is for the script's decisions. Never write it into the page (attributes, text, network requests): the site's own scripts can read the page.
 7. **No secrets, no tracking.** Don't send page content anywhere. `site.fetch` reaches only the hosts listed in `site.json`'s `"hosts"`; adding one is something the user is told about.
-8. **Check your work.** After saving, call `site_apply` with the tab's id: it applies the folder now and reports each part's errors, logs, and how many elements each `site.observe` selector matched (0 usually means a wrong selector). Then look at the tab (`snapshot_tab`, `read_tab`).
+8. **Check your work.** After saving, call `site_apply` with the tab's id: it applies the folder now and reports each part's errors, logs, and how many elements each `site.observe` selector matched (0 usually means a wrong selector). Then look at the tab: `site_snapshot` and `site_read` in Hydra (they take the browser tab id from the request), `snapshot_tab` and `read_tab` with Plutonium's own tools. Without any of these tools, the same from a shell: `node {{PLUTONIUM}}/helper/plutonium.ts sites apply|report|read|snapshot <tab id>` (snapshot prints a PNG's path). **Read the page before writing a selector**: never guess one from memory of how a site used to look.
 
 ## `site.json`
 

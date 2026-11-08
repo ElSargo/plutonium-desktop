@@ -245,6 +245,13 @@ describe("a tab's context", () => {
     });
   });
 
+  test("Hydra's thread tag", () => {
+    const context = new ContextSource(tempDir(), directory).contextFor(["t3:thread/th-1"]);
+    assert.deepEqual(context.thread, { id: "th-1", title: "Vim mode" });
+    assert.equal(context.project?.id, "p1");
+    assert.equal(context.shell, "hydra");
+  });
+
   test("a tab kept per project, an unknown thread, no tags", () => {
     const home = tempDir();
     const source = new ContextSource(home, directory);
