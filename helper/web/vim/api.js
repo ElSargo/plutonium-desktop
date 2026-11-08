@@ -31,6 +31,7 @@ const OPTIONS = {
   timeoutlen: (v) => { if (typeof v !== "number" || !(v >= 0) || v > 10000) throw new TypeError("milliseconds, from 0 to 10000"); return v; },
   mapleader: (v) => oneKey(v),
   clipboardHistory: (v) => bool(v),
+  displayLines: (v) => bool(v),
 };
 
 function bool(v) {

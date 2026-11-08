@@ -59,6 +59,41 @@ function vertical(ctx, dir) {
   return atColumn(text, start, ctx.session.want);
 }
 
+/**
+ * j and k by the lines the field shows (vim.opt.displayLines; gj and gk the
+ * other way round): the buffer's displayLine, where it has one, else real
+ * lines. An operator always takes real lines (dj deletes two lines).
+ *
+ * The column a run of them keeps is where the run started, as the browser's
+ * own arrow keys keep it: each move is counted from the run's first offset
+ * (session.displayRun), so k after j comes back exactly, and a short line
+ * on the way doesn't pull the cursor left for good.
+ */
+function displayOr(dir, display) {
+  return (ctx) => {
+    const { session } = ctx;
+    const buffer = session?.buffer;
+    const wanted = display === Boolean(ctx.vim?.opt?.displayLines);
+    if (ctx.op || !wanted || typeof buffer?.displayLine !== "function") return vertical(ctx, dir);
+    const run = session.displayRun?.at === ctx.pos && session.displayRun.text === ctx.text
+      ? session.displayRun : { origin: ctx.pos, lines: 0 };
+    const lines = run.lines + dir * ctx.count;
+    let target;
+    if (lines === 0) target = run.origin;
+    else {
+      const found = buffer.displayLine(run.origin, Math.sign(lines), Math.abs(lines));
+      if (found === undefined) return vertical(ctx, dir);
+      if (found === null) return null;
+      // At a soft wrap the line's end and the next line's start are one offset: the end is its last character.
+      target = T.clampNormal(ctx.text, found.end ? T.prev(ctx.text, found.offset) : found.offset);
+    }
+    // Past the first or last line the run can't go further: the motion fails, and the run stays.
+    if (target === ctx.pos) return null;
+    session.displayRun = { origin: run.origin, lines, at: target, text: ctx.text };
+    return target;
+  };
+}
+
 function atColumn(text, start, want) {
   const last = T.lastChar(text, start);
   return Math.min(start + (want === Infinity ? Infinity : want), last);
@@ -178,11 +213,13 @@ export const MOTIONS = [
   { keys: "l", fn: (c) => right(c, false), kind: "exclusive" },
   { keys: "<Right>", fn: (c) => right(c, false), kind: "exclusive" },
   { keys: " ", fn: (c) => right(c, true), kind: "exclusive" },
-  { keys: "j", fn: (c) => vertical(c, 1), kind: "linewise", keepWant: true },
+  { keys: "j", fn: displayOr(1, true), kind: "linewise", keepWant: true },
+  { keys: "gj", fn: displayOr(1, false), kind: "linewise", keepWant: true },
   { keys: "<Down>", fn: (c) => vertical(c, 1), kind: "linewise", keepWant: true },
   { keys: "<C-n>", fn: (c) => vertical(c, 1), kind: "linewise", keepWant: true },
   { keys: "<C-j>", fn: (c) => vertical(c, 1), kind: "linewise", keepWant: true },
-  { keys: "k", fn: (c) => vertical(c, -1), kind: "linewise", keepWant: true },
+  { keys: "k", fn: displayOr(-1, true), kind: "linewise", keepWant: true },
+  { keys: "gk", fn: displayOr(-1, false), kind: "linewise", keepWant: true },
   { keys: "<Up>", fn: (c) => vertical(c, -1), kind: "linewise", keepWant: true },
   { keys: "<C-p>", fn: (c) => vertical(c, -1), kind: "linewise", keepWant: true },
   { keys: "w", fn: wordForward(false), kind: wordKind },
