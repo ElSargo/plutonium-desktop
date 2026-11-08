@@ -132,13 +132,18 @@ Shell pages are pages too: Hydra's composer, Charon's search and the switcher's 
 Principle 1 makes a page's own keys win, which is right for pages that know nothing of Pluto Vim. A page that does know can do better, and Hydra's composer is the first: it should be usable entirely in vim mode, starting in normal mode if you choose.
 
 The page and the engine share the DOM, not JavaScript, so the protocol is attributes and DOM events on the field:
-- **`data-pvim-start="normal" | "insert"`**: the page's default starting mode. Your config overrides it (`vim.opt.startInInsert`, per field or site).
-- **`pvim:mode` events** on the field, with `{ mode }`, whenever the mode changes. The page uses them to show the mode and to decide what its own keys do: in Hydra, Enter sends from normal mode and from insert mode, and Shift+Enter is a newline in insert mode.
-- **`data-pvim-actions="submit history.prev history.next menu.open …"`**: what the field can do that isn't editing text. The engine runs one by dispatching `pvim:action` with `{ name }`. Default normal-mode keys map onto the common ones: Enter → `submit`, `k` on the first line and `j` on the last → `history.prev` and `history.next`; `init.js` maps the rest (`vim.keymap.set("n", "<leader>m", { action: "model.pick" })`).
-- **`:` commands** a page declares the same way (`data-pvim-commands="model attach stash"`) appear in the `:` line's completion and run as actions: `:model`, `:attach`, `:stash`.
-- **Keys the page gives up.** A page that integrates can tell the engine which of its keydown handlers yield in normal mode (`data-pvim-yield="Escape ArrowUp ArrowDown"`), so `j`, `k` and Escape do vim's thing there instead of the page's.
+- **`data-pvim-start="normal" | "insert"`**: the page's default starting mode. Your config overrides it: `vim.enable({ site, shell, selector, start })` for some fields, or `vim.opt.startInInsert` for every field.
+- **`pvim:mode` events** on the field, with `{ mode }`, whenever the mode changes, and `data-pvim-mode` on it. The detail reaches the page's own world (Blink clones it across worlds).
+- **`data-pvim-actions="submit history.prev history.next …"`**: what the field can do that isn't editing text. The engine runs one by dispatching `pvim:action` with `{ name }` on the field. Default keys map onto the common ones:
+  - normal mode: Enter → `menu.select` or `submit`; `j` and `k` → `menu.next` and `menu.prev`, or past the last or first line `history.next` and `history.prev`;
+  - insert mode, for an open menu, as vim's completion popup: Ctrl+N → `menu.next`, Ctrl+P → `menu.prev`, Ctrl+Y → `menu.select`, Ctrl+E → `menu.close`. Without the action, the key is the page's.
+  - `init.js` maps the rest: `vim.keymap.set("n", "<leader>m", { action: "model" })`.
+- **`data-pvim-commands="model stash"`**: names a mapping's `<Cmd>…<CR>` (and the `:` line, step 9) runs as the action of the same name, when `init.js` has no command by that name.
+- **`data-pvim-yield="<C-n> <C-p>"`**: keys, in vim's notation, the page's own handlers give up for as long as the attribute says so. They're claimed before the page, as `vim.opt.claim` is. The page sets and clears it as its state changes (Hydra yields Ctrl+N/P/Y/E only while a menu is open, since Ctrl+N is otherwise a new thread).
 
-For Hydra this is a T3 patch: the composer declares its actions (send, history, the slash and mention menus, the model picker, attachments, stash) and listens for `pvim:mode`. Its menus (`/` commands, `@` mentions) work from normal mode with `j`, `k` and Enter while they're open. The settings get "Composer starts in normal mode".
+The names are settled (`data-pvim-*`, `pvim:*`) and are a public contract from here.
+
+For Hydra this is a T3 patch (`apps/web/src/plutonium/plutoVim.ts`, one hook call in `ChatComposer.tsx`): the composer declares `submit`, the prompt history, the menu actions while a `/` or `@` menu is open, and `model` and `stash`. Each action runs the composer's own key handling (`submit` is its Enter, `history.prev` its ArrowUp), so it does what that key would, with the same conditions. Enter in normal mode is the composer's own Enter, which sends: its handler is the page's, and comes first. A menu is driven from insert mode, because entering normal mode moves the cursor back onto the `/`, and the composer closes the menu. To start the composer in normal mode: `vim.enable({ shell: "hydra", selector: ".composer-tiptap", start: "normal" })`.
 
 ### Native apps: text-input-v3 (Exo)
 
@@ -290,7 +295,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 3. **Blink's key hook and the isolated world** (built, above): the hook in Chromium, the engine in its own world from the helper over DevTools. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the helper, as the register store does (step 5).
 4. **The `init.js` API** on the engine: `opt`, `keymap.set`, `motion`, `operator`, `textobject`, `command`, events; reload on save; `plutonium vim check`.
 5. **The register store** (built, below) in the helper, in memory only; scopes; `"+` and `"=`.
-6. **Pages that integrate,** and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
+6. **Pages that integrate** (built, below), and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
 7. **text-input-v3:** the vim host page, the async key path, best-effort motions, the mode badge, the native insert mode extras.
 8. **`zwp_primary_selection_v1`** in Exo, for `"*` and middle-click paste.
 9. **Across the desktop:** marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
@@ -353,6 +358,13 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **Tests in a real Chromium** (`helper/test/vimConfig.test.ts`): a yank in one page puts in another; `"t` scoped to the thread is empty in another thread's tab and shared with the same thread's; the page's main world has no `plutoVimStore`; `"=6*7<CR>p` works on a page whose CSP allows no script.
 - **Not yet:** shell pages' threads and projects (step 6), `:registers` (the `:` line, step 9), the agents' register tools (step 9).
 
+### Step 6: pages that integrate (built)
+
+- **The engine** (`engine.js`): `runAction`, the default keys for actions, a page's commands from `<Cmd>`, the menu keys in insert mode; `vim.enable({ …, start })` (`startFor`); `{ action }` mappings (`api.js`); init.js's own options win over a page's start (`userOpts`).
+- **The DOM backend** (`dom.js`): each field's `actions`, `commands` and `yields` from its attributes, `pvim:action` to run one, yielded keys claimed before the page.
+- **Hydra:** T3 patch 0013 (`shells/hydra/src/patches/`).
+- **Tests:** `helper/test/vimApi.test.ts` (actions, commands, menus, `start` rules), `helper/test/vimDom.test.ts` (a page that integrates, in Chromium), `helper/test/vimConfig.test.ts` (the page hears `pvim:action` and `pvim:mode` from the engine's isolated world). In Hydra on an X11 slot, driven over DevTools: the composer declares its actions, a `/` menu adds the menu actions and yields Ctrl+N (which then didn't open a new thread), Ctrl+Y picked the item, and `k` and `j` sent `history.prev` and `history.next`.
+
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
@@ -371,10 +383,12 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - 2026-11-08: Caps Lock is Pluto Vim's Escape, and there's no Caps Lock: Ash makes it an Escape with code `CapsLock`, which the engine claims before the page as Ctrl+[, and everything else sees as Escape. Nobody uses Caps Lock as a lock.
 - 2026-11-08: a saved `init.js` goes into every page at once, not at each frame's next field focus: the helper checks it in Node first, so a page never runs one that doesn't load. Mappings follow neovim's (`remap` off by default, `<Cmd>`, `expr`, `nowait`); operator-pending mappings wait.
 - 2026-11-08: the register store is the helper's, in memory only. Registers hold whatever was yanked, passwords included, so they never go to disk, and they don't survive the helper. The helper rather than the browser process, because the engine already reaches pages through the helper's DevTools sessions, it knows threads, and it needs no Chromium change; the vim host for native apps (step 7) is a page and reaches it the same way.
+- 2026-11-09: the page protocol's names are settled with Hydra's integration (`data-pvim-start`, `-actions`, `-commands`, `-yield`, `-mode`; `pvim:mode`, `pvim:action`). `data-pvim-yield` takes vim's notation and holds while the page declares it, in any mode, rather than "in normal mode": the page knows its own state (Hydra's menu) better than a fixed rule.
+- 2026-11-09: "Composer starts in normal mode" is a config rule (`vim.enable({ shell, selector, start })`), not a Hydra setting: it's where every other vim choice lives, and it works for any site's fields.
+- 2026-11-09: a page's menus are driven from insert mode with vim's completion keys (Ctrl+N, Ctrl+P, Ctrl+Y, Ctrl+E), not `j`, `k` and Enter in normal mode: the menu belongs to the text being typed, and entering normal mode moves the cursor off its trigger.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions
 
 1. **Ctrl+R and Ctrl+O in native apps.** Taking them in insert mode hides the app's own keys; which ones to take by default (step 7).
 2. **The motion budget** for native apps: how many milliseconds and corrections before accepting the toolkit's cursor (step 7).
-3. **Page protocol names.** `data-pvim-*` and `pvim:*` become a public contract once pages other than ours use them; settle them with Hydra's integration (step 6).

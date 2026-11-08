@@ -270,3 +270,67 @@ describe("configure", () => {
     await assert.rejects(call!, /config\.js/);
   });
 });
+
+describe("pages that integrate", () => {
+  /** A field whose page declares `actions` and `commands`; what it's asked to do goes into `ran`. */
+  function pageField(marked: string, actions: string[], commands: string[] = []) {
+    const buffer = field(marked);
+    const ran: string[] = [];
+    buffer.field.actions = () => new Set(actions);
+    buffer.field.commands = () => new Set(commands);
+    buffer.field.action = (name: string) => ran.push(name);
+    return { buffer, ran };
+  }
+
+  test("{ action } mappings, page commands, and Enter, j and k on an open menu", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const errors: Error[] = [];
+    vim.on("error", (e: Error) => errors.push(e));
+    configure(vim, (v: any) => {
+      v.keymap.set("n", "<leader>m", { action: "model" });
+      v.keymap.set("n", "<leader>x", { action: "nope" });
+      v.keymap.set("n", "<leader>s", "<Cmd>stash<CR>");
+    });
+    const { buffer, ran } = pageField("|a\nb", ["model", "stash", "menu.next", "menu.prev", "menu.select", "submit"], ["stash"]);
+    const session = vim.attach(buffer);
+    await type(session, buffer, "\\m\\s\\xjk<CR>");
+    assert.deepEqual(ran, ["model", "stash", "menu.next", "menu.prev", "menu.select"]);
+    assert.match(errors[0]!.message, /no action nope/);
+    assert.equal(mark(buffer), "|a\nb", "j and k went to the menu");
+  });
+
+  test("an open menu from insert mode: Ctrl+N, Ctrl+P, Ctrl+Y, Ctrl+E; without one they're the page's", async () => {
+    const vim = new Vim({ opt: { startInInsert: true } });
+    const { buffer, ran } = pageField("|", ["menu.next", "menu.prev", "menu.select", "menu.close"]);
+    const session = vim.attach(buffer);
+    assert.deepEqual(["<C-n>", "<C-p>", "<C-y>", "<C-e>"].map((k) => session.feed(k)), [true, true, true, true]);
+    assert.deepEqual(ran, ["menu.next", "menu.prev", "menu.select", "menu.close"]);
+    const plain = vim.attach(field("|"));
+    assert.equal(plain.feed("<C-n>"), false);
+  });
+
+  test("init.js's startInInsert wins over the page's data-pvim-start", () => {
+    const vim = new Vim();
+    assert.equal(vim.userOpts.has("startInInsert"), false);
+    configure(vim, (v: any) => { v.opt.startInInsert = false; });
+    assert.equal(vim.userOpts.has("startInInsert"), true);
+    configure(vim, () => {});
+    assert.equal(vim.userOpts.has("startInInsert"), false, "a new version starts over");
+  });
+});
+
+describe("where fields start", () => {
+  test("vim.enable({ …, start }) names a field's starting mode; the last matching rule wins", () => {
+    const vim = new Vim();
+    configure(vim, (v: any) => {
+      v.enable({ shell: "hydra", start: "normal" });
+      v.enable({ shell: "hydra", selector: ".plain", start: "insert" });
+    });
+    const el = (plain: boolean) => ({ closest: (sel: string) => (sel === ".plain" && plain ? {} : null) });
+    assert.equal(vim.startFor({ shell: "hydra", el: el(false) }), "normal");
+    assert.equal(vim.startFor({ shell: "hydra", el: el(true) }), "insert");
+    assert.equal(vim.startFor({ shell: "styx", el: el(false) }), null);
+    assert.throws(() => configure(vim, (v: any) => v.disable({ shell: "x", start: "normal" })), /start is for vim.enable/);
+    assert.throws(() => configure(vim, (v: any) => v.enable({ shell: "x", start: "visual" })), /"normal" or "insert"/);
+  });
+});

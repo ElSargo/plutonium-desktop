@@ -90,6 +90,8 @@ export class Vim {
     this.rules = [];
     /** vim.registers.scope: register → "global", "project" or "thread" (each call to the register store carries it). */
     this.registerScopes = new Map();
+    /** The options init.js set (vim.opt.x = …), which win over a page's own (data-pvim-start). */
+    this.userOpts = new Set();
     this.rebuild();
   }
 
@@ -135,6 +137,13 @@ export class Vim {
     let on = true;
     for (const rule of this.rules) if (ruleMatches(rule, where)) on = rule.on;
     return on;
+  }
+
+  /** The mode a field starts in by vim.enable({ …, start }), the last matching rule's; null where none says. */
+  startFor(where) {
+    let start = null;
+    for (const rule of this.rules) if (rule.start && ruleMatches(rule, where)) start = rule.start;
+    return start;
   }
 
   /** A field's session. `options.startInInsert` overrides the option for this field (a page's data-pvim-start). */
@@ -531,11 +540,33 @@ export class Session {
     await this.#move(from);
   }
 
+  /** Runs a page's action (data-pvim-actions) on this field: false if it has none of that name. */
+  runAction(name) {
+    const field = this.buffer.field;
+    if (!field?.actions?.().has(name)) return false;
+    field.action(name);
+    return true;
+  }
+
+  #edgeAction(key) {
+    const field = this.buffer.field;
+    if (!field?.actions) return false;
+    if (this.runAction(key === "j" ? "menu.next" : "menu.prev")) return true;
+    const { text, cursor } = this.#read();
+    const edge = key === "k" ? T.lineStart(text, cursor) === 0 : text.indexOf("\n", cursor) === -1;
+    return edge && this.runAction(key === "j" ? "history.next" : "history.prev");
+  }
+
   /** A command (init.js's vim.command), from a mapping's <Cmd>…<CR> or vim.cmd(): "Name[!] args". */
   runCommand(line) {
     const m = /^\s*:?\s*([A-Za-z][A-Za-z0-9]*)(!?)\s*(.*)$/.exec(line);
     const command = m && this.vim.user.commands.get(m[1]);
     if (!command) {
+      // A page's command (data-pvim-commands) runs its action of that name.
+      if (m && this.buffer.field?.commands?.().has(m[1])) {
+        this.buffer.field.action(m[1]);
+        return;
+      }
       this.vim.emit("error", new Error(`pluto vim: not a command: :${line.trim()}`));
       return;
     }
@@ -589,6 +620,12 @@ export class Session {
       // Escape in normal mode is the page's (Principle 3).
       return key !== "<Esc>";
     }
+    // A page's actions (data-pvim-actions): Enter submits or picks the open menu's item; j and k
+    // move in an open menu, and past the last or first line go through the page's history.
+    if (!this.pending.length && !visual) {
+      if (key === "<CR>" && (this.runAction("menu.select") || this.runAction("submit"))) return true;
+      if ((key === "j" || key === "k") && this.#edgeAction(key)) return true;
+    }
     if (key === "<CR>" && this.buffer.field?.singleLine && !this.pending.length) return false;
     this.pending.push(key);
     if (key === "=" && this.pending.length === 2 && this.pending[0] === '"') {
@@ -634,6 +671,16 @@ export class Session {
         this.#leaveInsert({ keepCursor: true });
         this.oneShot = true;
         return true;
+      // A page's open menu (data-pvim-actions), as vim's completion popup: Ctrl+N and Ctrl+P
+      // move in it, Ctrl+Y picks, Ctrl+E closes. Without one, the keys are the page's.
+      case "<C-n>":
+        return this.runAction("menu.next");
+      case "<C-p>":
+        return this.runAction("menu.prev");
+      case "<C-y>":
+        return this.runAction("menu.select");
+      case "<C-e>":
+        return this.runAction("menu.close");
       case "<C-w>":
         this.#enqueue(() => this.#deleteBefore("word"));
         return true;

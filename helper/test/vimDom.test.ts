@@ -255,6 +255,37 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal((await state("#in")).text, "foo ");
   });
 
+  test("a page that integrates: its start, its actions from Enter, j and k, and keys it gives up", async () => {
+    await page.evaluate(() => {
+      const w = window as any;
+      w.actions = [];
+      const el = document.createElement("textarea");
+      el.id = "integ";
+      el.value = "one\ntwo";
+      el.dataset.pvimStart = "normal";
+      el.dataset.pvimActions = "submit history.prev history.next";
+      el.dataset.pvimYield = "x";
+      // The page's own x: vim's while the page gives it up.
+      el.addEventListener("keydown", (e) => { if (e.key === "x") e.preventDefault(); });
+      el.addEventListener("pvim:action", (e) => w.actions.push((e as CustomEvent).detail.name));
+      el.addEventListener("pvim:mode", (e) => w.actions.push(`mode ${(e as CustomEvent).detail.mode}`));
+      document.body.append(el);
+      el.focus();
+      el.setSelectionRange(0, 0);
+    });
+    await page.evaluate(() => (window as any).idle("#integ"));
+    assert.equal((await state("#integ")).mode, "normal", "data-pvim-start");
+    await keys("#integ", "k", "j", "j", "Enter");
+    assert.deepEqual(await page.evaluate(() => (window as any).actions), ["history.prev", "history.next", "submit"],
+      "k on the first line, j on the second (a motion), j on the last, Enter");
+    await keys("#integ", "x");
+    assert.equal((await state("#integ")).text, "one\nwo", "x yielded");
+    await page.evaluate(() => { document.getElementById("integ")!.dataset.pvimYield = ""; });
+    await keys("#integ", "i", "x");
+    assert.equal((await state("#integ")).text, "one\nwo", "the page's x in insert mode");
+    assert.ok((await page.evaluate(() => (window as any).actions)).includes("mode insert"));
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

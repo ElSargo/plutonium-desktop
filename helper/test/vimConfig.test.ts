@@ -309,6 +309,15 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     assert.equal(await c.value("document.getElementById('ta').value"), "helloagain");
     assert.deepEqual(await registers.get("t", "thread", { thread: "one" }), { text: "hello", linewise: false });
 
+    // A page that integrates hears the engine's events from its own world, detail and all.
+    await a.value(`(() => { const ta = document.getElementById('ta'); window.heard = []; ta.dataset.pvimActions = "submit";
+      ta.addEventListener("pvim:action", (e) => heard.push(e.detail && e.detail.name));
+      ta.addEventListener("pvim:mode", (e) => heard.push(e.detail && e.detail.mode)); })()`);
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, a.sessionId);
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, a.sessionId);
+    await press(a.sessionId, "i");
+    assert.deepEqual(await a.value("heard"), ["submit", "insert"]);
+
     const strict = await open("one", "ab", "/csp");
     await press(strict.sessionId, '"=');
     for (const key of "6*7") {

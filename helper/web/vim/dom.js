@@ -52,6 +52,22 @@ function secret(el) {
   return /password|one-time-code/.test(el.getAttribute("autocomplete") ?? "");
 }
 
+/**
+ * What a page that integrates declares on a field (PLUTO_VIM.md, Pages that
+ * integrate): its actions and commands, which the engine runs by
+ * dispatching pvim:action with { name }, and the keys its own handlers give
+ * up (in vim's notation: "<C-n> <Esc>"), for as long as it declares them.
+ */
+function integration(el) {
+  const words = (name) => new Set((el.getAttribute(name) ?? "").split(/\s+/).filter(Boolean));
+  return {
+    actions: () => words("data-pvim-actions"),
+    commands: () => words("data-pvim-commands"),
+    yields: () => words("data-pvim-yield"),
+    action: (name) => el.dispatchEvent(new el.ownerDocument.defaultView.CustomEvent("pvim:action", { detail: { name }, bubbles: true })),
+  };
+}
+
 function setCaret(el, shape, mode) {
   el.dataset.pvimMode = mode;
   const css = el.ownerDocument.defaultView.CSS;
@@ -72,7 +88,7 @@ export class TextFieldBuffer {
   constructor(el) {
     this.el = el;
     this.kind = "web";
-    this.field = { singleLine: el.tagName === "INPUT", site: el.ownerDocument.location?.host };
+    this.field = { singleLine: el.tagName === "INPUT", site: el.ownerDocument.location?.host, ...integration(el) };
     this.caps = { exactMotions: true, wholeText: true, selection: true, undo: "own" };
   }
 
@@ -181,7 +197,7 @@ export class EditableBuffer {
   constructor(root) {
     this.root = root;
     this.kind = "web";
-    this.field = { singleLine: false, site: root.ownerDocument.location?.host };
+    this.field = { singleLine: false, site: root.ownerDocument.location?.host, ...integration(root) };
     this.caps = { exactMotions: true, wholeText: true, selection: true, undo: "own" };
   }
 
@@ -342,7 +358,10 @@ export function attach(doc = globalThis.document, options = {}) {
     let session = sessions.get(field);
     if (!session) {
       const buffer = bufferFor(field);
-      const start = field.dataset.pvimStart;
+      // vim.enable({ …, start }) for this field, else the page's own (data-pvim-start) unless
+      // init.js chose one for every field (vim.opt.startInInsert).
+      const start = vim.startFor({ site: doc.location?.hostname, shell: options.shell, el: field })
+        ?? (vim.userOpts.has("startInInsert") ? null : field.dataset.pvimStart);
       session = vim.attach(buffer, start ? { startInInsert: start !== "normal" } : {});
       sessions.set(field, session);
     }
@@ -377,8 +396,12 @@ export function attach(doc = globalThis.document, options = {}) {
     const field = vimField(target(event));
     if (!field) return;
     const key = keyFromEvent(event);
-    if (!key || vim.opt.claim.includes(key) !== claimed) return;
-    if (sessionOf(field).feed(key)) {
+    if (!key) return;
+    const session = sessionOf(field);
+    // Claimed: vim.opt.claim, and the keys the page gives up while it says so (data-pvim-yield, in vim's notation).
+    const claim = vim.opt.claim.includes(key) || session.buffer.field.yields().has(key);
+    if (claim !== claimed) return;
+    if (session.feed(key)) {
       event.preventDefault();
       event.stopImmediatePropagation();
     }

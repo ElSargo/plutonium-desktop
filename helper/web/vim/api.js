@@ -138,6 +138,7 @@ function createApi(vim, host, warnings) {
       }
       try {
         vim.opt[key] = check(value);
+        vim.userOpts.add(key);
       } catch (error) {
         fail(`vim.opt.${String(key)}`, `${error.message}`);
       }
@@ -159,7 +160,14 @@ function createApi(vim, host, warnings) {
       /** A mapping: `rhs` is keys (vim's notation) or a function; opts: remap, expr, nowait, desc. */
       set(modes, lhs, rhs, opts = {}) {
         for (const key of Object.keys(opts ?? {})) if (!MAP_OPTS.has(key)) fail(`keymap ${lhs}`, `no option ${key} (there are ${[...MAP_OPTS].join(", ")})`);
-        if (typeof rhs !== "string" && typeof rhs !== "function") fail(`keymap ${lhs}`, "the right-hand side must be keys (a string) or a function");
+        if (rhs && typeof rhs === "object" && typeof rhs.action === "string") {
+          // { action }: the page's action of that name, on the field (data-pvim-actions).
+          const name = rhs.action;
+          rhs = () => {
+            if (!current(`keymap ${lhs}`).runAction(name)) throw new Error(`pluto vim: this field has no action ${name}`);
+          };
+        }
+        if (typeof rhs !== "string" && typeof rhs !== "function") fail(`keymap ${lhs}`, "the right-hand side must be keys (a string), a function, or { action }");
         if (opts.expr && typeof rhs !== "function") fail(`keymap ${lhs}`, "expr needs a function, whose result is the keys");
         const keys = lhsKeys(vim, lhs, `keymap ${lhs}`);
         const remap = opts.remap ?? (opts.noremap === false);
@@ -335,7 +343,12 @@ function createApi(vim, host, warnings) {
 
 function checkRule(rule, what) {
   if (!rule || typeof rule !== "object") fail(`vim.${what}`, "takes a rule: { site }, { shell }, { app } or { selector }");
-  const keys = Object.keys(rule);
+  const { start, ...where } = rule;
+  if (start !== undefined) {
+    if (what !== "enable") fail(`vim.${what}`, "start is for vim.enable");
+    if (start !== "normal" && start !== "insert") fail(`vim.${what}`, `start is "normal" or "insert"`);
+  }
+  const keys = Object.keys(where);
   if (!keys.length) fail(`vim.${what}`, "an empty rule would match everything; give site, shell, app or selector");
   for (const key of keys) {
     if (!RULE_KEYS.has(key)) fail(`vim.${what}`, `no rule key ${key} (there are site, shell, app, selector)`);
