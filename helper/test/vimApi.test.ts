@@ -172,7 +172,7 @@ describe("configure", () => {
     const vim = new Vim();
     assert.throws(() => configure(vim, (v: any) => { v.opt.nope = 1; }), /no such option/);
     assert.throws(() => configure(vim, (v: any) => { v.opt.inputs = false; }), /one of "manual", "on", "off"/);
-    assert.throws(() => configure(vim, (v: any) => { v.opt.clipboardHistory = true; }), /isn't built yet/);
+    assert.throws(() => configure(vim, (v: any) => { v.opt.whichwrap = "b"; }), /isn't built yet/);
     configure(vim, (v: any) => { v.opt.claim = ["<c-[>", "<C-Space>"]; });
     assert.deepEqual(vim.opt.claim, ["<C-[>", "<C- >"], "Space is \" \" in the notation");
   });

@@ -207,7 +207,7 @@ For apps without text-input-v3: Xwayland apps, older SDL and toolkits. The helpe
 | `"=` | The expression register, which evaluates JavaScript (in the engine's world, so the page's CSP doesn't apply) instead of vimscript: `"=new Date().toISOString()<CR>p`, or `Ctrl+R =` in insert mode. A promise is waited for, an array is lines (linewise), an object is its JSON. An empty expression puts the last one's value again. It isn't drawn while you type it until the `:` line (step 9); `init.js` can draw it from `CmdlineChanged` |
 | `"_` | The black hole |
 
-**Clipboard history** (`vim.opt.clipboardHistory = true`): every copy on the desktop, not only vim's yanks, goes into a ring of its own, read with `:registers` and put with `"#1`…`"#9`. The compositor sees every clipboard change, so this covers copies from apps and pages. Ash's own clipboard history is off in shell mode ([CHROME_UI.md](CHROME_UI.md)), so this can be the desktop's.
+**Clipboard history** (`vim.opt.clipboardHistory = true`): every copy on the desktop, not only vim's yanks, goes into a ring of its own, newest first, read with `:registers` and put with `"#1`…`"#9` (or `Ctrl+R #1` in insert mode). The helper watches the clipboard with `wl-paste --watch` (Exo's `ext_data_control_v1` hears apps' and pages' copies alike) only while the option is on, and keeps the nine in memory, like the registers; copying the same text again moves it to the front. Ash's own clipboard history is off in shell mode ([CHROME_UI.md](CHROME_UI.md)), so this can be the desktop's.
 
 ### Scopes
 
@@ -228,15 +228,15 @@ vim.registers.scope("0-9", "thread");   // each thread keeps its own yank and de
 
 ### Agents
 
-An agent running in a thread can read and write that thread's registers, and global registers, through two MCP tools (`read_register`, `write_register`). An agent can leave a snippet in `"t` for you to put, or read what you just yanked. Project registers are open to every thread in the project. As with the window tools, the scope is the agent's thread.
+An agent running in a thread can read and write that thread's registers, and global registers, through two MCP tools (`read_register`, `write_register`; built, step 9). An agent can leave a snippet in `"t` for you to put, or read what you just yanked. Project registers are open to every thread in the project. As with the window tools, the scope is the agent's thread. They go through the helper's socket (`/v1/threads/<thread>/registers/<name>`), with each register's scope from your `init.js`; clipboard history is read-only.
 
 ## Across the desktop
 
-- **Marks.** Lowercase marks are per field. Uppercase marks name a field in a window or tab: `'A` focuses that window or tab (in its shell, through the broker), then that field, then the position. A mark whose window has closed says so. Marks can be scoped like registers.
-- **The jump list** spans fields, windows and tabs: Ctrl+O and Ctrl+I go back and forth across apps.
-- **Macros** are register contents, so they replay in any field and any backend.
-- **The `:` line.** Vim's commands (`:s`, `:g` in a field, `:registers`, `:marks`, `:noh`), commands `init.js` adds (`vim.command`), and the desktop's actions ([KEYS.md](KEYS.md)): `:Run launcher.open`, `:Thread new`. It's drawn by the backend's host: by the field on the web, and by the visible shell for native apps (through the shell library).
-- **Contexts for the keymap.** The mode (`vimMode == "normal"`) and the field's focus (`editableFocus`) are contexts in KEYS.md, so a desktop binding can depend on them.
+- **Marks.** Lowercase marks (`m{a-z}`, `'a`, `` `a ``) are per field, and move with the text as it's edited, whoever edits it. Uppercase marks name a field in a window or tab: the helper keeps them (`helper/src/vimMarks.ts`), and `'A` from anywhere shows that window or tab (asking its shell, as the agents' `focus_window` does), then puts the cursor at the mark in that field, in normal mode. `''` and ` `` ` go back to where the last jump left from. Not yet: scoping marks like registers, and a mark whose window has closed saying so (it does nothing).
+- **The jump list** is per field so far: `gg`, `G`, `%`, `{`, `}`, searches and marks are jumps, and Ctrl+O and Ctrl+I go back and forth over them. Across fields, windows and tabs it isn't built.
+- **Macros** (`q{register}`, `@{register}`, `@@`, a count, a capital register appends) are the keys as typed, before mappings, kept as a register's text, so they replay in any field and any backend, and `"ap` puts one. In a native field, recording holds every key so typed text is in the macro too.
+- **The `:` line** and searches (`/`, `?`, `n`, `N`, `*`, `#`, after an operator too: `d/foo<CR>`) are typed into the engine's command line (`CmdlineChanged`), drawn by the backend's host: under the field on the web (a closed shadow root), and by the shell for native apps (the shell library's badge, which also shows messages and "recording @a"). Commands: `:s` with a range (`%`, `'<,'>` from visual mode, `n`, `n,m`, `.`, `$`) and flags `g` and `i`, vim's `&` and `\1` in the replacement; `:g/pat/d` and `:v/pat/d`; `:n` to go to line n; `:registers`, `:marks` (as messages); `:noh`; commands `init.js` adds (`vim.command`) and a page's (`data-pvim-commands`); `@:` repeats the last. **Patterns are JavaScript regular expressions**, not vim's. Not yet: the desktop's actions (`:Run launcher.open`, `:Thread new`), which wait for KEYS.md's actions.
+- **Contexts for the keymap.** The mode (`vimMode == "normal"`) and the field's focus (`editableFocus`) are to be contexts in KEYS.md, so a desktop binding can depend on them. Not yet: KEYS.md's keymap and `config.js` aren't built, and neither is `vim.desktop.call`.
 
 ## `init.js`
 
@@ -271,7 +271,7 @@ export default function setup(vim) {
 | `vim.operator(lhs, fn)` | `fn(buf, range, { count, register })` changes the range with `buf.edit()`. Works with motions, text objects, its doubled form (`gqq`), visual mode and `.` |
 | `vim.textobject(key, fn)` | `i{key}` and `a{key}`: `fn(buf, around, { count })` returns a range, or null |
 | `vim.command(name, fn)` / `vim.cmd(line)` | A command (a capital first letter, as in neovim): `fn(buf, { args, bang })`. Run from a mapping's `<Cmd>…<CR>`, or `vim.cmd`; the `:` line comes at step 9 |
-| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave`, `CmdlineChanged` (`cmdline`: the `"=` expression as it's typed, or null); `fn` gets `{ field, mode, … }` |
+| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave`, `CmdlineChanged` (`cmdline`: the `:`, `/`, `?` or `"=` line as it's typed, or null), `Message` (`text`), `RecordingChanged` (`register`, or null); `fn` gets `{ field, mode, … }` |
 | `vim.registers` | `get` (a promise), `set` (a capital letter appends), `scope` (Scopes, above) |
 | `vim.disable` / `vim.enable` | Rules by `site` (a host and its subdomains), `shell`, `selector`, or `app` (native apps, step 7); the last rule that matches wins |
 | `vim.mode()`, `vim.selection()`, `vim.feedkeys(keys, { remap })` | In a mapping's function: the field's mode, its selected text (visual mode's, or the field's own), keys into it |
@@ -304,7 +304,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 6. **Pages that integrate** (built, below), and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
 7. **text-input-v3** (built, below): the engine in the helper, the async key path, best-effort motions, the mode badge.
 8. **`zwp_primary_selection_v1`** in Exo (built, below), for `"*` and middle-click paste.
-9. **Across the desktop:** marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
+9. **Across the desktop** (built, below, but for what waits on KEYS.md): marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
 10. **AT-SPI,** for apps without text-input-v3.
 
 ### Step 1: the engine (built)
@@ -387,6 +387,16 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **Tested** on X11 slot 50 with GNOME Text Editor: `wl-copy --primary` then `wl-paste --primary` (and the clipboard stayed empty); selecting text in the editor made it the primary selection, read back by `wl-paste --primary`; GTK got wl-copy's offer with its types (`WAYLAND_DEBUG`); `"*yiw` set it, `"*p` put wl-copy's.
 - **Not verified:** middle-click paste itself. On Xvfb no pointer button reaches an embedded app (`WINDOW_SIZING.md`); it needs a DRM session with a real mouse.
 
+### Step 9: across the desktop (built, but for KEYS.md's parts)
+
+- **The engine** (`engine.js`, `commands.js`): the command line (`:`, `/`, `?`, `"=`), searches and `n` `N` `*` `#`, ex commands (`:s`, `:g`, `:v`, `:n`, `:registers`, `:marks`, `:noh`, `@:`), macros, marks (lowercase in the field, uppercase through the host), the jump list in a field, `"#1`…`"#9`. Marks and jumps move with the text by comparing what the engine last saw with what's there now.
+- **Pages** (`dom.js`, `remoteStore.js`): the line under the field; uppercase marks to the helper (`connectHost`), and `jumpToMark` when it comes back.
+- **Native apps** (`vimNative.ts`): the line in the shell's badge; uppercase marks to the helper, and the jump once the window's field is back (a window's field that comes back is in the mode it was in).
+- **The helper:** `vimMarks.ts` (uppercase marks; a jump shows the tab or window through its shell), `ClipboardHistory` in `vimRegisters.ts`, the register routes and the agents' `read_register` and `write_register` (`mcp.ts`).
+- **Tests:** `vim.test.ts` (search, the `:` line, macros, marks and jumps), `vimNative.test.ts` (`:s`, the line, a macro with typed text, marks, a returning field's mode), `vimRegisters.test.ts` (history), `vimDom.test.ts` (the line under a textarea), `vimConfig.test.ts` (an uppercase mark from one page to another, in Chromium).
+- **On X11 slot 50** in GNOME Text Editor: `:%s/a/b/g`; a macro `qqA!<Esc>jq@q`; `"#2p` put the copy before last (two `wl-copy`s); `0mA` in one editor window, then `` `A `` in another brought the first to the front in normal mode, and `x` deleted at the mark.
+- **Not yet:** the jump list across fields and windows; scoped marks; the desktop's actions on the `:` line, `vim.desktop.call` and the KEYS.md contexts (they wait for KEYS.md's keymap and `config.js`).
+
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
@@ -412,6 +422,8 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - 2026-11-09 (open question 1): in native apps, insert mode takes only Escape, Ctrl+[ (Caps Lock) and the first keys of `init.js`'s insert mappings. Ctrl+R, Ctrl+O, Ctrl+W and Ctrl+U stay the app's: they're common app keys (Ctrl+W closes, Ctrl+R reloads), and native fields have their own word and line deletion.
 - 2026-11-09 (open question 2): the motion budget is one batch of arrows, one correction, and 25 ms waiting on the app each; a held key the helper doesn't answer in 100 ms goes on to the app.
 - 2026-11-09: the native mode badge is the shell's to draw, over the element showing the window: a native window is drawn inside the shell page, so the browser can't place it on screen by itself.
+- 2026-11-09: searches and `:s` take JavaScript regular expressions, not vim's: it's the language `init.js` is written in, and a second regex dialect in the engine would be a large, buggy translation. Replacements keep vim's `&` and `\1`.
+- 2026-11-09: clipboard history is watched only while `vim.opt.clipboardHistory` is on, and kept in the helper's memory, like the registers.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions

@@ -13,14 +13,14 @@ import { normalizeKey, parseKeys, isPrintable } from "./keys.js";
 import { MAP_MODES, parseCommand } from "./engine.js";
 import { UserBuffer } from "./userBuffer.js";
 
-const EVENTS = new Set(["ModeChanged", "InsertEnter", "InsertLeave", "TextYankPost", "FieldEnter", "FieldLeave", "CmdlineChanged"]);
+const EVENTS = new Set(["ModeChanged", "InsertEnter", "InsertLeave", "TextYankPost", "FieldEnter", "FieldLeave", "CmdlineChanged", "Message", "RecordingChanged"]);
 const SCOPES = new Set(["global", "project", "thread"]);
 const KINDS = new Set(["exclusive", "inclusive", "linewise"]);
 const MAP_OPTS = new Set(["remap", "noremap", "expr", "desc", "silent", "nowait"]);
 const RULE_KEYS = new Set(["site", "shell", "app", "selector"]);
 
 /** Options documented for later steps, which say so rather than "unknown". */
-const LATER_OPTIONS = { clipboardHistory: "clipboard history (step 9)", whichwrap: "whichwrap", iskeyword: "iskeyword" };
+const LATER_OPTIONS = { whichwrap: "whichwrap", iskeyword: "iskeyword" };
 
 const OPTIONS = {
   startInInsert: (v) => bool(v),
@@ -30,6 +30,7 @@ const OPTIONS = {
   claim: (v) => { if (!Array.isArray(v)) throw new TypeError("a list of keys, like [\"<C-[>\"]"); return v.map(oneKey); },
   timeoutlen: (v) => { if (typeof v !== "number" || !(v >= 0) || v > 10000) throw new TypeError("milliseconds, from 0 to 10000"); return v; },
   mapleader: (v) => oneKey(v),
+  clipboardHistory: (v) => bool(v),
 };
 
 function bool(v) {

@@ -5,7 +5,7 @@ export { Vim, Session, DEFAULT_OPTIONS, MAP_MODES, parseCommand, insertedText } 
 export { configure } from "./api.js";
 export { UserBuffer } from "./userBuffer.js";
 export { Registers, MemoryStore, REGISTER_NAMES } from "./registers.js";
-export { RemoteStore } from "./remoteStore.js";
+export { RemoteStore, connectHost } from "./remoteStore.js";
 export { keyFromEvent, normalizeKey, parseKeys, isPrintable } from "./keys.js";
 export { StringBuffer } from "./stringBuffer.js";
 export * as text from "./text.js";

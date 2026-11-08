@@ -59,6 +59,9 @@ export interface VimInjectorOptions {
   readonly registers?: RegisterStore;
   /** Where a page's fields are, for registers' thread and project scopes. */
   readonly placeOf?: (targetId: string) => RegisterPlace;
+  /** An uppercase mark set in page `targetId` (m{A-Z}), and a jump to one from a page. */
+  readonly onMarkSet?: (targetId: string, name: string, offset: number) => void;
+  readonly onMarkJump?: (name: string) => void;
 }
 
 interface PageSession {
@@ -96,9 +99,11 @@ export class VimInjector {
     return [
       "if (/^https?:$/.test(location.protocol) && !globalThis.plutoVimPage) {",
       this.source(),
-      "  const vim = new globalThis.plutoVim.Vim({ store: new globalThis.plutoVim.RemoteStore() });",
+      "  const store = new globalThis.plutoVim.RemoteStore();",
+      "  const vim = new globalThis.plutoVim.Vim({ store });",
       `  try { globalThis.plutoVim.configure(vim, ${config}); } catch (error) { console.error("pluto vim: init.js:", error); }`,
       `  globalThis.plutoVimPage = globalThis.plutoVim.attach(document, { vim, shell: (${shells})[location.origin] ?? null });`,
+      "  globalThis.plutoVim.connectHost(vim, store);",
       "}",
       "",
     ].join("\n");
@@ -208,6 +213,7 @@ export class VimInjector {
   private async storeCall(sessionId: string, call: { name: string; payload: string; executionContextId: number }): Promise<void> {
     const store = this.options.registers;
     if (call.name !== BINDING || !store) return;
+    // (Marks need the binding too, which comes with the register store.)
     const target = [...this.sessions].find(([, page]) => page.sessionId === sessionId)?.[0];
     if (!target) return;
     let id = 0;
@@ -218,6 +224,8 @@ export class VimInjector {
       const place = this.options.placeOf?.(target) ?? {};
       if (message.op === "get") result = await store.get(message.name, message.scope, place);
       else if (message.op === "set") await store.set(message.name, message.value, message.scope, place);
+      else if (message.op === "mark.set") this.options.onMarkSet?.(target, message.name, Number((message as { offset?: unknown }).offset));
+      else if (message.op === "mark.jump") this.options.onMarkJump?.(message.name);
     } catch (error) {
       this.log(`pluto vim: register store: ${(error as Error).message}`);
     }
@@ -226,6 +234,23 @@ export class VimInjector {
       contextId: call.executionContextId,
       expression: `globalThis.${REPLY}?.(${id}, ${JSON.stringify(result ?? null)})`,
     }, sessionId).catch(() => {});
+  }
+
+  /** Uppercase mark `name` in page `targetId`: its field takes focus and the cursor goes to the mark. */
+  async jumpInPage(targetId: string, name: string, offset: number): Promise<boolean> {
+    const page = this.sessions.get(targetId);
+    if (!page) return false;
+    try {
+      const { executionContextId } = (await this.cdp.send("Page.createIsolatedWorld", { frameId: targetId, worldName: WORLD }, page.sessionId)) as { executionContextId: number };
+      const { result } = (await this.cdp.send("Runtime.evaluate", {
+        contextId: executionContextId,
+        expression: `!!globalThis.plutoVimPage?.jumpToMark(${JSON.stringify(name)}, ${Number(offset) || 0})`,
+        returnByValue: true,
+      }, page.sessionId)) as { result: { value?: boolean } };
+      return result.value === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Runs the script in the page's world now, if it's still ours; it does nothing where the engine already is. */

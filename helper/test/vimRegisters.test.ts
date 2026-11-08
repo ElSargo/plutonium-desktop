@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { fromClipboard, MAX_TEXT, RegisterStore, wlClipboard, type Clipboard } from "../src/vimRegisters.ts";
+import { ClipboardHistory, fromClipboard, MAX_TEXT, RegisterStore, wlClipboard, type Clipboard } from "../src/vimRegisters.ts";
 
 describe("the register store", () => {
   test("a scope picks the copy: the field's thread, its project, or global when it has neither", async () => {
@@ -58,6 +58,17 @@ describe("the register store", () => {
     assert.deepEqual(copied, { clipboard: "", primary: "selected" });
     copied.primary = "picked in an app";
     assert.deepEqual(await store.get("*", "thread", { thread: "two" }), { text: "picked in an app", linewise: false });
+  });
+
+  test("clipboard history: newest first, nine of them, a repeat moves to the front; \"#1…\"#9", async () => {
+    const history = new ClipboardHistory(() => null);
+    const store = new RegisterStore({ history });
+    for (const text of ["a", "b", "c", "a"]) history.add(text);
+    assert.deepEqual(history.entries, ["a", "c", "b"]);
+    for (let k = 0; k < 10; k++) history.add(`x${k}`);
+    assert.equal(history.entries.length, 9);
+    assert.deepEqual(await store.get("#1", "global"), { text: "x9", linewise: false });
+    assert.equal(await store.get("#9", "global").then((v) => v?.text), "x1");
   });
 
   test("without wl-clipboard there's no clipboard", () => {

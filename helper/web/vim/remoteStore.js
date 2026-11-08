@@ -38,6 +38,12 @@ export class RemoteStore {
     return typeof this.#global[BINDING] === "function";
   }
 
+  /** Anything else the helper does for this world: { op, ... }; resolves to its answer, or null. */
+  call(op, data = {}) {
+    if (!this.remote) return Promise.resolve(null);
+    return this.#call({ op, ...data, name: data.name ?? op }, () => null);
+  }
+
   get(name, scope = "global") {
     if (!this.remote) return this.#local.get(name, scope);
     return this.#call({ op: "get", name, scope }, () => this.#local.get(name, scope));
@@ -67,4 +73,16 @@ export class RemoteStore {
       }
     });
   }
+}
+
+/**
+ * Uppercase marks name a field anywhere on the desktop, so with the helper
+ * they're its (vimMarks.ts): a mark set here is told to it, and a jump to one
+ * asks it to go there, this page included (page.jumpToMark).
+ */
+export function connectHost(vim, store) {
+  if (!store.remote) return;
+  vim.remoteMarks = true;
+  vim.on("MarkSet", ({ name, offset }) => void store.call("mark.set", { name, offset }));
+  vim.on("MarkJump", ({ name }) => void store.call("mark.jump", { name }));
 }

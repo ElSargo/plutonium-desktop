@@ -12,7 +12,8 @@
 // what middle-click pastes): Exo's, through wl-clipboard (Exo has
 // ext_data_control_v1 and zwp_primary_selection_v1, WAYLAND_PROTOCOLS.md).
 // Without wl-clipboard they're ordinary global registers.
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createInterface } from "node:readline";
 
 export interface RegisterValue {
   readonly text: string;
@@ -41,9 +42,12 @@ export const MAX_TEXT = 8 * 1024 * 1024;
 export class RegisterStore {
   private readonly values = new Map<string, RegisterValue>();
   private readonly clipboard: Clipboard | null;
+  /** Clipboard history ("#1…"#9), newest first, while it's on (vim.opt.clipboardHistory). */
+  readonly history: ClipboardHistory | null;
 
-  constructor(options: { clipboard?: Clipboard | null } = {}) {
+  constructor(options: { clipboard?: Clipboard | null; history?: ClipboardHistory | null } = {}) {
     this.clipboard = options.clipboard ?? null;
+    this.history = options.history ?? null;
   }
 
   /** The copy a call means: "global", "thread:<id>" or "project:<id>". */
@@ -54,6 +58,11 @@ export class RegisterStore {
   }
 
   async get(name: string, scope: string, place: RegisterPlace = {}): Promise<RegisterValue | null> {
+    const history = /^#([1-9])$/.exec(name);
+    if (history) {
+      const text = this.history?.entries[Number(history[1]) - 1];
+      return text == null ? null : fromClipboard(text);
+    }
     if (!NAMES.test(name)) throw new Error(`not a register: ${JSON.stringify(name)}`);
     const system = name === "+" || name === "*";
     if (system && this.clipboard) {
@@ -124,5 +133,66 @@ export function wlClipboard(waylandDisplay: string, find: (name: string) => stri
         });
         child.stdin.end(text);
       }),
+  };
+}
+
+/**
+ * Every copy on the desktop, the last nine, newest first: "#1…"#9
+ * (vim.opt.clipboardHistory). It watches the clipboard through wl-paste's
+ * --watch (Exo's ext_data_control_v1 hears every change, apps' and pages'
+ * alike). In memory only, like the registers.
+ */
+export class ClipboardHistory {
+  readonly entries: string[] = [];
+  private child: ChildProcess | null = null;
+  private readonly start: () => ChildProcess | null;
+
+  /** `start` spawns the watcher: one line of base64 per copy on stdout. */
+  constructor(start: () => ChildProcess | null) {
+    this.start = start;
+  }
+
+  get on(): boolean {
+    return this.child !== null;
+  }
+
+  /** A copy, newest first; the same text again moves to the front. */
+  add(text: string): void {
+    if (!text) return;
+    const at = this.entries.indexOf(text);
+    if (at >= 0) this.entries.splice(at, 1);
+    this.entries.unshift(text.length > MAX_TEXT ? text.slice(0, MAX_TEXT) : text);
+    this.entries.length = Math.min(this.entries.length, 9);
+  }
+
+  setOn(on: boolean): void {
+    if (on === this.on) return;
+    if (!on) {
+      this.child?.kill();
+      this.child = null;
+      this.entries.length = 0;
+      return;
+    }
+    const child = this.start();
+    if (!child?.stdout) return;
+    this.child = child;
+    createInterface({ input: child.stdout }).on("line", (line) => this.add(Buffer.from(line, "base64").toString("utf8")));
+    child.on("exit", () => {
+      if (this.child === child) this.child = null;
+    });
+  }
+}
+
+/** The history's watcher on `waylandDisplay`: wl-paste --watch, base64 per copy; null without wl-paste. */
+export function wlClipboardWatch(waylandDisplay: string, find: (name: string) => string | undefined): (() => ChildProcess | null) {
+  return () => {
+    const paste = find("wl-paste");
+    const sh = find("sh") ?? "/bin/sh";
+    const base64 = find("base64");
+    if (!paste || !base64) return null;
+    return spawn(paste, ["--type", "text", "--watch", sh, "-c", `${JSON.stringify(base64)} -w0; echo`], {
+      env: { ...process.env, WAYLAND_DISPLAY: waylandDisplay },
+      stdio: ["ignore", "pipe", "ignore"],
+    });
   };
 }

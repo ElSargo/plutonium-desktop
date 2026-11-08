@@ -261,10 +261,14 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     }));
     const registers = new RegisterStore();
     const threads = new Map<string, string>();
+    const marks = new Map<string, { targetId: string; offset: number }>();
+    const jumps: string[] = [];
     const injector = new VimInjector(cdp, () => vimBundle(ENGINE), () => {}, {
       config: () => expression,
       registers,
       placeOf: (targetId) => ({ thread: threads.get(targetId) ?? null }),
+      onMarkSet: (targetId, name, offset) => marks.set(name, { targetId, offset }),
+      onMarkJump: (name) => jumps.push(name),
     });
     await injector.start();
     const open = async (thread: string, text: string, path = "/") => {
@@ -317,6 +321,18 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, a.sessionId);
     await press(a.sessionId, "i");
     assert.deepEqual(await a.value("heard"), ["submit", "insert"]);
+
+    // Uppercase marks are the helper's: mA in one page, `A in another asks it, and it moves the first page's field.
+    await press(c.sessionId, "0lmA");
+    await waitFor(() => marks.has("A"), 2000);
+    assert.equal(marks.get("A")!.targetId, c.targetId);
+    await press(c.sessionId, "$");
+    assert.notEqual(await c.value("document.getElementById('ta').selectionStart"), 1);
+    await press(b.sessionId, "`A");
+    await waitFor(() => jumps.length === 1, 2000);
+    assert.ok(await injector.jumpInPage(c.targetId, "A", 0));
+    await sleep(100);
+    assert.equal(await c.value("document.getElementById('ta').selectionStart"), 1, "the cursor went back to the mark");
 
     const strict = await open("one", "ab", "/csp");
     await press(strict.sessionId, '"=');

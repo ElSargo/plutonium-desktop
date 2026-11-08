@@ -203,8 +203,8 @@ export const MOTIONS = [
     wantEnd: true,
   },
   { keys: "<End>", fn: (c) => T.lastChar(c.text, c.pos), kind: "inclusive", wantEnd: true },
-  { keys: "gg", fn: line((c) => (c.hasCount ? c.count - 1 : 0)), kind: "linewise" },
-  { keys: "G", fn: line((c) => (c.hasCount ? c.count - 1 : Infinity)), kind: "linewise" },
+  { keys: "gg", fn: line((c) => (c.hasCount ? c.count - 1 : 0)), kind: "linewise", jump: true },
+  { keys: "G", fn: line((c) => (c.hasCount ? c.count - 1 : Infinity)), kind: "linewise", jump: true },
   {
     keys: "_",
     fn: (c) => { const s = lineDown(c, c.count - 1); return s == null ? null : T.firstNonBlank(c.text, s); },
@@ -227,8 +227,15 @@ export const MOTIONS = [
   { keys: "T", fn: find("T"), kind: "exclusive", arg: true },
   { keys: ";", fn: repeatFind(false), kind: findKind(false) },
   { keys: ",", fn: repeatFind(true), kind: findKind(true) },
-  { keys: "}", fn: repeatMotion(T.paragraphForward), kind: "exclusive" },
-  { keys: "{", fn: repeatMotion(T.paragraphBack), kind: "exclusive" },
+  { keys: "}", fn: repeatMotion(T.paragraphForward), kind: "exclusive", jump: true },
+  { keys: "{", fn: repeatMotion(T.paragraphBack), kind: "exclusive", jump: true },
+  // Search (the last / or ?, *, #) and marks: jumps, which Ctrl+O goes back over.
+  { keys: "n", fn: searchMotion(false), kind: "exclusive", jump: true },
+  { keys: "N", fn: searchMotion(true), kind: "exclusive", jump: true },
+  { keys: "*", fn: starMotion(false), kind: "exclusive", jump: true },
+  { keys: "#", fn: starMotion(true), kind: "exclusive", jump: true },
+  { keys: "'", fn: (c) => { const at = c.session.markOffset(c.arg); return at == null ? null : T.firstNonBlank(c.text, at); }, kind: "linewise", arg: true, jump: true },
+  { keys: "`", fn: (c) => c.session.markOffset(c.arg), kind: "exclusive", arg: true, jump: true },
   {
     keys: "%",
     fn: (c) => {
@@ -240,8 +247,63 @@ export const MOTIONS = [
       return at < 0 ? null : at;
     },
     kind: (c) => (c.hasCount ? "linewise" : "inclusive"),
+    jump: true,
   },
 ];
+
+/**
+ * Where `pattern` (a JavaScript regular expression: Pluto Vim's searches are
+ * JavaScript's, not vim's) next matches after `from`, or before it, going
+ * round the end. Null if it doesn't match, or isn't a pattern.
+ */
+export function searchFrom(text, pattern, from, backward) {
+  let re;
+  try {
+    re = new RegExp(pattern, "gmu");
+  } catch {
+    return null;
+  }
+  const starts = [];
+  for (const m of text.matchAll(re)) {
+    starts.push(m.index);
+    if (starts.length > 100000) break;
+  }
+  if (!starts.length) return null;
+  if (backward) {
+    for (let k = starts.length - 1; k >= 0; k--) if (starts[k] < from) return starts[k];
+    return starts[starts.length - 1];
+  }
+  for (const at of starts) if (at > from) return at;
+  return starts[0];
+}
+
+function searchMotion(reverse) {
+  return (c) => {
+    const last = c.vim.lastSearch;
+    if (!last) return null;
+    let at = c.pos;
+    for (let k = 0; k < c.count; k++) {
+      at = searchFrom(c.text, last.pattern, at, last.backward !== reverse);
+      if (at == null) return null;
+    }
+    return at;
+  };
+}
+
+/** * and #: the word under the cursor, as a whole word, forward or back. */
+function starMotion(backward) {
+  return (c) => {
+    const word = /[\p{L}\p{N}_]+/u;
+    let from = c.pos;
+    while (from > 0 && word.test(c.text[from - 1])) from--;
+    let to = from;
+    while (to < c.text.length && word.test(c.text[to])) to++;
+    if (to === from) return null;
+    const escaped = c.text.slice(from, to).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    c.vim.lastSearch = { pattern: `(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, backward };
+    return searchMotion(false)({ ...c, pos: backward ? from : c.pos });
+  };
+}
 
 // ── Text objects ─────────────────────────────────────────────────────────
 // fn(ctx, around) returns { from, to, linewise } (to is exclusive), or null.
@@ -410,6 +472,11 @@ export const ACTIONS = [
   { keys: ".", action: "repeat" },
   { keys: "v", action: "visual" },
   { keys: "V", action: "visualLine" },
+  { keys: "q", action: "record", arg: true },
+  { keys: "@", action: "play", arg: true },
+  { keys: "m", action: "mark", arg: true },
+  { keys: "<C-o>", action: "jumpBack" },
+  { keys: "<C-i>", action: "jumpForward" },
 ];
 
 /** Visual mode's commands, besides motions and text objects. */

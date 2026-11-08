@@ -80,6 +80,19 @@ export class Registers {
     return this.#setNamed(name, value);
   }
 
+  /** A macro recorded into `name` (q{name}): a capital appends; the unnamed register is left alone. */
+  async setMacro(name, value) {
+    if (/^[A-Z]$/.test(name)) {
+      const lower = name.toLowerCase();
+      const before = await this.store.get(lower);
+      value = before ? append(before, value) : value;
+      name = lower;
+    }
+    if (name === '"') return this.#setUnnamed(value);
+    if (!/^[a-z0-9]$/.test(name)) return;
+    await this.store.set(name, value);
+  }
+
   /** A read-only register the engine keeps: ". (the last insert), ": and "/. */
   async setSpecial(name, value) {
     await this.store.set(name, value);

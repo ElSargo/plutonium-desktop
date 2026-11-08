@@ -286,6 +286,15 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.ok((await page.evaluate(() => (window as any).actions)).includes("mode insert"));
   });
 
+  test("the : line is drawn under the field as it's typed, and runs on Enter", async () => {
+    await fresh("#ta", "a a");
+    await keys("#ta", "Escape", ":", "s/a/b/g");
+    assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-line").length), 1);
+    await keys("#ta", "Enter");
+    assert.equal((await state("#ta")).text, "b b");
+    assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-line").length), 0);
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

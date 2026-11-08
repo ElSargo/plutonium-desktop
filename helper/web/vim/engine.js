@@ -37,6 +37,8 @@ export const DEFAULT_OPTIONS = {
   timeoutlen: 1000,
   /** What <leader> stands for in a mapping, when it's made. */
   mapleader: "\\",
+  /** Every copy on the desktop goes into "#1…"#9 (the helper keeps them, in memory). */
+  clipboardHistory: false,
 };
 
 /** The modes a mapping can be for: normal, insert, and visual (visual and visual line). */
@@ -69,6 +71,14 @@ export class Vim {
     this.lastChange = null;
     /** The last f, t, F or T, for ; and ,. */
     this.lastFind = null;
+    /** The last / or ? (or * or #): { pattern, backward }. */
+    this.lastSearch = null;
+    /** Uppercase marks: name → { session, offset }. With remoteMarks, the host keeps them (MarkSet, MarkJump). */
+    this.globalMarks = new Map();
+    this.remoteMarks = false;
+    /** The last register @ played, and the last : command, for @@ and @:. */
+    this.lastPlayed = null;
+    this.lastEx = null;
     this.listeners = new Map();
     /** The session a mapping's function runs for (api.js's vim.selection(), vim.feedkeys()). */
     this.current = null;
@@ -217,9 +227,17 @@ export function parseCommand(vim, tokens, visual) {
   let register = null;
   if (tokens[0] === '"') {
     if (tokens.length < 2) return MORE;
-    if (!REGISTER_NAMES.test(tokens[1])) return BAD;
-    register = tokens[1];
-    i = 2;
+    if (tokens[1] === "#") {
+      // "#1…"#9: clipboard history.
+      if (tokens.length < 3) return MORE;
+      if (!/^[1-9]$/.test(tokens[2])) return BAD;
+      register = `#${tokens[2]}`;
+      i = 3;
+    } else {
+      if (!REGISTER_NAMES.test(tokens[1])) return BAD;
+      register = tokens[1];
+      i = 2;
+    }
   }
   let count1;
   [count1, i] = readCount(tokens, i);
@@ -306,8 +324,20 @@ export class Session {
     this.oneShot = false;
     /** After Ctrl+R in insert mode: the next key names a register. */
     this.insertRegister = false;
-    /** "= (or Ctrl+R =): the expression being typed, until Enter; null otherwise. */
-    this.expression = null;
+    /** The command line being typed, until Enter: { kind: ":" | "/" | "?" | "=", text }; null otherwise. */
+    this.cmd = null;
+    /** q{register}: the keys typed since, for the register. */
+    this.recording = null;
+    /** Lowercase marks: name → offset. */
+    this.marks = new Map();
+    /** The jump list (offsets), and where Ctrl+O and Ctrl+I are in it. */
+    this.jumps = [];
+    this.jumpAt = 0;
+    /** Where the last jump left from: the ' and ` marks. */
+    this.previousJump = null;
+    /** The lines visual mode last covered, for '<,'>. */
+    this.lastVisual = null;
+    this.playing = 0;
     /** Visual mode's ends, as offsets of characters. */
     this.vAnchor = 0;
     this.vCursor = 0;
@@ -330,8 +360,13 @@ export class Session {
   }
 
   /** Resolves once every command so far has run. */
-  idle() {
-    return this.queue;
+  /** Resolves once the queue is empty, including what the queued work queued (a macro's keys). */
+  async idle() {
+    let queue;
+    do {
+      queue = this.queue;
+      await queue;
+    } while (queue !== this.queue);
   }
 
   /** The mode as the caret and `vimMode` show it: "pending" while an operator waits for its motion. */
@@ -349,6 +384,8 @@ export class Session {
    */
   feed(key) {
     if (this.off || key == null) return false;
+    // A macro is the keys as typed, before mappings.
+    if (this.recording) this.recording.keys.push(key);
     clearTimeout(this.mapTimer);
     this.mapTimer = null;
     this.mapDepth = 0;
@@ -387,13 +424,14 @@ export class Session {
 
   /** The keymap that applies now: "i" in insert mode, "n" or "v" at the start of a command (after a register and a count); null otherwise. */
   #mapMode() {
-    if (this.expression !== null) return null;
+    if (this.cmd) return null;
     if (this.mode === "insert") return this.insertRegister ? null : "i";
     if (this.mode === "replace") return null;
     let i = 0;
     if (this.pending[0] === '"') {
       if (this.pending.length < 2) return null;
-      i = 2;
+      i = this.pending[1] === "#" ? 3 : 2;
+      if (this.pending.length < i) return null;
     }
     for (; i < this.pending.length; i++) if (!/^[0-9]$/.test(this.pending[i])) return null;
     return this.mode === "normal" ? "n" : "v";
@@ -590,7 +628,7 @@ export class Session {
   }
 
   #feedRaw(key) {
-    if (this.expression !== null) return this.#feedExpression(key);
+    if (this.cmd) return this.#feedCmdline(key);
     if (this.mode === "insert") return this.#feedInsert(key);
     if (this.mode === "replace") return this.#feedReplace(key);
     return this.#feedNormal(key);
@@ -627,11 +665,34 @@ export class Session {
       if ((key === "j" || key === "k") && this.#edgeAction(key)) return true;
     }
     if (key === "<CR>" && this.buffer.field?.singleLine && !this.pending.length) return false;
-    this.pending.push(key);
-    if (key === "=" && this.pending.length === 2 && this.pending[0] === '"') {
-      this.#startExpression();
+    // q while recording ends the macro.
+    if (key === "q" && this.recording && !this.pending.length) {
+      this.#stopRecording();
       return true;
     }
+    if (key === ":" && countOnly(this.pending)) {
+      this.pending = [];
+      if (visual) {
+        const { text } = this.#read();
+        const [a, b] = [this.vAnchor, this.vCursor].sort((x, y) => x - y);
+        this.lastVisual = { from: T.lineNumber(text, a), to: T.lineNumber(text, b) };
+        this.#setMode("normal");
+        this.#enqueue(() => this.#exitVisual());
+        this.#startCmdline(":", "'<,'>");
+      } else this.#startCmdline(":");
+      return true;
+    }
+    // / and ? are motions: wherever n would be one (after an operator too).
+    if ((key === "/" || key === "?") && parseCommand(this.vim, [...this.pending, "n"], visual).status === "done") {
+      this.#startCmdline(key);
+      return true;
+    }
+    this.pending.push(key);
+    if (key === "=" && this.pending.length === 2 && this.pending[0] === '"') {
+      this.#startCmdline("=");
+      return true;
+    }
+    if (key === "#" && this.pending.length === 2 && this.pending[0] === '"') return true;
     const parsed = parseCommand(this.vim, this.pending, visual);
     if (parsed === MORE) {
       this.#caret();
@@ -641,16 +702,34 @@ export class Session {
     this.pending = [];
     this.#caret();
     if (parsed === BAD) return keys.length > 1 || isPrintable(key);
+    // q{register} starts recording now, not when the queue gets to it: the next key is the macro's.
+    if (parsed.cmd.entry?.action === "record") {
+      if (/^[a-zA-Z0-9"]$/.test(parsed.cmd.arg)) {
+        this.recording = { register: parsed.cmd.arg, keys: [] };
+        this.vim.emit("RecordingChanged", { session: this, register: parsed.cmd.arg });
+      }
+      return true;
+    }
     this.#dispatch({ ...parsed.cmd, mode: this.mode });
     return true;
   }
 
   #feedInsert(key) {
     if (this.insertRegister) {
+      if (this.insertRegister === "#") {
+        this.insertRegister = false;
+        if (/^[1-9]$/.test(key)) this.#enqueue(() => this.#putInInsert(`#${key}`));
+        return true;
+      }
       if (key === "<C-r>") return true; // Ctrl+R Ctrl+R: put literally, which is what we do anyway.
       this.insertRegister = false;
       if (key === "=") {
-        this.#startExpression();
+        this.#startCmdline("=");
+        return true;
+      }
+      // Ctrl+R # then a digit: clipboard history.
+      if (key === "#") {
+        this.insertRegister = "#";
         return true;
       }
       if (REGISTER_NAMES.test(key)) this.#enqueue(() => this.#putInInsert(key));
@@ -692,44 +771,241 @@ export class Session {
     }
   }
 
-  /** The expression after "= or Ctrl+R =, as it's typed. */
+  /** The command line as it's typed (":s/a/b/", "/foo", "=1+2"), or null. */
   get cmdline() {
-    return this.expression === null ? null : `=${this.expression}`;
+    return this.cmd ? `${this.cmd.kind}${this.cmd.text}` : null;
   }
 
-  #startExpression() {
-    this.expression = "";
+  /** The "= expression being typed (vimNative.ts holds keys while there is one). */
+  get expression() {
+    return this.cmd?.kind === "=" ? this.cmd.text : null;
+  }
+
+  #startCmdline(kind, text = "") {
+    this.cmd = { kind, text };
     this.vim.emit("CmdlineChanged", { session: this, cmdline: this.cmdline });
   }
 
-  /** A key while an expression is typed: Enter evaluates it into "=, Escape (or deleting it all) cancels. */
-  #feedExpression(key) {
+  /** A key on the command line: Enter runs it, Escape (or deleting it all) cancels. */
+  #feedCmdline(key) {
+    const cmd = this.cmd;
     const done = (keep) => {
-      const source = this.expression;
-      this.expression = null;
+      this.cmd = null;
       this.vim.emit("CmdlineChanged", { session: this, cmdline: null });
       if (!keep) {
         if (this.mode !== "insert") this.pending = [];
         this.#caret();
         return;
       }
-      const insert = this.mode === "insert";
-      this.#enqueue(async () => {
-        // An empty expression puts the last one's value again, as in vim.
-        if (source) this.vim.registers.expression = await evaluate(source, this.vim);
-        if (insert) await this.#putInInsert("=");
-      });
+      this.#runCmdline(cmd);
     };
     if (key === "<Esc>" || key === "<C-[>") done(false);
     else if (key === "<CR>") done(true);
     else if (key === "<BS>" || key === "<C-h>") {
-      if (!this.expression) done(false);
-      else this.expression = this.expression.slice(0, -1);
-    } else if (key === "<C-u>") this.expression = "";
-    else if (key === "<Tab>") this.expression += "\t";
-    else if (isPrintable(key)) this.expression += key;
-    if (this.expression !== null) this.vim.emit("CmdlineChanged", { session: this, cmdline: this.cmdline });
+      if (!cmd.text) done(false);
+      else cmd.text = cmd.text.slice(0, -1);
+    } else if (key === "<C-u>") cmd.text = "";
+    else if (key === "<C-w>") cmd.text = cmd.text.replace(/\S*\s*$/, "");
+    else if (key === "<Tab>") cmd.text += "\t";
+    else if (isPrintable(key)) cmd.text += key;
+    if (this.cmd) this.vim.emit("CmdlineChanged", { session: this, cmdline: this.cmdline });
     return true;
+  }
+
+  #runCmdline({ kind, text }) {
+    if (kind === "=") {
+      const insert = this.mode === "insert";
+      this.#enqueue(async () => {
+        // An empty expression puts the last one's value again, as in vim.
+        if (text) this.vim.registers.expression = await evaluate(text, this.vim);
+        if (insert) await this.#putInInsert("=");
+      });
+      return;
+    }
+    if (kind === "/" || kind === "?") {
+      // An empty search searches for the last one again.
+      if (text) {
+        this.vim.lastSearch = { pattern: text, backward: kind === "?" };
+        void this.vim.registers.setSpecial("/", { text, linewise: false });
+      } else if (this.vim.lastSearch) this.vim.lastSearch = { ...this.vim.lastSearch, backward: kind === "?" };
+      // As n, with whatever register, count or operator came before the / (d/foo<CR>).
+      this.#feedNormal("n");
+      return;
+    }
+    this.#enqueue(() => this.#ex(text));
+  }
+
+  // ── Macros, marks and jumps ────────────────────────────────────────────
+
+  #stopRecording() {
+    const { register, keys } = this.recording;
+    this.recording = null;
+    // The q that ended it was recorded too.
+    keys.pop();
+    const text = keys.map((k) => (k === "<" ? "<lt>" : k)).join("");
+    this.vim.emit("RecordingChanged", { session: this, register: null });
+    this.#enqueue(() => this.vim.registers.setMacro(register, { text, linewise: false }));
+  }
+
+  /**
+   * Where mark `name` is in this field, or null. Uppercase marks name a
+   * field anywhere: with remoteMarks the host goes there (MarkJump), else
+   * one in this field is found here.
+   */
+  markOffset(name) {
+    if (name === "'" || name === "`") return this.previousJump;
+    if (/^[a-z]$/.test(name)) {
+      if (!this.marks.has(name)) this.vim.emit("error", new Error(`pluto vim: mark ${name} isn't set`));
+      return this.marks.get(name) ?? null;
+    }
+    if (/^[A-Z]$/.test(name)) {
+      const mark = this.vim.globalMarks.get(name);
+      if (!this.vim.remoteMarks && mark?.session === this) return mark.offset;
+      this.vim.emit("MarkJump", { session: this, name });
+      return null;
+    }
+    return null;
+  }
+
+  /** Moves the cursor to `offset` (the host, for an uppercase mark in this field). */
+  moveTo(offset) {
+    this.#enqueue(async () => {
+      const { text } = this.#read();
+      await this.#move(T.clampNormal(text, offset));
+    });
+  }
+
+  #pushJump(pos) {
+    this.jumps = this.jumps.slice(0, this.jumpAt);
+    if (this.jumps.at(-1) !== pos) this.jumps.push(pos);
+    if (this.jumps.length > 100) this.jumps.shift();
+    this.jumpAt = this.jumps.length;
+    this.previousJump = pos;
+  }
+
+  /** Marks and jumps move with the text an edit changed. */
+  #shiftOffsets(from, to, inserted) {
+    const shift = (at) => (at >= to ? at + inserted - (to - from) : at > from ? from : at);
+    for (const [name, at] of this.marks) this.marks.set(name, shift(at));
+    for (const mark of this.vim.globalMarks.values()) if (mark.session === this) mark.offset = shift(mark.offset);
+    this.jumps = this.jumps.map(shift);
+    if (this.previousJump != null) this.previousJump = shift(this.previousJump);
+  }
+
+  // ── The : line ─────────────────────────────────────────────────────────
+
+  /** Shows `text` where the command line was (the backend draws it). */
+  #message(text) {
+    this.vim.emit("Message", { session: this, text });
+  }
+
+  async #ex(line) {
+    this.vim.lastEx = line;
+    void this.vim.registers.setSpecial(":", { text: line, linewise: false });
+    const { text, cursor } = this.#read();
+    const pos = T.clampNormal(text, cursor);
+    const lines = T.lineNumber(text, text.length) + 1;
+    const here = T.lineNumber(text, pos);
+    // A range: %, '<,'>, n, n,m, .
+    const m = /^\s*(%|'<,'>|\.|\d+)?(?:,(\.|\$|\d+))?\s*(.*)$/.exec(line);
+    const lineOf = (spec) => (spec === "." ? here : spec === "$" ? lines - 1 : Number(spec) - 1);
+    let range = null;
+    if (m[1] === "%") range = [0, lines - 1];
+    else if (m[1] === "'<,'>") range = this.lastVisual ? [this.lastVisual.from, this.lastVisual.to] : null;
+    else if (m[1]) range = [lineOf(m[1]), m[2] ? lineOf(m[2]) : lineOf(m[1])];
+    const rest = m[3];
+    if (!rest && range) {
+      // :n goes to line n.
+      const at = T.lineStartOf(text, Math.max(0, Math.min(lines - 1, range[1])));
+      this.#pushJump(pos);
+      return this.#move(T.firstNonBlank(text, at));
+    }
+    const sub = /^s(?:ubstitute)?([^\w\s])(.*)$/.exec(rest);
+    if (sub) return this.#substitute(text, pos, range ?? [here, here], sub[1], sub[2]);
+    const global = /^(g|v|g!)(?:lobal)?([^\w\s])(.*)$/.exec(rest);
+    if (global) return this.#global(text, range ?? [0, lines - 1], global[1] !== "g", global[2], global[3]);
+    if (/^noh(lsearch)?$/.test(rest)) return;
+    if (/^(reg(isters)?|di(splay)?)$/.test(rest)) return this.#showRegisters();
+    if (/^marks$/.test(rest)) return this.#showMarks(text);
+    return this.runCommand(rest);
+  }
+
+  async #substitute(text, pos, [first, last], delimiter, body) {
+    const parts = splitUnescaped(body, delimiter);
+    const pattern = parts[0] || this.vim.lastSearch?.pattern;
+    if (!pattern) return this.#message("no pattern");
+    const flags = parts[2] ?? "";
+    let re;
+    try {
+      re = new RegExp(pattern, `u${flags.includes("g") ? "g" : ""}${flags.includes("i") ? "i" : ""}`);
+    } catch (error) {
+      return this.#message(`not a pattern: ${error.message}`);
+    }
+    this.vim.lastSearch = { pattern, backward: false };
+    const replacement = vimReplacement(parts[1] ?? "");
+    const from = T.lineStartOf(text, first);
+    const to = T.lineEnd(text, T.lineStartOf(text, last));
+    let count = 0;
+    let lastLine = first;
+    const changed = text.slice(from, to).split("\n").map((l, k) => {
+      const next = l.replace(re, (...args) => {
+        count++;
+        lastLine = first + k;
+        return expandReplacement(replacement, args);
+      });
+      return next;
+    }).join("\n");
+    if (!count) return this.#message(`not found: ${pattern}`);
+    this.edits = 0;
+    this.changeBefore = text;
+    await this.#edit(from, to, changed);
+    const after = this.#read().text;
+    await this.#move(T.firstNonBlank(after, T.lineStartOf(after, lastLine)));
+    this.#endChange();
+  }
+
+  async #global(text, [first, last], invert, delimiter, body) {
+    const [pattern, command = "d"] = splitUnescaped(body, delimiter);
+    if (command.trim() !== "d") return this.#message(":g runs d only, so far");
+    let re;
+    try {
+      re = new RegExp(pattern || this.vim.lastSearch?.pattern || "", "u");
+    } catch (error) {
+      return this.#message(`not a pattern: ${error.message}`);
+    }
+    const from = T.lineStartOf(text, first);
+    const to = T.lineEnd(text, T.lineStartOf(text, last));
+    const kept = text.slice(from, to).split("\n").filter((l) => re.test(l) === invert);
+    let end = to;
+    let start = from;
+    // Deleting every line of a range takes its newline with it.
+    if (!kept.length) {
+      if (end < text.length) end++;
+      else if (start > 0) start--;
+    }
+    this.edits = 0;
+    this.changeBefore = text;
+    await this.#edit(start, end, kept.join("\n"));
+    const after = this.#read().text;
+    await this.#move(T.firstNonBlank(after, Math.min(start, after.length)));
+    this.#endChange();
+  }
+
+  async #showRegisters() {
+    const names = ['"', "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "-", ...("abcdefghijklmnopqrstuvwxyz"), "+", "*", ".", ":", "/", "#1", "#2", "#3"];
+    const rows = [];
+    for (const name of names) {
+      const value = await this.vim.registers.get(name);
+      if (value?.text) rows.push(`"${name}  ${value.text.replace(/\n/g, "^J").slice(0, 60)}`);
+    }
+    this.#message(rows.join("\n") || "no registers");
+  }
+
+  #showMarks(text) {
+    const rows = [];
+    for (const [name, at] of [...this.marks].sort()) rows.push(`${name}  line ${T.lineNumber(text, at) + 1}`);
+    for (const [name, mark] of [...this.vim.globalMarks].sort()) rows.push(`${name}  ${mark.session === this ? `line ${T.lineNumber(text, mark.offset) + 1}` : "another field"}`);
+    this.#message(rows.join("\n") || "no marks");
   }
 
   #feedReplace(key) {
@@ -795,6 +1071,18 @@ export class Session {
 
   #read() {
     const snap = this.buffer.text();
+    // Whoever changed the text (our edits, typing, the page), marks and jumps move with it.
+    const before = this.seenText;
+    if (before != null && before !== snap.text && (this.marks.size || this.jumps.length || this.previousJump != null || this.vim.globalMarks.size)) {
+      const after = snap.text;
+      let head = 0;
+      const most = Math.min(before.length, after.length);
+      while (head < most && before.charCodeAt(head) === after.charCodeAt(head)) head++;
+      let tail = 0;
+      while (tail < most - head && before.charCodeAt(before.length - 1 - tail) === after.charCodeAt(after.length - 1 - tail)) tail++;
+      this.#shiftOffsets(head, before.length - tail, after.length - tail - head);
+    }
+    this.seenText = snap.text;
     this.start = snap.start ?? 0;
     return { text: snap.text, cursor: snap.cursor - this.start, anchor: snap.anchor - this.start };
   }
@@ -863,6 +1151,7 @@ export class Session {
     const target = cmd.entry.fn(this.#ctx(text, pos, cmd));
     if (target == null) return;
     const at = T.clampNormal(text, target);
+    if (cmd.entry.jump && !visual && at !== pos) this.#pushJump(pos);
     this.#updateWant(cmd.entry, text, at);
     if (visual) {
       this.vCursor = at;
@@ -1187,6 +1476,54 @@ export class Session {
         [this.vAnchor, this.vCursor] = [this.vCursor, this.vAnchor];
         return this.#select(text, cmd.mode);
       }
+      case "mark":
+        if (/^[a-z]$/.test(cmd.arg)) this.marks.set(cmd.arg, pos);
+        else if (/^[A-Z]$/.test(cmd.arg)) {
+          this.vim.globalMarks.set(cmd.arg, { session: this, offset: pos });
+          this.vim.emit("MarkSet", { session: this, name: cmd.arg, offset: pos });
+        }
+        return;
+      case "play":
+        return this.#play(cmd);
+      case "jumpBack": {
+        if (this.jumpAt === this.jumps.length) {
+          // Coming back to here is Ctrl+I's.
+          this.jumps.push(pos);
+        }
+        if (this.jumpAt <= 0) return;
+        this.jumpAt--;
+        return this.#move(T.clampNormal(text, this.jumps[this.jumpAt]));
+      }
+      case "jumpForward": {
+        if (this.jumpAt + 1 >= this.jumps.length) return;
+        this.jumpAt++;
+        return this.#move(T.clampNormal(text, this.jumps[this.jumpAt]));
+      }
+    }
+  }
+
+  /** @{register}: its keys again, as typed (through mappings); @@ the last one, @: the last : command. */
+  async #play(cmd) {
+    if (this.playing > 20) {
+      this.vim.emit("error", new Error("pluto vim: macros play each other without end"));
+      return;
+    }
+    let name = cmd.arg;
+    if (name === "@") name = this.vim.lastPlayed;
+    if (!name) return;
+    if (name === ":") {
+      if (this.vim.lastEx != null) for (let k = 0; k < cmd.count; k++) await this.#ex(this.vim.lastEx);
+      return;
+    }
+    if (!/^[a-zA-Z0-9".+*-]$/.test(name)) return;
+    this.vim.lastPlayed = name;
+    const value = await this.vim.registers.get(name);
+    if (!value?.text) return;
+    this.playing++;
+    try {
+      for (let k = 0; k < cmd.count; k++) this.sendKeys(value.text, { remap: true });
+    } finally {
+      this.playing--;
     }
   }
 
@@ -1428,6 +1765,50 @@ async function evaluate(source, vim) {
     vim.emit("error", new Error(`pluto vim: "=${source}: ${error?.message ?? error}`));
     return null;
   }
+}
+
+/** Nothing but a count (and a register) typed: where : may start. */
+function countOnly(pending) {
+  let i = pending[0] === '"' ? 2 : 0;
+  for (; i < pending.length; i++) if (!/^[0-9]$/.test(pending[i])) return false;
+  return true;
+}
+
+/** "a/b\/c/g" split on unescaped `delimiter`, with \<delimiter> made plain. */
+function splitUnescaped(body, delimiter) {
+  const parts = [""];
+  for (let k = 0; k < body.length; k++) {
+    if (body[k] === "\\" && body[k + 1] === delimiter) {
+      parts[parts.length - 1] += delimiter;
+      k++;
+    } else if (body[k] === delimiter) parts.push("");
+    else parts[parts.length - 1] += body[k];
+  }
+  return parts;
+}
+
+/** A replacement in vim's spelling: & is the match, \1…\9 groups, \n a newline, \& a plain &. */
+function vimReplacement(replacement) {
+  const out = [];
+  for (let k = 0; k < replacement.length; k++) {
+    const ch = replacement[k];
+    if (ch === "\\" && k + 1 < replacement.length) {
+      const next = replacement[++k];
+      if (/[0-9]/.test(next)) out.push({ group: Number(next) });
+      else if (next === "n" || next === "r") out.push("\n");
+      else if (next === "t") out.push("\t");
+      else out.push(next);
+    } else if (ch === "&") out.push({ group: 0 });
+    else out.push(ch);
+  }
+  return out;
+}
+
+function expandReplacement(parts, args) {
+  // String.replace's callback: match, groups…, offset, whole string (and maybe named groups).
+  const named = typeof args.at(-1) === "object";
+  const groups = args.slice(0, args.length - (named ? 3 : 2));
+  return parts.map((p) => (typeof p === "string" ? p : groups[p.group] ?? "")).join("");
 }
 
 function cmdLine(keys) {

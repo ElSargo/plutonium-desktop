@@ -415,6 +415,43 @@ export function attach(doc = globalThis.document, options = {}) {
   const onOffer = (event) => handle(event, false);
   const onReady = (event) => { if (event.isTrusted) hooked = true; };
 
+  // The command line (:, /, ?, "=), messages (:registers) and "recording @a", under the field,
+  // in a closed shadow root so the page's styles leave it alone.
+  let line = null;
+  let messageTimer = null;
+  const lineFor = (session) => {
+    const el = session?.buffer?.el ?? session?.buffer?.root;
+    if (!el || el.ownerDocument !== doc) return null;
+    if (!line) {
+      const host = doc.createElement("pvim-line");
+      host.style.cssText = "position:fixed;z-index:2147483647;pointer-events:none;inset:auto";
+      const root = host.attachShadow({ mode: "closed" });
+      const box = doc.createElement("div");
+      box.style.cssText = "font:12px/1.4 ui-monospace,monospace;white-space:pre;max-width:80vw;max-height:40vh;overflow:hidden;" +
+        "padding:2px 6px;border-radius:4px;color:#eee;background:rgba(30,30,36,.92);box-shadow:0 1px 4px rgba(0,0,0,.3)";
+      root.append(box);
+      line = { host, box };
+    }
+    const rect = el.getBoundingClientRect();
+    line.host.style.left = `${Math.max(0, Math.round(rect.left))}px`;
+    line.host.style.top = `${Math.round(Math.min(view.innerHeight - 24, rect.bottom + 2))}px`;
+    if (!line.host.isConnected) doc.documentElement.append(line.host);
+    return line;
+  };
+  const show = (session, text) => {
+    const l = lineFor(session);
+    if (!l) return;
+    clearTimeout(messageTimer);
+    if (text == null) l.host.remove();
+    else l.box.textContent = text;
+  };
+  const onCmdline = ({ session, cmdline }) => show(session, cmdline);
+  const onMessage = ({ session, text }) => {
+    show(session, text);
+    messageTimer = setTimeout(() => line?.host.remove(), Math.min(10000, 3000 + text.length * 20));
+  };
+  const onRecording = ({ session, register }) => show(session, register ? `recording @${register}` : null);
+
   const onMode = ({ session, to }) => {
     const el = session.buffer.el ?? session.buffer.root;
     if (!el || el.ownerDocument !== doc) return;
@@ -427,13 +464,27 @@ export function attach(doc = globalThis.document, options = {}) {
   view.addEventListener("keydown", onKey);
   view.addEventListener("plutoniumvimready", onReady);
   view.addEventListener("plutoniumvimkey", onOffer);
-  const unlisten = vim.on("ModeChanged", onMode);
+  const unlistens = [
+    vim.on("ModeChanged", onMode),
+    vim.on("CmdlineChanged", onCmdline),
+    vim.on("Message", onMessage),
+    vim.on("RecordingChanged", onRecording),
+  ];
   const active = vimField(doc.activeElement);
   if (active) sessionOf(active);
 
   return {
     vim,
     sessionOf,
+    /** Uppercase mark `name`, set in this page: focuses its field and moves there (the helper asks). */
+    jumpToMark(name, offset) {
+      const mark = vim.globalMarks.get(name);
+      const el = mark?.session?.buffer?.el ?? mark?.session?.buffer?.root;
+      if (!el?.isConnected) return false;
+      el.focus();
+      mark.session.moveTo(mark.offset ?? offset);
+      return true;
+    },
     /** Whether keys come from Blink's hook (plutoniumvimkey), not keydown. */
     get hooked() { return hooked; },
     detach() {
@@ -443,7 +494,8 @@ export function attach(doc = globalThis.document, options = {}) {
       view.removeEventListener("keydown", onKey);
       view.removeEventListener("plutoniumvimkey", onOffer);
       view.removeEventListener("plutoniumvimready", onReady);
-      unlisten();
+      for (const unlisten of unlistens) unlisten();
+      line?.host.remove();
     },
   };
 }

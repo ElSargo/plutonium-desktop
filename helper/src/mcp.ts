@@ -293,6 +293,37 @@ const TOOLS = [
     },
   },
   {
+    name: "read_register",
+    description:
+      "Read one of the user's Pluto Vim registers (vim mode in text fields): what they yanked, deleted or recorded. " +
+      'name is a vim register: "a"-"z", "0"-"9", "\"" (the unnamed one), "-", "+" (the clipboard), "*" (the primary ' +
+      'selection), or "#1"-"#9" (clipboard history, if the user turned it on). A register the user scoped to threads or ' +
+      "projects is this thread's copy. Returns { name, scope, value: { text, linewise } or null }.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: 'The register, e.g. "a" or "+".' } },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_register",
+    description:
+      "Leave text in one of the user's Pluto Vim registers, for them to put with \"{name}p (or Ctrl+R {name} in insert " +
+      'mode). name as for read_register (not "#1"-"#9"); linewise puts it as whole lines. A register scoped to threads ' +
+      "or projects gets this thread's copy, so a snippet in \"t waits for the user in this thread.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: 'The register, e.g. "t".' },
+        text: { type: "string" },
+        linewise: { type: "boolean", description: "Whole lines (default false)." },
+      },
+      required: ["name", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "list_displays",
     description:
       "List the user's displays (monitors): each one's number (1-based, left to right), size in DIPs, scale, " +
@@ -1048,6 +1079,14 @@ export async function callTool(
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/focus`, displayArg()));
     case "list_displays":
       return text(await helperJson(socket, "GET", `/v1/displays`));
+    case "read_register":
+    case "write_register": {
+      if (typeof args.name !== "string" || !args.name) throw new Error("name is required.");
+      const path = `/v1/threads/${thread}/registers/${encodeURIComponent(args.name)}`;
+      if (name === "read_register") return text(await helperJson(socket, "GET", path));
+      if (typeof args.text !== "string") throw new Error("text is required.");
+      return text(await helperJson(socket, "PUT", path, { text: args.text, linewise: args.linewise === true }));
+    }
     case "close_window":
       return text(await helperJson(socket, "POST", `/v1/threads/${thread}/windows/${windowId()}/close`));
     default:

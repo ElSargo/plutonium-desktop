@@ -566,3 +566,89 @@ describe("the expression register", () => {
     assert.deepEqual(seen, ["=", "=1", null]);
   });
 });
+
+describe("search", () => {
+  test("/ and ? with n and N, round the end; * and #; d/ as a motion", async () => {
+    await expectKeys("|ab x ab y ab", "/ab<CR>", "ab x |ab y ab");
+    await expectKeys("|ab x ab y ab", "/ab<CR>nn", "|ab x ab y ab", ); // round to the first
+    await expectKeys("ab x ab y |ab", "?ab<CR>", "ab x |ab y ab");
+    await expectKeys("|ab x ab y ab", "/ab<CR>N", "|ab x ab y ab");
+    await expectKeys("|foo bar foo", "*", "foo bar |foo");
+    await expectKeys("|one two three", "d/thr<CR>", "|three");
+    await expectKeys("|a1 b22 c333", "/\\d{2}<CR>", "a1 b|22 c333");
+  });
+});
+
+describe("the : line", () => {
+  test(":s on the line, :%s with flags and groups, & and \\1", async () => {
+    await expectKeys("|a a\na a", ":s/a/b/<CR>", "|b a\na a");
+    await expectKeys("|a a\na a", ":%s/a/b/g<CR>", "b b\n|b b");
+    await expectKeys("|John Smith", ":s/(\\w+) (\\w+)/\\2, \\1/<CR>", "|Smith, John");
+    await expectKeys("|cat", ":s/cat/[&]/<CR>", "|[cat]");
+  });
+
+  test("a range from visual mode, :n, :g and :v", async () => {
+    await expectKeys("|a\na\na", "Vj:s/a/b/<CR>", "b\n|b\na");
+    await expectKeys("|one\ntwo\nthree", ":3<CR>", "one\ntwo\n|three");
+    await expectKeys("|x1\ny\nx2", ":g/x/d<CR>", "|y");
+    await expectKeys("|x1\ny\nx2", ":v/x/d<CR>", "|x1\nx2");
+  });
+
+  test("u undoes a whole :s; @: repeats the last : command", async () => {
+    await expectKeys("|a a a", ":s/a/b/<CR>u", "|a a a");
+    await expectKeys("|a a a", ":s/a/b/<CR>@:", "|b b a");
+  });
+
+  test("the line is drawn as it's typed; :registers is a message", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const seen: (string | null)[] = [];
+    const messages: string[] = [];
+    vim.on("CmdlineChanged", ({ cmdline }: any) => seen.push(cmdline));
+    vim.on("Message", ({ text }: any) => messages.push(text));
+    await run("|word", "yiw:reg<CR>", { vim });
+    assert.deepEqual(seen, [":", ":r", ":re", ":reg", null]);
+    assert.match(messages[0]!, /"0  word/);
+  });
+});
+
+describe("macros", () => {
+  test("q records, @ plays, with a count; @@ again", async () => {
+    await expectKeys("|a\nb\nc\nd", "qaA!<Esc>jq2@a", "a!\nb!\nc!\n|d");
+    await expectKeys("|a\nb\nc", "qqI-<Esc>jq@q@@", "-a\n-b\n|-c");
+  });
+
+  test("a macro is a register of keys: \"ap puts it, and a capital appends", async () => {
+    const { vim } = await run("|x", "qaix<Esc>qqAa<Esc>q");
+    assert.equal((await vim.registers.get("a")).text, "ix<Esc>a<Esc>");
+    assert.equal((await vim.registers.get('"')), null, "recording leaves the unnamed register alone");
+  });
+});
+
+describe("marks and jumps", () => {
+  test("m and ' and `; marks move with edits", async () => {
+    await expectKeys("ab\ncd |ef", "mxgg`x", "ab\ncd |ef");
+    await expectKeys("ab\ncd |ef", "mxgg'x", "ab\n|cd ef");
+    await expectKeys("ab\ncd |ef", "mxggiZZ<Esc>`x", "ZZab\ncd |ef");
+  });
+
+  test("Ctrl+O and Ctrl+I go back and forth over jumps; '' to the last", async () => {
+    await expectKeys("|a\nb\nc", "G<C-o>", "|a\nb\nc");
+    await expectKeys("|a\nb\nc", "G<C-o><C-i>", "a\nb\n|c");
+    await expectKeys("a\n|b\nc", "G''", "a\n|b\nc");
+  });
+
+  test("an uppercase mark in another field: the host's (MarkJump)", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const jumps: string[] = [];
+    vim.on("MarkJump", ({ name }: any) => jumps.push(name));
+    const a = field("|one");
+    const sa = vim.attach(a);
+    await type(sa, a, "lmA");
+    const b = field("|two");
+    const sb = vim.attach(b);
+    await type(sb, b, "`A");
+    assert.deepEqual(jumps, ["A"]);
+    await type(sa, a, "0`A");
+    assert.equal(mark(a), "o|ne", "in its own field it's found here");
+  });
+});

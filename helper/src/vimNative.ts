@@ -248,8 +248,9 @@ interface Session {
   feed(key: string): boolean;
   idle(): Promise<void>;
   typeahead: unknown[];
-  insertRegister: boolean;
+  insertRegister: boolean | string;
   expression: string | null;
+  recording: unknown;
   pending: unknown[];
   buffer: NativeBuffer;
 }
@@ -262,8 +263,17 @@ export interface NativeVimOptions {
   readonly registers?: RegisterStore;
   /** A window's thread and project, for registers' scopes. */
   readonly placeOf?: (windowId: number) => RegisterPlace;
-  /** The mode, for the shell to show over the window (null: hide it). */
-  readonly showMode?: (show: { windowId: number; mode: string | null; caret: number[] | null }) => void;
+  /**
+   * What the shell shows over the window, at the field's cursor: the mode
+   * outside insert mode, or the command line, a message, "recording @a".
+   * Nulls hide it.
+   */
+  readonly showMode?: (show: { windowId: number; mode: string | null; caret: number[] | null; line?: string | null }) => void;
+  /** An uppercase mark set in a native field, and a jump to one from a native field. */
+  readonly onMarkSet?: (windowId: number, name: string, offset: number) => void;
+  readonly onMarkJump?: (name: string) => void;
+  /** init.js's options, each time it's configured (clipboardHistory turns the helper's history on). */
+  readonly onOptions?: (opt: Record<string, unknown>) => void;
   readonly log?: (message: string) => void;
   readonly budget?: number;
   readonly quiet?: number;
@@ -281,6 +291,18 @@ export class NativeVim {
   private readonly options: NativeVimOptions;
   private readonly host: NativeHost;
   private readonly debug: ((message: string) => void) | null;
+  /** Each field's mode, and what its line shows (the command line, a message), for the shell. */
+  private readonly modes = new Map<number, string | null>();
+  private readonly lines = new Map<number, string>();
+  private messageTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The mode each window's field was last in: a field that comes back (focus
+   * left the window and returned, which is a new text input) starts in it, as
+   * a page's field keeps its session.
+   */
+  private readonly windowModes = new Map<number, string>();
+  /** A mark jump waiting for its window's field: windowId, offset. */
+  private pendingJump: { windowId: number; offset: number; until: number } | null = null;
 
   constructor(cdp: BrowserCdp, options: NativeVimOptions) {
     this.cdp = cdp;
@@ -300,10 +322,37 @@ export class NativeVim {
         await this.cdp.send("Plutonium.dispatchWindowKeyEvents", { id: windowId, events });
       },
       mode: (field, mode) => {
-        const shown = mode && mode !== "insert" ? mode : null;
-        this.options.showMode?.({ windowId: field.windowId, mode: shown, caret: field.caret ?? null });
+        this.modes.set(field.id, mode);
+        this.show(field);
       },
     };
+  }
+
+  private show(field: VimField): void {
+    const mode = this.modes.get(field.id) ?? null;
+    const line = this.lines.get(field.id) ?? null;
+    this.options.showMode?.({ windowId: field.windowId, mode: mode && mode !== "insert" ? mode : null, caret: field.caret ?? null, line });
+  }
+
+  private sessionField(session: Session | undefined): VimField | null {
+    return session?.buffer?.state ?? null;
+  }
+
+  /** A register's scope by init.js (vim.registers.scope), for the agents' register tools. */
+  scopeOf(name: string): string {
+    return this.engine().registerScopes.get(name.toLowerCase()) ?? "global";
+  }
+
+  /** Uppercase mark in window `windowId`: once its field is back (focus moved there), the cursor goes to it. */
+  jumpInWindow(windowId: number, offset: number): void {
+    for (const session of this.sessions.values()) {
+      if (session.buffer.state.windowId === windowId) {
+        if (session.mode === "insert") session.feed("<C-[>");
+        (session as unknown as { moveTo(o: number): void }).moveTo(offset);
+        return;
+      }
+    }
+    this.pendingJump = { windowId, offset, until: Date.now() + 2000 };
   }
 
   /** The engine, configured with init.js; again for each new version. */
@@ -318,6 +367,30 @@ export class NativeVim {
       context.store = store;
       this.vim = runInContext("new plutoVim.Vim(store ? { store } : {})", context);
       this.vim.on("error", (error: Error) => this.options.log?.(`pluto vim (native): ${error.message}`));
+      // Uppercase marks are the helper's (vimMarks.ts), across pages and apps.
+      this.vim.remoteMarks = true;
+      this.vim.on("MarkSet", ({ session, name, offset }: { session: Session; name: string; offset: number }) => {
+        const field = this.sessionField(session);
+        if (field) this.options.onMarkSet?.(field.windowId, name, offset);
+      });
+      this.vim.on("MarkJump", ({ name }: { name: string }) => this.options.onMarkJump?.(name));
+      const lineChanged = (session: Session, line: string | null, ms = 0) => {
+        const field = this.sessionField(session);
+        if (!field) return;
+        clearTimeout(this.messageTimer);
+        if (line == null) this.lines.delete(field.id);
+        else this.lines.set(field.id, line);
+        this.show(field);
+        if (ms && line != null) {
+          this.messageTimer = setTimeout(() => {
+            this.lines.delete(field.id);
+            this.show(field);
+          }, ms);
+        }
+      };
+      this.vim.on("CmdlineChanged", ({ session, cmdline }: { session: Session; cmdline: string | null }) => lineChanged(session, cmdline));
+      this.vim.on("Message", ({ session, text }: { session: Session; text: string }) => lineChanged(session, text, Math.min(10000, 3000 + text.length * 20)));
+      this.vim.on("RecordingChanged", ({ session, register }: { session: Session; register: string | null }) => lineChanged(session, register ? `recording @${register}` : null));
       this.context = context;
       this.configure();
     }
@@ -330,6 +403,7 @@ export class NativeVim {
     try {
       const setup = runInContext(this.options.config?.() ?? "null", this.context);
       runInContext("(vim, setup) => plutoVim.configure(vim, setup)", this.context)(this.vim, setup);
+      this.options.onOptions?.({ ...this.vim.opt });
     } catch (error) {
       this.options.log?.(`pluto vim (native): init.js: ${(error as Error).message}`);
     }
@@ -347,7 +421,11 @@ export class NativeVim {
     }
     this.sessions.clear();
     this.holds.clear();
+    // The engine now, so init.js's options (clipboardHistory) are known before any field.
+    const vim = this.engine();
     await this.cdp.send("Plutonium.setVimEnabled", { enabled: true });
+    // Again now the browser is there: what init.js's options start (the clipboard's watcher) needs its display.
+    this.options.onOptions?.({ ...vim.opt });
   }
 
   async stop(): Promise<void> {
@@ -374,25 +452,37 @@ export class NativeVim {
     }
     const vim = this.engine();
     const buffer = new NativeBuffer(field, this.host, this.options.budget, this.options.quiet);
-    const session = vim.attach(buffer) as Session;
+    const jump = this.pendingJump && this.pendingJump.windowId === field.windowId && Date.now() < this.pendingJump.until ? this.pendingJump : null;
+    // A mark jump lands in normal mode; a returning field in its window's last mode.
+    const before = this.windowModes.get(field.windowId);
+    const start = jump ? { startInInsert: false } : before ? { startInInsert: before === "insert" } : {};
+    const session = vim.attach(buffer, start) as Session;
     this.sessions.set(field.id, session);
     vim.emit("FieldEnter", { session });
     void this.hold(field.id);
+    if (jump) {
+      this.pendingJump = null;
+      (session as unknown as { moveTo(o: number): void }).moveTo(jump.offset);
+    }
   }
 
   private fieldGone(id: number): void {
     const session = this.sessions.get(id);
     if (!session) return;
     this.sessions.delete(id);
+    if (session.buffer.state.windowId) this.windowModes.set(session.buffer.state.windowId, session.mode === "insert" ? "insert" : "normal");
     this.holds.delete(id);
     this.busy.delete(id);
+    this.lines.delete(id);
+    this.modes.delete(id);
     session.buffer.setCaret("bar", "insert");
     this.vim?.emit("FieldLeave", { session });
   }
 
   /** What field `id` holds now: every key unless it's in insert mode with nothing pending. */
   private wanted(session: Session): { all: boolean; keys: KeySpec[] } {
-    const insertIdle = session.mode === "insert" && !session.typeahead.length && !session.insertRegister && session.expression === null;
+    // Recording a macro sees every key, typed text too (each still goes on to the app).
+    const insertIdle = session.mode === "insert" && !session.typeahead.length && !session.insertRegister && session.expression === null && !session.recording;
     if (!insertIdle) return { all: true, keys: [] };
     const keys: KeySpec[] = [{ key: "Escape" }, { key: "[", modifiers: 2 }];
     for (const mapping of this.vim.keymaps.i.values()) {

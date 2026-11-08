@@ -173,9 +173,50 @@ describe("Pluto Vim in a native field", () => {
     const { exo, shown } = await setup("word", 4, "null", { registers });
     await exo.keys("<Esc>", "0", "yw");
     assert.deepEqual(await registers.get('"', "global"), { text: "word", linewise: false });
-    assert.deepEqual(shown.at(-1), { windowId: 7, mode: "normal", caret: [10, 20, 1, 16] });
+    assert.deepEqual(shown.at(-1), { windowId: 7, mode: "normal", caret: [10, 20, 1, 16], line: null });
     await exo.keys("i");
     assert.equal(shown.at(-1).mode, null);
+  });
+});
+
+describe("the : line, macros and marks in a native field", () => {
+  test(":s edits, the line is shown as it's typed, a macro replays, and uppercase marks go to the helper", async () => {
+    const marks: [number, string, number][] = [];
+    const jumps: string[] = [];
+    const exo = new FakeExo("a a", 3);
+    const shown: any[] = [];
+    const native = new NativeVim(exo as any, {
+      bundle: () => vimBundle(ENGINE), config: () => "null", budget: 60, quiet: 10,
+      showMode: (s) => shown.push(s), onMarkSet: (w, n, o) => marks.push([w, n, o]), onMarkJump: (n) => jumps.push(n),
+    });
+    await native.start();
+    exo.report();
+    await sleep(10);
+    await exo.keys("<Esc>", ":s/a/b/g");
+    assert.equal(shown.at(-1).line, ":s/a/b/g");
+    await exo.press("Enter");
+    await sleep(60);
+    assert.equal(exo.text, "b b");
+    assert.equal(shown.at(-1).line, null);
+    await exo.keys("0qqA!", "<Esc>", "q", "@q");
+    assert.equal(exo.text, "b b!!", "the typed ! was recorded, and replayed");
+    await exo.keys("0mA", "`B");
+    assert.deepEqual(marks, [[7, "A", 0]]);
+    assert.deepEqual(jumps, ["B"]);
+  });
+});
+
+describe("a field that comes back", () => {
+  test("focus left the window and returned (a new field): it's in the mode it was; a mark jump lands in normal mode", async () => {
+    const { exo, native } = await setup("abc", 3);
+    await exo.keys("<Esc>");
+    assert.equal(native.session(1)!.mode, "normal");
+    exo.emit("Plutonium.vimFieldGone", { id: 1 });
+    exo.emit("Plutonium.vimFieldChanged", { field: { id: 2, windowId: 7, text: "abc", cursor: 2, anchor: 2, hint: 0, purpose: 0 } });
+    assert.equal(native.session(2)!.mode, "normal");
+    native.jumpInWindow(9, 1);
+    exo.emit("Plutonium.vimFieldChanged", { field: { id: 3, windowId: 9, text: "xyz", cursor: 3, anchor: 3, hint: 0, purpose: 0 } });
+    assert.equal(native.session(3)!.mode, "normal");
   });
 });
 
