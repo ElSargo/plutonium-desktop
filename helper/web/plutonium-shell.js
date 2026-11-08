@@ -274,6 +274,8 @@ export class PlutoniumShell extends EventTarget {
     this.native = new ShellNativeSide();
     /** An installed shell's storage: JSON values by key, kept outside its folder. */
     this.storage = shellStorage;
+    // Site extensions (SITE_EXTENSIONS.md): what applies to a tab, requests, parts.
+    this.sites = new ShellSites(this);
     /** @type {Map<string, { threadId: string, tabId: string, browserTabId: number, targetId: string }>} */
     this._serverTabs = new Map();
     /** Whether this Chromium has the capture API (screenshots, streams, capture requests). */
@@ -2790,6 +2792,47 @@ class ShellNativeSide extends EventTarget {
       body: JSON.stringify(args),
     });
     return value;
+  }
+}
+
+// Site extensions (SITE_EXTENSIONS.md). A shell's button: forTab(id) for
+// the site's parts and their state, request(id, text, { preset }) for the
+// prompt (to start a thread with, or to copy), lend(id, threadId) while the
+// thread's agent works on the tab, setPart() for the switches.
+class ShellSites {
+  constructor(shell) {
+    this.shell = shell;
+  }
+  /** Every site: { dir, sites: [{ name, title, parts, tabs, error }] }. */
+  list() {
+    return helperFiles("/v1/sites");
+  }
+  /** What runs in tab `tabId`: its context and each part (applies, running, errors, keys). */
+  forTab(tabId) {
+    return helperFiles(`/v1/sites/tabs/${tabId}`);
+  }
+  /** Records a request for the tab's site; resolves to { site, dir, part, preset, prompt }. */
+  request(tabId, text, { preset, part } = {}) {
+    return helperFiles("/v1/sites/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tab: tabId, text, preset, part }),
+    });
+  }
+  /** Turns a part on or off. */
+  setPart(site, part, enabled) {
+    return helperFiles(`/v1/sites/${encodeURIComponent(site)}/parts/${encodeURIComponent(part)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  }
+  /** Lends tab `tabId` to thread `threadId` (its agent's tab tools reach it) until giveBack(). */
+  lend(tabId, threadId) {
+    return this.shell.tagTab(tabId, [threadId]);
+  }
+  giveBack(tabId, threadId) {
+    return this.shell.tagTab(tabId, [], [threadId]);
   }
 }
 

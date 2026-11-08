@@ -73,6 +73,8 @@ import { AppearanceService } from "./services/appearance.ts";
 import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
 import { plutoHome, ShellError } from "./shells.ts";
+import { SitesService } from "./sites/service.ts";
+import { SiteError } from "./sites/store.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
 import { HELPER_PAGE, type PermissionAnswer, ServerTabs } from "./serverTabs.ts";
 import { TERMINAL_THREAD, Terminals } from "./terminal.ts";
@@ -394,6 +396,8 @@ export class Daemon {
   /** The browser's windows and tabs, if it has the Plutonium DevTools domain. */
   readonly desktop: Desktop | null;
   readonly pages: ThreadPages | null;
+  /** Site extensions (sites/): the folders in $PLUTO_HOME/sites, applied to tabs over DevTools. */
+  readonly sites: SitesService | null;
   /** When each window last got input (windowInput). */
   private readonly lastInput = new Map<number, number>();
   /** The next desktop service request's handle number (askForService). */
@@ -582,6 +586,10 @@ export class Daemon {
     this.serverTabs = cdp ? new ServerTabs(cdp) : null;
     this.desktop = cdp ? new Desktop(cdp) : null;
     this.pages = cdp && this.desktop ? new ThreadPages(cdp, this.desktop) : null;
+    this.sites =
+      cdp && this.desktop && process.env.PLUTONIUM_SITES !== "0"
+        ? new SitesService({ cdp, desktop: this.desktop, home: options.shells?.home ?? plutoHome() })
+        : null;
     if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
@@ -2160,6 +2168,19 @@ export class Daemon {
     if (method === "GET" && path === "/v1/shells") {
       return sendJson(response, 200, this.options.shells?.status() ?? []);
     }
+    // Site extensions (SITE_EXTENSIONS.md).
+    if (path === "/v1/sites" || path.startsWith("/v1/sites/")) {
+      if (!this.sites) throw new HttpError(501, "Site extensions need the browser's DevTools (and PLUTONIUM_SITES isn't 0).");
+      let value: unknown;
+      try {
+        value = await this.sites.route(method, path, () => readJson(request));
+      } catch (error) {
+        if (error instanceof SiteError) throw new HttpError(error.status, error.message);
+        throw error;
+      }
+      if (value === undefined) throw new HttpError(404, "No such sites route.");
+      return sendJson(response, 200, value);
+    }
     if (method === "GET" && path === "/v1/displays") {
       return sendJson(response, 200, await this.displays());
     }
@@ -2608,6 +2629,20 @@ export class Daemon {
         if (method === "POST" && userWindow[2] === "close") {
           await desktop.closeWindow(windowId);
           return void response.writeHead(204).end();
+        }
+      }
+      // Site extensions, for an agent writing one (site_apply, site_report): its thread's tabs only.
+      const siteTab = path.match(/^\/v1\/threads\/([^/]+)\/tabs\/(\d+)\/sites(\/apply)?$/);
+      if (siteTab) {
+        if (!this.sites) throw new HttpError(501, "Site extensions need the browser's DevTools.");
+        const threadId = decodeURIComponent(siteTab[1]!);
+        const tabId = Number(siteTab[2]);
+        await this.ownedTab(threadId, tabId);
+        try {
+          if (method === "POST" && siteTab[3]) return sendJson(response, 200, await this.sites.injector.applyNow(tabId));
+          if (method === "GET" && !siteTab[3]) return sendJson(response, 200, await this.sites.injector.report(tabId));
+        } catch (error) {
+          throw new HttpError(409, (error as Error).message);
         }
       }
       const windows = path.match(/^\/v1\/threads\/([^/]+)\/windows$/);
