@@ -199,7 +199,7 @@ For apps without text-input-v3: Xwayland apps, older SDL and toolkits. The helpe
 | Register | Here |
 |---|---|
 | `"+` | The system clipboard: Exo's `wl_data_device` selection, what apps' Ctrl+C and Ctrl+V use. Clipboard managers and `wl-copy` see it through `ext_data_control_v1` ([WAYLAND_PROTOCOLS.md](WAYLAND_PROTOCOLS.md)). The helper reads and writes it with `wl-paste` and `wl-copy`; text that ends in a newline is linewise, and a linewise yank gets one. Without wl-clipboard, `"+` is an ordinary register |
-| `"*` | The primary selection. Exo has none yet: implementing `zwp_primary_selection_v1` gives apps middle-click paste and gives `"*` its meaning (until then, `"*` is `"+`, as on systems without one) |
+| `"*` | The primary selection: what's selected in an app, what middle-click pastes. Exo's own (`zwp_primary_selection_v1`, step 8); the helper reads and writes it with `wl-paste --primary` and `wl-copy --primary`. Always global |
 | `""` | The unnamed register. With `vim.opt.clipboard = "unnamedplus"`, it is `"+` |
 | `"0`, `"1`–`"9`, `"-` | The last yank, the delete history, and the last small delete, as in vim |
 | `"a`–`"z`, `"A`–`"Z` | Named registers (capitals append), scoped by your config |
@@ -303,7 +303,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 5. **The register store** (built, below) in the helper, in memory only; scopes; `"+` and `"=`.
 6. **Pages that integrate** (built, below), and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
 7. **text-input-v3** (built, below): the engine in the helper, the async key path, best-effort motions, the mode badge.
-8. **`zwp_primary_selection_v1`** in Exo, for `"*` and middle-click paste.
+8. **`zwp_primary_selection_v1`** in Exo (built, below), for `"*` and middle-click paste.
 9. **Across the desktop:** marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
 10. **AT-SPI,** for apps without text-input-v3.
 
@@ -379,6 +379,13 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **On an X11 slot** (Xvfb, niri, GNOME Text Editor 50.1 with `GTK_IM_MODULE=wayland`, real keys through Ash with xdotool): typing in insert mode went to the app unchanged; Escape entered normal mode and the shell drew the NORMAL badge; `b` `dw` turned "hello big world" into "hello big "; `0` `cw` `hi` Escape gave "hi big "; `0` `dw` `u` `yy` `p` gave "one two" twice.
 - **What testing changed:** the motion waits for the app to arrive or go quiet (its first report, one press of four, had set off a correction that overshot); every native field is multi-line; undo makes a silent app report; GTK needs `GTK_IM_MODULE=wayland`.
 - **Not yet:** the badge's place is approximate (GTK's cursor rectangle and the element's scale aren't reconciled), Qt 6 apps, a DRM session with a real keyboard, an IME composing while in normal mode, and the fail-open timeout under a stalled helper (by design; not exercised).
+
+### Step 8: the primary selection (built)
+
+- **Exo** (build bb046202c0ae): `components/exo/wayland/zwp_primary_selection.{h,cc}` (patch 0012), its global in `server.cc` (patch 0002). The browser's clipboard has no primary selection on ChromeOS, so Exo keeps it itself, as other compositors do: the selection is the source client's offer, and a receive goes to that client's send with the same fd. An app's device gets the selection while one of its surfaces has keyboard focus. `ext_data_control_v1`'s primary selection is the same one (it used to cancel every source), so clipboard managers and `wl-copy --primary` see and set it.
+- **The engine:** `"*` is a register of its own, no longer `"+`; the helper's store reads and writes it through wl-clipboard's `--primary`.
+- **Tested** on X11 slot 50 with GNOME Text Editor: `wl-copy --primary` then `wl-paste --primary` (and the clipboard stayed empty); selecting text in the editor made it the primary selection, read back by `wl-paste --primary`; GTK got wl-copy's offer with its types (`WAYLAND_DEBUG`); `"*yiw` set it, `"*p` put wl-copy's.
+- **Not verified:** middle-click paste itself. On Xvfb no pointer button reaches an embedded app (`WINDOW_SIZING.md`); it needs a DRM session with a real mouse.
 
 ### Caps Lock (built)
 

@@ -47,6 +47,19 @@ describe("the register store", () => {
     assert.deepEqual(fromClipboard("x\n"), { text: "x", linewise: true });
   });
 
+  test("\"* is the primary selection, apart from the clipboard, and always global", async () => {
+    const copied: Record<string, string> = { clipboard: "", primary: "" };
+    const clipboard: Clipboard = {
+      read: async (primary) => copied[primary ? "primary" : "clipboard"] || null,
+      write: async (text, primary) => void (copied[primary ? "primary" : "clipboard"] = text),
+    };
+    const store = new RegisterStore({ clipboard });
+    await store.set("*", { text: "selected", linewise: false }, "thread", { thread: "one" });
+    assert.deepEqual(copied, { clipboard: "", primary: "selected" });
+    copied.primary = "picked in an app";
+    assert.deepEqual(await store.get("*", "thread", { thread: "two" }), { text: "picked in an app", linewise: false });
+  });
+
   test("without wl-clipboard there's no clipboard", () => {
     assert.equal(wlClipboard("wayland-0", () => undefined), null);
     assert.ok(wlClipboard("wayland-0", (name) => `/bin/${name}`));

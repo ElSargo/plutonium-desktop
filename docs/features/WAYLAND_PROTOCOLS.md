@@ -45,8 +45,15 @@ Clipboard managers and wl-copy and wl-paste read and set the clipboard without f
 - **Offers:** a device gets the clipboard when made and on each change, as a focused app gets it through `wl_data_device` (the same types: text, HTML, RTF, images, files).
 - **Setting:** `set_selection` reads the source into the clipboard as `wl_data_device`'s does (only the types Chrome keeps); a null source clears it.
 - **Who may:** any client. Anything running as the user can read and set the clipboard some other way (the browser's DevTools, driving an app), so a check here would hold nothing back (`TAB_FEATURES.md`, no fake restrictions).
-- **No primary selection** (Exo has none): wl-copy says so; a source given to `set_primary_selection` is cancelled.
+- **The primary selection** is Exo's own (`zwp_primary_selection_v1`, below): `set_primary_selection` sets it, and a device hears each change as `primary_selection`.
 - **Tested** on X11 with wl-clipboard 2.3 (`WAYLAND_DEBUG` showed `ext_data_control_device_v1`): wl-copy then wl-paste; `wl-paste --watch` saw wl-copy's copies and the shell page's `navigator.clipboard.writeText()`; a wl-copy replaced by the next one exited (cancelled); `wl-copy --clear` emptied it. The page reading wl-copy's text with `navigator.clipboard.readText()` waited on a permission and wasn't checked; the watch saw the copy go through the browser's clipboard (its types).
+
+## `zwp_primary_selection_v1`: what's selected, what middle-click pastes
+
+GTK, Qt and foot set it when text is selected and paste it on a middle click. Chrome's clipboard has no primary selection on ChromeOS, so Exo keeps it (`components/exo/wayland/zwp_primary_selection.{h,cc}`), as other compositors do: the selection is the source client's offer, and a receive goes straight to that client's send with the same fd. Exo copies nothing.
+- **Offers:** an app's device gets the selection while one of its surfaces has keyboard focus, when it gains focus and when the selection changes. `ext_data_control_v1` devices get every change.
+- **Pages** don't take part: Blink's selection buffer isn't there on ChromeOS.
+- **Tested** on X11 (slot 50, build bb046202c0ae) with wl-clipboard and GNOME Text Editor 50.1: `wl-copy --primary`/`wl-paste --primary`; a selection in the editor read back with `wl-paste --primary`; the editor got wl-copy's offer (`WAYLAND_DEBUG`). Middle-click paste wasn't: no pointer button reaches an embedded app on Xvfb.
 
 ## `xdg_toplevel_icon_v1`: apps' window icons
 

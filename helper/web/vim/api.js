@@ -275,7 +275,7 @@ function createApi(vim, host, warnings) {
         if (typeof name !== "string" || !/^[a-zA-Z0-9"\-+*]$/.test(name)) fail(`registers.set(${JSON.stringify(name)})`, "not a register init.js can set (letters, digits, \", -, + and *)");
         const v = typeof value === "string" ? { text: value, linewise: false } : value;
         if (!v || typeof v.text !== "string") fail(`registers.set(${name})`, "the value is text, or { text, linewise }");
-        const target = name === "*" ? "+" : name;
+        const target = name;
         if (/^[A-Z]$/.test(target)) return vim.registers.yank(target, { text: v.text, linewise: Boolean(v.linewise) });
         return vim.registers.store.set(target, { text: v.text, linewise: Boolean(v.linewise) });
       },

@@ -26,6 +26,7 @@ It holds these changes:
 - a parked window stays invisible when Ash demotes it
 - Caps Lock, as Ash makes it, reaches apps as Escape
 - Pluto Vim for native apps: keys held for the helper's engine, and given back in order
+- the primary selection's global (zwp_primary_selection_v1)
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -78,8 +79,8 @@ and the parts in these files of:
  components/exo/surface.h                      |    6 +
  components/exo/surface_tree_host.cc           |   12 +-
  components/exo/surface_tree_host.h            |   14 +
- components/exo/wayland/BUILD.gn               |   25 +
- components/exo/wayland/server.cc              |   53 +
+ components/exo/wayland/BUILD.gn               |   28 +
+ components/exo/wayland/server.cc              |   60 +
  .../exo/wayland/wayland_display_observer.cc   |   14 +
  .../exo/wayland/wayland_display_observer.h    |    2 +
  .../wayland_dmabuf_feedback_manager.cc        |    6 +
@@ -94,7 +95,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 46 files changed, 4576 insertions(+), 95 deletions(-)
+ 46 files changed, 4586 insertions(+), 95 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
  create mode 100644 components/exo/plutonium_vim.cc
@@ -5278,15 +5279,17 @@ index 7a981c1498..3127b96dd0 100644
    raw_ptr<SecurityDelegate> security_delegate_ = nullptr;
  
 diff --git a/components/exo/wayland/BUILD.gn b/components/exo/wayland/BUILD.gn
-index d47a715bbb..a9e033b4f4 100644
+index d47a715bbb..a07c8962f7 100644
 --- a/components/exo/wayland/BUILD.gn
 +++ b/components/exo/wayland/BUILD.gn
-@@ -20,6 +20,14 @@ source_set("wayland") {
+@@ -20,6 +20,16 @@ source_set("wayland") {
      "client_tracker.h",
      "content_type.cc",
      "content_type.h",
 +    "ext_data_control.cc",
 +    "ext_data_control.h",
++    "zwp_primary_selection.cc",
++    "zwp_primary_selection.h",
 +    "ext_idle_notify.cc",
 +    "ext_idle_notify.h",
 +    "ext_image_copy_capture.cc",
@@ -5296,7 +5299,7 @@ index d47a715bbb..a9e033b4f4 100644
      "output_configuration_change.cc",
      "output_configuration_change.h",
      "output_controller.cc",
-@@ -73,6 +81,8 @@ source_set("wayland") {
+@@ -73,6 +83,8 @@ source_set("wayland") {
      "wl_shm.h",
      "wl_subcompositor.cc",
      "wl_subcompositor.h",
@@ -5305,7 +5308,7 @@ index d47a715bbb..a9e033b4f4 100644
      "wp_fractional_scale.cc",
      "wp_fractional_scale.h",
      "wp_presentation.cc",
-@@ -81,6 +91,8 @@ source_set("wayland") {
+@@ -81,6 +93,8 @@ source_set("wayland") {
      "wp_single_pixel_buffer.h",
      "wp_viewporter.cc",
      "wp_viewporter.h",
@@ -5314,13 +5317,14 @@ index d47a715bbb..a9e033b4f4 100644
      "xdg_shell.cc",
      "xdg_shell.h",
      "zaura_output_manager.cc",
-@@ -167,17 +179,21 @@ source_set("wayland") {
+@@ -167,17 +181,22 @@ source_set("wayland") {
      "//third_party/wayland:wayland_server",
      "//third_party/wayland-protocols:alpha_compositing_protocol",
      "//third_party/wayland-protocols:content_type_protocol",
 +    "//third_party/wayland-protocols:cursor_shape_protocol",
      "//third_party/wayland-protocols:cursor_shapes_protocol",
 +    "//third_party/wayland-protocols:ext_data_control_protocol",
++    "//third_party/wayland-protocols:primary_selection_protocol",
      "//third_party/wayland-protocols:extended_drag",
      "//third_party/wayland-protocols:fractional_scale_protocol",
      "//third_party/wayland-protocols:gaming_input_protocol",
@@ -5336,7 +5340,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//third_party/wayland-protocols:pointer_constraints_protocol",
      "//third_party/wayland-protocols:pointer_gestures_protocol",
      "//third_party/wayland-protocols:presentation_time_protocol",
-@@ -193,13 +209,20 @@ source_set("wayland") {
+@@ -193,13 +212,20 @@ source_set("wayland") {
      "//third_party/wayland-protocols:ui_controls_v1_protocol",
      "//third_party/wayland-protocols:viewporter_protocol",
      "//third_party/wayland-protocols:vsync_feedback_protocol",
@@ -5357,7 +5361,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//ui/base/dragdrop/mojom:mojom_shared",
      "//ui/base/wayland:wayland_display_util",
      "//ui/base/wayland:wayland_server_input_types",
-@@ -208,6 +231,7 @@ source_set("wayland") {
+@@ -208,6 +234,7 @@ source_set("wayland") {
      "//ui/events:events_base",
      "//ui/events/devices",
      "//ui/events/ozone/layout",
@@ -5365,7 +5369,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//ui/gfx/linux:drm",
      "//ui/ozone",
      "//ui/views",
-@@ -312,6 +336,7 @@ source_set("unit_tests") {
+@@ -312,6 +339,7 @@ source_set("unit_tests") {
      "zaura_shell_unittest.cc",
      "zcr_remote_shell_impl_unittest.cc",
      "zcr_remote_shell_unittest.cc",
@@ -5374,10 +5378,10 @@ index d47a715bbb..a9e033b4f4 100644
    ]
  
 diff --git a/components/exo/wayland/server.cc b/components/exo/wayland/server.cc
-index c0f85f4f0a..8ed207dfc1 100644
+index c0f85f4f0a..4ba23e7adc 100644
 --- a/components/exo/wayland/server.cc
 +++ b/components/exo/wayland/server.cc
-@@ -6,7 +6,10 @@
+@@ -6,12 +6,16 @@
  
  #include <alpha-compositing-unstable-v1-server-protocol.h>
  #include <content-type-v1-server-protocol.h>
@@ -5388,7 +5392,13 @@ index c0f85f4f0a..8ed207dfc1 100644
  #include <extended-drag-unstable-v1-server-protocol.h>
  #include <gaming-input-unstable-v2-server-protocol.h>
  #include <grp.h>
-@@ -21,15 +24,22 @@
+ #include <idle-inhibit-unstable-v1-server-protocol.h>
+ #include <input-timestamps-unstable-v1-server-protocol.h>
++#include <primary-selection-unstable-v1-server-protocol.h>
+ #include <keyboard-extension-unstable-v1-server-protocol.h>
+ #include <keyboard-shortcuts-inhibit-unstable-v1-server-protocol.h>
+ #include <linux-dmabuf-unstable-v1-server-protocol.h>
+@@ -21,15 +25,22 @@
  #include <pointer-gestures-unstable-v1-server-protocol.h>
  #include <presentation-time-server-protocol.h>
  #include <relative-pointer-unstable-v1-server-protocol.h>
@@ -5411,18 +5421,19 @@ index c0f85f4f0a..8ed207dfc1 100644
  
  #include <array>
  #include <memory>
-@@ -50,6 +60,10 @@
+@@ -50,6 +61,11 @@
  #include "components/exo/security_delegate.h"
  #include "components/exo/wayland/client_tracker.h"
  #include "components/exo/wayland/content_type.h"
 +#include "components/exo/wayland/ext_data_control.h"
++#include "components/exo/wayland/zwp_primary_selection.h"
 +#include "components/exo/wayland/ext_idle_notify.h"
 +#include "components/exo/wayland/ext_image_copy_capture.h"
 +#include "components/exo/wayland/org_kde_kwin_server_decoration.h"
  #include "components/exo/wayland/overlay_prioritizer.h"
  #include "components/exo/wayland/serial_tracker.h"
  #include "components/exo/wayland/server_util.h"
-@@ -63,10 +77,12 @@
+@@ -63,10 +79,12 @@
  #include "components/exo/wayland/wl_shell.h"
  #include "components/exo/wayland/wl_shm.h"
  #include "components/exo/wayland/wl_subcompositor.h"
@@ -5435,7 +5446,7 @@ index c0f85f4f0a..8ed207dfc1 100644
  #include "components/exo/wayland/xdg_shell.h"
  #include "components/exo/wayland/zaura_shell.h"
  #include "components/exo/wayland/zcr_alpha_compositing.h"
-@@ -292,6 +308,9 @@ void Server::Initialize() {
+@@ -292,6 +310,9 @@ void Server::Initialize() {
                     /*version=*/1, display_, bind_content_type);
    wl_global_create(wl_display_.get(), &zcr_cursor_shapes_v1_interface,
                     /*version=*/1, display_, bind_cursor_shapes);
@@ -5445,7 +5456,7 @@ index c0f85f4f0a..8ed207dfc1 100644
    wl_global_create(wl_display_.get(), &zcr_gaming_input_v2_interface,
                     /*version=*/3, display_, bind_gaming_input);
    wl_global_create(wl_display_.get(), &zcr_keyboard_configuration_v1_interface,
-@@ -327,10 +346,26 @@ void Server::Initialize() {
+@@ -327,10 +348,31 @@ void Server::Initialize() {
                     display_, bind_relative_pointer_manager);
    wl_global_create(wl_display_.get(), &zxdg_decoration_manager_v1_interface,
                     /*version=*/1, display_, bind_zxdg_decoration_manager);
@@ -5469,10 +5480,15 @@ index c0f85f4f0a..8ed207dfc1 100644
 +  // PLUTONIUM: ext_data_control_v1 (ext_data_control.h).
 +  wl_global_create(wl_display_.get(), &ext_data_control_manager_v1_interface,
 +                   /*version=*/1, display_, bind_data_control_manager);
++  // PLUTONIUM: zwp_primary_selection_v1 (zwp_primary_selection.h).
++  wl_global_create(wl_display_.get(),
++                   &zwp_primary_selection_device_manager_v1_interface,
++                   /*version=*/1, display_,
++                   bind_primary_selection_device_manager);
  
    ui_controls_holder_ = std::make_unique<UiControls>(this);
  
-@@ -349,6 +384,9 @@ void Server::Initialize() {
+@@ -349,6 +391,9 @@ void Server::Initialize() {
    wl_global_create(wl_display_.get(), &zwp_text_input_manager_v1_interface,
                     /*version=*/1, zwp_text_manager_data_.get(),
                     bind_text_input_manager);
@@ -5482,7 +5498,7 @@ index c0f85f4f0a..8ed207dfc1 100644
  
    zcr_text_input_extension_data_ =
        std::make_unique<WaylandTextInputExtension>();
-@@ -364,6 +402,21 @@ void Server::Initialize() {
+@@ -364,6 +409,21 @@ void Server::Initialize() {
  
    wl_global_create(wl_display_.get(), &zcr_touchpad_haptics_v1_interface,
                     /*version=*/1, display_, bind_touchpad_haptics);

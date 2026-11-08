@@ -8,9 +8,10 @@
 // writes: global, the field's thread (its tab's thread tag), or the thread's
 // project. A field with no thread, or a thread with no project, uses global.
 //
-// "+ is the system clipboard: Exo's selection, through wl-clipboard (Exo has
-// ext_data_control_v1, WAYLAND_PROTOCOLS.md). Without wl-clipboard it's an
-// ordinary global register.
+// "+ is the system clipboard and "* the primary selection (what's selected,
+// what middle-click pastes): Exo's, through wl-clipboard (Exo has
+// ext_data_control_v1 and zwp_primary_selection_v1, WAYLAND_PROTOCOLS.md).
+// Without wl-clipboard they're ordinary global registers.
 import { spawn } from "node:child_process";
 
 export interface RegisterValue {
@@ -27,12 +28,13 @@ export interface RegisterPlace {
 }
 
 export interface Clipboard {
-  read(): Promise<string | null>;
-  write(text: string): Promise<void>;
+  /** `primary`: the primary selection ("*), not the clipboard ("+). */
+  read(primary?: boolean): Promise<string | null>;
+  write(text: string, primary?: boolean): Promise<void>;
 }
 
 /** The registers the engine keeps in the store (lowercase: capitals append, in the engine). */
-const NAMES = /^[a-z0-9"\-.:/+]$/;
+const NAMES = /^[a-z0-9"\-.:/+*]$/;
 /** The most text one register holds (a yank of more is cut). */
 export const MAX_TEXT = 8 * 1024 * 1024;
 
@@ -53,19 +55,21 @@ export class RegisterStore {
 
   async get(name: string, scope: string, place: RegisterPlace = {}): Promise<RegisterValue | null> {
     if (!NAMES.test(name)) throw new Error(`not a register: ${JSON.stringify(name)}`);
-    if (name === "+" && this.clipboard) {
-      const text = await this.clipboard.read().catch(() => null);
+    const system = name === "+" || name === "*";
+    if (system && this.clipboard) {
+      const text = await this.clipboard.read(name === "*").catch(() => null);
       if (text != null) return fromClipboard(text);
     }
-    return this.values.get(`${RegisterStore.key(name === "+" ? "global" : scope, place)}\0${name}`) ?? null;
+    return this.values.get(`${RegisterStore.key(system ? "global" : scope, place)}\0${name}`) ?? null;
   }
 
   async set(name: string, value: unknown, scope: string, place: RegisterPlace = {}): Promise<void> {
     if (!NAMES.test(name)) throw new Error(`not a register: ${JSON.stringify(name)}`);
     const checked = checkValue(value);
-    const key = `${RegisterStore.key(name === "+" ? "global" : scope, place)}\0${name}`;
+    const system = name === "+" || name === "*";
+    const key = `${RegisterStore.key(system ? "global" : scope, place)}\0${name}`;
     this.values.set(key, checked);
-    if (name === "+" && this.clipboard) await this.clipboard.write(checked.linewise ? `${checked.text}\n` : checked.text);
+    if (system && this.clipboard) await this.clipboard.write(checked.linewise ? `${checked.text}\n` : checked.text, name === "*");
   }
 
   /** How many registers are held, for tests. */
@@ -95,9 +99,9 @@ export function wlClipboard(waylandDisplay: string, find: (name: string) => stri
   if (!paste || !copy) return null;
   const env = { ...process.env, WAYLAND_DISPLAY: waylandDisplay };
   return {
-    read: () =>
+    read: (primary = false) =>
       new Promise((resolve) => {
-        const child = spawn(paste, ["--type", "text"], { env, stdio: ["ignore", "pipe", "ignore"] });
+        const child = spawn(paste, [...(primary ? ["--primary"] : []), "--type", "text"], { env, stdio: ["ignore", "pipe", "ignore"] });
         const chunks: Buffer[] = [];
         const timer = setTimeout(() => child.kill(), CLIPBOARD_TIMEOUT_MS);
         child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -108,10 +112,10 @@ export function wlClipboard(waylandDisplay: string, find: (name: string) => stri
           resolve(code === 0 ? Buffer.concat(chunks).toString("utf8") : null);
         });
       }),
-    write: (text) =>
+    write: (text, primary = false) =>
       new Promise((resolve) => {
         // wl-copy serves the selection from a child of its own; this one exits once it's offered.
-        const child = spawn(copy, ["--type", "text/plain;charset=utf-8"], { env, stdio: ["pipe", "ignore", "ignore"] });
+        const child = spawn(copy, [...(primary ? ["--primary"] : []), "--type", "text/plain;charset=utf-8"], { env, stdio: ["pipe", "ignore", "ignore"] });
         const timer = setTimeout(() => child.kill(), CLIPBOARD_TIMEOUT_MS);
         child.on("error", () => resolve());
         child.on("exit", () => {

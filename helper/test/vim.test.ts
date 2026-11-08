@@ -530,6 +530,14 @@ describe("the register store", () => {
   });
 });
 
+describe("the primary selection register", () => {
+  test('"* is a register of its own, not "+', async () => {
+    const { vim } = await run("|ab cd", '"*yiww"+yiw');
+    assert.equal((await vim.registers.get("*")).text, "ab");
+    assert.equal((await vim.registers.get("+")).text, "cd");
+  });
+});
+
 describe("the expression register", () => {
   test('"= evaluates JavaScript into a register to put', async () => {
     await expectKeys("|ab", '"=1+2<CR>p', "a|3b");

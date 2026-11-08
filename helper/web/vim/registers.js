@@ -31,10 +31,11 @@ export class Registers {
     this.scopeOf = scopeOf;
     const raw = store;
     this.raw = raw;
-    // The store, with each register's scope ("+ is always global: the system's).
+    // The store, with each register's scope ("+ and "* are always global: the system's).
+    const scope = (name) => (name === "+" || name === "*" ? "global" : this.scopeOf(name) ?? "global");
     this.store = {
-      get: (name) => raw.get(name, name === "+" ? "global" : this.scopeOf(name) ?? "global"),
-      set: (name, value) => raw.set(name, value, name === "+" ? "global" : this.scopeOf(name) ?? "global"),
+      get: (name) => raw.get(name, scope(name)),
+      set: (name, value) => raw.set(name, value, scope(name)),
     };
   }
 
@@ -43,7 +44,6 @@ export class Registers {
   /** The value of register `name` (null or `"` for the unnamed one), or null. */
   async get(name) {
     if (name == null || name === '"') name = this.#unnamedPlus() ? "+" : '"';
-    if (name === "*") name = "+"; // No primary selection yet (Exo has none): "* is "+.
     if (name === "_") return null;
     if (name === "=") return this.expression;
     if (/^[A-Z]$/.test(name)) name = name.toLowerCase();
@@ -86,14 +86,13 @@ export class Registers {
   }
 
   async #setNamed(name, value) {
-    if (name === "*") name = "+";
     if (/^[A-Z]$/.test(name)) {
       const lower = name.toLowerCase();
       const before = await this.store.get(lower);
       value = before ? append(before, value) : value;
       name = lower;
     }
-    if (!/^[a-z0-9\-+]$/.test(name)) return;
+    if (!/^[a-z0-9\-+*]$/.test(name)) return;
     await this.store.set(name, value);
     return this.#setUnnamed(value, name === "+");
   }
