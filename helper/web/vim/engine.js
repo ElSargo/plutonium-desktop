@@ -55,11 +55,16 @@ export class Vim {
    * @param {object} [options]
    * @param {Partial<typeof DEFAULT_OPTIONS>} [options.opt]
    * @param {Registers} [options.registers]
+   * @param {object} [options.store] the registers' store (registers.js): MemoryStore by default, RemoteStore in Plutonium
    */
-  constructor({ opt = {}, registers } = {}) {
+  constructor({ opt = {}, registers, store } = {}) {
     /** Options the backend set (a test's, a page's), under init.js's. */
     this.baseOpt = opt;
-    this.registers = registers ?? new Registers({ clipboard: () => this.opt.clipboard });
+    this.registers = registers ?? new Registers({
+      store,
+      clipboard: () => this.opt.clipboard,
+      scopeOf: (name) => this.registerScopes.get(name) ?? "global",
+    });
     /** The last change, for `.`: { cmd, inserted }. */
     this.lastChange = null;
     /** The last f, t, F or T, for ; and ,. */
@@ -83,7 +88,7 @@ export class Vim {
     this.user = { motions: [], operators: [], objects: {}, ops: new Map(), commands: new Map(), unlisten: [] };
     /** vim.disable and vim.enable, in order: { on, site?, shell?, app?, selector? }. */
     this.rules = [];
-    /** vim.registers.scope: register → "global", "project" or "thread" (the register store's, step 5). */
+    /** vim.registers.scope: register → "global", "project" or "thread" (each call to the register store carries it). */
     this.registerScopes = new Map();
     this.rebuild();
   }
@@ -292,6 +297,8 @@ export class Session {
     this.oneShot = false;
     /** After Ctrl+R in insert mode: the next key names a register. */
     this.insertRegister = false;
+    /** "= (or Ctrl+R =): the expression being typed, until Enter; null otherwise. */
+    this.expression = null;
     /** Visual mode's ends, as offsets of characters. */
     this.vAnchor = 0;
     this.vCursor = 0;
@@ -371,6 +378,7 @@ export class Session {
 
   /** The keymap that applies now: "i" in insert mode, "n" or "v" at the start of a command (after a register and a count); null otherwise. */
   #mapMode() {
+    if (this.expression !== null) return null;
     if (this.mode === "insert") return this.insertRegister ? null : "i";
     if (this.mode === "replace") return null;
     let i = 0;
@@ -551,6 +559,7 @@ export class Session {
   }
 
   #feedRaw(key) {
+    if (this.expression !== null) return this.#feedExpression(key);
     if (this.mode === "insert") return this.#feedInsert(key);
     if (this.mode === "replace") return this.#feedReplace(key);
     return this.#feedNormal(key);
@@ -582,6 +591,10 @@ export class Session {
     }
     if (key === "<CR>" && this.buffer.field?.singleLine && !this.pending.length) return false;
     this.pending.push(key);
+    if (key === "=" && this.pending.length === 2 && this.pending[0] === '"') {
+      this.#startExpression();
+      return true;
+    }
     const parsed = parseCommand(this.vim, this.pending, visual);
     if (parsed === MORE) {
       this.#caret();
@@ -599,6 +612,10 @@ export class Session {
     if (this.insertRegister) {
       if (key === "<C-r>") return true; // Ctrl+R Ctrl+R: put literally, which is what we do anyway.
       this.insertRegister = false;
+      if (key === "=") {
+        this.#startExpression();
+        return true;
+      }
       if (REGISTER_NAMES.test(key)) this.#enqueue(() => this.#putInInsert(key));
       return true;
     }
@@ -626,6 +643,46 @@ export class Session {
       default:
         return false;
     }
+  }
+
+  /** The expression after "= or Ctrl+R =, as it's typed. */
+  get cmdline() {
+    return this.expression === null ? null : `=${this.expression}`;
+  }
+
+  #startExpression() {
+    this.expression = "";
+    this.vim.emit("CmdlineChanged", { session: this, cmdline: this.cmdline });
+  }
+
+  /** A key while an expression is typed: Enter evaluates it into "=, Escape (or deleting it all) cancels. */
+  #feedExpression(key) {
+    const done = (keep) => {
+      const source = this.expression;
+      this.expression = null;
+      this.vim.emit("CmdlineChanged", { session: this, cmdline: null });
+      if (!keep) {
+        if (this.mode !== "insert") this.pending = [];
+        this.#caret();
+        return;
+      }
+      const insert = this.mode === "insert";
+      this.#enqueue(async () => {
+        // An empty expression puts the last one's value again, as in vim.
+        if (source) this.vim.registers.expression = await evaluate(source, this.vim);
+        if (insert) await this.#putInInsert("=");
+      });
+    };
+    if (key === "<Esc>" || key === "<C-[>") done(false);
+    else if (key === "<CR>") done(true);
+    else if (key === "<BS>" || key === "<C-h>") {
+      if (!this.expression) done(false);
+      else this.expression = this.expression.slice(0, -1);
+    } else if (key === "<C-u>") this.expression = "";
+    else if (key === "<Tab>") this.expression += "\t";
+    else if (isPrintable(key)) this.expression += key;
+    if (this.expression !== null) this.vim.emit("CmdlineChanged", { session: this, cmdline: this.cmdline });
+    return true;
   }
 
   #feedReplace(key) {
@@ -1309,6 +1366,23 @@ export class Session {
 }
 
 /** A <Cmd>…<CR> mapping's keys as the command line they spell. */
+/**
+ * "=: JavaScript, evaluated in the engine's world (not the page's), as a
+ * register's value. A promise is waited for; an array is lines (linewise);
+ * null and undefined are nothing.
+ */
+async function evaluate(source, vim) {
+  try {
+    const result = await (0, eval)(source);
+    if (result == null) return null;
+    if (Array.isArray(result)) return { text: result.map(String).join("\n"), linewise: true };
+    return { text: typeof result === "object" ? JSON.stringify(result) : String(result), linewise: false };
+  } catch (error) {
+    vim.emit("error", new Error(`pluto vim: "=${source}: ${error?.message ?? error}`));
+    return null;
+  }
+}
+
 function cmdLine(keys) {
   return keys.filter((k) => k !== "<CR>").map((k) => (isPrintable(k) ? k : k === "<lt>" ? "<" : "")).join("");
 }

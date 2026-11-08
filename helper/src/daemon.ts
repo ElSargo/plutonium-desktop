@@ -35,6 +35,7 @@ import { uiLibraryFile } from "./uiLibrary.ts";
 import { vimBundle } from "./vimBundle.ts";
 import { VimConfig } from "./vimConfig.ts";
 import { VimInjector } from "./vimInject.ts";
+import { RegisterStore, wlClipboard } from "./vimRegisters.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
   Desktop,
@@ -601,8 +602,14 @@ export class Daemon {
         log,
       });
       config.start();
+      // Registers: in memory only, never on disk (vimRegisters.ts).
+      const registers = new RegisterStore({ clipboard: wlClipboard(options.waylandDisplay, findExecutable) });
+      const desktop = this.desktop;
       injector = new VimInjector(cdp, () => vimBundle(vimDir), log, {
         config: () => config.expression,
+        registers,
+        // A tab's thread is its first tag. Shell pages and untagged tabs use global, for now (step 6).
+        placeOf: (targetId) => ({ thread: desktop?.tabs().find((tab) => tab.targetId === targetId)?.tags[0] ?? null }),
         shellOrigins: () => {
           const origins: Record<string, string> = {};
           for (const shell of shells ? installedShells(shells.home) : []) {

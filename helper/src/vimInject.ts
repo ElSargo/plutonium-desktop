@@ -25,9 +25,17 @@
 // The script also carries init.js (vimConfig.ts), configured before the
 // engine attaches. A new version replaces each page's script, for its next
 // document, and is configured into the world the page has now.
+//
+// Registers are the helper's (vimRegisters.ts): each page's session gets a
+// binding, plutoVimStore, only in the engine's world, and its calls are
+// answered there (remoteStore.js). The page's own scripts can't reach it.
 import type { BrowserCdp } from "./cdp.ts";
+import type { RegisterPlace, RegisterStore } from "./vimRegisters.ts";
 
 const WORLD = "pluto-vim";
+/** remoteStore.js's binding and reply. */
+const BINDING = "plutoVimStore";
+const REPLY = "plutoVimStoreReply";
 /** When a page open at start is checked again for the engine (ensure). */
 const ENSURE_AGAIN_MS = 1000;
 
@@ -47,6 +55,10 @@ export interface VimInjectorOptions {
   readonly config?: () => string;
   /** The installed shells by origin, for vim.disable({ shell }). */
   readonly shellOrigins?: () => Record<string, string>;
+  /** The register store every page shares; without it each page keeps its own. */
+  readonly registers?: RegisterStore;
+  /** Where a page's fields are, for registers' thread and project scopes. */
+  readonly placeOf?: (targetId: string) => RegisterPlace;
 }
 
 interface PageSession {
@@ -58,7 +70,7 @@ interface PageSession {
 export class VimInjector {
   private readonly sessions = new Map<string, PageSession>();
   private readonly attaching = new Set<string>();
-  private listening = false;
+  private listener: ((event: { method: string; params?: unknown; sessionId?: string }) => void) | null = null;
 
   private readonly cdp: BrowserCdp;
   private readonly source: () => string;
@@ -84,7 +96,7 @@ export class VimInjector {
     return [
       "if (/^https?:$/.test(location.protocol) && !globalThis.plutoVimPage) {",
       this.source(),
-      "  const vim = new globalThis.plutoVim.Vim();",
+      "  const vim = new globalThis.plutoVim.Vim({ store: new globalThis.plutoVim.RemoteStore() });",
       `  try { globalThis.plutoVim.configure(vim, ${config}); } catch (error) { console.error("pluto vim: init.js:", error); }`,
       `  globalThis.plutoVimPage = globalThis.plutoVim.attach(document, { vim, shell: (${shells})[location.origin] ?? null });`,
       "}",
@@ -98,7 +110,7 @@ export class VimInjector {
    * went with the old connection).
    */
   async start(): Promise<void> {
-    if (!this.listening) this.listen();
+    if (!this.listener) this.listen();
     this.sessions.clear();
     await this.cdp.send("Target.setDiscoverTargets", { discover: true });
     await this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
@@ -106,10 +118,21 @@ export class VimInjector {
     await Promise.all(targetInfos.map((target) => this.attachOpen(target)));
   }
 
+  /** Stops: no more pages get the engine, and the ones that have it keep it until their session goes. */
+  async stop(): Promise<void> {
+    if (this.listener) this.cdp.removeEventListener(this.listener);
+    this.listener = null;
+    await this.cdp.send("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }).catch(() => {});
+    await Promise.all([...this.sessions.values()].map((page) => this.cdp.send("Target.detachFromTarget", { sessionId: page.sessionId }).catch(() => {})));
+    this.sessions.clear();
+  }
+
   private listen(): void {
-    this.listening = true;
-    this.cdp.addEventListener(({ method, params, sessionId }) => {
-      if (sessionId) return;
+    this.listener = ({ method, params, sessionId }) => {
+      if (sessionId) {
+        if (method === "Runtime.bindingCalled") void this.storeCall(sessionId, params as { name: string; payload: string; executionContextId: number });
+        return;
+      }
       const value = params as { targetInfo?: TargetInfo; targetId?: string; sessionId?: string; waitingForDebugger?: boolean };
       if (method === "Target.attachedToTarget" && value.waitingForDebugger && value.sessionId && value.targetInfo) {
         void this.attachNew(value.sessionId, value.targetInfo);
@@ -121,7 +144,8 @@ export class VimInjector {
       } else if (method === "Target.detachedFromTarget" && value.sessionId) {
         for (const [target, page] of this.sessions) if (page.sessionId === value.sessionId) this.sessions.delete(target);
       }
-    });
+    };
+    this.cdp.addEventListener(this.listener);
   }
 
   /** The pages that have the engine's script. */
@@ -133,6 +157,7 @@ export class VimInjector {
   private async attachNew(sessionId: string, target: TargetInfo): Promise<void> {
     try {
       if (target.type === "page" && !this.sessions.has(target.targetId)) {
+        await this.bind(sessionId);
         const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD }, sessionId)) as { identifier: string };
         this.sessions.set(target.targetId, { sessionId, identifier, url: target.url });
         if (wantsVim(target.url)) this.log(`pluto vim: in ${target.url}`);
@@ -154,6 +179,7 @@ export class VimInjector {
     this.attaching.add(target.targetId);
     try {
       const { sessionId } = (await this.cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true })) as { sessionId: string };
+      await this.bind(sessionId);
       const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD, runImmediately: true }, sessionId)) as { identifier: string };
       const page = { sessionId, identifier, url: target.url };
       this.sessions.set(target.targetId, page);
@@ -165,6 +191,41 @@ export class VimInjector {
     } finally {
       this.attaching.delete(target.targetId);
     }
+  }
+
+  /** The register store's binding, in the engine's world of this page (now and in its next documents). */
+  private async bind(sessionId: string): Promise<void> {
+    if (!this.options.registers) return;
+    // A binding named for a world reaches that world's contexts only while
+    // Runtime is enabled on the session (disabled again, new documents' worlds
+    // go without it). Enabled, the page's console messages come to the
+    // session too; they're dropped (listen).
+    await this.cdp.send("Runtime.enable", {}, sessionId);
+    await this.cdp.send("Runtime.addBinding", { name: BINDING, executionContextName: WORLD }, sessionId);
+  }
+
+  /** A call from a page's engine to the register store, answered in the same world. */
+  private async storeCall(sessionId: string, call: { name: string; payload: string; executionContextId: number }): Promise<void> {
+    const store = this.options.registers;
+    if (call.name !== BINDING || !store) return;
+    const target = [...this.sessions].find(([, page]) => page.sessionId === sessionId)?.[0];
+    if (!target) return;
+    let id = 0;
+    let result: unknown = null;
+    try {
+      const message = JSON.parse(call.payload) as { id: number; op: string; name: string; scope: string; value?: unknown };
+      id = Number(message.id);
+      const place = this.options.placeOf?.(target) ?? {};
+      if (message.op === "get") result = await store.get(message.name, message.scope, place);
+      else if (message.op === "set") await store.set(message.name, message.value, message.scope, place);
+    } catch (error) {
+      this.log(`pluto vim: register store: ${(error as Error).message}`);
+    }
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    await this.cdp.send("Runtime.evaluate", {
+      contextId: call.executionContextId,
+      expression: `globalThis.${REPLY}?.(${id}, ${JSON.stringify(result ?? null)})`,
+    }, sessionId).catch(() => {});
   }
 
   /** Runs the script in the page's world now, if it's still ours; it does nothing where the engine already is. */

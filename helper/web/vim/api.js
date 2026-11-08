@@ -13,7 +13,7 @@ import { normalizeKey, parseKeys, isPrintable } from "./keys.js";
 import { MAP_MODES, parseCommand } from "./engine.js";
 import { UserBuffer } from "./userBuffer.js";
 
-const EVENTS = new Set(["ModeChanged", "InsertEnter", "InsertLeave", "TextYankPost", "FieldEnter", "FieldLeave"]);
+const EVENTS = new Set(["ModeChanged", "InsertEnter", "InsertLeave", "TextYankPost", "FieldEnter", "FieldLeave", "CmdlineChanged"]);
 const SCOPES = new Set(["global", "project", "thread"]);
 const KINDS = new Set(["exclusive", "inclusive", "linewise"]);
 const MAP_OPTS = new Set(["remap", "noremap", "expr", "desc", "silent", "nowait"]);
@@ -259,7 +259,7 @@ function createApi(vim, host, warnings) {
     registers: {
       /** A register's value, { text, linewise }, or null. A promise: the register store answers asynchronously. */
       get(name) {
-        if (typeof name !== "string" || !/^[a-zA-Z0-9"\-+*.:/]$/.test(name)) fail(`registers.get(${JSON.stringify(name)})`, "not a register");
+        if (typeof name !== "string" || !/^[a-zA-Z0-9"\-+*.:/=]$/.test(name)) fail(`registers.get(${JSON.stringify(name)})`, "not a register");
         return vim.registers.get(name);
       },
       /** Sets a register: text, or { text, linewise }. A capital letter appends, as in vim. */
@@ -271,7 +271,7 @@ function createApi(vim, host, warnings) {
         if (/^[A-Z]$/.test(target)) return vim.registers.yank(target, { text: v.text, linewise: Boolean(v.linewise) });
         return vim.registers.store.set(target, { text: v.text, linewise: Boolean(v.linewise) });
       },
-      /** Which registers are global, per project or per thread ("a-z", "t", "0-9"). The register store (step 5) keeps them apart. */
+      /** Which registers are global, per project or per thread ("a-z", "t", "0-9"). The register store (helper/src/vimRegisters.ts) keeps them apart. */
       scope(names, scope) {
         if (!SCOPES.has(scope)) fail(`registers.scope(${JSON.stringify(names)})`, `the scope is "global", "project" or "thread"`);
         for (const name of expandRegisters(names)) {

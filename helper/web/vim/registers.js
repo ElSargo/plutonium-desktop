@@ -1,29 +1,41 @@
 // Pluto Vim's registers (PLUTO_VIM.md, Registers): vim's rules for which
-// register a yank or a delete goes to, over a store. The store here keeps
-// them in memory; the browser's register store (step 5) takes its place, so
-// get() and set() may return promises.
+// register a yank or a delete goes to, over a store. MemoryStore keeps them
+// in this world; in Plutonium, RemoteStore (remoteStore.js) is the helper's
+// register store, shared by every page, so get() and set() may return
+// promises. Each call carries the register's scope (vim.registers.scope):
+// "global", "project" or "thread"; the store decides what that means.
 //
 // A register's value is { text, linewise }. Linewise text has no trailing
 // newline: "a\nb" is two lines.
 
 /** Every register name a command may give after `"`. */
-export const REGISTER_NAMES = /^[a-zA-Z0-9"\-_+*.:/]$/;
+export const REGISTER_NAMES = /^[a-zA-Z0-9"\-_+*.:/=]$/;
 
 export class MemoryStore {
   #values = new Map();
-  get(name) { return this.#values.get(name) ?? null; }
-  set(name, value) { this.#values.set(name, value); }
+  get(name, _scope) { return this.#values.get(name) ?? null; }
+  set(name, value, _scope) { this.#values.set(name, value); }
 }
 
 export class Registers {
   /**
    * @param {object} [options]
-   * @param {{ get(name: string): any, set(name: string, value: any): any }} [options.store]
+   * @param {{ get(name: string, scope: string): any, set(name: string, value: any, scope: string): any }} [options.store]
    * @param {() => string} [options.clipboard] vim.opt.clipboard: "" or "unnamedplus"
+   * @param {(name: string) => string} [options.scopeOf] a register's scope: "global" (the default), "project" or "thread"
    */
-  constructor({ store = new MemoryStore(), clipboard = () => "" } = {}) {
-    this.store = store;
+  constructor({ store = new MemoryStore(), clipboard = () => "", scopeOf = () => "global" } = {}) {
+    /** "=: the last expression's value, this world's own (it's evaluated here). */
+    this.expression = null;
     this.clipboard = clipboard;
+    this.scopeOf = scopeOf;
+    const raw = store;
+    this.raw = raw;
+    // The store, with each register's scope ("+ is always global: the system's).
+    this.store = {
+      get: (name) => raw.get(name, name === "+" ? "global" : this.scopeOf(name) ?? "global"),
+      set: (name, value) => raw.set(name, value, name === "+" ? "global" : this.scopeOf(name) ?? "global"),
+    };
   }
 
   #unnamedPlus() { return this.clipboard() === "unnamedplus"; }
@@ -33,6 +45,7 @@ export class Registers {
     if (name == null || name === '"') name = this.#unnamedPlus() ? "+" : '"';
     if (name === "*") name = "+"; // No primary selection yet (Exo has none): "* is "+.
     if (name === "_") return null;
+    if (name === "=") return this.expression;
     if (/^[A-Z]$/.test(name)) name = name.toLowerCase();
     return (await this.store.get(name)) ?? null;
   }

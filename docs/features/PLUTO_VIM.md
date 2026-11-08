@@ -18,16 +18,16 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
  │  init.js  ⇄  Blink's vim core  │   │        ⇅                             │
  │  (synchronous)                 │   │ vim host: engine + init.js           │
  └──────────────┬─────────────────┘   └───────────────────┬──────────────────┘
-                │          register store, marks, jumps   │
-                └──────────────► browser process ◄────────┘
-                                       ⇅
-                     helper: persistence, thread and project scopes,
+                │        DevTools binding, engine's world │
+                └──────────────►     helper     ◄─────────┘
+                     register store (memory only), marks, jumps,
+                     thread and project scopes, init.js,
                      config.js (KEYS.md), agents' tools
 ```
 
 - **The engine** (modes, counts, operators, motions, text objects, registers, macros, the `:` line) is JavaScript. It is shipped as the default runtime, like neovim's `runtime/`, and `init.js` can change or replace any part of it.
 - **A backend** gives the engine a field as a buffer (Buffer interface, below). Blink is one backend, text-input-v3 another, and AT-SPI a fallback.
-- **The register store** is in the browser process, so every backend shares it. The helper persists it and knows each field's thread and project.
+- **The register store** is in the helper, so every backend shares it, and in its memory only: registers never touch the disk. The helper knows each field's thread and project. The engine reaches it through a DevTools binding that only the engine's world has.
 
 ## Principles
 
@@ -177,21 +177,23 @@ For apps without text-input-v3: Xwayland apps, older SDL and toolkits. The helpe
 
 ### The store
 
-- **In the browser process.** The web engine (in every frame) and the vim host share it, so a yank in a native app puts into a web textarea, and the reverse.
-- **Persisted by the helper,** in `~/.pluto/vim/registers.json`, as neovim's shada file does. Registers survive restarts. Each register keeps its text and whether it's linewise or characterwise.
-- **Reads are asynchronous.** `p` is consumed at once, and the text arrives a moment later. The engine keeps edits in order, so `.` and macros replay correctly.
+- **In the helper** (`helper/src/vimRegisters.ts`). Every page's engine, and the vim host (a page too, step 7), share it, so a yank in one tab puts in another, and a yank in a native app will put into a web textarea.
+- **In memory only.** Registers hold whatever you yanked, passwords and tokens included, so they never touch the disk: nothing like neovim's shada file. They go when the helper does (a restart, a log out). `"+` is the exception that outlives it, because it's the system clipboard.
+- **Each register keeps** its text and whether it's linewise or characterwise. One holds at most 8 MB; a bigger yank is cut.
+- **Reads are asynchronous.** `p` is consumed at once, and the text arrives a moment later (a round trip to the helper, about a millisecond). The engine keeps edits in order, so `.` and macros replay correctly.
+- **How a page reaches it.** The helper adds a binding, `plutoVimStore`, to each page's DevTools session, named for the engine's world, so the page's own scripts can't call it. The engine's `RemoteStore` (`helper/web/vim/remoteStore.js`) calls it with the register, its scope and the value, and the helper answers in the same world. Where there's no helper (a browser without it, a test), or it doesn't answer in 2 seconds, the page keeps its registers itself.
 
 ### Vim's registers on the desktop
 
 | Register | Here |
 |---|---|
-| `"+` | The system clipboard: Exo's `wl_data_device` selection, what apps' Ctrl+C and Ctrl+V use. Clipboard managers and `wl-copy` see it through `ext_data_control_v1` ([WAYLAND_PROTOCOLS.md](WAYLAND_PROTOCOLS.md)) |
+| `"+` | The system clipboard: Exo's `wl_data_device` selection, what apps' Ctrl+C and Ctrl+V use. Clipboard managers and `wl-copy` see it through `ext_data_control_v1` ([WAYLAND_PROTOCOLS.md](WAYLAND_PROTOCOLS.md)). The helper reads and writes it with `wl-paste` and `wl-copy`; text that ends in a newline is linewise, and a linewise yank gets one. Without wl-clipboard, `"+` is an ordinary register |
 | `"*` | The primary selection. Exo has none yet: implementing `zwp_primary_selection_v1` gives apps middle-click paste and gives `"*` its meaning (until then, `"*` is `"+`, as on systems without one) |
 | `""` | The unnamed register. With `vim.opt.clipboard = "unnamedplus"`, it is `"+` |
 | `"0`, `"1`–`"9`, `"-` | The last yank, the delete history, and the last small delete, as in vim |
 | `"a`–`"z`, `"A`–`"Z` | Named registers (capitals append), scoped by your config |
 | `".`, `":`, `"/` | The last inserted text, the last `:` command, the last search |
-| `"=` | The expression register, which evaluates JavaScript (in the engine's world) instead of vimscript: `"=new Date().toISOString()<CR>p` |
+| `"=` | The expression register, which evaluates JavaScript (in the engine's world, so the page's CSP doesn't apply) instead of vimscript: `"=new Date().toISOString()<CR>p`, or `Ctrl+R =` in insert mode. A promise is waited for, an array is lines (linewise), an object is its JSON. An empty expression puts the last one's value again. It isn't drawn while you type it until the `:` line (step 9); `init.js` can draw it from `CmdlineChanged` |
 | `"_` | The black hole |
 
 **Clipboard history** (`vim.opt.clipboardHistory = true`): every copy on the desktop, not only vim's yanks, goes into a ring of its own, read with `:registers` and put with `"#1`…`"#9`. The compositor sees every clipboard change, so this covers copies from apps and pages. Ash's own clipboard history is off in shell mode ([CHROME_UI.md](CHROME_UI.md)), so this can be the desktop's.
@@ -208,6 +210,7 @@ vim.registers.scope("0-9", "thread");   // each thread keeps its own yank and de
 ```
 
 - A field's thread is its window's or tab's thread tag. A field in a shell page is in the shell's current thread (Hydra's open thread). A thread's project is Hydra's, for Hydra's threads. A field with no thread (an untagged app) and a thread with no project use global.
+- Built so far: tabs' threads. Shell pages, and every project scope, use global until the shell tells the helper its thread and project (step 6).
 - `"+` and `"*` are always global: they're the system's.
 - `:registers` shows each register's scope.
 - Scopes apply to marks too (Across the desktop, below).
@@ -257,8 +260,8 @@ export default function setup(vim) {
 | `vim.operator(lhs, fn)` | `fn(buf, range, { count, register })` changes the range with `buf.edit()`. Works with motions, text objects, its doubled form (`gqq`), visual mode and `.` |
 | `vim.textobject(key, fn)` | `i{key}` and `a{key}`: `fn(buf, around, { count })` returns a range, or null |
 | `vim.command(name, fn)` / `vim.cmd(line)` | A command (a capital first letter, as in neovim): `fn(buf, { args, bang })`. Run from a mapping's `<Cmd>…<CR>`, or `vim.cmd`; the `:` line comes at step 9 |
-| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave`; `fn` gets `{ field, mode, … }` |
-| `vim.registers` | `get` (a promise), `set` (a capital letter appends), `scope` (kept until the register store, step 5, keeps them apart) |
+| `vim.on(event, fn)` | Neovim's autocmd events that make sense here: `ModeChanged`, `InsertEnter`, `InsertLeave`, `TextYankPost`, `FieldEnter`, `FieldLeave`, `CmdlineChanged` (`cmdline`: the `"=` expression as it's typed, or null); `fn` gets `{ field, mode, … }` |
+| `vim.registers` | `get` (a promise), `set` (a capital letter appends), `scope` (Scopes, above) |
 | `vim.disable` / `vim.enable` | Rules by `site` (a host and its subdomains), `shell`, `selector`, or `app` (native apps, step 7); the last rule that matches wins |
 | `vim.mode()`, `vim.selection()`, `vim.feedkeys(keys, { remap })` | In a mapping's function: the field's mode, its selected text (visual mode's, or the field's own), keys into it |
 | `vim.desktop.call(name, args)` | A call to a function `config.js` exports; a promise. Rejects until KEYS.md's `config.js` is built |
@@ -276,17 +279,17 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 ## Trust
 
 - `init.js` and its plugins run in every frame's isolated world, banking sites and shell pages included, with the DOM. That's the trust an extension that can read every page gets, and that neovim plugins get. It's your code, so that's fine; a plugin someone else wrote is something you choose to install, as with neovim's.
-- The page can't reach the engine, `init.js`, or the register store: the world is isolated, and the store's IPC is only bound to that world.
-- Registers can hold anything you yanked, including from a page you trust more than others. Thread and project scopes keep them apart if you want that. `"+` is the system clipboard, as every app sees it.
+- The page can't reach the engine, `init.js`, or the register store: the world is isolated, and the store's binding is only in that world.
+- Registers can hold anything you yanked, including from a page you trust more than others. Thread and project scopes keep them apart if you want that. They're kept in the helper's memory and never written to disk. `"+` is the system clipboard, as every app sees it.
 - Password fields: Principle 5.
 
 ## The work, in order
 
 1. **The engine** in plain JS, against a fake Buffer, with unit tests: modes, counts, operators, motions, text objects, in-memory registers, `.`, the insert mode extras. No Chromium build, so the engine's shape is settled before any C++.
 2. **A stand-in web backend** in page JS (`Selection.modify`, `execCommand`), loaded into a test page and the shell pages. Pluto Vim works in real fields, Hydra's composer included, and shows what only Blink can do.
-3. **Blink's key hook and the isolated world** (built, above): the hook in Chromium, the engine in its own world from the helper over DevTools. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the register store's browser-side IPC instead.
+3. **Blink's key hook and the isolated world** (built, above): the hook in Chromium, the engine in its own world from the helper over DevTools. Since the extensions work's fix-up to patch 0004, `navigator.windowBroker` is null outside a page's main world, so anything the engine needs from the broker (marks that focus a window, `:` commands) goes through the helper, as the register store does (step 5).
 4. **The `init.js` API** on the engine: `opt`, `keymap.set`, `motion`, `operator`, `textobject`, `command`, events; reload on save; `plutonium vim check`.
-5. **The register store** in the browser process, persisted by the helper; scopes; `"+` and `"=`.
+5. **The register store** (built, below) in the helper, in memory only; scopes; `"+` and `"=`.
 6. **Pages that integrate,** and Hydra's composer on it (a T3 patch): actions, `:` commands, yielded keys, starting in normal mode.
 7. **text-input-v3:** the vim host page, the async key path, best-effort motions, the mode badge, the native insert mode extras.
 8. **`zwp_primary_selection_v1`** in Exo, for `"*` and middle-click paste.
@@ -342,6 +345,14 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **The helper** (`helper/src/vimConfig.ts`): bundling `init.js` and its plugins, the dry run, the watched folder and its git, the last good version. The injector carries the good version in each page's script, and a new one into each page's world over DevTools (`Page.createIsolatedWorld` finds the world the page has; a world is its DevTools session's, so it's the injector's session that does it). Tests: `helper/test/vimConfig.test.ts`, including `init.js` in a real Chromium's page, reconfigured live.
 - **`plutonium vim check`** (`helper/plutonium.ts vim check`).
 
+### Step 5: the register store (built)
+
+- **The store** (`helper/src/vimRegisters.ts`): registers by scope (global, `thread:<id>`, `project:<id>`) in the helper's memory, never on disk; `"+` through wl-clipboard on the session's Wayland display. Tests: `helper/test/vimRegisters.test.ts`.
+- **The pages' side:** the injector adds the `plutoVimStore` binding to each page's session before its script, and answers calls in the engine's world (`vimInject.ts`). A binding named for a world only reaches that world's new documents while `Runtime` is enabled on the session, so it stays enabled; the page's console messages that brings are dropped. The engine's `Registers` passes each register's scope (`vim.registers.scope`) to the store; `RemoteStore` is the store in a page.
+- **`"=`** in the engine (`engine.js`): typed after `"=` or Ctrl+R =, evaluated by Enter.
+- **Tests in a real Chromium** (`helper/test/vimConfig.test.ts`): a yank in one page puts in another; `"t` scoped to the thread is empty in another thread's tab and shared with the same thread's; the page's main world has no `plutoVimStore`; `"=6*7<CR>p` works on a page whose CSP allows no script.
+- **Not yet:** shell pages' threads and projects (step 6), `:registers` (the `:` line, step 9), the agents' register tools (step 9).
+
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
@@ -359,6 +370,7 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - 2026-11-08 (to confirm): Ctrl+[ is Pluto Vim's before the page in a field it's on in (`vim.opt.claim`), because ProseMirror and Hydra's composer take Escape and T3 takes Ctrl+[.
 - 2026-11-08: Caps Lock is Pluto Vim's Escape, and there's no Caps Lock: Ash makes it an Escape with code `CapsLock`, which the engine claims before the page as Ctrl+[, and everything else sees as Escape. Nobody uses Caps Lock as a lock.
 - 2026-11-08: a saved `init.js` goes into every page at once, not at each frame's next field focus: the helper checks it in Node first, so a page never runs one that doesn't load. Mappings follow neovim's (`remap` off by default, `<Cmd>`, `expr`, `nowait`); operator-pending mappings wait.
+- 2026-11-08: the register store is the helper's, in memory only. Registers hold whatever was yanked, passwords included, so they never go to disk, and they don't survive the helper. The helper rather than the browser process, because the engine already reaches pages through the helper's DevTools sessions, it knows threads, and it needs no Chromium change; the vim host for native apps (step 7) is a page and reaches it the same way.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions

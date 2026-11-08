@@ -486,3 +486,75 @@ describe("events and the caret", () => {
     assert.equal(mark(inner), "b|a");
   });
 });
+
+describe("the register store", () => {
+  const { RemoteStore, MemoryStore } = vimModule as any;
+
+  test("each call carries its register's scope; \"+ is always global", async () => {
+    const calls: string[] = [];
+    const store = {
+      values: new Map<string, unknown>(),
+      get(name: string, scope: string) { calls.push(`get ${name} ${scope}`); return this.values.get(`${scope}:${name}`) ?? null; },
+      set(name: string, value: unknown, scope: string) { calls.push(`set ${name} ${scope}`); this.values.set(`${scope}:${name}`, value); },
+    };
+    const vim = new Vim({ store, opt: { startInInsert: false } });
+    vim.registerScopes.set("t", "thread");
+    vim.registerScopes.set("0", "thread");
+    const buffer = field("|foo bar");
+    const session = vim.attach(buffer);
+    await type(session, buffer, '"tyiwyiw"+yiw');
+    assert.deepEqual(calls, ["set t thread", 'set " global', "set 0 thread", 'set " global', "set + global", 'set " global']);
+  });
+
+  test("RemoteStore asks the binding and takes its reply; without one, or with no answer, it keeps them itself", async () => {
+    const world: any = {};
+    const sent: any[] = [];
+    world.plutoVimStore = (json: string) => {
+      const message = JSON.parse(json);
+      sent.push(message);
+      setTimeout(() => world.plutoVimStoreReply(message.id, message.op === "get" ? { text: "far", linewise: false } : null), 1);
+    };
+    const store = new RemoteStore({ global: world, timeoutMs: 50 });
+    await store.set("a", { text: "x", linewise: false }, "thread");
+    assert.deepEqual(await store.get("a", "thread"), { text: "far", linewise: false });
+    assert.deepEqual(sent.map(({ id: _, ...m }) => m), [
+      { op: "set", name: "a", scope: "thread", value: { text: "x", linewise: false } },
+      { op: "get", name: "a", scope: "thread" },
+    ]);
+    world.plutoVimStore = () => {}; // never answers
+    assert.deepEqual(await store.get("a", "thread"), { text: "x", linewise: false }, "this world's own copy, after the timeout");
+    delete world.plutoVimStore;
+    store.set("b", { text: "y", linewise: true });
+    assert.deepEqual(await store.get("b"), { text: "y", linewise: true });
+    assert.ok(new MemoryStore());
+  });
+});
+
+describe("the expression register", () => {
+  test('"= evaluates JavaScript into a register to put', async () => {
+    await expectKeys("|ab", '"=1+2<CR>p', "a|3b");
+    await expectKeys("|ab", '"=["x","y"]<CR>p', "ab\n|x\ny");
+    await expectKeys("|ab", "i<C-r>='hi'.toUpperCase()<CR>!<Esc>", "HI|!ab");
+  });
+
+  test("Escape or deleting it all cancels; mappings don't apply while it's typed; an error puts nothing", async () => {
+    await expectKeys("|ab", '"=1<Esc>x', "|b");
+    await expectKeys("|ab", '"=1<BS><BS>x', "|b");
+    const vim = new Vim({ opt: { startInInsert: false } });
+    vim.keymaps.n.set("1", { lhs: ["1"], rhs: "x", opts: {} });
+    assert.equal((await run("|ab", '"=1<CR>p', { vim })).text, "a|1b", "1 is mapped, but not in an expression");
+    const errors: Error[] = [];
+    vim.on("error", (error: Error) => errors.push(error));
+    const { text } = await run("|ab", '"=nope(<CR>p', { vim });
+    assert.equal(text, "|ab");
+    assert.match(errors[0]!.message, /"=nope\(/);
+  });
+
+  test("CmdlineChanged shows it as it's typed", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const seen: (string | null)[] = [];
+    vim.on("CmdlineChanged", ({ cmdline }: { cmdline: string | null }) => seen.push(cmdline));
+    await run("|ab", '"=1<CR>', { vim });
+    assert.deepEqual(seen, ["=", "=1", null]);
+  });
+});

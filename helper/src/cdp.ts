@@ -152,6 +152,10 @@ export class BrowserCdp {
     this.eventListeners.add(listener);
   }
 
+  removeEventListener(listener: (event: CdpEvent) => void): void {
+    this.eventListeners.delete(listener);
+  }
+
   /** The connection to the browser closed (it restarted, or quit). */
   addCloseListener(listener: () => void): void {
     this.closeListeners.add(listener);

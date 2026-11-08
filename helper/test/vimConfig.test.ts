@@ -15,6 +15,7 @@ import { BrowserCdp } from "../src/cdp.ts";
 import { checkConfig, configExpression, configModules, VimConfig } from "../src/vimConfig.ts";
 import { vimBundle } from "../src/vimBundle.ts";
 import { VimInjector } from "../src/vimInject.ts";
+import { RegisterStore } from "../src/vimRegisters.ts";
 
 const ENGINE = join(dirname(fileURLToPath(import.meta.url)), "..", "web", "vim");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -148,9 +149,9 @@ describe("the watched folder", () => {
   });
 });
 
-async function waitFor(condition: () => boolean, ms = 3000) {
+async function waitFor(condition: () => boolean | Promise<boolean>, ms = 3000) {
   const end = Date.now() + ms;
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() > end) throw new Error("timed out");
     await sleep(20);
   }
@@ -175,7 +176,11 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
   let origin = "";
 
   before(async () => {
-    server = createServer((_req, res) => res.writeHead(200, { "Content-Type": "text/html" }).end("<textarea id=ta></textarea>"));
+    server = createServer((req, res) => res.writeHead(200, {
+      "Content-Type": "text/html",
+      // A page that allows no eval of its own: "= still evaluates, in the engine's world.
+      ...(req.url === "/csp" ? { "Content-Security-Policy": "script-src 'none'" } : {}),
+    }).end("<textarea id=ta></textarea>"));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
@@ -247,5 +252,76 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     assert.equal(await value("document.getElementById('ta').value"), "abjk", "jk is typed now; kj leaves");
     assert.equal(await value("document.getElementById('ta').dataset.pvimMode"), "normal");
     await cdp.send("Target.closeTarget", { targetId });
+    await injector.stop();
+  });
+
+  test("registers are the helper's: a yank in one page puts in another, by scope, and the page can't reach them", async () => {
+    const expression = configExpression(folder({
+      "init.js": 'export default function (vim) { vim.opt.startInInsert = false; vim.registers.scope("t", "thread"); }\n',
+    }));
+    const registers = new RegisterStore();
+    const threads = new Map<string, string>();
+    const injector = new VimInjector(cdp, () => vimBundle(ENGINE), () => {}, {
+      config: () => expression,
+      registers,
+      placeOf: (targetId) => ({ thread: threads.get(targetId) ?? null }),
+    });
+    await injector.start();
+    const open = async (thread: string, text: string, path = "/") => {
+      const { targetId } = (await cdp.send("Target.createTarget", { url: `${origin}${path}` })) as { targetId: string };
+      threads.set(targetId, thread);
+      const { sessionId } = (await cdp.send("Target.attachToTarget", { targetId, flatten: true })) as { sessionId: string };
+      await waitFor(() => (injector as any).sessions.has(targetId), 5000);
+      const own = (injector as any).sessions.get(targetId).sessionId as string;
+      const end = Date.now() + 5000;
+      const inWorld = async () => {
+        const { executionContextId } = (await cdp.send("Page.createIsolatedWorld", { frameId: targetId, worldName: "pluto-vim" }, own)) as { executionContextId: number };
+        return ((await cdp.send("Runtime.evaluate", { contextId: executionContextId, expression: "!!globalThis.plutoVimPage", returnByValue: true }, own)) as { result: { value: boolean } }).result.value;
+      };
+      while (!(await inWorld().catch(() => false))) {
+        if (Date.now() > end) throw new Error("the engine didn't reach the page");
+        await sleep(50);
+      }
+      const value = async (expr: string) => ((await cdp.send("Runtime.evaluate", { expression: expr, returnByValue: true }, sessionId)) as { result: { value: unknown } }).result.value;
+      await value(`(() => { const ta = document.getElementById('ta'); ta.value = ${JSON.stringify(text)}; ta.focus(); ta.setSelectionRange(0, 0); })()`);
+      await sleep(100);
+      return { targetId, sessionId, value };
+    };
+    const a = await open("one", "hello");
+    const b = await open("two", "world");
+    const c = await open("one", "again");
+    assert.equal(await a.value("typeof plutoVimStore"), "undefined", "the binding is only in the engine's world");
+
+    await press(a.sessionId, "yy");
+    await waitFor(() => registers.size > 0, 2000);
+    await press(b.sessionId, "p");
+    await waitFor(async () => (await b.value("document.getElementById('ta').value")) !== "world", 2000);
+    assert.equal(await b.value("document.getElementById('ta').value"), "world\nhello", "a yank in one page puts in another");
+
+    // "t is each thread's own: b's thread has nothing in it; c shares a's.
+    await press(a.sessionId, '"tyiw');
+    await sleep(100);
+    await press(b.sessionId, 'u"tp');
+    await sleep(200);
+    assert.equal(await b.value("document.getElementById('ta').value"), "world", "another thread's \"t is empty");
+    await press(c.sessionId, '"tP');
+    await waitFor(async () => (await c.value("document.getElementById('ta').value")) !== "again", 2000);
+    assert.equal(await c.value("document.getElementById('ta').value"), "helloagain");
+    assert.deepEqual(await registers.get("t", "thread", { thread: "one" }), { text: "hello", linewise: false });
+
+    const strict = await open("one", "ab", "/csp");
+    await press(strict.sessionId, '"=');
+    for (const key of "6*7") {
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, text: key }, strict.sessionId);
+      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key }, strict.sessionId);
+    }
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, strict.sessionId);
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, strict.sessionId);
+    await press(strict.sessionId, "p");
+    await waitFor(async () => (await strict.value("document.getElementById('ta').value")) !== "ab", 2000);
+    assert.equal(await strict.value("document.getElementById('ta').value"), "a42b", "\"= under the page's CSP");
+    await cdp.send("Target.closeTarget", { targetId: strict.targetId });
+    for (const page of [a, b, c]) await cdp.send("Target.closeTarget", { targetId: page.targetId });
+    await injector.stop();
   });
 });
