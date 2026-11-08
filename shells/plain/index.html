@@ -737,7 +737,12 @@ $("web-site").onclick = () => {
     run: async (request) => {
       const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(state.current)}`).then((r) => r.json());
       const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
-      launch(["foot", "-T", `site: ${request.site}`, "-e", "claude", "--mcp-config", mcp, request.prompt]);
+      // In the site's folder (what Claude Code asks to trust), and the prompt before
+      // --mcp-config, which takes every argument after it.
+      launch([
+        "foot", `--working-directory=${request.dir}`, "-T", `site: ${request.site}`,
+        "-e", "claude", request.prompt, "--mcp-config", mcp,
+      ]);
     },
   });
 };

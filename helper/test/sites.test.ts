@@ -252,6 +252,11 @@ describe("a tab's context", () => {
     assert.equal(context.shell, "hydra");
   });
 
+  test("another shell's thread tag", () => {
+    const context = new ContextSource(tempDir(), directory).contextFor(["plain:thread/a5367a0a"]);
+    assert.deepEqual(context, { thread: { id: "plain:thread/a5367a0a", title: null }, project: null, sites: {}, shell: "plain" });
+  });
+
   test("a tab kept per project, an unknown thread, no tags", () => {
     const home = tempDir();
     const source = new ContextSource(home, directory);

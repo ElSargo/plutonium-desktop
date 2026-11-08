@@ -142,6 +142,7 @@ export class ContextSource {
     let thread: TabContext["thread"] = null;
     let projectId: string | null = null;
     let fromHydra = false;
+    let shell: string | null = null;
     for (const tag of tags) {
       if (tag.startsWith(THREAD_TAG)) {
         const id = tag.slice(THREAD_TAG.length);
@@ -156,6 +157,10 @@ export class ContextSource {
         fromHydra = true;
       } else if (tag.startsWith("t3:")) {
         fromHydra = true;
+      } else if (/^[\w-]+:thread\//.test(tag)) {
+        // Another shell's thread (the plain shell's "plain:thread/<id>"): its tag is its id.
+        thread ??= { id: tag, title: null };
+        shell ??= tag.slice(0, tag.indexOf(":"));
       } else if (!tag.includes(":") && !thread) {
         const row = this.directory.thread(tag);
         thread = { id: tag, title: row?.title ?? null };
@@ -174,7 +179,7 @@ export class ContextSource {
       thread,
       project,
       sites: project ? projectSiteSettings(this.plutoHome, project.id) : {},
-      shell: fromHydra ? "hydra" : null,
+      shell: fromHydra ? "hydra" : shell,
     };
   }
 }

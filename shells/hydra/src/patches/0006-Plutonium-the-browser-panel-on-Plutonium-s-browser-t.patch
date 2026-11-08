@@ -32,11 +32,11 @@ Folded from:
  .../src/components/preview/previewBridge.ts   |   7 +-
  .../components/preview/usePreviewSession.ts   |   8 +-
  .../src/plutonium/PlutoniumBrowserHost.tsx    | 370 +++++++++
- apps/web/src/plutonium/SiteButton.tsx         | 397 +++++++++
+ apps/web/src/plutonium/SiteButton.tsx         | 413 ++++++++++
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 13 files changed, 1647 insertions(+), 36 deletions(-)
+ 13 files changed, 1663 insertions(+), 36 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
  create mode 100644 apps/web/src/plutonium/SiteButton.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
@@ -743,10 +743,10 @@ index 0000000000..713ee42b49
 +}
 diff --git a/apps/web/src/plutonium/SiteButton.tsx b/apps/web/src/plutonium/SiteButton.tsx
 new file mode 100644
-index 0000000000..abde506038
+index 0000000000..1366863d31
 --- /dev/null
 +++ b/apps/web/src/plutonium/SiteButton.tsx
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,413 @@
 +// Site extensions (SITE_EXTENSIONS.md, "The button"): a request starts a thread
 +// in the Sites project with the helper's prompt, and lends it the tab until the
 +// run ends, so its agent's tab tools reach it.
@@ -756,7 +756,7 @@ index 0000000000..abde506038
 +import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 +import { useNavigate } from "@tanstack/react-router";
 +import { WandSparkles } from "lucide-react";
-+import { useState } from "react";
++import { useEffect, useState } from "react";
 +
 +import { Button } from "~/components/ui/button";
 +import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
@@ -776,6 +776,7 @@ index 0000000000..abde506038
 +import { threadEnvironment } from "../state/threads";
 +import { useAtomCommand } from "../state/use-atom-command";
 +import { useOrchestrationCommand } from "../state/use-orchestration-command";
++import { useStableCallback } from "../hooks/useStableCallback";
 +import { plutoniumPreview } from "./previewBridge";
 +import { threadTag } from "./threadTag";
 +import { plutoniumShell } from "./windowStore";
@@ -824,6 +825,7 @@ index 0000000000..abde506038
 +const SITES_PROJECT_TITLE = "Sites";
 +const DONE = new Set(["completed", "interrupted", "failed", "cancelled", "rolled_back"]);
 +const RUN_POLL_MS = 2_000;
++const HEALTH_POLL_MS = 10_000;
 +
 +async function shellSites(): Promise<ShellSites | null> {
 +  const shell = (await plutoniumShell()) as unknown as { sites?: ShellSites } | null;
@@ -880,6 +882,18 @@ index 0000000000..abde506038
 +      setError(cause instanceof Error ? cause.message : String(cause));
 +    }
 +  };
++
++  const poll = useStableCallback(refresh);
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the helper's health checks for this tab, so the button's dot shows a stale part before the popover is opened
++  useEffect(() => {
++    if (browserTabId === null) return;
++    const first = setTimeout(() => void poll(), 0);
++    const timer = setInterval(() => void poll(), HEALTH_POLL_MS);
++    return () => {
++      clearTimeout(first);
++      clearInterval(timer);
++    };
++  }, [browserTabId, poll]);
 +
 +  const changeOpen = (next: boolean) => {
 +    setOpen(next);
@@ -1059,6 +1073,8 @@ index 0000000000..abde506038
 +                      {part.title}
 +                      {partReport?.errors.length ? (
 +                        <span className="text-destructive"> · error</span>
++                      ) : stale.includes(part.name) ? (
++                        <span className="text-destructive"> · stopped working</span>
 +                      ) : null}
 +                    </span>
 +                    <Switch
