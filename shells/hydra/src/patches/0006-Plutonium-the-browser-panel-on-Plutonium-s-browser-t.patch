@@ -32,11 +32,11 @@ Folded from:
  .../src/components/preview/previewBridge.ts   |   7 +-
  .../components/preview/usePreviewSession.ts   |   8 +-
  .../src/plutonium/PlutoniumBrowserHost.tsx    | 370 +++++++++
- apps/web/src/plutonium/SiteButton.tsx         | 381 +++++++++
+ apps/web/src/plutonium/SiteButton.tsx         | 397 +++++++++
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 13 files changed, 1631 insertions(+), 36 deletions(-)
+ 13 files changed, 1647 insertions(+), 36 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
  create mode 100644 apps/web/src/plutonium/SiteButton.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
@@ -743,10 +743,10 @@ index 0000000000..713ee42b49
 +}
 diff --git a/apps/web/src/plutonium/SiteButton.tsx b/apps/web/src/plutonium/SiteButton.tsx
 new file mode 100644
-index 0000000000..136f1de468
+index 0000000000..abde506038
 --- /dev/null
 +++ b/apps/web/src/plutonium/SiteButton.tsx
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,397 @@
 +// Site extensions (SITE_EXTENSIONS.md, "The button"): a request starts a thread
 +// in the Sites project with the helper's prompt, and lends it the tab until the
 +// run ends, so its agent's tab tools reach it.
@@ -789,6 +789,8 @@ index 0000000000..136f1de468
 +interface TabReport {
 +  readonly url: string;
 +  readonly parts: readonly PartReport[];
++  /** Parts that stopped working here: a selector that used to match, or an error. */
++  readonly stale?: readonly { part: string }[];
 +}
 +interface SiteRequest {
 +  readonly site: string;
@@ -813,6 +815,7 @@ index 0000000000..136f1de468
 +    }[];
 +  }>;
 +  request(tabId: number, text: string, options?: { preset?: string }): Promise<SiteRequest>;
++  fix(tabId: number): Promise<SiteRequest>;
 +  setPart(site: string, part: string, enabled: boolean): Promise<unknown>;
 +  lend(tabId: number, threadId: string): Promise<void>;
 +  giveBack(tabId: number, threadId: string): Promise<void>;
@@ -929,15 +932,17 @@ index 0000000000..136f1de468
 +    }, RUN_POLL_MS);
 +  };
 +
-+  const submit = async (preset?: string) => {
++  const submit = async (preset?: string, fix = false) => {
 +    const sites = await shellSites();
 +    if (!sites || browserTabId === null || busy) return;
-+    const request = text.trim();
++    const request = fix ? "Fix what stopped working" : text.trim();
 +    if (!request && !preset) return;
 +    setBusy(true);
 +    setError(null);
 +    try {
-+      const asked = await sites.request(browserTabId, request, preset ? { preset } : {});
++      const asked = fix
++        ? await sites.fix(browserTabId)
++        : await sites.request(browserTabId, request, preset ? { preset } : {});
 +      const root = asked.dir.slice(0, asked.dir.lastIndexOf("/"));
 +      const project = await sitesProject(threadRef.environmentId, root);
 +      // The model and mode of the thread the user is in, or of their latest thread (a draft has none yet).
@@ -1009,6 +1014,7 @@ index 0000000000..136f1de468
 +    }
 +  })();
 +  const errors = report?.parts.filter((part) => part.applies && part.errors.length > 0) ?? [];
++  const stale = [...new Set((report?.stale ?? []).map((reason) => reason.part.split("/")[1]))];
 +
 +  return (
 +    <Popover open={open} onOpenChange={changeOpen}>
@@ -1029,7 +1035,7 @@ index 0000000000..136f1de468
 +          }
 +        >
 +          <WandSparkles />
-+          {errors.length ? (
++          {errors.length || stale.length ? (
 +            <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-destructive" />
 +          ) : null}
 +        </TooltipTrigger>
@@ -1100,6 +1106,16 @@ index 0000000000..136f1de468
 +            ))}
 +          </div>
 +          <div className="flex items-center justify-between gap-2">
++            {stale.length ? (
++              <Button
++                variant="outline"
++                size="xs"
++                disabled={busy}
++                onClick={() => void submit(undefined, true)}
++              >
++                Fix {stale.join(", ")}
++              </Button>
++            ) : null}
 +            {lastRun ? (
 +              <Button
 +                variant="link"

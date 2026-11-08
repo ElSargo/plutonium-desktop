@@ -8,6 +8,8 @@
 //   POST /v1/sites/tabs/<tab>/apply         apply the folder to a tab now, then report
 //   POST /v1/sites/request                  { tab, text, preset?, part? }: a request to change the tab's
 //                                           site: its folder, requests.md, and the prompt for an agent
+//   POST /v1/sites/fix                      { tab }: a request to fix what's stale on the tab's sites
+//   GET  /v1/sites/stale                    every stale part, and why
 //   GET  /v1/sites/presets                  the presets: { id, title, description }
 //   GET  /v1/sites/log                      the folder's history
 //   POST /v1/sites/reload                   read every site again
@@ -18,7 +20,8 @@ import { fileURLToPath } from "node:url";
 import type { BrowserCdp } from "../cdp.ts";
 import type { Desktop } from "../desktop.ts";
 import { ContextSource, type ThreadDirectory } from "./context.ts";
-import { SiteInjector, type SiteEvent } from "./injector.ts";
+import { SiteInjector, type SiteEvent, type TabReport } from "./injector.ts";
+import { fixRequest, SiteHealth, type StaleReason } from "./health.ts";
 import { installPresets, listPresets } from "./presets.ts";
 import { isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./store.ts";
 
@@ -57,6 +60,7 @@ export interface SitesOptions {
 export class SitesService {
   readonly store: SiteStore;
   readonly injector: SiteInjector;
+  readonly health: SiteHealth;
   private readonly logDir: string;
   private readonly desktop: Desktop;
 
@@ -67,6 +71,10 @@ export class SitesService {
       dir: join(options.home, "sites"),
       onChange: (changed) => {
         console.log(`plutoniumd: sites: ${[...changed].join(", ")} changed`);
+        // A changed site's old reasons don't hold; the next load checks it again.
+        for (const reason of this.health.reasons()) {
+          if (changed.has(reason.part.split("/")[0]!)) this.health.forget(reason.part);
+        }
         this.injector.storeChanged();
       },
     });
@@ -77,6 +85,14 @@ export class SitesService {
       new ContextSource(options.home, options.directory),
     );
     this.injector.onEvent = (site, event) => this.log(site, event);
+    this.health = new SiteHealth(join(options.home, "sites", ".data", "health.json"));
+    this.health.onChange = (part, reasons) =>
+      console.log(
+        reasons.length
+          ? `plutoniumd: sites: ${part} is stale: ${reasons.map((reason) => reason.detail).join("; ")}`
+          : `plutoniumd: sites: ${part} works again`,
+      );
+    this.injector.onReport = (_tab, report) => this.health.update(report);
     this.store.start();
     this.installSkill(options.home);
     try {
@@ -143,6 +159,7 @@ export class SitesService {
         error: compileErrors.get(part.id) ?? null,
       })),
       tabs: this.injector.tabsFor(site.name),
+      stale: this.health.reasons(site.name),
       ...(site.manifest.block.length ? { blockIgnored: "block rules need the sites host extension (not built yet)" } : {}),
     };
   }
@@ -207,6 +224,23 @@ export class SitesService {
     return { site: name, dir, part, preset, prompt };
   }
 
+  /** A tab's report, with the stale reasons of the parts that apply there. */
+  private withStale(report: TabReport): TabReport & { stale: StaleReason[] } {
+    const parts = new Set(report.parts.filter((part) => part.applies).map((part) => part.id));
+    return { ...report, stale: this.health.reasons().filter((reason) => parts.has(reason.part)) };
+  }
+
+  /** A Fix: a request whose text is what broke on the tab's sites. */
+  fix(tabId: number): SiteRequest {
+    const tab = this.desktop.tabs().find((candidate) => candidate.id === tabId);
+    if (!tab) throw new SiteError(`No tab ${tabId}.`, 404);
+    const sites = new Set(this.store.sitesFor(tab.url).map((site) => site.name));
+    const reasons = this.health.reasons().filter((reason) => sites.has(reason.part.split("/")[0]!));
+    if (reasons.length === 0) throw new SiteError("Nothing on this tab's sites is stale.", 409);
+    const parts = new Set(reasons.map((reason) => reason.part.split("/")[1]!));
+    return this.request(tabId, fixRequest(reasons), parts.size === 1 ? { part: [...parts][0] } : {});
+  }
+
   async route(method: string, path: string, body: () => Promise<Record<string, unknown>>): Promise<unknown> {
     if (method === "POST" && path === "/v1/sites/request") {
       const { tab, text, preset, part } = await body();
@@ -220,6 +254,12 @@ export class SitesService {
       return { dir: this.store.dir, sites: this.store.sites().map((site) => this.describe(site)) };
     }
     if (method === "GET" && path === "/v1/sites/log") return { log: this.store.log() };
+    if (method === "GET" && path === "/v1/sites/stale") return { stale: this.health.reasons() };
+    if (method === "POST" && path === "/v1/sites/fix") {
+      const { tab } = await body();
+      if (typeof tab !== "number") throw new SiteError("Expected { tab }.");
+      return this.fix(tab);
+    }
     if (method === "GET" && path === "/v1/sites/presets") {
       return { presets: listPresets(this.presetsDir).map(({ id, title, description }) => ({ id, title, description })) };
     }
@@ -232,8 +272,8 @@ export class SitesService {
     if (tab) {
       const tabId = Number(tab[1]);
       try {
-        if (method === "GET" && !tab[2]) return await this.injector.report(tabId);
-        if (method === "POST" && tab[2]) return await this.injector.applyNow(tabId);
+        if (method === "GET" && !tab[2]) return this.withStale(await this.injector.report(tabId));
+        if (method === "POST" && tab[2]) return this.withStale(await this.injector.applyNow(tabId));
       } catch (error) {
         throw new SiteError((error as Error).message, /No tab/.test((error as Error).message) ? 404 : 409);
       }

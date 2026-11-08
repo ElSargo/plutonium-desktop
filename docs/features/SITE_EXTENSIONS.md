@@ -1,6 +1,6 @@
 # Site extensions: describe a change to a site, an agent writes it
 
-**Status: steps 1 to 4 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. Not built yet: stale detection, the sites host extension, import. The goals:
+**Status: steps 1 to 5 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. Not built yet: the sites host extension, import. The goals:
 - from any browser tab, one button: describe a change to the site ("hide the sidebar", "j/k between results", "make it match my desktop's dark theme"), and an agent writes it as an extension;
 - it applies to that tab while the agent writes it, and to every matching tab, now and on later visits, once it's done;
 - extensions are small and readable (a CSS file, a JS module, a manifest), kept in git, undone in one click, and editable by hand or by asking again;
@@ -270,7 +270,7 @@ A fix is never started without you: it's an agent reading a page you might be si
    - **Other shells:** `shell.sites.showPopover({ tabId, anchor, run })` in the library: the same popover; `run(request)` starts the agent, or without it the prompt is copied. The plain shell has a ✎ beside the address, which starts Claude Code in the thread with the prompt.
    - **`site.change`** waits for KEYS.md's catalogue (its step 2): the shells have no shared actions to add it to yet.
 4. **Presets.** Built: Theme, Keys, Declutter, Readable and Dark as Markdown files (`helper/src/sites/presets/`: front matter with `title`, `description`, `order`, then the prompt), copied into `presets/` at start; a copy the user edited is kept when a newer one ships (the shipped versions' hashes are in `.data/presets.json`). `GET /v1/sites/presets` lists them, both popovers show them, and a preset request puts the preset's text in the prompt. A preset the user writes is one more file there. Not yet: the keys reported to the which-key overlay (KEYS.md's catalogue).
-5. **Stale detection and Fix.** `site_report` already counts each `site.observe` selector's matches.
+5. **Stale detection and Fix.** Built (`helper/src/sites/health.ts`): four seconds after a page loads (`Page.loadEventFired`), the helper reads the tab's report. Each part's `site.observe` selectors that have ever matched are kept (`.data/health.json`); a part is **stale** on the site when it threw, or when a selector that used to match finds nothing. A selector that never matched isn't stale (the part may be for another page of the site). Saving the site forgets its reasons until the next load. `GET /v1/sites/stale`, a site's `stale` in `/v1/sites`, a tab's report's `stale`, `plutonium.ts sites check` (exits 1 when something is stale), and the helper's log say so. Both popovers show a dot and a **Fix** button, and `POST /v1/sites/fix` makes a request whose text is what broke (the part, the error or the selector, the page) with the usual prompt. Not yet: `sites.on("stale")` for `config.js`, which doesn't exist.
 6. **The sites host extension:** `userScripts.register` with the world's CSP, and `block` rules, beside DevTools; then, with EXTENSIONS.md's tab ids, live changes, user stylesheets, the context from the registry, and DevTools off.
 7. **Import** of user scripts and user styles.
 
@@ -289,6 +289,7 @@ A fix is never started without you: it's an agent reading a page you might be si
 | Helper tests (`npm test`): 320 pass, with `test/sites.test.ts` (16) | ✅ |
 | Hydra (2026-11-09, slot 52, its own `T3_HOME`): the button in the browser panel's toolbar; its popover lists example.com's parts with their switches and marks the one that threw | ✅ |
 | Presets (2026-11-09): installed into `presets/` at start, listed by `/v1/sites/presets`; a Keys request's prompt carries the preset's text; the plain shell's ✎ opens the library's popover with the site's parts and the five presets | ✅ |
+| Stale (2026-11-09, a local page): a part's `.target` matched, then the page renamed it; after a reload the part was stale (API, `sites check`, log), `/v1/sites/fix` made a prompt naming the selector, and putting `.target` back made it work again by itself | ✅ |
 | A request from the popover: `requests.md`, the Sites project made, a thread started with the prompt (Codex), the tab tagged with the new thread, a `learn-more` part written and applied (the link a green pill, white text), the tab given back when the run ended | ✅ |
 
 ## Open questions

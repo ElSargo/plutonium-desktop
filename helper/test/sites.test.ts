@@ -301,3 +301,46 @@ describe("presets", () => {
     for (const preset of presets) assert.ok(preset.prompt.length > 100 && preset.description, preset.id);
   });
 });
+
+describe("stale parts", () => {
+  const report = (observers: { selector: string; matched: number }[], errors: { message: string }[] = []) => ({
+    url: "https://example.com/",
+    top: true,
+    context: { thread: null, project: null, sites: {}, shell: null },
+    parts: [
+      { id: "example.com/a", hash: "h", applies: true, running: true, errors: errors.map((e) => ({ ...e, stack: "", where: "start", url: "", at: 0 })), logs: [], observers, keys: [] },
+      { id: "example.com/off", hash: "h", applies: false, running: false, errors: [], logs: [], observers: [], keys: [] },
+    ],
+  });
+
+  test("a selector that used to match and doesn't; an error; then working again", async () => {
+    const { SiteHealth, fixRequest } = await import("../src/sites/health.ts");
+    const health = new SiteHealth(join(tempDir(), "health.json"));
+    const changes: string[] = [];
+    health.onChange = (part, reasons) => changes.push(`${part}:${reasons.length}`);
+    // Never matched: not stale (maybe the part is for another page of the site).
+    health.update(report([{ selector: ".x", matched: 0 }]));
+    assert.deepEqual(health.reasons(), []);
+    health.update(report([{ selector: ".x", matched: 3 }]));
+    health.update(report([{ selector: ".x", matched: 0 }], [{ message: "boom" }]));
+    assert.deepEqual(
+      health.reasons("example.com").map((reason) => [reason.kind, reason.detail]),
+      [["error", "boom"], ["selector", ".x"]],
+    );
+    assert.match(fixRequest(health.reasons()), /throws: boom[\s\S]*site.observe\("\.x"\) matches nothing/);
+    health.update(report([{ selector: ".x", matched: 1 }]));
+    assert.deepEqual(health.reasons(), []);
+    assert.deepEqual(changes, ["example.com/a:2", "example.com/a:0"]);
+  });
+
+  test("what has matched is kept across restarts", async () => {
+    const { SiteHealth } = await import("../src/sites/health.ts");
+    const file = join(tempDir(), "health.json");
+    new SiteHealth(file).update(report([{ selector: ".x", matched: 1 }]));
+    const again = new SiteHealth(file);
+    again.update(report([{ selector: ".x", matched: 0 }]));
+    assert.equal(again.reasons().length, 1);
+    again.forget("example.com/a");
+    assert.equal(again.reasons().length, 0);
+  });
+});

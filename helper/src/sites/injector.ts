@@ -19,6 +19,7 @@ export const WORLD = "plutonium-sites";
 const BINDING = "__plutoniumSitesSend";
 const MAX_FETCH_BYTES = 8 << 20;
 const MAX_SITE_EVENTS = 100;
+const HEALTH_CHECK_MS = 4_000;
 
 interface TabState {
   readonly tabId: number;
@@ -78,6 +79,9 @@ export class SiteInjector {
   private readonly events = new Map<string, SiteEvent[]>();
   /** Called with each error or log line (the daemon writes the site's log). */
   onEvent: ((site: string, event: SiteEvent) => void) | null = null;
+  /** Called with a tab's report a few seconds after its page loaded (health.ts). */
+  onReport: ((tabId: number, report: TabReport) => void) | null = null;
+  private readonly checks = new Map<number, NodeJS.Timeout>();
 
   constructor(cdp: BrowserCdp, desktop: Desktop, store: SiteStore, contexts: ContextSource) {
     this.cdp = cdp;
@@ -296,6 +300,23 @@ export class SiteInjector {
 
   private event({ method, params, sessionId }: CdpEvent): void {
     if (!sessionId) return;
+    if (method === "Page.loadEventFired") {
+      const state = this.sessions.get(sessionId);
+      if (!state || !this.onReport) return;
+      // A few seconds after load: single-page apps render after it.
+      clearTimeout(this.checks.get(state.tabId));
+      this.checks.set(
+        state.tabId,
+        setTimeout(() => {
+          this.checks.delete(state.tabId);
+          this.report(state.tabId).then(
+            (report) => this.onReport?.(state.tabId, report),
+            () => {},
+          );
+        }, HEALTH_CHECK_MS),
+      );
+      return;
+    }
     if (method === "Page.frameNavigated") {
       const state = this.sessions.get(sessionId);
       const { frame } = params as { frame: { id: string; parentId?: string } };

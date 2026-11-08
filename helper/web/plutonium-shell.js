@@ -2823,6 +2823,14 @@ class ShellSites {
       body: JSON.stringify({ tab: tabId, text, preset, part }),
     });
   }
+  /** A request to fix what's stale on tab `tabId`'s sites; resolves as request() does. */
+  fix(tabId) {
+    return helperFiles("/v1/sites/fix", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tab: tabId }),
+    });
+  }
   /** Turns a part on or off. */
   setPart(site, part, enabled) {
     return helperFiles(`/v1/sites/${encodeURIComponent(site)}/parts/${encodeURIComponent(part)}`, {
@@ -2950,11 +2958,13 @@ class SitePopover {
     presets.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;";
     const status = document.createElement("small");
     status.textContent = error;
-    const submit = async (preset) => {
-      if (!text.value.trim() && !preset) return;
+    const submit = async (preset, fix = false) => {
+      if (!fix && !text.value.trim() && !preset) return;
       status.textContent = "…";
       try {
-        const request = await this.sites.request(this.tabId, text.value, preset ? { preset } : {});
+        const request = fix
+          ? await this.sites.fix(this.tabId)
+          : await this.sites.request(this.tabId, text.value, preset ? { preset } : {});
         if (this.run) {
           await this.run(request, preset ?? null);
           status.textContent = "An agent is writing it.";
@@ -2984,7 +2994,15 @@ class SitePopover {
         void submit();
       }
     });
-    this.element.append(presets, go, status);
+    this.element.append(presets, go);
+    // A part stopped working on this site (its selectors match nothing, or it throws).
+    if (report?.stale?.length) {
+      const fix = document.createElement("button");
+      fix.textContent = `Fix (${[...new Set(report.stale.map((reason) => reason.part.split("/")[1]))].join(", ")} stopped working)`;
+      fix.addEventListener("click", () => void submit(null, true));
+      this.element.append(fix);
+    }
+    this.element.append(status);
     text.focus();
   }
 }

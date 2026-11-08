@@ -11,7 +11,7 @@
 //   plutonium.ts shells <command>           the installed shells (shellsCli.ts)
 //   plutonium.ts appearance [light|dark|toggle|default]
 //                                           light or dark for the whole desktop
-//   plutonium.ts sites apply|report|read|snapshot <tab>
+//   plutonium.ts sites apply|report|read|snapshot <tab> | sites check
 //                                           site extensions, for an agent writing one
 //                                           (SITE_EXTENSIONS.md): on a tab of
 //                                           $PLUTONIUM_THREAD_ID's (one lent to it)
@@ -72,7 +72,7 @@ function usage(): never {
       "       plutonium.ts mcp\n" +
       "       plutonium.ts open <url|file>…\n" +
       "       plutonium.ts appearance [light|dark|toggle|default]\n" +
-      "       plutonium.ts sites apply|report|read|snapshot <tab-id>\n" +
+      "       plutonium.ts sites apply|report|read|snapshot <tab-id> | sites check\n" +
       "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
@@ -176,6 +176,14 @@ switch (command) {
     // For an agent writing a site extension, with any provider: the same as the
     // site_apply, site_report, read_tab and snapshot_tab tools, on its thread's tab.
     const [action, tab] = rest;
+    if (action === "check") {
+      // Stale parts: a site changed under them (SITE_EXTENSIONS.md, "Keeping them working").
+      const { stale } = await helperJson<{ stale: { part: string; kind: string; detail: string; url: string }[] }>(socketPath, "GET", "/v1/sites/stale");
+      for (const reason of stale) console.log(`${reason.part}: ${reason.kind === "error" ? "throws" : "matches nothing:"} ${reason.detail} (${reason.url})`);
+      if (stale.length === 0) console.log("No stale site extensions.");
+      process.exitCode = stale.length ? 1 : 0;
+      break;
+    }
     const thread = process.env[THREAD_ID_VARIABLE];
     if (!tab || !/^\d+$/.test(tab) || !["apply", "report", "read", "snapshot"].includes(action ?? "")) usage();
     // Outside a thread (an agent the user started elsewhere, with a copied prompt), apply
