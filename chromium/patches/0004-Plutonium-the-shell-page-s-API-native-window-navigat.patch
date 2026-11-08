@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 04/13] Plutonium: the shell page's API: <native-window>,
+Subject: [PATCH 04/14] Plutonium: the shell page's API: <native-window>,
  navigator.windowBroker, and the shells' events
 
 The web platform side: the <native-window> element and its layout and cross-fade, navigator.windowBroker, and the events and entries the shells get for windows, tabs, displays, captures, downloads and context menus.

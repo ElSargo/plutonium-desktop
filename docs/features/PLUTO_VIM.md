@@ -32,7 +32,7 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
 ## Principles
 
 1. **Vim yields to the page.** A page's keydown handlers see every key first. Vim only acts where Blink would otherwise insert text or run a default editing action. Editors with their own key handling (Monaco, CodeMirror, xterm.js) keep working. A page that integrates can give keys up to the engine (Pages that integrate, below).
-2. **Fields start in insert mode,** unless you choose otherwise for a field, a site or a page that integrates (Pages that integrate, below). Typing into a search box never changes. Normal mode starts with Escape, or with Ctrl+[ where Escape is the page's (single-line inputs).
+2. **Fields start in insert mode,** unless you choose otherwise for a field, a site or a page that integrates (Pages that integrate, below). Typing into a search box never changes. Normal mode starts with Caps Lock or Ctrl+[, which are Pluto Vim's before the page, or with Escape where the page leaves it alone.
 3. **Escape in normal mode belongs to the page.** The first Escape enters normal mode; the second closes the dialog or cancels the edit, as the page expects.
 4. **Edits go through the editor, not around it.** Operators run Blink's editing commands, so pages get real `beforeinput` and `input` events (`deleteWordForward`, `historyUndo`) and frameworks (React, ProseMirror, Lexical, Tiptap) keep their own models. Native apps get edits through text-input-v3 and their own undo.
 5. **Passwords are never touched.** Password fields (web) and fields marked `password`, `sensitive_data` or `hidden_text` (text-input-v3) are always in insert mode, and no config can change that.
@@ -56,7 +56,7 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
 Insert mode is the field's own typing plus a few of vim's insert-mode keys, so registers are within reach without leaving it. They work in every field Pluto Vim is on in, single-line inputs included:
 - **Ctrl+R {register}** puts a register (`Ctrl+R +`, `Ctrl+R a`, `Ctrl+R #1`); Ctrl+R Ctrl+R puts it literally, as in vim.
 - **Ctrl+O** runs one normal-mode command and comes back to insert mode (`Ctrl+O "ayiw`, `Ctrl+O p`).
-- **Ctrl+[** enters normal mode. In multi-line fields Escape does too; in single-line inputs Escape stays the page's (it clears search boxes and closes autocompletes), so Ctrl+[ is the way in.
+- **Caps Lock** and **Ctrl+[** enter normal mode, before the page. In multi-line fields Escape does too, where the page doesn't take it first; in single-line inputs Escape stays the page's (it clears search boxes and closes autocompletes).
 - Ctrl+W and Ctrl+U, as in the first version above.
 
 Each one is an ordinary insert-mode mapping, so `init.js` can move or remove it. Two limits:
@@ -300,7 +300,7 @@ What it settled:
 
 `helper/web/vim/dom.js`: `attach(document)` puts Pluto Vim in every field of a page, in ordinary page JS. The helper serves the engine at `/v1/vim/` (beside `/v1/ui/`), so a shell page loads it with `import("<helper>/v1/vim/dom.js")`. Tests: `helper/test/vimDom.test.ts`, real key events in headless Chromium into a `<textarea>`, an `<input>`, a contenteditable and a ProseMirror editor (from T3 Code's checkout).
 
-- **Keys:** a keydown listener on the window in the bubble phase, so the page's handlers on the field and the document see a key first, and a key one of them took is never vim's. The keys in `vim.opt.claim` (Ctrl+[) are taken in the capture phase instead, before the page.
+- **Keys:** a keydown listener on the window in the bubble phase, so the page's handlers on the field and the document see a key first, and a key one of them took is never vim's. The keys in `vim.opt.claim` (Ctrl+[, and Caps Lock, which is Ctrl+[ to vim) are taken in the capture phase instead, before the page.
 - **Text and edits:** an `<input>`'s or `<textarea>`'s value and selection; a contenteditable's text with a line per block and per `<br>` (not the placeholder `<br>` that holds an empty line open), no-break spaces read as spaces. Edits are `execCommand`, so pages get `beforeinput` and `input`. A newline is `insertParagraph`, or `insertLineBreak` first in a field of one paragraph (a composer); whichever the editor keeps, checked after its mutation observer has run (a microtask, still before the next key). At a block's end Chrome adds a second `<br>` to hold the line open, which ProseMirror keeps as a real break, so the extra one is deleted.
 - **Editors with a model** (ProseMirror, Lexical) only learn of a selection change on the next `selectionchange`; the backend fires one after each move, or an edit lands at the editor's old selection. Undo and redo are a synthetic Ctrl+Z (Ctrl+Shift+Z, Ctrl+Y) to the editor's own history, falling back to the browser's.
 - **The caret:** `caret-shape` (Plutonium's Chromium has it), and `data-pvim-mode` on the field, and `pvim:mode` events.
@@ -323,6 +323,13 @@ Step 2 showed that the engine needs nothing from Blink to read text, move and ed
 
 Verified on a slot (out/Cros, main's series plus 0014; a release Hydra): the engine in Hydra's page in its own world, `plutoniumvimready` received, Ctrl+[ to normal mode, `b dw`, `x`, `u`, `A`, `o`, `k J` in the composer, again after the session restarted. A window keydown listener the page added after the engine took `x`, and vim left it alone, which the step 2 backend couldn't do.
 
+### Caps Lock (built)
+
+A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
+- **In a field Pluto Vim is on in,** it's Ctrl+[ to the engine (`keyFromEvent`), so it's claimed before the page and enters normal mode even where the page takes Escape (Hydra's composer, ProseMirror). The Escape key stays the page's first.
+- **Everywhere else,** pages see an Escape (a page that reads `code` sees `CapsLock`), and native apps get the Escape key: Exo gives them the Escape key's code, not Caps Lock's.
+- **Chromium:** `KeyboardModifierEventRewriter::RemapPressKey` in shell mode (patch 0006), ahead of the user's modifier remapping, so `CapsLockEventRewriter` never toggles the lock; `ClientCode` in `components/exo/keyboard.cc` (patch 0002). There is no way to turn Caps Lock on.
+
 Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach` on each page), registers shared between pages (each world has its own until step 5's store), and Blink-side motions (`gj` over wrapped lines) for later.
 
 ## Decisions
@@ -332,6 +339,7 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - 2026-11-08: Hydra's composer integrates properly rather than relying on Principle 1: it can start in normal mode, Enter sends from either mode, and everything it does is reachable from normal mode and the `:` line. The protocol is open to any page.
 - 2026-11-08: clipboard history is `"#1`…`"#9`. `"#` is vim's alternate file register, which has no meaning here yet; it can move if something comes along that maps onto it.
 - 2026-11-08 (to confirm): Ctrl+[ is Pluto Vim's before the page in a field it's on in (`vim.opt.claim`), because ProseMirror and Hydra's composer take Escape and T3 takes Ctrl+[.
+- 2026-11-08: Caps Lock is Pluto Vim's Escape, and there's no Caps Lock: Ash makes it an Escape with code `CapsLock`, which the engine claims before the page as Ctrl+[, and everything else sees as Escape. Nobody uses Caps Lock as a lock.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
 
 ## Open questions

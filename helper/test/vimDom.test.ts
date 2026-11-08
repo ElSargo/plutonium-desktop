@@ -238,6 +238,23 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.deepEqual(await page.evaluate(() => (window as any).submitted), ["foo "]);
   });
 
+  test("Caps Lock (Plutonium's Escape with code CapsLock) is Ctrl+[: normal mode before the page", async () => {
+    await fresh("#in", "");
+    await page.evaluate(() => { (window as any).escapes.length = 0; });
+    await keys("#in", "foo bar");
+    // Ash's rewrite, as Blink gets it: key Escape, keyCode 27, code CapsLock.
+    const cdp = await page.context().newCDPSession(page);
+    for (const type of ["rawKeyDown", "keyUp"]) {
+      await cdp.send("Input.dispatchKeyEvent", { type: type as "rawKeyDown", key: "Escape", code: "CapsLock", windowsVirtualKeyCode: 27 });
+    }
+    await cdp.detach();
+    await page.evaluate((s) => (window as any).idle(s), "#in");
+    assert.equal((await state("#in")).mode, "normal");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [], "the page never saw it");
+    await keys("#in", "b", "D");
+    assert.equal((await state("#in")).text, "foo ");
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 11/13] Plutonium: screen capture
+Subject: [PATCH 11/14] Plutonium: screen capture
 
 Captures for shells and apps: capture requests to the focused shell, getDisplayMedia, PipeWire video nodes (with dmabufs), window captures from the window's own frames, and ext-image-copy-capture-v1 for grim.
 

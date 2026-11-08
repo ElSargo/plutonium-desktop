@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 07/13] Plutonium: the switcher (Super+Tab), desktop settings
+Subject: [PATCH 07/14] Plutonium: the switcher (Super+Tab), desktop settings
  and display configuration
 
 Ash's overlay that switches between shells, lists windows and installed shells, copies a prompt for the user's agent, opens the backup terminal, and holds the desktop settings and display configuration.

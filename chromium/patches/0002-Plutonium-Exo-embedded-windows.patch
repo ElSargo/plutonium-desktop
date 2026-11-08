@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 02/13] Plutonium: Exo: embedded windows
+Subject: [PATCH 02/14] Plutonium: Exo: embedded windows
 
 Exo's side of embedding: windows parked off the desktop until a page shows them, the page alone sizing them, focus, keyboard and pointer for embedded windows (pointer lock and confine, modal dialogs, popups), drag and drop, input methods, and window icons.
 
@@ -24,6 +24,7 @@ It holds these changes:
 - agents type through the session's keymap, and a temporary one for what it lacks
 - xdg_toplevel_icon_v1, apps' window icons for the shells
 - a parked window stays invisible when Ash demotes it
+- Caps Lock, as Ash makes it, reaches apps as Escape
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -57,7 +58,7 @@ and the parts in these files of:
  components/exo/drag_drop_operation.h          |    4 +
  components/exo/embedded_windows.cc            | 1174 +++++++++++++++++
  components/exo/embedded_windows.h             |  386 ++++++
- components/exo/keyboard.cc                    |   99 +-
+ components/exo/keyboard.cc                    |  119 +-
  components/exo/keyboard.h                     |   17 +
  components/exo/pointer.cc                     |  291 +++-
  components/exo/pointer.h                      |   47 +-
@@ -90,7 +91,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 44 files changed, 4051 insertions(+), 91 deletions(-)
+ 44 files changed, 4067 insertions(+), 95 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
 
@@ -2118,7 +2119,7 @@ index 0000000000..2d25c0e69b
 +
 +#endif  // COMPONENTS_EXO_EMBEDDED_WINDOWS_H_
 diff --git a/components/exo/keyboard.cc b/components/exo/keyboard.cc
-index efa6c2a66d..46558099eb 100644
+index efa6c2a66d..50b0f393d5 100644
 --- a/components/exo/keyboard.cc
 +++ b/components/exo/keyboard.cc
 @@ -31,9 +31,11 @@
@@ -2133,7 +2134,15 @@ index efa6c2a66d..46558099eb 100644
  #include "ui/aura/client/aura_constants.h"
  #include "ui/aura/client/focus_client.h"
  #include "ui/aura/window.h"
-@@ -105,6 +107,13 @@ bool ProcessAcceleratorIfReserved(Surface* surface, ui::KeyEvent* event) {
+@@ -44,6 +46,7 @@
+ #include "ui/events/event.h"
+ #include "ui/events/event_constants.h"
+ #include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
+ #include "ui/events/keycodes/dom/keycode_converter.h"
+ #include "ui/views/widget/widget.h"
+ #include "ui/wm/core/window_util.h"
+@@ -105,6 +108,13 @@ bool ProcessAcceleratorIfReserved(Surface* surface, ui::KeyEvent* event) {
  // TODO(yhanada, https://crbug.com/847500): Remove this when we find a way
  // to fix https://crbug.com/847500 without breaking ARC apps/Lacros browser.
  bool IsImeSupportedSurface(Surface* surface) {
@@ -2147,7 +2156,25 @@ index efa6c2a66d..46558099eb 100644
    aura::Window* window = surface->window();
    while (window) {
      const auto app_type = window->GetProperty(chromeos::kAppTypeKey);
-@@ -235,8 +244,75 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+@@ -140,6 +150,17 @@ bool IsAutoRepeatEnabled(const ui::KeyEvent& event) {
+   return !ui::HasKeyEventSuppressAutoRepeat(*properties);
+ }
+ 
++// Plutonium: in a Plutonium shell, Ash makes Caps Lock an Escape that keeps
++// its code (keyboard_modifier_event_rewriter.cc), for Pluto Vim. A client is
++// told of the key by its code, so it's given the Escape key's.
++ui::DomCode ClientCode(const ui::KeyEvent& event) {
++  if (event.code() == ui::DomCode::CAPS_LOCK &&
++      event.GetDomKey() == ui::DomKey::ESCAPE) {
++    return ui::DomCode::ESCAPE;
++  }
++  return event.code();
++}
++
+ }  // namespace
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -235,8 +256,75 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
    if (!focus_ || seat_->was_shutdown())
      return;
  
@@ -2224,7 +2251,42 @@ index efa6c2a66d..46558099eb 100644
  
    // Ignore synthetic key repeat events.
    if (event->is_repeat()) {
-@@ -417,16 +493,17 @@ void Keyboard::OnSurfaceDestroying(Surface* surface) {
+@@ -310,14 +398,14 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+         }
+ 
+         for (auto& observer : observer_list_) {
+-          observer.OnKeyboardKey(event->time_stamp(), event->code(), true);
++          observer.OnKeyboardKey(event->time_stamp(), ClientCode(*event), true);
+         }
+ 
+         if (!consumed_by_ime) {
+           // Process key press event if not already handled and not already
+           // pressed.
+           uint32_t serial = delegate_->OnKeyboardKey(event->time_stamp(),
+-                                                     event->code(), true);
++                                                     ClientCode(*event), true);
+           if (AreKeyboardKeyAcksNeeded()) {
+             pending_key_acks_.insert(
+                 {serial,
+@@ -328,7 +416,7 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+         }
+         // Keep track of both the physical code and potentially re-written
+         // code that this event generated.
+-        pressed_keys_[physical_code].emplace(event->code(), consumed_by_ime);
++        pressed_keys_[physical_code].emplace(ClientCode(*event), consumed_by_ime);
+       } else if (!should_handle && !event->handled()) {
+         // Non-repeate key events for already pressed key can be sent in some
+         // cases (e.g. Holding 'A' key then holding 'B' key then releasing 'A'
+@@ -348,7 +436,7 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+ 
+       auto& key_state_set = key_state_set_iter->second;
+       auto key_state_iter = std::ranges::find(
+-          key_state_set, event->code(),
++          key_state_set, ClientCode(*event),
+           [](const KeyState& key_state) { return key_state.code; });
+ 
+       // If we can't find the specific key event to release, all previously
+@@ -417,16 +505,17 @@ void Keyboard::OnSurfaceDestroying(Surface* surface) {
  void Keyboard::OnSurfaceFocused(Surface* gained_focus,
                                  Surface* lost_focused,
                                  bool has_focused_surface) {
@@ -2246,7 +2308,7 @@ index efa6c2a66d..46558099eb 100644
    if (focus_)
      delegate_->OnKeyboardModifiers(seat_->xkb_tracker()->GetModifiers());
  }
-@@ -540,6 +617,12 @@ void Keyboard::AddEventHandler() {
+@@ -540,6 +629,12 @@ void Keyboard::AddEventHandler() {
    if (!focus_)
      return;
  
@@ -2259,7 +2321,7 @@ index efa6c2a66d..46558099eb 100644
    // Toplevel window can be not ShellSurface, for example for a notification
    // surface.
    aura::Window* toplevel_window = focus_->window();
-@@ -556,6 +639,12 @@ void Keyboard::RemoveEventHandler() {
+@@ -556,6 +651,12 @@ void Keyboard::RemoveEventHandler() {
    if (!focus_)
      return;
  

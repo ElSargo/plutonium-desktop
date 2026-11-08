@@ -20,6 +20,9 @@ const ALIASES = {
 /** The key of a DOM KeyboardEvent (or anything with its fields), or null for keys vim never sees. */
 export function keyFromEvent(event) {
   if (event.metaKey || event.isComposing || event.key === "Process" || event.key === "Dead") return null;
+  // Caps Lock: a Plutonium shell makes it an Escape that keeps its code, and it's Ctrl+[ to vim,
+  // claimed before the page; the Escape key stays the page's first (PLUTO_VIM.md, "Keys").
+  if (event.key === "Escape" && event.code === "CapsLock" && !event.ctrlKey && !event.altKey) return "<C-[>";
   const name = NAMES[event.key];
   if (name) return withModifiers(name, event.ctrlKey, event.altKey, event.shiftKey && name !== "CR");
   if ([...event.key].length !== 1) return null;

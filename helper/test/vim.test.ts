@@ -61,6 +61,9 @@ describe("keys", () => {
     assert.equal(keyFromEvent({ key: "r", ctrlKey: true }), "<C-r>");
     assert.equal(keyFromEvent({ key: "[", ctrlKey: true }), "<C-[>");
     assert.equal(keyFromEvent({ key: "Escape" }), "<Esc>");
+    assert.equal(keyFromEvent({ key: "Escape", code: "Escape" }), "<Esc>");
+    assert.equal(keyFromEvent({ key: "Escape", code: "CapsLock" }), "<C-[>", "Caps Lock is Ctrl+[");
+    assert.equal(keyFromEvent({ key: "Escape", code: "CapsLock", shiftKey: true }), "<C-[>");
     assert.equal(keyFromEvent({ key: "ArrowLeft", ctrlKey: true }), "<C-Left>");
     assert.equal(keyFromEvent({ key: "d", metaKey: true }), null, "Super is the desktop's");
     assert.equal(keyFromEvent({ key: "Shift", shiftKey: true }), null);
