@@ -2807,6 +2807,10 @@ class ShellSites {
   list() {
     return helperFiles("/v1/sites");
   }
+  /** The presets: [{ id, title, description }]. */
+  async presets() {
+    return (await helperFiles("/v1/sites/presets")).presets;
+  }
   /** What runs in tab `tabId`: its context and each part (applies, running, errors, keys). */
   forTab(tabId) {
     return helperFiles(`/v1/sites/tabs/${tabId}`);
@@ -2849,14 +2853,6 @@ class ShellSites {
   }
 }
 
-const SITE_PRESETS = [
-  ["theme", "Theme"],
-  ["keys", "Keys"],
-  ["declutter", "Declutter"],
-  ["readable", "Readable"],
-  ["dark", "Dark"],
-];
-
 class SitePopover {
   constructor(sites, tabId, anchor, run) {
     ensureDialogStyle();
@@ -2891,13 +2887,19 @@ class SitePopover {
       this.element.style.right = "12px";
       this.element.style.top = "12px";
     }
+    this.presetList = [];
     this.render(null, []);
     void this.load();
   }
 
   async load() {
     try {
-      const [report, all] = await Promise.all([this.sites.forTab(this.tabId), this.sites.list()]);
+      const [report, all, presets] = await Promise.all([
+        this.sites.forTab(this.tabId),
+        this.sites.list(),
+        this.sites.presets().catch(() => []),
+      ]);
+      this.presetList = presets;
       const parts = all.sites
         .filter((site) => site.tabs.some((tab) => tab.id === this.tabId))
         .flatMap((site) => site.parts.map((part) => ({ site: site.name, ...part })));
@@ -2965,9 +2967,10 @@ class SitePopover {
         status.textContent = cause.message;
       }
     };
-    for (const [id, label] of SITE_PRESETS) {
+    for (const { id, title: label, description } of this.presetList) {
       const button = document.createElement("button");
       button.textContent = label;
+      button.title = description;
       button.addEventListener("click", () => void submit(id));
       presets.append(button);
     }

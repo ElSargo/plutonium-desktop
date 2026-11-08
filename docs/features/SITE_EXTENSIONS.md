@@ -1,6 +1,6 @@
 # Site extensions: describe a change to a site, an agent writes it
 
-**Status: steps 1 to 3 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. Not built yet: presets as files, stale detection, the sites host extension, import. The goals:
+**Status: steps 1 to 4 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. Not built yet: stale detection, the sites host extension, import. The goals:
 - from any browser tab, one button: describe a change to the site ("hide the sidebar", "j/k between results", "make it match my desktop's dark theme"), and an agent writes it as an extension;
 - it applies to that tab while the agent writes it, and to every matching tab, now and on later visits, once it's done;
 - extensions are small and readable (a CSS file, a JS module, a manifest), kept in git, undone in one click, and editable by hand or by asking again;
@@ -269,7 +269,7 @@ A fix is never started without you: it's an agent reading a page you might be si
    - **Any agent:** `node <plutonium>/helper/plutonium.ts sites apply|report|read|snapshot <tab>` in a shell (in its thread; outside one, `apply` and `report` only). The prompt names both ways: in the first live run (Codex), the agent didn't find the MCP tools and guessed a selector from memory; with the shell form in the prompt and "read the page before writing a selector" in the skill, the second run read the page and verified on the tab.
    - **Other shells:** `shell.sites.showPopover({ tabId, anchor, run })` in the library: the same popover; `run(request)` starts the agent, or without it the prompt is copied. The plain shell has a ✎ beside the address, which starts Claude Code in the thread with the prompt.
    - **`site.change`** waits for KEYS.md's catalogue (its step 2): the shells have no shared actions to add it to yet.
-4. **Presets** as files in `presets/` (the skill describes Theme, Keys and Declutter for now); the keys reported to the which-key overlay once KEYS.md's catalogue exists.
+4. **Presets.** Built: Theme, Keys, Declutter, Readable and Dark as Markdown files (`helper/src/sites/presets/`: front matter with `title`, `description`, `order`, then the prompt), copied into `presets/` at start; a copy the user edited is kept when a newer one ships (the shipped versions' hashes are in `.data/presets.json`). `GET /v1/sites/presets` lists them, both popovers show them, and a preset request puts the preset's text in the prompt. A preset the user writes is one more file there. Not yet: the keys reported to the which-key overlay (KEYS.md's catalogue).
 5. **Stale detection and Fix.** `site_report` already counts each `site.observe` selector's matches.
 6. **The sites host extension:** `userScripts.register` with the world's CSP, and `block` rules, beside DevTools; then, with EXTENSIONS.md's tab ids, live changes, user stylesheets, the context from the registry, and DevTools off.
 7. **Import** of user scripts and user styles.
@@ -288,6 +288,7 @@ A fix is never started without you: it's an agent reading a page you might be si
 | `POST /v1/sites/request` from the shell page: makes `wikipedia.org/`, appends to `requests.md`, returns the prompt | ✅ |
 | Helper tests (`npm test`): 320 pass, with `test/sites.test.ts` (16) | ✅ |
 | Hydra (2026-11-09, slot 52, its own `T3_HOME`): the button in the browser panel's toolbar; its popover lists example.com's parts with their switches and marks the one that threw | ✅ |
+| Presets (2026-11-09): installed into `presets/` at start, listed by `/v1/sites/presets`; a Keys request's prompt carries the preset's text; the plain shell's ✎ opens the library's popover with the site's parts and the five presets | ✅ |
 | A request from the popover: `requests.md`, the Sites project made, a thread started with the prompt (Codex), the tab tagged with the new thread, a `learn-more` part written and applied (the link a green pill, white text), the tab given back when the run ended | ✅ |
 
 ## Open questions

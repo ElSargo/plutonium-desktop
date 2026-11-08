@@ -266,3 +266,38 @@ describe("a tab's context", () => {
     assert.deepEqual(source.contextFor([]), { thread: null, project: null, sites: {}, shell: null });
   });
 });
+
+describe("presets", () => {
+  test("a preset file: front matter, then the prompt", async () => {
+    const { parsePreset } = await import("../src/sites/presets.ts");
+    const preset = parsePreset("---\ntitle: Theme\ndescription: Match the desktop\norder: 2\n---\nDo the theme.\n", "theme");
+    assert.deepEqual(preset, { id: "theme", title: "Theme", description: "Match the desktop", order: 2, prompt: "Do the theme." });
+    assert.equal(parsePreset("Just a prompt.", "x").title, "x");
+  });
+
+  test("shipped presets are installed, updated, and an edited copy is kept", async () => {
+    const { installPresets, listPresets } = await import("../src/sites/presets.ts");
+    const shipped = tempDir();
+    writeFileSync(join(shipped, "keys.md"), "---\ntitle: Keys\norder: 2\n---\nv1");
+    writeFileSync(join(shipped, "theme.md"), "---\ntitle: Theme\norder: 1\n---\nv1");
+    const dir = join(tempDir(), "presets");
+    const state = join(tempDir(), "presets.json");
+    const url = new URL(`file://${shipped}/`);
+    assert.deepEqual(installPresets(dir, state, url).sort(), ["keys", "theme"]);
+    assert.deepEqual(listPresets(dir).map((preset) => preset.id), ["theme", "keys"]);
+    // The user edits keys; both are shipped again, changed.
+    writeFileSync(join(dir, "keys.md"), "---\ntitle: Keys\n---\nmine");
+    writeFileSync(join(shipped, "keys.md"), "---\ntitle: Keys\n---\nv2");
+    writeFileSync(join(shipped, "theme.md"), "---\ntitle: Theme\n---\nv2");
+    assert.deepEqual(installPresets(dir, state, url), ["theme"]);
+    assert.match(readFileSync(join(dir, "keys.md"), "utf8"), /mine/);
+    assert.match(readFileSync(join(dir, "theme.md"), "utf8"), /v2/);
+  });
+
+  test("the shipped presets parse", async () => {
+    const { listPresets } = await import("../src/sites/presets.ts");
+    const presets = listPresets(new URL("../src/sites/presets/", import.meta.url).pathname);
+    assert.deepEqual(presets.map((preset) => preset.id), ["theme", "keys", "declutter", "readable", "dark"]);
+    for (const preset of presets) assert.ok(preset.prompt.length > 100 && preset.description, preset.id);
+  });
+});

@@ -32,11 +32,11 @@ Folded from:
  .../src/components/preview/previewBridge.ts   |   7 +-
  .../components/preview/usePreviewSession.ts   |   8 +-
  .../src/plutonium/PlutoniumBrowserHost.tsx    | 370 +++++++++
- apps/web/src/plutonium/SiteButton.tsx         | 380 +++++++++
+ apps/web/src/plutonium/SiteButton.tsx         | 381 +++++++++
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 13 files changed, 1630 insertions(+), 36 deletions(-)
+ 13 files changed, 1631 insertions(+), 36 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
  create mode 100644 apps/web/src/plutonium/SiteButton.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
@@ -743,10 +743,10 @@ index 0000000000..713ee42b49
 +}
 diff --git a/apps/web/src/plutonium/SiteButton.tsx b/apps/web/src/plutonium/SiteButton.tsx
 new file mode 100644
-index 0000000000..56e7125b41
+index 0000000000..136f1de468
 --- /dev/null
 +++ b/apps/web/src/plutonium/SiteButton.tsx
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,381 @@
 +// Site extensions (SITE_EXTENSIONS.md, "The button"): a request starts a thread
 +// in the Sites project with the helper's prompt, and lends it the tab until the
 +// run ends, so its agent's tab tools reach it.
@@ -795,9 +795,15 @@ index 0000000000..56e7125b41
 +  readonly dir: string;
 +  readonly prompt: string;
 +}
++interface Preset {
++  readonly id: string;
++  readonly title: string;
++  readonly description: string;
++}
 +/** The shell library's site extensions (helper/web/plutonium-shell.js, ShellSites). */
 +interface ShellSites {
 +  forTab(tabId: number): Promise<TabReport>;
++  presets(): Promise<readonly Preset[]>;
 +  list(): Promise<{
 +    dir: string;
 +    sites: {
@@ -811,14 +817,6 @@ index 0000000000..56e7125b41
 +  lend(tabId: number, threadId: string): Promise<void>;
 +  giveBack(tabId: number, threadId: string): Promise<void>;
 +}
-+
-+const PRESETS = [
-+  { id: "theme", label: "Theme" },
-+  { id: "keys", label: "Keys" },
-+  { id: "declutter", label: "Declutter" },
-+  { id: "readable", label: "Readable" },
-+  { id: "dark", label: "Dark" },
-+] as const;
 +
 +const SITES_PROJECT_TITLE = "Sites";
 +const DONE = new Set(["completed", "interrupted", "failed", "cancelled", "rolled_back"]);
@@ -842,6 +840,7 @@ index 0000000000..56e7125b41
 +    { site: string; name: string; title: string; enabled: boolean }[]
 +  >([]);
 +  const [error, setError] = useState<string | null>(null);
++  const [presets, setPresets] = useState<readonly Preset[]>([]);
 +  const [lastRun, setLastRun] = useState<ScopedThreadRef | null>(null);
 +  const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
 +  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
@@ -856,6 +855,7 @@ index 0000000000..56e7125b41
 +    try {
 +      const tab = await sites.forTab(browserTabId);
 +      const all = await sites.list();
++      setPresets(await sites.presets().catch(() => []));
 +      setReport(tab);
 +      // The sites whose patterns match the tab (the helper lists each site's tabs).
 +      setParts(
@@ -949,7 +949,7 @@ index 0000000000..56e7125b41
 +      if (!current) throw new Error("Start a thread first, so Hydra knows which agent to use.");
 +      const threadId = newThreadId();
 +      const title = deriveThreadTitleSeed({
-+        text: `${asked.site}: ${request || PRESETS.find((p) => p.id === preset)?.label || preset}`,
++        text: `${asked.site}: ${request || presets.find((p) => p.id === preset)?.title || preset}`,
 +        attachments: [],
 +      });
 +      const createdAt = new Date().toISOString();
@@ -1086,15 +1086,16 @@ index 0000000000..56e7125b41
 +            }}
 +          />
 +          <div className="flex flex-wrap gap-1">
-+            {PRESETS.map((preset) => (
++            {presets.map((preset) => (
 +              <Button
 +                key={preset.id}
 +                variant="outline"
 +                size="xs"
 +                disabled={busy}
 +                onClick={() => void submit(preset.id)}
++                title={preset.description}
 +              >
-+                {preset.label}
++                {preset.title}
 +              </Button>
 +            ))}
 +          </div>

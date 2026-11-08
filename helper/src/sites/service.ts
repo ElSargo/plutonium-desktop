@@ -8,6 +8,7 @@
 //   POST /v1/sites/tabs/<tab>/apply         apply the folder to a tab now, then report
 //   POST /v1/sites/request                  { tab, text, preset?, part? }: a request to change the tab's
 //                                           site: its folder, requests.md, and the prompt for an agent
+//   GET  /v1/sites/presets                  the presets: { id, title, description }
 //   GET  /v1/sites/log                      the folder's history
 //   POST /v1/sites/reload                   read every site again
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,6 +19,7 @@ import type { BrowserCdp } from "../cdp.ts";
 import type { Desktop } from "../desktop.ts";
 import { ContextSource, type ThreadDirectory } from "./context.ts";
 import { SiteInjector, type SiteEvent } from "./injector.ts";
+import { installPresets, listPresets } from "./presets.ts";
 import { isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./store.ts";
 
 /** The checkout (or install) the helper runs from. */
@@ -34,8 +36,6 @@ function writeIfChanged(file: string, text: string): void {
   if (current !== text) writeFileSync(file, text);
 }
 
-/** The presets the skill describes. */
-const PRESETS = new Set(["theme", "keys", "declutter", "readable", "dark"]);
 
 export interface SiteRequest {
   readonly site: string;
@@ -79,6 +79,12 @@ export class SitesService {
     this.injector.onEvent = (site, event) => this.log(site, event);
     this.store.start();
     this.installSkill(options.home);
+    try {
+      const written = installPresets(this.presetsDir, join(this.store.dir, ".data", "presets.json"));
+      if (written.length) console.log(`plutoniumd: sites: presets ${written.join(", ")} installed`);
+    } catch (error) {
+      console.warn(`plutoniumd: sites: can't install the presets: ${(error as Error).message}`);
+    }
     const broken = this.store.sites().filter((site) => site.error);
     console.log(
       `plutoniumd: sites: ${this.store.sites().length} in ${this.store.dir}` +
@@ -98,6 +104,10 @@ export class SitesService {
     } catch (error) {
       console.warn(`plutoniumd: sites: can't write the skill: ${(error as Error).message}`);
     }
+  }
+
+  get presetsDir(): string {
+    return join(this.store.dir, "presets");
   }
 
   private log(site: string, event: SiteEvent): void {
@@ -152,8 +162,12 @@ export class SitesService {
       throw new SiteError(`Tab ${tabId} has no page to change.`);
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") throw new SiteError(`Tab ${tabId} isn't a website (${url.protocol}).`);
-    const preset = options.preset && PRESETS.has(options.preset) ? options.preset : null;
-    if (options.preset && !preset) throw new SiteError(`No preset ${options.preset}: ${[...PRESETS].join(", ")}.`);
+    const presets = listPresets(this.presetsDir);
+    const presetSpec = options.preset ? presets.find((candidate) => candidate.id === options.preset) : undefined;
+    if (options.preset && !presetSpec) {
+      throw new SiteError(`No preset ${options.preset}: ${presets.map((candidate) => candidate.id).join(", ")}.`);
+    }
+    const preset = presetSpec?.id ?? null;
     const part = options.part ?? preset ?? null;
     if (part !== null && !/^[a-z0-9][a-z0-9_-]*$/.test(part)) throw new SiteError(`Not a part name: ${part}.`);
     if (!text.trim() && !preset) throw new SiteError("Say what to change, or pick a preset.");
@@ -176,8 +190,12 @@ export class SitesService {
     const prompt = [
       `Change ${name} for me with a Plutonium site extension. First read ${join(this.store.dir, "SKILL.md")}.`,
       "",
-      `The request: ${text.trim() || `the ${preset} preset, as the skill describes it`}`,
-      preset ? `Preset: ${preset} (write the "${preset}" part).` : part ? `Edit the "${part}" part.` : "Pick the part from the request and the parts already there (or add one).",
+      `The request: ${text.trim() || `the ${presetSpec?.title ?? preset} preset, as it is`}`,
+      presetSpec
+        ? `\nThe ${presetSpec.title} preset (${join(this.presetsDir, `${presetSpec.id}.md`)}); the request, if any, narrows it:\n\n${presetSpec.prompt}\n`
+        : part
+          ? `Edit the "${part}" part.`
+          : "Pick the part from the request and the parts already there (or add one).",
       "",
       `The site's folder is ${dir}; what was asked before is in its requests.md.`,
       `The tab is ${tabId} (${tab.url}), lent to this thread. Look at the page before writing selectors, and check each change on that tab: with the site_apply, site_read and site_snapshot tools (T3's MCP server, or Plutonium's), or in a shell with \`node ${CLI} sites apply|read|snapshot ${tabId}\`.`,
@@ -202,6 +220,9 @@ export class SitesService {
       return { dir: this.store.dir, sites: this.store.sites().map((site) => this.describe(site)) };
     }
     if (method === "GET" && path === "/v1/sites/log") return { log: this.store.log() };
+    if (method === "GET" && path === "/v1/sites/presets") {
+      return { presets: listPresets(this.presetsDir).map(({ id, title, description }) => ({ id, title, description })) };
+    }
     if (method === "POST" && path === "/v1/sites/reload") {
       this.store.reload();
       this.injector.storeChanged();
