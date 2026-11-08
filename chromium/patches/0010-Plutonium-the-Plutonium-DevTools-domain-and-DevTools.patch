@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 10/13] Plutonium: the Plutonium DevTools domain, and DevTools
+Subject: [PATCH 10/14] Plutonium: the Plutonium DevTools domain, and DevTools
  on a Unix socket
 
 The browser target's Plutonium domain (cros_protocol.pdl) for the helper and its agents: windows, tabs, input, notifications, media, the hardware keys. DevTools are served on a Unix socket that only this user's processes may connect to (--plutonium-remote-debugging-socket).

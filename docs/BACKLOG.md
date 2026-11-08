@@ -49,6 +49,15 @@ Done in Phase 2: window broker and grants, grant-checked embedding and input,
 shell-only broker API (`--plutonium-shell-origin`), push events instead of the
 JSON registry, viz hit-test rewrite limited to browser-linked children.
 
+- [ ] **Extensions can script the shell page and use its window broker.** S ·
+  Fixed on branch `shell-ext-guard` (Chromium patch 0014, checked on X11;
+  not merged). Found 2026-11-08 (`EXTENSIONS.md`, "Extensions reach the shell page"): the
+  shell page is a tab in an `app` window, so `<all_urls>` content scripts run
+  in it and `scripting.executeScript` reaches it, and the broker answers in
+  the isolated world as in the page's. Any loaded extension with access to all
+  sites drives every window and tab. Make shell documents restricted URLs to
+  extensions (`PermissionsData::IsRestrictedUrl`, from `IsShellDocument()`),
+  and bind the broker in the main world only.
 - [x] **DevTools only for this user.** S · The session's browser served
   DevTools on 127.0.0.1:9224, which any local process (another user, a
   sandboxed app with network access) could use to drive the whole browser.
