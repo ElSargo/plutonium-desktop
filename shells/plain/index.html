@@ -152,6 +152,7 @@
     <button id="web-forward" title="Forward">→</button>
     <button id="web-reload" title="Reload">⟳</button>
     <input id="web-url" spellcheck="false" aria-label="Address">
+    <button id="web-site" title="Change this site (an agent writes a site extension)">✎</button>
   </div>
   <div id="stage-wrap">
   <div id="stage"></div>
@@ -724,6 +725,26 @@ $("web-url").onkeydown = (event) => {
   if (event.key !== "Enter" || !t) return;
   shell.navigateTab(t.id, event.target.value).catch((error) => setStatus(error.message));
   event.target.blur();
+};
+// Site extensions: the library's popover; a request starts Claude Code in this
+// thread with the prompt (the tab is the thread's, so its agent reaches it).
+$("web-site").onclick = () => {
+  const t = activeWebTab();
+  if (!t || !shell?.sites) return;
+  shell.sites.showPopover({
+    tabId: t.id,
+    anchor: $("web-site"),
+    run: async (request) => {
+      const setup = await fetch(`${helper}/v1/thread-setup?thread=${encodeURIComponent(state.current)}`).then((r) => r.json());
+      const mcp = JSON.stringify({ mcpServers: { plutonium: { type: "stdio", ...setup.mcpServer } } });
+      // In the site's folder (what Claude Code asks to trust), and the prompt before
+      // --mcp-config, which takes every argument after it.
+      launch([
+        "foot", `--working-directory=${request.dir}`, "-T", `site: ${request.site}`,
+        "-e", "claude", request.prompt, "--mcp-config", mcp,
+      ]);
+    },
+  });
 };
 // The library's download list, for this thread.
 $("downloads").onclick = () => shell?.showDownloads?.({ thread: state.current, anchor: $("downloads") });

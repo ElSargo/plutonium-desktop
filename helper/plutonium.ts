@@ -11,6 +11,11 @@
 //   plutonium.ts shells <command>           the installed shells (shellsCli.ts)
 //   plutonium.ts appearance [light|dark|toggle|default]
 //                                           light or dark for the whole desktop
+//   plutonium.ts sites apply|report|read|snapshot <tab> | sites check
+//                         | sites import <file|url> [site]
+//                                           site extensions, for an agent writing one
+//                                           (SITE_EXTENSIONS.md): on a tab of
+//                                           $PLUTONIUM_THREAD_ID's (one lent to it)
 //   plutonium.ts stop-x-displays            stops the threads' X servers a stopped
 //                                           helper left running (plutonium stop)
 //
@@ -25,11 +30,11 @@ import { runOpen } from "./src/opener.ts";
 import { ShellPackages } from "./src/shellPackages.ts";
 import { plutoHome } from "./src/shells.ts";
 import { PLUTONIUM_ROOT, runShellsCommand } from "./src/shellsCli.ts";
-import { HELPER_VARIABLE, stopXDisplays, wantsShow, xDisplayStatePath } from "./src/threads.ts";
+import { HELPER_VARIABLE, stopXDisplays, THREAD_ID_VARIABLE, wantsShow, xDisplayStatePath } from "./src/threads.ts";
 
 const [command, ...rest] = process.argv.slice(2);
 // An app's own arguments (after `launch <thread-id>`) aren't ours to parse.
-const ownArgs = command === "launch" || command === "open" || command === "shells" ? [] : rest;
+const ownArgs = command === "launch" || command === "open" || command === "shells" || command === "sites" ? [] : rest;
 const { values, positionals } = parseArgs({
   args: ownArgs,
   allowPositionals: true,
@@ -68,6 +73,7 @@ function usage(): never {
       "       plutonium.ts mcp\n" +
       "       plutonium.ts open <url|file>…\n" +
       "       plutonium.ts appearance [light|dark|toggle|default]\n" +
+      "       plutonium.ts sites apply|report|read|snapshot <tab-id> | sites check | sites import <file|url> [site]\n" +
       "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
@@ -165,6 +171,71 @@ switch (command) {
       state = (await helperJson<{ value: State }>(socketPath, "POST", `${base}/set`, { colorScheme })).value;
     } else usage();
     console.log(`${state.colorScheme}${state.chosen ? "" : " (the default)"}`);
+    break;
+  }
+  case "sites": {
+    // For an agent writing a site extension, with any provider: the same as the
+    // site_apply, site_report, read_tab and snapshot_tab tools, on its thread's tab.
+    const [action, tab] = rest;
+    if (action === "import") {
+      // A user script or user style, from a file or a URL, as a part of its site.
+      const [, from, site] = rest;
+      if (!from) usage();
+      const { readFileSync } = await import("node:fs");
+      const text = /^https?:\/\//.test(from) ? await (await fetch(from)).text() : readFileSync(from, "utf8");
+      try {
+        const result = await helperJson<{ site: string; part: string; notes: string[] }>(socketPath, "POST", "/v1/sites/import", { text, source: from, site });
+        console.log(`imported as ${result.site}/${result.part}`);
+        for (const note of result.notes) console.log(`  not carried over: ${note}`);
+      } catch (error) {
+        console.error(`plutonium.ts sites import: ${(error as Error).message}`);
+        process.exitCode = 1;
+      }
+      break;
+    }
+    if (action === "check") {
+      // Stale parts: a site changed under them (SITE_EXTENSIONS.md, "Keeping them working").
+      const { stale } = await helperJson<{ stale: { part: string; kind: string; detail: string; url: string }[] }>(socketPath, "GET", "/v1/sites/stale");
+      for (const reason of stale) console.log(`${reason.part}: ${reason.kind === "error" ? "throws" : "matches nothing:"} ${reason.detail} (${reason.url})`);
+      if (stale.length === 0) console.log("No stale site extensions.");
+      process.exitCode = stale.length ? 1 : 0;
+      break;
+    }
+    const thread = process.env[THREAD_ID_VARIABLE];
+    if (!tab || !/^\d+$/.test(tab) || !["apply", "report", "read", "snapshot"].includes(action ?? "")) usage();
+    // Outside a thread (an agent the user started elsewhere, with a copied prompt), apply
+    // and report go to any tab: the helper's socket is this user's only.
+    if (!thread && (action === "read" || action === "snapshot")) {
+      console.error(`plutonium.ts sites ${action}: only in a Plutonium thread (no PLUTONIUM_THREAD_ID).`);
+      process.exit(2);
+    }
+    const base = thread ? `/v1/threads/${encodeURIComponent(thread)}` : "";
+    try {
+      if (action === "apply" || action === "report") {
+        const path = thread ? `${base}/tabs/${tab}/sites` : `/v1/sites/tabs/${tab}`;
+        const report = await helperJson(socketPath, action === "apply" ? "POST" : "GET", `${path}${action === "apply" ? "/apply" : ""}`);
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        const { content } = await helperJson<{ content: { type: string; text?: string; data?: string }[] }>(socketPath, "POST", `${base}/mcp/call`, {
+          name: action === "read" ? "read_tab" : "snapshot_tab",
+          arguments: { tab_id: Number(tab) },
+        });
+        for (const part of content) {
+          if (part.type === "text") console.log(part.text);
+          else if (part.type === "image" && part.data) {
+            const { writeFileSync } = await import("node:fs");
+            const { join } = await import("node:path");
+            const { tmpdir } = await import("node:os");
+            const file = join(tmpdir(), `plutonium-tab-${tab}-${Date.now()}.png`);
+            writeFileSync(file, Buffer.from(part.data, "base64"));
+            console.log(file);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`plutonium.ts sites ${action}: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
     break;
   }
   case "stop-x-displays":

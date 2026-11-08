@@ -20,8 +20,10 @@ Folded from:
 - start_recording and stop_recording for an agent's windows
 - remote clients see native windows
 - native windows are their threads' server tabs
+
+- site extensions: site_apply, site_report, site_read and site_snapshot on the tab lent to the thread
 ---
- apps/server/src/mcp/McpHttpServer.ts          |  38 +-
+ apps/server/src/mcp/McpHttpServer.ts          |  55 +-
  apps/server/src/mcp/OrchestratorMcpService.ts |   5 +
  .../server/src/mcp/PreviewAutomationBroker.ts |   9 +-
  .../src/mcp/providerUsageWarning.test.ts      |  70 ++
@@ -31,11 +33,11 @@ Folded from:
  apps/server/src/mcp/toolkits/preview/tools.ts |  14 +-
  .../server/src/plutonium/windowStream.test.ts |  32 +
  apps/server/src/plutonium/windowStream.ts     | 304 +++++++
- apps/server/src/plutonium/windowTabs.test.ts  | 343 ++++++++
- apps/server/src/plutonium/windowTabs.ts       | 575 +++++++++++++
- apps/server/src/plutonium/windowTools.test.ts | 275 +++++++
- apps/server/src/plutonium/windowTools.ts      | 762 ++++++++++++++++++
- 14 files changed, 2506 insertions(+), 7 deletions(-)
+ apps/server/src/plutonium/windowTabs.test.ts  | 343 +++++++
+ apps/server/src/plutonium/windowTabs.ts       | 575 ++++++++++++
+ apps/server/src/plutonium/windowTools.test.ts | 275 ++++++
+ apps/server/src/plutonium/windowTools.ts      | 838 ++++++++++++++++++
+ 14 files changed, 2599 insertions(+), 7 deletions(-)
  create mode 100644 apps/server/src/mcp/providerUsageWarning.test.ts
  create mode 100644 apps/server/src/mcp/providerUsageWarning.ts
  create mode 100644 apps/server/src/plutonium/windowStream.test.ts
@@ -46,7 +48,7 @@ Folded from:
  create mode 100644 apps/server/src/plutonium/windowTools.ts
 
 diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
-index 9bc3b9da43..de3bcb77c7 100644
+index 9bc3b9da43..9da3a9ae24 100644
 --- a/apps/server/src/mcp/McpHttpServer.ts
 +++ b/apps/server/src/mcp/McpHttpServer.ts
 @@ -77,6 +77,7 @@ import {
@@ -73,7 +75,7 @@ index 9bc3b9da43..de3bcb77c7 100644
                  },
                  ...(screenshotPath === undefined ? {} : { screenshotPath }),
                };
-@@ -1182,6 +1185,38 @@ export const layerInProcessMcpServer = McpServer.middleware<{
+@@ -1182,6 +1185,55 @@ export const layerInProcessMcpServer = McpServer.middleware<{
    { global: true },
  ).pipe(Layer.provideMerge(McpServer.McpServer.layer));
  
@@ -93,6 +95,22 @@ index 9bc3b9da43..de3bcb77c7 100644
 +  );
 +});
 +
++const registerSiteSnapshot = Effect.fn("McpHttpServer.registerSiteSnapshot")(function* () {
++  const threads = yield* ThreadManagementService.ThreadManagementService;
++  const built = yield* PlutoniumWindowTools.SiteSnapshotToolkit;
++  yield* registerImageTool(
++    PlutoniumWindowTools.SiteSnapshotTool,
++    (payload) =>
++      built
++        .handle("site_snapshot", payload)
++        .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
++    (effect) =>
++      effect.pipe(Effect.provideService(ThreadManagementService.ThreadManagementService, threads)),
++    "screenshot",
++    (error) => error.message,
++  );
++});
++
 +/** Plutonium: the native window tools, in a Plutonium session only. */
 +export const layerPlutoniumWindowToolkit = Layer.unwrap(
 +  Effect.sync(() =>
@@ -103,6 +121,7 @@ index 9bc3b9da43..de3bcb77c7 100644
 +            PlutoniumWindowTools.layerStandard,
 +          ),
 +          imageToolRegistration(registerWindowSnapshot(), PlutoniumWindowTools.layerSnapshot),
++          imageToolRegistration(registerSiteSnapshot(), PlutoniumWindowTools.layerSiteSnapshot),
 +          toolkitRegistration(PlutoniumWindowTools.TabToolkit, PlutoniumWindowTools.layerTabs),
 +        )
 +      : Layer.empty,
@@ -112,7 +131,7 @@ index 9bc3b9da43..de3bcb77c7 100644
  export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE, RR>) =>
    McpServer.layerHttp({
      name: "T3 Code",
-@@ -1207,4 +1242,5 @@ export const layerTools = Layer.mergeAll(
+@@ -1207,4 +1259,5 @@ export const layerTools = Layer.mergeAll(
    layerHtmlToolkit,
  );
  
@@ -1997,10 +2016,10 @@ index 0000000000..d4aebb10cb
 +);
 diff --git a/apps/server/src/plutonium/windowTools.ts b/apps/server/src/plutonium/windowTools.ts
 new file mode 100644
-index 0000000000..a6d9d6b311
+index 0000000000..2c2c7bac48
 --- /dev/null
 +++ b/apps/server/src/plutonium/windowTools.ts
-@@ -0,0 +1,762 @@
+@@ -0,0 +1,838 @@
 +// @effect-diagnostics nodeBuiltinImport:off - requests go to the Plutonium helper's Unix socket
 +/**
 + * Plutonium: the native window tools (find_apps, launch_app, snapshot_window,
@@ -2330,6 +2349,55 @@ index 0000000000..a6d9d6b311
 +  { title: "Stop window recording" },
 +);
 +
++// Site extensions (Plutonium's SITE_EXTENSIONS.md): for an agent writing one,
++// on the browser tab the user lent its thread (the request names its id).
++const siteTabId = Schema.Int.annotate({
++  description: "The browser tab's id from the request: the tab the user lent this thread.",
++});
++
++const SiteApplyTool = windowTool(
++  "site_apply",
++  "Apply the site extensions folder (Plutonium's sites folder; read its SKILL.md first) to the browser tab the user lent this thread, now, in place (no reload), and report what runs there: for each part, whether it applies to the tab, the errors it threw, what it logged, how many elements each site.observe() selector matched (0 usually means a wrong selector), and its keys; and the tab's context (thread, project, settings) as scripts see it. Saving a file applies it too; this waits for the result.",
++  { tab_id: siteTabId },
++  { title: "Apply site extensions" },
++);
++
++const SiteReportTool = windowTool(
++  "site_report",
++  "Report what site extension parts run in the browser tab the user lent this thread, as site_apply does, without applying anything.",
++  { tab_id: siteTabId },
++  { title: "Site extensions report" },
++);
++
++const SiteReadTool = windowTool(
++  "site_read",
++  "Read the page in the browser tab the user lent this thread as an accessibility tree (YAML): roles, names and text, to find what a site extension should change and stable selectors for it.",
++  { tab_id: siteTabId },
++  { title: "Read lent tab" },
++);
++
++export const SiteSnapshotTool = Tool.make("site_snapshot", {
++  description:
++    "Take a screenshot of the browser tab the user lent this thread (the visible part of the page), to check a site extension's change, even if the user isn't looking at it.",
++  parameters: Schema.Struct({ tab_id: siteTabId }),
++  success: Schema.Struct({
++    tab_id: Schema.Int,
++    screenshot: Schema.Struct({
++      mimeType: Schema.Literal("image/png"),
++      data: Schema.String,
++      width: Schema.Int,
++      height: Schema.Int,
++    }),
++  }),
++  failure: WindowToolFailure,
++  dependencies,
++})
++  .annotate(Tool.Title, "Screenshot lent tab")
++  .annotate(Tool.Readonly, true)
++  .annotate(Tool.Destructive, false)
++  .annotate(Tool.Idempotent, true)
++  .annotate(Tool.OpenWorld, true);
++
 +export const WindowStandardToolkit = Toolkit.make(
 +  ListWindowsTool,
 +  FindAppsTool,
@@ -2347,9 +2415,13 @@ index 0000000000..a6d9d6b311
 +  CloseWindowTool,
 +  StartRecordingTool,
 +  StopRecordingTool,
++  SiteApplyTool,
++  SiteReportTool,
++  SiteReadTool,
 +);
 +
 +export const WindowSnapshotToolkit = Toolkit.make(SnapshotWindowTool);
++export const SiteSnapshotToolkit = Toolkit.make(SiteSnapshotTool);
 +
 +// The helper's tab tools, on T3's tabs.
 +
@@ -2654,6 +2726,29 @@ index 0000000000..a6d9d6b311
 +  close_window: McpToolAccess.actsAsCaller(forward("close_window")),
 +  start_recording: McpToolAccess.actsAsCaller(forward("start_recording")),
 +  stop_recording: McpToolAccess.actsAsCaller(forward("stop_recording")),
++  site_apply: McpToolAccess.actsAsCaller(forward("site_apply")),
++  site_report: McpToolAccess.readsAsCaller(forward("site_report")),
++  site_read: McpToolAccess.readsAsCaller(forward("read_tab")),
++});
++
++export const layerSiteSnapshot = McpToolAccess.toLayer(SiteSnapshotToolkit, {
++  site_snapshot: McpToolAccess.readsAsCaller((input) =>
++    callHelper("snapshot_tab", input).pipe(
++      Effect.flatMap((content) => {
++        const image = content.find((part) => part.type === "image");
++        return image?.mimeType === "image/png"
++          ? Effect.succeed({
++              tab_id: input.tab_id,
++              screenshot: {
++                mimeType: "image/png" as const,
++                data: image.data,
++                ...pngSize(image.data),
++              },
++            })
++          : Effect.fail(failure(texts(content) || "The tab gave no image."));
++      }),
++    ),
++  ),
 +});
 +
 +/**

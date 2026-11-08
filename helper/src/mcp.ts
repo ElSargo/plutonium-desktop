@@ -529,6 +529,21 @@ const TOOLS = [
     inputSchema: tabIdSchema,
   },
   {
+    name: "site_apply",
+    description:
+      "Apply the site extensions folder ($PLUTO_HOME/sites, see its SKILL.md) to one of this thread's browser tabs " +
+      "now, in place (no reload), and report what runs there: for each part, whether it applies to the tab, the " +
+      "errors it threw, what it logged, how many elements each site.observe() selector matched, and its keys; and " +
+      "the tab's context (thread, project, settings) as scripts see it. Saving a file in the folder applies it too; " +
+      "this waits for the result.",
+    inputSchema: tabIdSchema,
+  },
+  {
+    name: "site_report",
+    description: "Report what site extension parts run in one of this thread's browser tabs, as site_apply does, without applying anything.",
+    inputSchema: tabIdSchema,
+  },
+  {
     name: "start_recording",
     description:
       "Record one of this thread's windows or browser tabs to a video file (WebM), even if the user isn't looking " +
@@ -978,6 +993,10 @@ export async function callTool(
       );
       return text(result);
     }
+    case "site_apply":
+      return text(await helperJson(socket, "POST", `/v1/threads/${thread}/tabs/${tabId()}/sites/apply`));
+    case "site_report":
+      return text(await helperJson(socket, "GET", `/v1/threads/${thread}/tabs/${tabId()}/sites`));
     case "snapshot_tab":
       return png(`/v1/threads/${thread}/tabs/${tabId()}/snapshot`);
     case "focus_tab":

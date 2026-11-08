@@ -20,20 +20,25 @@ Folded from:
 - the preview bridge reports a desktop tab's page zoom
 - a dock slot holds one window or tab
 - native windows are their threads' server tabs
+
+- site extensions: the browser panel's button and popover (plutonium/SiteButton.tsx)
 ---
  apps/web/src/AppRoot.tsx                      |   4 +
  apps/web/src/browser/desktopTabLifetime.ts    |   2 +
  apps/web/src/browser/previewRuntime.ts        |   7 +-
+ .../src/components/preview/PreviewView.tsx    |  56 +-
  .../preview/ThreadPreviewMiniPlayer.tsx       |  35 +-
  .../components/preview/agentOpenedPreviews.ts |  17 +-
  .../src/components/preview/previewBridge.ts   |   7 +-
  .../components/preview/usePreviewSession.ts   |   8 +-
  .../src/plutonium/PlutoniumBrowserHost.tsx    | 370 +++++++++
+ apps/web/src/plutonium/SiteButton.tsx         | 413 ++++++++++
  apps/web/src/plutonium/previewBridge.test.ts  |  19 +
  apps/web/src/plutonium/previewBridge.ts       | 758 ++++++++++++++++++
  apps/web/src/previewStateStore.ts             |   3 +-
- 11 files changed, 1218 insertions(+), 12 deletions(-)
+ 13 files changed, 1663 insertions(+), 36 deletions(-)
  create mode 100644 apps/web/src/plutonium/PlutoniumBrowserHost.tsx
+ create mode 100644 apps/web/src/plutonium/SiteButton.tsx
  create mode 100644 apps/web/src/plutonium/previewBridge.test.ts
  create mode 100644 apps/web/src/plutonium/previewBridge.ts
 
@@ -110,6 +115,80 @@ index 7ca4a8a8f6..85b80b66ba 100644
      snapshot?.runtime === "server" &&
      !snapshot.headless &&
      primaryEnvironmentId !== null &&
+diff --git a/apps/web/src/components/preview/PreviewView.tsx b/apps/web/src/components/preview/PreviewView.tsx
+index 865448e1f6..9c94f0934f 100644
+--- a/apps/web/src/components/preview/PreviewView.tsx
++++ b/apps/web/src/components/preview/PreviewView.tsx
+@@ -63,6 +63,8 @@ import { closePreviewSession } from "./closePreviewSession";
+ import { openPreviewSession } from "./openPreviewSession";
+ import { showPreviewPopup } from "./showPreviewPopup";
+ import { PreviewChromeRow } from "./PreviewChromeRow";
++import { SiteButton } from "../../plutonium/SiteButton";
++import { isPlutoniumShell } from "../../plutonium/windowStore";
+ import { PreviewEmptyState } from "./PreviewEmptyState";
+ import { PreviewMoreMenu, type PreviewMoreMenuActions } from "./PreviewMoreMenu";
+ import { commitBrowserViewportChange } from "~/browser/browserViewportActions";
+@@ -915,30 +917,36 @@ export function PreviewView({
+           ) : null
+         }
+         trailingActions={
+-          moreMenuActions ? (
+-            <PreviewMoreMenu
+-              enabled={
+-                runtimeTabId !== null &&
+-                (serverOwnsRendering || (desktopOverlay?.hasWebContents ?? false))
+-              }
+-              actions={moreMenuActions}
+-              {...(moveTarget
+-                ? { move: { label: moveLabel, onMove: () => void handleMoveTab() } }
+-                : {})}
+-              profileName={activeProfileName}
+-              zoomFactor={
+-                serverOwnsRendering ? serverZoomFactor : (desktopOverlay?.zoomFactor ?? 1)
+-              }
+-              colorScheme={
+-                serverOwnsRendering
+-                  ? (snapshot?.colorScheme ?? "system")
+-                  : (desktopOverlay?.colorScheme ?? "system")
+-              }
+-              deviceToolbarVisible={viewport._tag !== "fill"}
+-              onToggleDeviceToolbar={handleToggleDeviceToolbar}
+-              nativePictureInPicture={desktopOverlay?.pictureInPicture ?? false}
+-            />
+-          ) : null
++          <>
++            {/* Plutonium: site extensions (plutonium/SiteButton.tsx). */}
++            {!isServerTab && isPlutoniumShell() ? (
++              <SiteButton threadRef={threadRef} runtimeTabId={runtimeTabId} />
++            ) : null}
++            {moreMenuActions ? (
++              <PreviewMoreMenu
++                enabled={
++                  runtimeTabId !== null &&
++                  (serverOwnsRendering || (desktopOverlay?.hasWebContents ?? false))
++                }
++                actions={moreMenuActions}
++                {...(moveTarget
++                  ? { move: { label: moveLabel, onMove: () => void handleMoveTab() } }
++                  : {})}
++                profileName={activeProfileName}
++                zoomFactor={
++                  serverOwnsRendering ? serverZoomFactor : (desktopOverlay?.zoomFactor ?? 1)
++                }
++                colorScheme={
++                  serverOwnsRendering
++                    ? (snapshot?.colorScheme ?? "system")
++                    : (desktopOverlay?.colorScheme ?? "system")
++                }
++                deviceToolbarVisible={viewport._tag !== "fill"}
++                onToggleDeviceToolbar={handleToggleDeviceToolbar}
++                nativePictureInPicture={desktopOverlay?.pictureInPicture ?? false}
++              />
++            ) : null}
++          </>
+         }
+       />
+ 
 diff --git a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx b/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
 index 50b5ae47c4..1e9aab29e3 100644
 --- a/apps/web/src/components/preview/ThreadPreviewMiniPlayer.tsx
@@ -660,6 +739,425 @@ index 0000000000..713ee42b49
 +        </div>
 +      </form>
 +    </div>
++  );
++}
+diff --git a/apps/web/src/plutonium/SiteButton.tsx b/apps/web/src/plutonium/SiteButton.tsx
+new file mode 100644
+index 0000000000..1366863d31
+--- /dev/null
++++ b/apps/web/src/plutonium/SiteButton.tsx
+@@ -0,0 +1,413 @@
++// Site extensions (SITE_EXTENSIONS.md, "The button"): a request starts a thread
++// in the Sites project with the helper's prompt, and lends it the tab until the
++// run ends, so its agent's tab tools reach it.
++import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
++import { CommandId, ProjectId, ThreadId } from "@t3tools/contracts";
++import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
++import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
++import { useNavigate } from "@tanstack/react-router";
++import { WandSparkles } from "lucide-react";
++import { useEffect, useState } from "react";
++
++import { Button } from "~/components/ui/button";
++import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
++import { Switch } from "~/components/ui/switch";
++import { Textarea } from "~/components/ui/textarea";
++import { toastManager } from "~/components/ui/toast";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
++import { newMessageId, newProjectId, newThreadId } from "~/lib/utils";
++import {
++  readProjects,
++  readThreadShell,
++  readThreadShells,
++  waitForProject,
++  waitForThreadShell,
++} from "../state/entities";
++import { projectEnvironment } from "../state/projects";
++import { threadEnvironment } from "../state/threads";
++import { useAtomCommand } from "../state/use-atom-command";
++import { useOrchestrationCommand } from "../state/use-orchestration-command";
++import { useStableCallback } from "../hooks/useStableCallback";
++import { plutoniumPreview } from "./previewBridge";
++import { threadTag } from "./threadTag";
++import { plutoniumShell } from "./windowStore";
++
++interface PartReport {
++  readonly id: string;
++  readonly applies: boolean;
++  readonly running: boolean;
++  readonly errors: readonly { message: string }[];
++}
++interface TabReport {
++  readonly url: string;
++  readonly parts: readonly PartReport[];
++  /** Parts that stopped working here: a selector that used to match, or an error. */
++  readonly stale?: readonly { part: string }[];
++}
++interface SiteRequest {
++  readonly site: string;
++  readonly dir: string;
++  readonly prompt: string;
++}
++interface Preset {
++  readonly id: string;
++  readonly title: string;
++  readonly description: string;
++}
++/** The shell library's site extensions (helper/web/plutonium-shell.js, ShellSites). */
++interface ShellSites {
++  forTab(tabId: number): Promise<TabReport>;
++  presets(): Promise<readonly Preset[]>;
++  list(): Promise<{
++    dir: string;
++    sites: {
++      name: string;
++      tabs: { id: number }[];
++      parts: { name: string; title: string; enabled: boolean }[];
++    }[];
++  }>;
++  request(tabId: number, text: string, options?: { preset?: string }): Promise<SiteRequest>;
++  fix(tabId: number): Promise<SiteRequest>;
++  setPart(site: string, part: string, enabled: boolean): Promise<unknown>;
++  lend(tabId: number, threadId: string): Promise<void>;
++  giveBack(tabId: number, threadId: string): Promise<void>;
++}
++
++const SITES_PROJECT_TITLE = "Sites";
++const DONE = new Set(["completed", "interrupted", "failed", "cancelled", "rolled_back"]);
++const RUN_POLL_MS = 2_000;
++const HEALTH_POLL_MS = 10_000;
++
++async function shellSites(): Promise<ShellSites | null> {
++  const shell = (await plutoniumShell()) as unknown as { sites?: ShellSites } | null;
++  return shell?.sites ?? null;
++}
++
++/** Lent tabs, so a run's tab goes back once, whichever button started it. */
++const lent = new Map<string, number>();
++
++export function SiteButton(props: { threadRef: ScopedThreadRef; runtimeTabId: string | null }) {
++  const { threadRef, runtimeTabId } = props;
++  const [open, setOpen] = useState(false);
++  const [text, setText] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [report, setReport] = useState<TabReport | null>(null);
++  const [parts, setParts] = useState<
++    { site: string; name: string; title: string; enabled: boolean }[]
++  >([]);
++  const [error, setError] = useState<string | null>(null);
++  const [presets, setPresets] = useState<readonly Preset[]>([]);
++  const [lastRun, setLastRun] = useState<ScopedThreadRef | null>(null);
++  const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
++  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
++    reportFailure: false,
++  });
++  const navigate = useNavigate();
++  const browserTabId = runtimeTabId ? (plutoniumPreview()?.tab(runtimeTabId)?.id ?? null) : null;
++
++  const refresh = async () => {
++    const sites = await shellSites();
++    if (!sites || browserTabId === null) return;
++    try {
++      const tab = await sites.forTab(browserTabId);
++      const all = await sites.list();
++      setPresets(await sites.presets().catch(() => []));
++      setReport(tab);
++      // The sites whose patterns match the tab (the helper lists each site's tabs).
++      setParts(
++        all.sites
++          .filter((site) => site.tabs.some((candidate) => candidate.id === browserTabId))
++          .flatMap((site) =>
++            site.parts.map((part) => ({
++              site: site.name,
++              name: part.name,
++              title: part.title,
++              enabled: part.enabled,
++            })),
++          ),
++      );
++      setError(null);
++    } catch (cause) {
++      setReport(null);
++      setParts([]);
++      setError(cause instanceof Error ? cause.message : String(cause));
++    }
++  };
++
++  const poll = useStableCallback(refresh);
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the helper's health checks for this tab, so the button's dot shows a stale part before the popover is opened
++  useEffect(() => {
++    if (browserTabId === null) return;
++    const first = setTimeout(() => void poll(), 0);
++    const timer = setInterval(() => void poll(), HEALTH_POLL_MS);
++    return () => {
++      clearTimeout(first);
++      clearInterval(timer);
++    };
++  }, [browserTabId, poll]);
++
++  const changeOpen = (next: boolean) => {
++    setOpen(next);
++    if (next) void refresh();
++  };
++
++  /** The Sites project: the helper's sites folder, made the first time. */
++  const sitesProject = async (environmentId: EnvironmentId, root: string) => {
++    const existing = readProjects().find(
++      (project) => project.environmentId === environmentId && project.workspaceRoot === root,
++    );
++    if (existing) return existing;
++    const projectId = newProjectId();
++    const result = await createProject({
++      environmentId,
++      input: {
++        projectId,
++        commandId: CommandId.make(`plutonium:sites:project:${projectId}`),
++        title: SITES_PROJECT_TITLE,
++        workspaceRoot: root,
++        createWorkspaceRootIfMissing: true,
++        defaultModelSelection: null,
++      },
++    });
++    if (result._tag !== "Success") throw new Error("Could not make the Sites project.");
++    return waitForProject(scopeProjectRef(environmentId, ProjectId.make(projectId)));
++  };
++
++  /** Gives the tab back once the run is over (or after it can no longer be seen). */
++  const watchRun = (ref: ScopedThreadRef, tabId: number, sites: ShellSites) => {
++    const key = `${ref.environmentId}/${ref.threadId}`;
++    lent.set(key, tabId);
++    let seenRun = false;
++    let misses = 0;
++    const timer = setInterval(() => {
++      const shell = readThreadShell(ref);
++      const status = shell?.latestRun?.status;
++      if (status && !DONE.has(status)) seenRun = true;
++      if (!shell) misses += 1;
++      const over =
++        (seenRun && status !== undefined && DONE.has(status) && !shell?.hasPendingApprovals) ||
++        misses > 30;
++      if (!over) return;
++      clearInterval(timer);
++      if (lent.get(key) === tabId) {
++        lent.delete(key);
++        void sites.giveBack(tabId, threadTag(ref.threadId)).catch(() => {});
++      }
++      void refresh();
++    }, RUN_POLL_MS);
++  };
++
++  const submit = async (preset?: string, fix = false) => {
++    const sites = await shellSites();
++    if (!sites || browserTabId === null || busy) return;
++    const request = fix ? "Fix what stopped working" : text.trim();
++    if (!request && !preset) return;
++    setBusy(true);
++    setError(null);
++    try {
++      const asked = fix
++        ? await sites.fix(browserTabId)
++        : await sites.request(browserTabId, request, preset ? { preset } : {});
++      const root = asked.dir.slice(0, asked.dir.lastIndexOf("/"));
++      const project = await sitesProject(threadRef.environmentId, root);
++      // The model and mode of the thread the user is in, or of their latest thread (a draft has none yet).
++      const current =
++        readThreadShell(threadRef) ??
++        [...readThreadShells()]
++          .filter((shell) => shell.environmentId === threadRef.environmentId)
++          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
++      if (!current) throw new Error("Start a thread first, so Hydra knows which agent to use.");
++      const threadId = newThreadId();
++      const title = deriveThreadTitleSeed({
++        text: `${asked.site}: ${request || presets.find((p) => p.id === preset)?.title || preset}`,
++        attachments: [],
++      });
++      const createdAt = new Date().toISOString();
++      // The thread starts with the prompt, in the user's model and mode of the thread they're in.
++      const turn = await startThreadTurn({
++        environmentId: threadRef.environmentId,
++        input: {
++          threadId,
++          message: { messageId: newMessageId(), role: "user", text: asked.prompt, attachments: [] },
++          modelSelection: current.modelSelection,
++          titleSeed: title,
++          runtimeMode: current.runtimeMode,
++          interactionMode: "default",
++          bootstrap: {
++            createThread: {
++              projectId: project.id,
++              title,
++              modelSelection: current.modelSelection,
++              runtimeMode: current.runtimeMode,
++              interactionMode: "default",
++              branch: null,
++              worktreePath: null,
++              createdAt,
++            },
++          },
++          createdAt,
++        },
++      });
++      if (turn._tag !== "Success") throw new Error("Could not start the thread.");
++      const ref = scopeThreadRef(threadRef.environmentId, ThreadId.make(threadId));
++      // The thread's tag on the tab, so its agent's tab tools reach it (thread-scoped).
++      await sites.lend(browserTabId, threadTag(threadId));
++      watchRun(ref, browserTabId, sites);
++      void waitForThreadShell(ref);
++      setText("");
++      setLastRun(ref);
++      toastManager.add({
++        type: "success",
++        title: `Changing ${asked.site}`,
++        description: "An agent is writing it in the Sites project. The page changes as it saves.",
++      });
++    } catch (cause) {
++      setError(cause instanceof Error ? cause.message : String(cause));
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  if (browserTabId === null) return null;
++  const host = (() => {
++    try {
++      return new URL(
++        report?.url ?? plutoniumPreview()?.tab(runtimeTabId!)?.url ?? "",
++      ).hostname.replace(/^www\./, "");
++    } catch {
++      return "";
++    }
++  })();
++  const errors = report?.parts.filter((part) => part.applies && part.errors.length > 0) ?? [];
++  const stale = [...new Set((report?.stale ?? []).map((reason) => reason.part.split("/")[1]))];
++
++  return (
++    <Popover open={open} onOpenChange={changeOpen}>
++      <Tooltip>
++        <TooltipTrigger
++          render={
++            <PopoverTrigger
++              render={
++                <Button
++                  variant="ghost"
++                  size="icon-xs"
++                  aria-label="Change this site"
++                  type="button"
++                  className="relative"
++                />
++              }
++            />
++          }
++        >
++          <WandSparkles />
++          {errors.length || stale.length ? (
++            <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-destructive" />
++          ) : null}
++        </TooltipTrigger>
++        <TooltipPopup>Change this site</TooltipPopup>
++      </Tooltip>
++      <PopoverPopup side="bottom" align="end" className="w-80">
++        <div className="flex flex-col gap-3 text-sm">
++          <div className="font-medium">{host ? `Change ${host}` : "Change this site"}</div>
++          {parts.length ? (
++            <div className="flex flex-col gap-1.5">
++              {parts.map((part) => {
++                const partReport = report?.parts.find(
++                  (candidate) => candidate.id === `${part.site}/${part.name}`,
++                );
++                return (
++                  <label
++                    key={`${part.site}/${part.name}`}
++                    className="flex items-center justify-between gap-2"
++                  >
++                    <span className="min-w-0 truncate">
++                      {part.title}
++                      {partReport?.errors.length ? (
++                        <span className="text-destructive"> · error</span>
++                      ) : stale.includes(part.name) ? (
++                        <span className="text-destructive"> · stopped working</span>
++                      ) : null}
++                    </span>
++                    <Switch
++                      checked={part.enabled}
++                      onCheckedChange={(checked) => {
++                        setParts((list) =>
++                          list.map((item) =>
++                            item === part ? { ...item, enabled: checked } : item,
++                          ),
++                        );
++                        void shellSites().then((sites) =>
++                          sites?.setPart(part.site, part.name, checked),
++                        );
++                      }}
++                    />
++                  </label>
++                );
++              })}
++            </div>
++          ) : null}
++          <Textarea
++            value={text}
++            onChange={(event) => setText(event.target.value)}
++            placeholder={host ? `Describe a change to ${host}…` : "Describe a change…"}
++            rows={3}
++            onKeyDown={(event) => {
++              if (event.key === "Enter" && !event.shiftKey) {
++                event.preventDefault();
++                void submit();
++              }
++            }}
++          />
++          <div className="flex flex-wrap gap-1">
++            {presets.map((preset) => (
++              <Button
++                key={preset.id}
++                variant="outline"
++                size="xs"
++                disabled={busy}
++                onClick={() => void submit(preset.id)}
++                title={preset.description}
++              >
++                {preset.title}
++              </Button>
++            ))}
++          </div>
++          <div className="flex items-center justify-between gap-2">
++            {stale.length ? (
++              <Button
++                variant="outline"
++                size="xs"
++                disabled={busy}
++                onClick={() => void submit(undefined, true)}
++              >
++                Fix {stale.join(", ")}
++              </Button>
++            ) : null}
++            {lastRun ? (
++              <Button
++                variant="link"
++                size="xs"
++                onClick={() =>
++                  void navigate({
++                    to: "/$environmentId/$threadId",
++                    params: { environmentId: lastRun.environmentId, threadId: lastRun.threadId },
++                  })
++                }
++              >
++                Open the thread
++              </Button>
++            ) : (
++              <span className="text-muted-foreground text-xs">
++                The agent can see this tab while it works.
++              </span>
++            )}
++            <Button size="xs" disabled={busy || !text.trim()} onClick={() => void submit()}>
++              {busy ? "Starting…" : "Change"}
++            </Button>
++          </div>
++          {error ? <div className="text-destructive text-xs">{error}</div> : null}
++        </div>
++      </PopoverPopup>
++    </Popover>
 +  );
 +}
 diff --git a/apps/web/src/plutonium/previewBridge.test.ts b/apps/web/src/plutonium/previewBridge.test.ts

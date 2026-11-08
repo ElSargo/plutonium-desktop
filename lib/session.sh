@@ -129,6 +129,19 @@ restore_portal() {
   log "portal: XDG_CURRENT_DESKTOP back to ${PORTAL_PREVIOUS:-unset}"
 }
 
+# The sites host extension (docs/features/SITE_EXTENSIONS.md): the helper
+# writes it into $PLUTO_HOME/sites-host when it starts; Chromium loads it. A
+# --load-extension in EXTRA_FLAGS gets it added to its list.
+sites_host() {
+  local dir=$PLUTO_HOME/sites-host i
+  for _ in $(seq 1 20); do [[ -f $dir/config.json ]] && break; sleep 0.25; done
+  [[ -f $dir/manifest.json ]] || return 0
+  for i in "${!FLAGS[@]}"; do
+    if [[ ${FLAGS[$i]} == --load-extension=* ]]; then FLAGS[i]="${FLAGS[$i]},$dir"; return 0; fi
+  done
+  FLAGS+=("--load-extension=$dir")
+}
+
 start_helper() {
   shell_library
   local pidfile=$RUN_DIR/plutonium/helper-$TAG.pid
@@ -260,6 +273,7 @@ if [[ $MODE == x11 ]]; then
     for _ in $(seq 1 20); do on_ash test -S "/tmp/.X11-unix/X${XDISP#:}" && break; sleep 0.5; done
   fi
   start_helper
+  sites_host
   wait_shell_servers
   on_ash_setsid -e DISPLAY="$XDISP" ${XAUTHORITY:+-e XAUTHORITY="$XAUTHORITY"} "${ASH_ENV[@]}" \
     "$CHROME_BIN" "${FLAGS[@]}" > "$ASH_LOG" 2>&1 < /dev/null &
@@ -320,6 +334,7 @@ on_ash test -S /run/dbus/system_bus_socket ||
   log "session $SID ($(session_prop TTY)) is not in front; Ash comes up when it is (Ctrl+Alt+F$(session_prop VTNr))"
 
 start_helper
+sites_host
 wait_shell_servers
 echo "Starting Ash on DRM in session $SID ($(session_prop TTY)). Ctrl+Alt+F1…F12 switch VTs, Ctrl+Alt+Backspace ends it."
 FLAGS+=(--ozone-platform=drm --use-angle=gles-egl --exo-viability-real-displays
