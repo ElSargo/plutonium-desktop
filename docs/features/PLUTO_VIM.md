@@ -182,7 +182,15 @@ What it lacks, and what's done instead:
 
 ### Fallback: AT-SPI (the helper)
 
-For apps without text-input-v3: Xwayland apps, older SDL and toolkits. The helper's AT-SPI client (`helper/src/a11y.ts`) reads and sets the caret and selection (`Text`) and edits (`EditableText`). The engine runs in the helper's Node process (the same JS). Every motion is a D-Bus round trip, so it's the slowest backend, and it waits until the other two are done.
+For apps without text-input-v3: Xwayland apps, older SDL and toolkits, a GTK app without its Wayland input method. The helper (`helper/src/vimAtspi.ts`) listens on the accessibility bus for focus on editable text (`object:state-changed:focused`). For one in a window that has no text-input-v3 field, it asks Exo to hold that window's keys as a text-input-v3 field's are (`Plutonium.setVimWindowField`), and the same engine as native apps' (`vimNative.ts`) runs over an `AtspiBuffer`:
+- the text, caret and selection come from `Text`, read again before each key (the app may have changed them);
+- motions are exact, by `Text.SetCaretOffset` and `SetSelection`, so `caps.exactMotions` is true here;
+- edits are `EditableText.DeleteText` and `InsertText`; undo and redo are the app's Ctrl+Z;
+- AT-SPI counts characters (code points), the engine UTF-16 units: the buffer converts;
+- password text is never vim's; focus leaving the element ends it;
+- every motion and edit is a D-Bus round trip (a read was 1 to 3 ms in GNOME Text Editor), so it's the slowest backend.
+
+The accessibility bus is the session's (`org.a11y.Bus`, at-spi2-core), or `AT_SPI_BUS_ADDRESS` when set.
 
 ## Registers
 
@@ -305,7 +313,7 @@ Names follow neovim's where the idea is the same (`vim.keymap.set`, `vim.opt`, t
 7. **text-input-v3** (built, below): the engine in the helper, the async key path, best-effort motions, the mode badge.
 8. **`zwp_primary_selection_v1`** in Exo (built, below), for `"*` and middle-click paste.
 9. **Across the desktop** (built, below, but for what waits on KEYS.md): marks, the jump list, macros, the `:` line, `vim.desktop.call`, the agents' register tools, clipboard history, the `vimMode` and `editableFocus` contexts in KEYS.md.
-10. **AT-SPI,** for apps without text-input-v3.
+10. **AT-SPI** (built, below), for apps without text-input-v3.
 
 ### Step 1: the engine (built)
 
@@ -396,6 +404,15 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 - **Tests:** `vim.test.ts` (search, the `:` line, macros, marks and jumps), `vimNative.test.ts` (`:s`, the line, a macro with typed text, marks, a returning field's mode), `vimRegisters.test.ts` (history), `vimDom.test.ts` (the line under a textarea), `vimConfig.test.ts` (an uppercase mark from one page to another, in Chromium).
 - **On X11 slot 50** in GNOME Text Editor: `:%s/a/b/g`; a macro `qqA!<Esc>jq@q`; `"#2p` put the copy before last (two `wl-copy`s); `0mA` in one editor window, then `` `A `` in another brought the first to the front in normal mode, and `x` deleted at the mark.
 - **Not yet:** the jump list across fields and windows; scoped marks; the desktop's actions on the `:` line, `vim.desktop.call` and the KEYS.md contexts (they wait for KEYS.md's keymap and `config.js`).
+
+### Step 10: AT-SPI (built)
+
+- **Chromium** (build 6ea5a0aef002): window fields in `components/exo/plutonium_vim.{h,cc}` (patch 0002), `Plutonium.setVimWindowField` (patch 0010).
+- **The helper:** `helper/src/vimAtspi.ts` (`AtspiVim`, the focus watcher; `AtspiBuffer`), run by `NativeVim` (`addField`, `removeField`; an AT-SPI field is read again before each key, one key at a time).
+- **Tests:** `helper/test/vimAtspi.test.ts` against a fake element that counts in characters: motions, `dw`, `cw` and typing, undo's keys, the app's own changes read again.
+- **On X11 slot 50:** GNOME Text Editor with `GTK_IM_MODULE=simple` (so no text-input-v3), a private session bus with at-spi2-core's bus launcher and registry (the host runs none): typed "one two", Escape, `b` `dw` gave "one ", `0` `cw` `uno` Escape gave "uno ".
+- **What testing changed:** an AT-SPI field is multi-line to the engine, as native fields are; `AT_SPI_BUS_ADDRESS` is honoured (the session's bus proxy doesn't activate `org.a11y.Bus`).
+- **Not yet:** an Xwayland app (its windows are its satellite's, so the field's window is the focused one); the badge's place (AT-SPI's caret rectangle isn't read); hosts without at-spi2-core (nothing is found: install it, or set `AT_SPI_BUS_ADDRESS`).
 
 ### Caps Lock (built)
 

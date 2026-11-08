@@ -62,8 +62,8 @@ and the parts in these files of:
  components/exo/embedded_windows.h             |  388 ++++++
  components/exo/keyboard.cc                    |  127 +-
  components/exo/keyboard.h                     |   17 +
- components/exo/plutonium_vim.cc               |  316 +++++
- components/exo/plutonium_vim.h                |  169 +++
+ components/exo/plutonium_vim.cc               |  347 +++++
+ components/exo/plutonium_vim.h                |  176 +++
  components/exo/pointer.cc                     |  291 +++-
  components/exo/pointer.h                      |   47 +-
  components/exo/pointer_constraint_delegate.h  |    4 +
@@ -95,7 +95,7 @@ and the parts in these files of:
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 46 files changed, 4586 insertions(+), 95 deletions(-)
+ 46 files changed, 4624 insertions(+), 95 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
  create mode 100644 components/exo/plutonium_vim.cc
@@ -2408,10 +2408,10 @@ index 3ed334d4ca..a5d5da11fd 100644
    // details.
 diff --git a/components/exo/plutonium_vim.cc b/components/exo/plutonium_vim.cc
 new file mode 100644
-index 0000000000..10c6b91ac1
+index 0000000000..5041276895
 --- /dev/null
 +++ b/components/exo/plutonium_vim.cc
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,347 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2481,18 +2481,44 @@ index 0000000000..10c6b91ac1
 +    entry.hold_all = false;
 +    entry.hold.clear();
 +  }
++  window_fields_.clear();
 +  taken_.clear();
 +}
 +
 +bool PlutoniumVim::SetHold(int field_id, bool all, std::vector<KeySpec> keys) {
++  FieldEntry* entry = EntryById(field_id);
++  if (!entry) {
++    return false;
++  }
++  entry->hold_all = all;
++  entry->hold = std::move(keys);
++  return true;
++}
++
++int PlutoniumVim::SetWindowField(int32_t window_id, bool on) {
++  if (!on) {
++    window_fields_.erase(window_id);
++    return 0;
++  }
++  auto [it, added] = window_fields_.try_emplace(window_id);
++  if (added) {
++    it->second.id = next_field_id_++;
++  }
++  return it->second.id;
++}
++
++PlutoniumVim::FieldEntry* PlutoniumVim::EntryById(int field_id) {
 +  for (auto& [field, entry] : fields_) {
 +    if (entry.id == field_id) {
-+      entry.hold_all = all;
-+      entry.hold = std::move(keys);
-+      return true;
++      return &entry;
 +    }
 +  }
-+  return false;
++  for (auto& [window_id, entry] : window_fields_) {
++    if (entry.id == field_id) {
++      return &entry;
++    }
++  }
++  return nullptr;
 +}
 +
 +void PlutoniumVim::Answer(int key_id, bool consumed) {
@@ -2587,6 +2613,14 @@ index 0000000000..10c6b91ac1
 +  for (auto& [field, entry] : fields_) {
 +    if (field->VimSurface() == focus) {
 +      return entry.off || entry.composing ? nullptr : &entry;
++    }
++  }
++  // A window field (AT-SPI's), when the window has no text-input-v3 one.
++  if (!window_fields_.empty()) {
++    auto it = window_fields_.find(
++        EmbeddedWindows::Get()->WindowIdForSurface(focus));
++    if (it != window_fields_.end()) {
++      return &it->second;
 +    }
 +  }
 +  return nullptr;
@@ -2691,12 +2725,9 @@ index 0000000000..10c6b91ac1
 +  while (!queue_.empty()) {
 +    Pending& front = queue_.front();
 +    if (front.event->type() == ui::EventType::kKeyPressed && listener_) {
-+      FieldEntry* entry = nullptr;
-+      for (auto& [field, candidate] : fields_) {
-+        if (candidate.id == front.field_id && !candidate.off &&
-+            !candidate.composing) {
-+          entry = &candidate;
-+        }
++      FieldEntry* entry = EntryById(front.field_id);
++      if (entry && (entry->off || entry->composing)) {
++        entry = nullptr;
 +      }
 +      const bool repeat_of_taken =
 +          front.event->is_repeat() && taken_.contains(front.event->code());
@@ -2730,10 +2761,10 @@ index 0000000000..10c6b91ac1
 +}  // namespace exo
 diff --git a/components/exo/plutonium_vim.h b/components/exo/plutonium_vim.h
 new file mode 100644
-index 0000000000..d95a48e02d
+index 0000000000..d6301b90a3
 --- /dev/null
 +++ b/components/exo/plutonium_vim.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,176 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2842,6 +2873,10 @@ index 0000000000..d95a48e02d
 +  // From the helper: the answer for key |key_id|.
 +  void Answer(int key_id, bool consumed);
 +  bool Edit(int field_id, int before, int after, const std::u16string& text);
++  // From the helper: window |window_id| has a field it reaches some other
++  // way (AT-SPI, for apps without text-input-v3), whose keys it wants held
++  // as a text-input-v3 field's are; 0 to stop. Returns the field's id.
++  int SetWindowField(int32_t window_id, bool on);
 +
 +  // From WaylandTextInputV3Delegate, on each commit while enabled. |off|:
 +  // vim stays out (a password, PIN, sensitive, hidden or terminal field).
@@ -2881,6 +2916,7 @@ index 0000000000..d95a48e02d
 +  ~PlutoniumVim();
 +
 +  FieldEntry* EntryFor(Surface* focus);
++  FieldEntry* EntryById(int field_id);
 +  bool Wants(const FieldEntry& entry, const ui::KeyEvent& event) const;
 +  void Send(Pending& pending);
 +  void Resolve(bool consumed);
@@ -2889,6 +2925,8 @@ index 0000000000..d95a48e02d
 +
 +  raw_ptr<Listener> listener_ = nullptr;
 +  std::map<Field*, FieldEntry> fields_;
++  // Window fields (SetWindowField), by window id.
++  std::map<int32_t, FieldEntry> window_fields_;
 +  int next_field_id_ = 1;
 +  int next_key_id_ = 1;
 +  // The key being answered first, then the keys behind it, in order.

@@ -36,6 +36,7 @@ import { vimBundle } from "./vimBundle.ts";
 import { VimConfig } from "./vimConfig.ts";
 import { VimInjector } from "./vimInject.ts";
 import { NativeVim } from "./vimNative.ts";
+import { AtspiVim } from "./vimAtspi.ts";
 import { ClipboardHistory, RegisterStore, wlClipboard, wlClipboardWatch } from "./vimRegisters.ts";
 import { VimMarks } from "./vimMarks.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
@@ -664,10 +665,21 @@ export class Daemon {
       });
       this.vimNative = native;
       const nativeVim = native;
+      // Apps without text-input-v3 (vimAtspi.ts): their editable text over the accessibility bus.
+      const atspi = new AtspiVim(cdp, {
+        windows: () => desktop?.windows() ?? [],
+        hasNativeField: (windowId) => nativeVim.hasNativeField(windowId),
+        addField: (fieldId, buffer) => nativeVim.addField(fieldId, buffer),
+        removeField: (fieldId) => nativeVim.removeField(fieldId),
+        host: nativeVim.fieldHost,
+        log,
+      });
       const start = () => {
         void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
         // A browser without Pluto Vim's Exo side has no Plutonium.setVimEnabled: pages only.
-        void nativeVim.start().catch((error) => log(`pluto vim: no native fields (${(error as Error).message})`));
+        void nativeVim.start()
+          .then(() => atspi.start().catch((error) => log(`pluto vim: no AT-SPI fields (${(error as Error).message})`)))
+          .catch((error) => log(`pluto vim: no native fields (${(error as Error).message})`));
       };
       // Again each time the helper connects to the browser (as watchCrashes does): a new connection has no sessions.
       this.desktop?.enableListeners.add(start);

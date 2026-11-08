@@ -32,20 +32,20 @@ and the parts in these files of:
  .../chrome_devtools_manager_delegate.cc       |    9 +
  .../devtools/chrome_devtools_session.cc       |    8 +
  .../devtools/chrome_devtools_session.h        |    3 +
- chrome/browser/devtools/cros_protocol.pdl     |  621 +++++++++
+ chrome/browser/devtools/cros_protocol.pdl     |  632 +++++++++
  .../devtools/devtools_ui_controller.cc        |    6 +-
  chrome/browser/devtools/devtools_window.cc    |   36 +-
  chrome/browser/devtools/devtools_window.h     |   13 +
  .../browser/devtools/devtools_window_views.cc |   20 +
  .../devtools/inspector_protocol_config.json   |    4 +
- .../devtools/protocol/plutonium_handler.cc    | 1163 +++++++++++++++++
- .../devtools/protocol/plutonium_handler.h     |  259 ++++
+ .../devtools/protocol/plutonium_handler.cc    | 1170 +++++++++++++++++
+ .../devtools/protocol/plutonium_handler.h     |  262 ++++
  .../devtools/protocol/plutonium_media.cc      |  132 ++
  .../devtools/protocol/plutonium_media.h       |   78 ++
  .../protocol/plutonium_notifications.cc       |  153 +++
  .../protocol/plutonium_notifications.h        |   77 ++
  .../devtools/remote_debugging_server.cc       |   64 +
- 17 files changed, 2656 insertions(+), 2 deletions(-)
+ 17 files changed, 2677 insertions(+), 2 deletions(-)
  create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.cc
  create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.h
  create mode 100644 chrome/browser/devtools/protocol/plutonium_media.cc
@@ -160,10 +160,10 @@ index f703912a1b..6a8991099e 100644
  };
  
 diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
-index a30bf0d965..0240919f32 100644
+index a30bf0d965..9809de46cb 100644
 --- a/chrome/browser/devtools/cros_protocol.pdl
 +++ b/chrome/browser/devtools/cros_protocol.pdl
-@@ -12,3 +12,624 @@ domain WindowManager
+@@ -12,3 +12,635 @@ domain WindowManager
  
    # Exit the overview mode.
    command exitOverviewMode
@@ -695,6 +695,17 @@ index a30bf0d965..0240919f32 100644
 +      boolean all
 +      array of VimKeySpec keys
 +
++  # Window |windowId| has a field the helper reaches some other way (AT-SPI,
++  # for apps without text-input-v3): its keys are held as a text-input-v3
++  # field's are (setVimHold, vimKey), until this comes with enabled false.
++  command setVimWindowField
++    parameters
++      integer windowId
++      boolean enabled
++    returns
++      # The field's id (0 when enabled is false).
++      integer fieldId
++
 +  # Whether the engine took held key |keyId|. A key not answered in 100 ms
 +  # goes on to the app.
 +  command answerVimKey
@@ -995,10 +1006,10 @@ index c972f74e20..885d1c9fba 100644
                  "include": [ "triggerAction", "loadUnpacked", "getStorageItems", "setStorageItems", "removeStorageItems", "clearStorageItems", "uninstall", "getExtensions" ],
 diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
 new file mode 100644
-index 0000000000..f591c59c06
+index 0000000000..923f6090e1
 --- /dev/null
 +++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
-@@ -0,0 +1,1163 @@
+@@ -0,0 +1,1170 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2022,6 +2033,13 @@ index 0000000000..f591c59c06
 +  return Response::Success();
 +}
 +
++Response PlutoniumHandler::SetVimWindowField(int window_id,
++                                             bool enabled,
++                                             int* field_id) {
++  *field_id = exo::PlutoniumVim::Get()->SetWindowField(window_id, enabled);
++  return Response::Success();
++}
++
 +Response PlutoniumHandler::AnswerVimKey(int key_id, bool consumed) {
 +  exo::PlutoniumVim::Get()->Answer(key_id, consumed);
 +  return Response::Success();
@@ -2164,10 +2182,10 @@ index 0000000000..f591c59c06
 +}
 diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
 new file mode 100644
-index 0000000000..23056c26b9
+index 0000000000..2179522212
 --- /dev/null
 +++ b/chrome/browser/devtools/protocol/plutonium_handler.h
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,262 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2333,6 +2351,9 @@ index 0000000000..23056c26b9
 +      std::unique_ptr<protocol::Array<protocol::Plutonium::VimKeySpec>> keys)
 +      override;
 +  protocol::Response AnswerVimKey(int key_id, bool consumed) override;
++  protocol::Response SetVimWindowField(int window_id,
++                                       bool enabled,
++                                       int* field_id) override;
 +  protocol::Response EditVimField(int field_id,
 +                                  int before,
 +                                  int after,

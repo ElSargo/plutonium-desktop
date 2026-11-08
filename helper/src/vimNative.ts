@@ -243,6 +243,15 @@ export function keySpec(key: string): KeySpec | null {
   return null;
 }
 
+/** A field's Buffer here: a text-input-v3 field's (NativeBuffer), or AT-SPI's (vimAtspi.ts). */
+interface FieldBuffer {
+  readonly kind: string;
+  state: VimField;
+  update(field: VimField): void;
+  refresh?(): Promise<void>;
+  setCaret(shape: string, mode?: string): void;
+}
+
 interface Session {
   mode: string;
   feed(key: string): boolean;
@@ -252,7 +261,7 @@ interface Session {
   expression: string | null;
   recording: unknown;
   pending: unknown[];
-  buffer: NativeBuffer;
+  buffer: FieldBuffer;
 }
 
 export interface NativeVimOptions {
@@ -285,6 +294,7 @@ export class NativeVim {
   private readonly sessions = new Map<number, Session>();
   private readonly holds = new Map<number, string>();
   private readonly busy = new Map<number, number>();
+  private feeding: Promise<void> = Promise.resolve();
   private place: RegisterPlace = {};
   private listener: ((event: { method: string; params?: unknown; sessionId?: string }) => void) | null = null;
   private readonly cdp: BrowserCdp;
@@ -443,6 +453,31 @@ export class NativeVim {
     return this.sessions.get(fieldId);
   }
 
+  /** Exo and the shell, for another backend's buffers (AT-SPI's undo keys, the badge). */
+  get fieldHost(): NativeHost {
+    return this.host;
+  }
+
+  /** Whether window `windowId` has a text-input-v3 field now (it wins over AT-SPI's). */
+  hasNativeField(windowId: number): boolean {
+    for (const session of this.sessions.values()) if (session.buffer.kind === "native" && session.buffer.state.windowId === windowId) return true;
+    return false;
+  }
+
+  /** A field another backend found (AT-SPI's), whose keys Exo holds as a window field. */
+  addField(fieldId: number, buffer: FieldBuffer): void {
+    const vim = this.engine();
+    const before = this.windowModes.get(buffer.state.windowId);
+    const session = vim.attach(buffer, before ? { startInInsert: before === "insert" } : {}) as Session;
+    this.sessions.set(fieldId, session);
+    vim.emit("FieldEnter", { session });
+    void this.hold(fieldId);
+  }
+
+  removeField(fieldId: number): void {
+    this.fieldGone(fieldId);
+  }
+
   private fieldChanged(field: VimField): void {
     this.debug?.(`field ${field.id} ${JSON.stringify(field.text.slice(0, 60))} ${field.cursor}/${field.anchor}`);
     const known = this.sessions.get(field.id);
@@ -519,7 +554,24 @@ export class NativeVim {
     this.debug?.(`key ${event.id} ${event.key} -> ${key}`);
     if (!key) return void answer(false);
     this.place = this.options.placeOf?.(session.buffer.state.windowId) ?? {};
-    const mine = session.feed(key);
+    // An AT-SPI field is read again first (the app may have changed it), one key at a time, in order.
+    let mine = false;
+    const feeding = this.feeding.then(async () => {
+      if (session.buffer.refresh) {
+        const at = Date.now();
+        await session.idle().then(() => session.buffer.refresh!()).catch((error) => this.debug?.(`refresh: ${(error as Error).message}`));
+        this.debug?.(`refreshed ${JSON.stringify(session.buffer.state.text.slice(0, 40))} ${session.buffer.state.cursor} in ${Date.now() - at} ms`);
+      }
+      mine = session.feed(key);
+    });
+    this.feeding = feeding.catch(() => {});
+    try {
+      await feeding;
+    } catch (error) {
+      // A key the engine choked on goes on to the app, rather than waiting out Exo's timeout.
+      this.options.log?.(`pluto vim (native): ${key}: ${(error as Error).stack ?? error}`);
+      return void answer(false);
+    }
     // Until the engine's edits are out, every key waits behind this one.
     this.busy.set(event.fieldId, (this.busy.get(event.fieldId) ?? 0) + 1);
     await this.hold(event.fieldId, { all: true, keys: [] });
