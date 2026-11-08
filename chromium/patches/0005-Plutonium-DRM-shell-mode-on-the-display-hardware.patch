@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 05/13] Plutonium: DRM: shell mode on the display hardware
+Subject: [PATCH 05/14] Plutonium: DRM: shell mode on the display hardware
 
 Running on the hardware: the display-plane path, logind seats (also on a VT that isn't in front), evdev and libinput fixes, touchpad swipes for the shell, and the GPU details (Vulkan device ids, the GPU's PCI ids without libpci, shm buffers the GPU can't import).
 

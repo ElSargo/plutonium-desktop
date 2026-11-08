@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 02/13] Plutonium: Exo: embedded windows
+Subject: [PATCH 02/14] Plutonium: Exo: embedded windows
 
 Exo's side of embedding: windows parked off the desktop until a page shows them, the page alone sizing them, focus, keyboard and pointer for embedded windows (pointer lock and confine, modal dialogs, popups), drag and drop, input methods, and window icons.
 

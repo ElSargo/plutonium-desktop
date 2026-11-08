@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Plutonium extension probe",
+  "version": "1.0",
+  "permissions": ["tabs", "scripting", "storage", "declarativeNetRequest", "userScripts", "contextMenus", "webNavigation"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "bg.js" },
+  "action": { "default_title": "Probe", "default_popup": "probe.html" },
+  "commands": { "probe-cmd": { "suggested_key": { "default": "Ctrl+Shift+Y" }, "description": "probe" } },
+  "content_scripts": [{ "matches": ["<all_urls>"], "js": ["cs.js"], "run_at": "document_start", "all_frames": true }]
+}

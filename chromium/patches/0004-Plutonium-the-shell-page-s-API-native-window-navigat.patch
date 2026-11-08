@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 04/13] Plutonium: the shell page's API: <native-window>,
+Subject: [PATCH 04/14] Plutonium: the shell page's API: <native-window>,
  navigator.windowBroker, and the shells' events
 
 The web platform side: the <native-window> element and its layout and cross-fade, navigator.windowBroker, and the events and entries the shells get for windows, tabs, displays, captures, downloads and context menus.
@@ -17,6 +17,7 @@ It holds these changes:
 - a floating native window keeps its client-side resize edges
 - a page painting where nothing may draw it doesn't let viz slow it
 - a native window's surface range doesn't hold the page's frames
+- navigator.windowBroker is null outside the page's main world
 
 and the parts in these files of:
 - report Wayland client pid through the window broker
@@ -83,8 +84,8 @@ and the parts in these files of:
  .../renderer/core/html/html_tag_names.json5   |    4 +
  .../blink/renderer/core/html/item_group.idl   |   12 +
  .../core/html/native_display_entry.idl        |   32 +
- .../core/html/native_window_broker.cc         | 1457 +++++++++++++++++
- .../renderer/core/html/native_window_broker.h |  340 ++++
+ .../core/html/native_window_broker.cc         | 1464 +++++++++++++++++
+ .../renderer/core/html/native_window_broker.h |  345 ++++
  .../core/html/native_window_broker.idl        |  241 +++
  .../core/html/native_window_entry.idl         |   35 +
  .../renderer/core/html/native_window_event.cc |   56 +
@@ -95,7 +96,7 @@ and the parts in these files of:
  .../core/html/native_window_request_event.h   |   32 +
  .../core/html/native_window_request_event.idl |   19 +
  .../html/navigator_native_window_broker.h     |   12 +
- .../html/navigator_native_window_broker.idl   |   12 +
+ .../html/navigator_native_window_broker.idl   |   14 +
  .../renderer/core/html/resources/html.css     |   10 +-
  .../renderer/core/html/shell_capture_event.cc |   40 +
  .../renderer/core/html/shell_capture_event.h  |   39 +
@@ -112,7 +113,7 @@ and the parts in these files of:
  .../graphics/compositing/pending_layer.cc     |   21 +-
  .../platform/runtime_enabled_features.json5   |   11 +
  .../widget/compositing/layer_tree_view.cc     |   15 +-
- 71 files changed, 5522 insertions(+), 8 deletions(-)
+ 71 files changed, 5536 insertions(+), 8 deletions(-)
  create mode 100644 third_party/blink/public/mojom/native_window/native_window.mojom
  create mode 100644 third_party/blink/public/mojom/native_window/window_broker.mojom
  create mode 100644 third_party/blink/renderer/core/html/browser_download_event.cc
@@ -3385,10 +3386,10 @@ index 0000000000..8efe478a61
 +};
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.cc b/third_party/blink/renderer/core/html/native_window_broker.cc
 new file mode 100644
-index 0000000000..4752a53a52
+index 0000000000..887a52a882
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.cc
-@@ -0,0 +1,1457 @@
+@@ -0,0 +1,1464 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -3420,6 +3421,8 @@ index 0000000000..4752a53a52
 +#include "third_party/blink/renderer/core/html/native_window_event.h"
 +#include "third_party/blink/renderer/core/html/shell_capture_event.h"
 +#include "third_party/blink/renderer/core/html/tab_request_event.h"
++#include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
 +#include "third_party/blink/renderer/platform/wtf/functional.h"
 +
 +namespace blink {
@@ -4825,7 +4828,12 @@ index 0000000000..4752a53a52
 +
 +// static
 +NativeWindowBroker* NavigatorNativeWindowBroker::windowBroker(
++    ScriptState* script_state,
 +    Navigator& navigator) {
++  // EXO-EXTENSIONS: the main world only.
++  if (!script_state || !script_state->World().IsMainWorld()) {
++    return nullptr;
++  }
 +  auto* supplement =
 +      Supplement<Navigator>::From<NavigatorNativeWindowBroker>(navigator);
 +  if (!supplement) {
@@ -4848,10 +4856,10 @@ index 0000000000..4752a53a52
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/core/html/native_window_broker.h b/third_party/blink/renderer/core/html/native_window_broker.h
 new file mode 100644
-index 0000000000..7180fef49c
+index 0000000000..76eec1a186
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/native_window_broker.h
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,345 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4879,6 +4887,8 @@ index 0000000000..7180fef49c
 +#include "third_party/blink/renderer/platform/wtf/hash_set.h"
 +
 +namespace blink {
++
++class ScriptState;
 +
 +class File;
 +
@@ -5179,7 +5189,10 @@ index 0000000000..7180fef49c
 + public:
 +  static const char kSupplementName[];
 +
-+  static NativeWindowBroker* windowBroker(Navigator& navigator);
++  // Null outside the main world: only the shell page's own script gets the
++  // broker, not a script an extension or DevTools runs in another world.
++  static NativeWindowBroker* windowBroker(ScriptState* script_state,
++                                          Navigator& navigator);
 +
 +  explicit NavigatorNativeWindowBroker(Navigator&);
 +
@@ -5755,10 +5768,10 @@ index 0000000000..0686a19930
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_HTML_NAVIGATOR_NATIVE_WINDOW_BROKER_H_
 diff --git a/third_party/blink/renderer/core/html/navigator_native_window_broker.idl b/third_party/blink/renderer/core/html/navigator_native_window_broker.idl
 new file mode 100644
-index 0000000000..d1387fd5b2
+index 0000000000..8d4917b072
 --- /dev/null
 +++ b/third_party/blink/renderer/core/html/navigator_native_window_broker.idl
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,14 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5769,7 +5782,9 @@ index 0000000000..d1387fd5b2
 +    RuntimeEnabled=PlutoniumShell,
 +    SecureContext
 +] partial interface Navigator {
-+    [SameObject] readonly attribute NativeWindowBroker windowBroker;
++    // EXO-EXTENSIONS: null outside the page's main world (extensions'
++    // isolated worlds, DevTools' utility worlds).
++    [CallWith=ScriptState] readonly attribute NativeWindowBroker? windowBroker;
 +};
 diff --git a/third_party/blink/renderer/core/html/resources/html.css b/third_party/blink/renderer/core/html/resources/html.css
 index fe16804c90..9522642b14 100644

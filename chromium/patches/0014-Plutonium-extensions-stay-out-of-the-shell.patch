@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Sun, 8 Nov 2026 11:47:58 +1300
+Subject: [PATCH 14/14] Plutonium: extensions stay out of the shell
+
+Extensions load in shell mode, and the shell page was an ordinary page to them: a tab in an app window, listed by chrome.tabs, given every <all_urls> content script, open to scripting.executeScript, and its requests visible to webRequest and declarativeNetRequest. The window broker answers in every world of a shell document, so any extension allowed on all sites could drive every window and tab, or redirect the shell's own scripts. Now:
+- the renderer injects no extension script into a shell document or a frame of it (ExtensionInjectionHost; asked of the document, so shells added later are covered);
+- in the browser, the shells' origins are restricted URLs to every extension (a PermissionsData policy delegate), so no script access, debugger or capture;
+- a shell page's requests, and requests for one, are hidden from webRequest and declarativeNetRequest, as privileged content's are;
+- a shell's window isn't in the extensions' window list, its page isn't found by tab id (not even through a prerender in it), and it raises no tab events.
+
+It holds these changes:
+- extensions can't script the shell page
+---
+ ...nt_router_platform_delegate_non_android.cc |  6 +++
+ .../browser_extension_window_controller.cc    | 11 +++++
+ .../chrome_extensions_browser_client.cc       | 42 +++++++++++++++++++
+ .../browser/extensions/extension_tab_util.cc  |  6 +++
+ .../api/web_request/web_request_info.cc       | 12 ++++++
+ .../common/permissions/permissions_data.cc    |  6 +++
+ .../common/permissions/permissions_data.h     |  6 +++
+ .../renderer/extension_injection_host.cc      | 12 ++++++
+ 8 files changed, 101 insertions(+)
+
+diff --git a/chrome/browser/extensions/api/tabs/tabs_event_router_platform_delegate_non_android.cc b/chrome/browser/extensions/api/tabs/tabs_event_router_platform_delegate_non_android.cc
+index b2b8b2a5de..4250b78e84 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_event_router_platform_delegate_non_android.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_event_router_platform_delegate_non_android.cc
+@@ -11,6 +11,7 @@
+ #include "chrome/browser/extensions/api/tabs/tabs_windows_api.h"
+ #include "chrome/browser/extensions/api/tabs/windows_event_router.h"
+ #include "chrome/browser/extensions/browser_extension_window_controller.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/resource_coordinator/lifecycle_unit.h"
+ #include "chrome/browser/resource_coordinator/lifecycle_unit_state.mojom-shared.h"
+@@ -67,6 +68,11 @@ TabsEventRouterPlatformDelegate::~TabsEventRouterPlatformDelegate() = default;
+ 
+ bool TabsEventRouterPlatformDelegate::ShouldTrackBrowser(
+     BrowserWindowInterface* browser) {
++  // EXO-EXTENSIONS: a Plutonium shell's window has no tabs to extensions
++  // (BrowserExtensionWindowController), so its page raises no tab events.
++  if (plutonium_shell::IsShellBrowser(browser)) {
++    return false;
++  }
+   return router_->ShouldTrackBrowser(*browser);
+ }
+ 
+diff --git a/chrome/browser/extensions/browser_extension_window_controller.cc b/chrome/browser/extensions/browser_extension_window_controller.cc
+index c6f4ed6fba..c14596a010 100644
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -13,6 +13,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+@@ -119,6 +120,12 @@ BrowserExtensionWindowController::BrowserExtensionWindowController(
+       session_id_(browser->GetSessionID()),
+       window_type_(GetTabsWindowType(browser)),
+       scoped_data_holder_(browser->GetUnownedUserDataHost(), *this) {
++  // EXO-EXTENSIONS: a Plutonium shell's window isn't a window to extensions.
++  // Listed, its page would be a tab they could query, navigate, close,
++  // capture or message by id; the shell is the desktop, not a browser window.
++  if (plutonium_shell::IsShellBrowser(browser)) {
++    return;
++  }
+   WindowControllerList::GetInstance()->AddExtensionWindow(this);
+ }
+ 
+@@ -190,6 +197,10 @@ bool BrowserExtensionWindowController::IsVisibleToTabsAPIForExtension(
+   if (extension && extension->is_platform_app()) {
+     return false;
+   }
++  // EXO-EXTENSIONS: see the constructor.
++  if (plutonium_shell::IsShellBrowser(&*browser_)) {
++    return false;
++  }
+ 
+   return (window_type_ != api::tabs::WindowType::kDevtools) ||
+          allow_dev_tools_windows;
+diff --git a/chrome/browser/extensions/chrome_extensions_browser_client.cc b/chrome/browser/extensions/chrome_extensions_browser_client.cc
+index 92742e80ff..e8ff0041e7 100644
+--- a/chrome/browser/extensions/chrome_extensions_browser_client.cc
++++ b/chrome/browser/extensions/chrome_extensions_browser_client.cc
+@@ -4,13 +4,18 @@
+ 
+ #include "chrome/browser/extensions/chrome_extensions_browser_client.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/command_line.h"
+ #include "base/logging.h"
+ #include "base/memory/scoped_refptr.h"
++#include "base/no_destructor.h"
++#include "base/synchronization/lock.h"
++#include "base/thread_annotations.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/path_service.h"
+ #include "base/strings/string_util.h"
+@@ -73,6 +78,7 @@
+ #include "chrome/browser/net/system_network_context_manager.h"
+ #include "chrome/browser/policy/cloud/extension_install_policy_service.h"
+ #include "chrome/browser/policy/cloud/extension_install_policy_service_factory.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/prefetch/pref_names.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+@@ -149,6 +155,7 @@
+ #include "extensions/common/manifest_handlers/chrome_url_overrides_handler.h"
+ #include "extensions/common/mojom/view_type.mojom-shared.h"
+ #include "extensions/common/permissions/permission_set.h"
++#include "extensions/common/permissions/permissions_data.h"
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
+@@ -273,6 +280,39 @@ bool RegisterTransformers() {
+   return true;
+ }
+ 
++// EXO-EXTENSIONS: Plutonium's shell pages are restricted URLs to every
++// extension, as chrome:// pages are: no script access, no webRequest or
++// declarativeNetRequest redirects on them, no debugger, no captures. A shell
++// page has the window broker, which reaches every window and tab. The renderer
++// also refuses to inject into a shell document (ExtensionInjectionHost); this
++// covers the browser's own checks. The shells' origins are read on the UI
++// thread; a check from another thread uses the last list the UI thread saw.
++class PlutoniumShellPolicyDelegate : public PermissionsData::PolicyDelegate {
++ public:
++  bool IsRestrictedUrl(const GURL& document_url, std::string* error) override {
++    if (!plutonium_shell::IsShellMode()) {
++      return false;
++    }
++    url::Origin origin = url::Origin::Create(document_url);
++    bool restricted = false;
++    {
++      base::AutoLock lock(lock_);
++      if (content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
++        origins_ = plutonium_shell::GetShellOrigins();
++      }
++      restricted = std::ranges::contains(origins_, origin);
++    }
++    if (restricted && error) {
++      *error = "Cannot access a Plutonium shell page.";
++    }
++    return restricted;
++  }
++
++ private:
++  base::Lock lock_;
++  std::vector<url::Origin> origins_ GUARDED_BY(lock_);
++};
++
+ }  // namespace
+ 
+ ChromeExtensionsBrowserClient::ChromeExtensionsBrowserClient()
+@@ -280,6 +320,8 @@ ChromeExtensionsBrowserClient::ChromeExtensionsBrowserClient()
+           std::make_unique<ChromeComponentExtensionResourceManager>()),
+       api_client_(std::make_unique<ChromeExtensionsAPIClient>()),
+       event_router_forwarder_(base::MakeRefCounted<EventRouterForwarder>()) {
++  static base::NoDestructor<PlutoniumShellPolicyDelegate> shell_policy;
++  PermissionsData::SetPolicyDelegate(shell_policy.get());
+   AddAPIProvider(std::make_unique<CoreExtensionsBrowserAPIProvider>());
+   AddAPIProvider(std::make_unique<ChromeExtensionsBrowserAPIProvider>());
+   // This ensures transformers are only registered once. This is required
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index 20c6eaf858..9b2cb156d5 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -26,6 +26,7 @@
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+ #include "chrome/browser/extensions/extension_management.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
++#include "chrome/browser/plutonium_shell.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/tab_group_sync/tab_group_sync_service_factory.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
+@@ -707,6 +708,11 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
+       if (!web_contents->IsPrerenderedFrame(rfh->GetFrameTreeNodeId())) {
+         return;
+       }
++      // EXO-EXTENSIONS: not a Plutonium shell's page, through a prerender in
++      // it (Chrome's search warm-up); see BrowserExtensionWindowController.
++      if (plutonium_shell::IsShellWindowContents(web_contents)) {
++        return;
++      }
+ 
+       found_prerender_contents = web_contents;
+     });
+diff --git a/extensions/browser/api/web_request/web_request_info.cc b/extensions/browser/api/web_request/web_request_info.cc
+index 13c8767ff9..a6f7649e7e 100644
+--- a/extensions/browser/api/web_request/web_request_info.cc
++++ b/extensions/browser/api/web_request/web_request_info.cc
+@@ -29,6 +29,7 @@
+ #include "extensions/browser/extensions_browser_client.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extension_id.h"
++#include "extensions/common/permissions/permissions_data.h"
+ #include "ipc/constants.mojom.h"
+ #include "net/base/ip_endpoint.h"
+ #include "net/base/upload_bytes_element_reader.h"
+@@ -288,6 +289,17 @@ WebRequestInfoInitParams::WebRequestInfoInitParams(
+     is_privileged = process->IsPrivileged();
+   }
+ 
++  // EXO-EXTENSIONS: a Plutonium shell page's requests, and requests for a
++  // shell page, are hidden too: a redirect of the shell's own scripts would
++  // hand an extension the window broker, and a blocked one could break the
++  // desktop. The policy delegate knows the shells' origins.
++  if (!is_privileged &&
++      (PermissionsData::IsRestrictedByPolicyDelegate(url) ||
++       (initiator && !initiator->opaque() &&
++        PermissionsData::IsRestrictedByPolicyDelegate(initiator->GetURL())))) {
++    is_privileged = true;
++  }
++
+   std::vector<std::unique_ptr<UploadDataSource>> data_sources;
+   if (CreateUploadDataSourcesFromResourceRequest(request, &data_sources)) {
+     request_body_data =
+diff --git a/extensions/common/permissions/permissions_data.cc b/extensions/common/permissions/permissions_data.cc
+index 51826bf5d3..9ff9e3552c 100644
+--- a/extensions/common/permissions/permissions_data.cc
++++ b/extensions/common/permissions/permissions_data.cc
+@@ -112,6 +112,12 @@ void PermissionsData::SetPolicyDelegate(PolicyDelegate* delegate) {
+   g_policy_delegate = delegate;
+ }
+ 
++// static
++bool PermissionsData::IsRestrictedByPolicyDelegate(const GURL& url) {
++  return g_policy_delegate &&
++         g_policy_delegate->IsRestrictedUrl(url, /*error=*/nullptr);
++}
++
+ // static
+ bool PermissionsData::CanExecuteScriptEverywhere(
+     const ExtensionId& extension_id,
+diff --git a/extensions/common/permissions/permissions_data.h b/extensions/common/permissions/permissions_data.h
+index e94605cbcc..479ba5ada9 100644
+--- a/extensions/common/permissions/permissions_data.h
++++ b/extensions/common/permissions/permissions_data.h
+@@ -75,6 +75,12 @@ class PermissionsData {
+ 
+   static void SetPolicyDelegate(PolicyDelegate* delegate);
+ 
++  // EXO-EXTENSIONS: whether the policy delegate restricts `url` for every
++  // extension (Plutonium's shell pages, in the browser). Used to hide such
++  // pages' network requests from the webRequest and declarativeNetRequest
++  // APIs, as for privileged content.
++  static bool IsRestrictedByPolicyDelegate(const GURL& url);
++
+   PermissionsData(const ExtensionId& extension_id,
+                   Manifest::Type manifest_type,
+                   mojom::ManifestLocation location,
+diff --git a/extensions/renderer/extension_injection_host.cc b/extensions/renderer/extension_injection_host.cc
+index e89596d1b3..5fd833dead 100644
+--- a/extensions/renderer/extension_injection_host.cc
++++ b/extensions/renderer/extension_injection_host.cc
+@@ -70,6 +70,18 @@ PermissionsData::PageAccess ExtensionInjectionHost::CanExecuteOnFrame(
+   }
+ #endif  // BUILDFLAG(ENABLE_PDF)
+ 
++  // EXO-EXTENSIONS: no extension script runs in a Plutonium shell page, nor
++  // in a frame of one in its process. The page has the window broker, which
++  // reaches every window and tab; an extension allowed on all sites would get
++  // all of it. The browser exposes the shell API to the document when it
++  // commits (the same signal as navigator.windowBroker), so this holds for
++  // shells added after the renderer started. Component extensions included.
++  if (blink::WebFrame* top = web_local_frame->Top();
++      top && top->IsWebLocalFrame() &&
++      top->ToWebLocalFrame()->GetDocument().IsPlutoniumShell()) {
++    return PermissionsData::PageAccess::kDenied;
++  }
++
+   // If the WebView is embedded in another WebView the outermost extension
+   // origin will be set, otherwise we should use it directly from the
+   // WebFrame's top origin.

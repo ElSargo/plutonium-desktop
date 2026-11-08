@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 03/13] Plutonium: embedded surfaces: SurfaceEmbed, input
+Subject: [PATCH 03/14] Plutonium: embedded surfaces: SurfaceEmbed, input
  routing and hit testing
 
 Pages show other surfaces (Exo windows, tabs) through SurfaceEmbed; input reaches them through the input router and viz's hit testing, and drags that leave them end properly.

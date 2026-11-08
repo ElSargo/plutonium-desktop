@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
 Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 12/13] Plutonium: Wayland protocols
+Subject: [PATCH 12/14] Plutonium: Wayland protocols
 
 Protocols apps expect from a desktop: zwp_text_input_v3, xdg_activation_v1, wp_cursor_shape_v1, ext_idle_notify_v1, ext_data_control_v1, and server-side decorations.
 
