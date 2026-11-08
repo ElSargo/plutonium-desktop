@@ -1,6 +1,6 @@
 # Site extensions: describe a change to a site, an agent writes it
 
-**Status: steps 1 to 7 built on branch `site-extensions` (and its Hydra patches), not merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. The sites host does `block` rules only until tabs have ids. The goals:
+**Status: steps 1 to 7 built and merged** (2026-11-09): the folder, the DevTools backend, `site.context`, the agent's tools and skill, Hydra's button, the library's popover. The sites host does `block` rules only until tabs have ids. The goals:
 - from any browser tab, one button: describe a change to the site ("hide the sidebar", "j/k between results", "make it match my desktop's dark theme"), and an agent writes it as an extension;
 - it applies to that tab while the agent writes it, and to every matching tab, now and on later visits, once it's done;
 - extensions are small and readable (a CSS file, a JS module, a manifest), kept in git, undone in one click, and editable by hand or by asking again;
