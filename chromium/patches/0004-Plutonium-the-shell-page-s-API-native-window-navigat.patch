@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 04/14] Plutonium: the shell page's API: <native-window>,
+Date: Mon, 9 Nov 2026 11:23:42 +1300
+Subject: [PATCH 04/15] Plutonium: the shell page's API: <native-window>,
  navigator.windowBroker, and the shells' events
 
 The web platform side: the <native-window> element and its layout and cross-fade, navigator.windowBroker, and the events and entries the shells get for windows, tabs, displays, captures, downloads and context menus.
@@ -17,7 +17,6 @@ It holds these changes:
 - a floating native window keeps its client-side resize edges
 - a page painting where nothing may draw it doesn't let viz slow it
 - a native window's surface range doesn't hold the page's frames
-- navigator.windowBroker is null outside the page's main world
 
 and the parts in these files of:
 - report Wayland client pid through the window broker

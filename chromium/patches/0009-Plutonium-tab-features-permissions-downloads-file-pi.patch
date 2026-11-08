@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 09/14] Plutonium: tab features: permissions, downloads, file
+Date: Mon, 9 Nov 2026 11:23:47 +1300
+Subject: [PATCH 09/15] Plutonium: tab features: permissions, downloads, file
  pickers, printing and more
 
 What tabs need from a desktop, asked of the shell: permission prompts and per-thread grants, downloads, file pickers, printing, page zoom, find in page, context menus, media sessions over MPRIS, speechSynthesis voices; pages see Linux, not ChromeOS.

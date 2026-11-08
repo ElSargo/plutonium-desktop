@@ -23,6 +23,7 @@ Sessions:
   status                     what is running
   appearance [--drm|--x11] [light|dark|toggle|default]
                              light or dark for the desktop: shells, tabs, GTK and Qt apps
+  vim check                  Pluto Vim's $PLUTO_HOME/vim/init.js in a dry run: errors, warnings
   helper <args>              run helper/plutonium.ts (thread-setup, launch, mcp, open, ...)
   <shell> <args>             a shell's own command, if it has one: plutonium hydra help
 EOF
@@ -494,6 +495,8 @@ case "$cmd" in
   status) status_cmd ;;
   session) session_cmd "$@" ;;
   shells) shells_cmd "$@" ;;
+  # Pluto Vim (docs/features/PLUTO_VIM.md): `vim check` loads init.js in a dry run.
+  vim) exec "$NODE" "$ROOT/helper/plutonium.ts" vim "$@" --pluto-home "$PLUTO_HOME" ;;
   # Light or dark for the whole desktop, through the running session's helper:
   # this thread's, else the DRM session's, else the X11 one's (--drm, --x11 to say).
   appearance)

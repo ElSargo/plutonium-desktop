@@ -966,6 +966,36 @@ export class PlutoniumShell extends EventTarget {
     return document.querySelector(`embed[data-content-id="${CSS.escape(tab.contentId)}"]`);
   }
 
+  // Pluto Vim (PLUTO_VIM.md, Native apps): the mode outside insert mode, by the cursor of the
+  // native window's field, over the element that shows the window. A shell that draws its own
+  // listens for "vimmode" and calls preventDefault().
+  _vimBadge({ windowId, mode, caret, line = null }) {
+    const show = new CustomEvent("vimmode", { detail: { windowId, mode, caret, line }, cancelable: true });
+    this.dispatchEvent(show);
+    let badge = this._vimBadgeElement;
+    const element = (mode || line) && !show.defaultPrevented ? this.shownWindowElement(windowId) : null;
+    if (!element) {
+      if (badge) badge.hidden = true;
+      return;
+    }
+    if (!badge) {
+      badge = this._vimBadgeElement = document.createElement("div");
+      badge.setAttribute("aria-live", "polite");
+      badge.style.cssText =
+        "position:fixed;z-index:2147483646;pointer-events:none;padding:1px 5px;border-radius:4px;" +
+        "font:600 11px/16px ui-monospace,monospace;letter-spacing:.04em;color:#fff;background:rgba(40,40,48,.88);" +
+        "white-space:pre;max-width:70vw;max-height:40vh;overflow:hidden";
+      document.documentElement.append(badge);
+    }
+    const names = { normal: "NORMAL", visual: "VISUAL", vline: "V-LINE", replace: "REPLACE", pending: "PENDING" };
+    badge.textContent = line ?? names[mode] ?? String(mode).toUpperCase();
+    const rect = element.getBoundingClientRect();
+    const [x, y, , h] = Array.isArray(caret) ? caret : [0, 0, 0, 0];
+    badge.style.left = `${Math.round(Math.max(rect.left, Math.min(rect.right - 60, rect.left + x)))}px`;
+    badge.style.top = `${Math.round(Math.min(rect.bottom - 18, rect.top + y + h + 2))}px`;
+    badge.hidden = false;
+  }
+
   /** The element in this page that shows native window `windowId` now, if any. */
   shownWindowElement(windowId) {
     if (windowId === undefined || windowId === null) return null;
@@ -1737,6 +1767,12 @@ export class PlutoniumShell extends EventTarget {
         }
         if (op === "file_chooser_cancel" || op === "print_cancel" || op === "system_request_cancel") {
           this._appRequests?.get(args.handle)?.abort();
+        }
+        // Pluto Vim in a native window's field ({ windowId, mode, caret, line }; mode null: insert; line:
+        // the command line, a message, "recording @a").
+        if (op === "vim_mode") {
+          this._vimBadge(args);
+          return;
         }
         if (op === "agent_windows") {
           this.agentWindows = new Map((args.windows ?? []).map((window) => [window.id, window]));

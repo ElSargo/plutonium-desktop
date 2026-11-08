@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Sun, 8 Nov 2026 11:47:58 +1300
-Subject: [PATCH 14/14] Plutonium: extensions stay out of the shell
+Date: Mon, 9 Nov 2026 11:23:52 +1300
+Subject: [PATCH 15/15] Plutonium: extensions stay out of the shell
 
 Extensions load in shell mode, and the shell page was an ordinary page to them: a tab in an app window, listed by chrome.tabs, given every <all_urls> content script, open to scripting.executeScript, and its requests visible to webRequest and declarativeNetRequest. The window broker answers in every world of a shell document, so any extension allowed on all sites could drive every window and tab, or redirect the shell's own scripts. Now:
 - the renderer injects no extension script into a shell document or a frame of it (ExtensionInjectionHost; asked of the document, so shells added later are covered);

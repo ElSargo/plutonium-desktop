@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 02/14] Plutonium: Exo: embedded windows
+Date: Mon, 9 Nov 2026 11:23:41 +1300
+Subject: [PATCH 02/15] Plutonium: Exo: embedded windows
 
 Exo's side of embedding: windows parked off the desktop until a page shows them, the page alone sizing them, focus, keyboard and pointer for embedded windows (pointer lock and confine, modal dialogs, popups), drag and drop, input methods, and window icons.
 
@@ -24,6 +24,9 @@ It holds these changes:
 - agents type through the session's keymap, and a temporary one for what it lacks
 - xdg_toplevel_icon_v1, apps' window icons for the shells
 - a parked window stays invisible when Ash demotes it
+- Caps Lock, as Ash makes it, reaches apps as Escape
+- Pluto Vim for native apps: keys held for the helper's engine, and given back in order
+- the primary selection's global (zwp_primary_selection_v1)
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -46,7 +49,7 @@ and the parts in these files of:
 - a floating native window keeps its client-side resize edges
 - Super+F maximizes in the shell, Super+Shift+F is fullscreen; menus over a fullscreen element; a backdrop for presented windows
 ---
- components/exo/BUILD.gn                       |    4 +
+ components/exo/BUILD.gn                       |    6 +
  components/exo/buffer.cc                      |   48 +
  components/exo/buffer.h                       |   19 +
  components/exo/data_device.cc                 |   21 +-
@@ -55,14 +58,16 @@ and the parts in these files of:
  components/exo/data_source.h                  |   11 +
  components/exo/drag_drop_operation.cc         |   18 +
  components/exo/drag_drop_operation.h          |    4 +
- components/exo/embedded_windows.cc            | 1174 +++++++++++++++++
- components/exo/embedded_windows.h             |  386 ++++++
- components/exo/keyboard.cc                    |   99 +-
+ components/exo/embedded_windows.cc            | 1186 +++++++++++++++++
+ components/exo/embedded_windows.h             |  388 ++++++
+ components/exo/keyboard.cc                    |  127 +-
  components/exo/keyboard.h                     |   17 +
+ components/exo/plutonium_vim.cc               |  347 +++++
+ components/exo/plutonium_vim.h                |  176 +++
  components/exo/pointer.cc                     |  291 +++-
  components/exo/pointer.h                      |   47 +-
  components/exo/pointer_constraint_delegate.h  |    4 +
- components/exo/seat.cc                        |  148 ++-
+ components/exo/seat.cc                        |  148 +-
  components/exo/seat.h                         |   61 +-
  components/exo/seat_observer.h                |   17 +
  components/exo/shell_surface.cc               |   95 +-
@@ -74,8 +79,8 @@ and the parts in these files of:
  components/exo/surface.h                      |    6 +
  components/exo/surface_tree_host.cc           |   12 +-
  components/exo/surface_tree_host.h            |   14 +
- components/exo/wayland/BUILD.gn               |   25 +
- components/exo/wayland/server.cc              |   53 +
+ components/exo/wayland/BUILD.gn               |   28 +
+ components/exo/wayland/server.cc              |   60 +
  .../exo/wayland/wayland_display_observer.cc   |   14 +
  .../exo/wayland/wayland_display_observer.h    |    2 +
  .../wayland_dmabuf_feedback_manager.cc        |    6 +
@@ -85,25 +90,29 @@ and the parts in these files of:
  components/exo/wayland/wl_compositor.h        |    4 +-
  components/exo/wayland/wl_output.h            |    3 +-
  components/exo/wayland/wl_shm.cc              |   45 +-
- components/exo/wayland/xdg_shell.cc           |  370 +++++-
+ components/exo/wayland/xdg_shell.cc           |  370 ++++-
  components/exo/wayland/xdg_shell.h            |   13 +
  .../exo/wayland/zwp_pointer_constraints.cc    |   33 +-
  components/exo/xkb_tracker.cc                 |   57 +
  components/exo/xkb_tracker.h                  |   14 +
- 44 files changed, 4051 insertions(+), 91 deletions(-)
+ 46 files changed, 4624 insertions(+), 95 deletions(-)
  create mode 100644 components/exo/embedded_windows.cc
  create mode 100644 components/exo/embedded_windows.h
+ create mode 100644 components/exo/plutonium_vim.cc
+ create mode 100644 components/exo/plutonium_vim.h
 
 diff --git a/components/exo/BUILD.gn b/components/exo/BUILD.gn
-index d487acb5a4..698577bd76 100644
+index d487acb5a4..a1d2bcb389 100644
 --- a/components/exo/BUILD.gn
 +++ b/components/exo/BUILD.gn
-@@ -106,6 +106,10 @@ static_library("exo") {
+@@ -106,6 +106,12 @@ static_library("exo") {
      "surface.h",
      "surface_delegate.h",
      "surface_observer.h",
 +    "embedded_windows.cc",
 +    "embedded_windows.h",
++    "plutonium_vim.cc",
++    "plutonium_vim.h",
 +    "session_idle.cc",
 +    "session_idle.h",
      "surface_tree_host.cc",
@@ -547,10 +556,10 @@ index 1df95bbf4d..fa8d87f2b8 100644
        DataSource* source,
 diff --git a/components/exo/embedded_windows.cc b/components/exo/embedded_windows.cc
 new file mode 100644
-index 0000000000..f91e10df55
+index 0000000000..e645650b60
 --- /dev/null
 +++ b/components/exo/embedded_windows.cc
-@@ -0,0 +1,1174 @@
+@@ -0,0 +1,1186 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1274,6 +1283,18 @@ index 0000000000..f91e10df55
 +      base::Unretained(this), window_id));
 +}
 +
++int32_t EmbeddedWindows::WindowIdForSurface(const Surface* surface) const {
++  if (!surface) {
++    return 0;
++  }
++  for (const auto& [window_id, entry] : windows_) {
++    if (entry.shell_surface && entry.shell_surface->root_surface() == surface) {
++      return window_id;
++    }
++  }
++  return 0;
++}
++
 +bool EmbeddedWindows::InjectKeyEvents(
 +    int32_t window_id,
 +    std::vector<std::unique_ptr<ui::KeyEvent>> events) {
@@ -1727,10 +1748,10 @@ index 0000000000..f91e10df55
 +}  // namespace exo
 diff --git a/components/exo/embedded_windows.h b/components/exo/embedded_windows.h
 new file mode 100644
-index 0000000000..2d25c0e69b
+index 0000000000..8302277af3
 --- /dev/null
 +++ b/components/exo/embedded_windows.h
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,388 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1970,6 +1991,8 @@ index 0000000000..2d25c0e69b
 +  // same app, the window takes it for these keys instead, standing in for the
 +  // focused aura window (the shell page), and gives it back. False if there
 +  // is no such window, or no focus to borrow.
++  // PLUTONIUM: the window whose root surface is |surface|, or 0.
++  int32_t WindowIdForSurface(const Surface* surface) const;
 +  bool InjectKeyEvents(int32_t window_id,
 +                       std::vector<std::unique_ptr<ui::KeyEvent>> events);
 +  // EXO-AGENT: a character the seat's keymap types, its key
@@ -2118,14 +2141,15 @@ index 0000000000..2d25c0e69b
 +
 +#endif  // COMPONENTS_EXO_EMBEDDED_WINDOWS_H_
 diff --git a/components/exo/keyboard.cc b/components/exo/keyboard.cc
-index efa6c2a66d..46558099eb 100644
+index efa6c2a66d..145a7c68a8 100644
 --- a/components/exo/keyboard.cc
 +++ b/components/exo/keyboard.cc
-@@ -31,9 +31,11 @@
+@@ -31,9 +31,12 @@
  #include "components/exo/keyboard_modifiers.h"
  #include "components/exo/seat.h"
  #include "components/exo/shell_surface.h"
 +#include "components/exo/embedded_windows.h"
++#include "components/exo/plutonium_vim.h"
  #include "components/exo/shell_surface_util.h"
  #include "components/exo/surface.h"
  #include "components/exo/xkb_tracker.h"
@@ -2133,7 +2157,15 @@ index efa6c2a66d..46558099eb 100644
  #include "ui/aura/client/aura_constants.h"
  #include "ui/aura/client/focus_client.h"
  #include "ui/aura/window.h"
-@@ -105,6 +107,13 @@ bool ProcessAcceleratorIfReserved(Surface* surface, ui::KeyEvent* event) {
+@@ -44,6 +47,7 @@
+ #include "ui/events/event.h"
+ #include "ui/events/event_constants.h"
+ #include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
+ #include "ui/events/keycodes/dom/keycode_converter.h"
+ #include "ui/views/widget/widget.h"
+ #include "ui/wm/core/window_util.h"
+@@ -105,6 +109,13 @@ bool ProcessAcceleratorIfReserved(Surface* surface, ui::KeyEvent* event) {
  // TODO(yhanada, https://crbug.com/847500): Remove this when we find a way
  // to fix https://crbug.com/847500 without breaking ARC apps/Lacros browser.
  bool IsImeSupportedSurface(Surface* surface) {
@@ -2147,7 +2179,25 @@ index efa6c2a66d..46558099eb 100644
    aura::Window* window = surface->window();
    while (window) {
      const auto app_type = window->GetProperty(chromeos::kAppTypeKey);
-@@ -235,8 +244,75 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+@@ -140,6 +151,17 @@ bool IsAutoRepeatEnabled(const ui::KeyEvent& event) {
+   return !ui::HasKeyEventSuppressAutoRepeat(*properties);
+ }
+ 
++// Plutonium: in a Plutonium shell, Ash makes Caps Lock an Escape that keeps
++// its code (keyboard_modifier_event_rewriter.cc), for Pluto Vim. A client is
++// told of the key by its code, so it's given the Escape key's.
++ui::DomCode ClientCode(const ui::KeyEvent& event) {
++  if (event.code() == ui::DomCode::CAPS_LOCK &&
++      event.GetDomKey() == ui::DomKey::ESCAPE) {
++    return ui::DomCode::ESCAPE;
++  }
++  return event.code();
++}
++
+ }  // namespace
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -235,8 +257,82 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
    if (!focus_ || seat_->was_shutdown())
      return;
  
@@ -2155,6 +2205,13 @@ index efa6c2a66d..46558099eb 100644
 +  DCHECK(embedded_owner_ ||
 +         GetShellRootSurface(static_cast<aura::Window*>(event->target())) ||
           Surface::AsSurface(static_cast<aura::Window*>(event->target())));
++  // PLUTONIUM: Pluto Vim holds a key for its engine, or took it
++  // (plutonium_vim.h). A key the input method has is never vim's.
++  if (!ConsumedByIme(*event) &&
++      PlutoniumVim::Get()->FilterKey(focus_, event)) {
++    event->StopPropagation();
++    return;
++  }
 +  ProcessKeyEvent(event);
 +}
 +
@@ -2224,7 +2281,42 @@ index efa6c2a66d..46558099eb 100644
  
    // Ignore synthetic key repeat events.
    if (event->is_repeat()) {
-@@ -417,16 +493,17 @@ void Keyboard::OnSurfaceDestroying(Surface* surface) {
+@@ -310,14 +406,14 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+         }
+ 
+         for (auto& observer : observer_list_) {
+-          observer.OnKeyboardKey(event->time_stamp(), event->code(), true);
++          observer.OnKeyboardKey(event->time_stamp(), ClientCode(*event), true);
+         }
+ 
+         if (!consumed_by_ime) {
+           // Process key press event if not already handled and not already
+           // pressed.
+           uint32_t serial = delegate_->OnKeyboardKey(event->time_stamp(),
+-                                                     event->code(), true);
++                                                     ClientCode(*event), true);
+           if (AreKeyboardKeyAcksNeeded()) {
+             pending_key_acks_.insert(
+                 {serial,
+@@ -328,7 +424,7 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+         }
+         // Keep track of both the physical code and potentially re-written
+         // code that this event generated.
+-        pressed_keys_[physical_code].emplace(event->code(), consumed_by_ime);
++        pressed_keys_[physical_code].emplace(ClientCode(*event), consumed_by_ime);
+       } else if (!should_handle && !event->handled()) {
+         // Non-repeate key events for already pressed key can be sent in some
+         // cases (e.g. Holding 'A' key then holding 'B' key then releasing 'A'
+@@ -348,7 +444,7 @@ void Keyboard::OnKeyEvent(ui::KeyEvent* event) {
+ 
+       auto& key_state_set = key_state_set_iter->second;
+       auto key_state_iter = std::ranges::find(
+-          key_state_set, event->code(),
++          key_state_set, ClientCode(*event),
+           [](const KeyState& key_state) { return key_state.code; });
+ 
+       // If we can't find the specific key event to release, all previously
+@@ -417,16 +513,17 @@ void Keyboard::OnSurfaceDestroying(Surface* surface) {
  void Keyboard::OnSurfaceFocused(Surface* gained_focus,
                                  Surface* lost_focused,
                                  bool has_focused_surface) {
@@ -2246,7 +2338,7 @@ index efa6c2a66d..46558099eb 100644
    if (focus_)
      delegate_->OnKeyboardModifiers(seat_->xkb_tracker()->GetModifiers());
  }
-@@ -540,6 +617,12 @@ void Keyboard::AddEventHandler() {
+@@ -540,6 +637,12 @@ void Keyboard::AddEventHandler() {
    if (!focus_)
      return;
  
@@ -2259,7 +2351,7 @@ index efa6c2a66d..46558099eb 100644
    // Toplevel window can be not ShellSurface, for example for a notification
    // surface.
    aura::Window* toplevel_window = focus_->window();
-@@ -556,6 +639,12 @@ void Keyboard::RemoveEventHandler() {
+@@ -556,6 +659,12 @@ void Keyboard::RemoveEventHandler() {
    if (!focus_)
      return;
  
@@ -2314,6 +2406,541 @@ index 3ed334d4ca..a5d5da11fd 100644
    // Set of currently pressed keys. First value is a platform code and second
    // value is the code that was delivered to client. See Seat.h for more
    // details.
+diff --git a/components/exo/plutonium_vim.cc b/components/exo/plutonium_vim.cc
+new file mode 100644
+index 0000000000..5041276895
+--- /dev/null
++++ b/components/exo/plutonium_vim.cc
+@@ -0,0 +1,347 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/plutonium_vim.h"
++
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "components/exo/embedded_windows.h"
++#include "components/exo/surface.h"
++#include "ui/events/event.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++
++namespace exo {
++
++namespace {
++
++// CDP's modifiers (Input.dispatchKeyEvent): Alt 1, Ctrl 2, Meta 4, Shift 8.
++int ModifiersOf(const ui::KeyEvent& event) {
++  int modifiers = 0;
++  if (event.flags() & ui::EF_ALT_DOWN) {
++    modifiers |= 1;
++  }
++  if (event.flags() & ui::EF_CONTROL_DOWN) {
++    modifiers |= 2;
++  }
++  if (event.flags() & ui::EF_COMMAND_DOWN) {
++    modifiers |= 4;
++  }
++  if (event.flags() & ui::EF_SHIFT_DOWN) {
++    modifiers |= 8;
++  }
++  return modifiers;
++}
++
++bool IsModifierKey(ui::DomKey key) {
++  return key == ui::DomKey::CONTROL || key == ui::DomKey::SHIFT ||
++         key == ui::DomKey::ALT || key == ui::DomKey::ALT_GRAPH ||
++         key == ui::DomKey::META || key == ui::DomKey::SUPER ||
++         key == ui::DomKey::HYPER || key == ui::DomKey::CAPS_LOCK ||
++         key == ui::DomKey::NUM_LOCK;
++}
++
++}  // namespace
++
++// static
++PlutoniumVim* PlutoniumVim::Get() {
++  static base::NoDestructor<PlutoniumVim> instance;
++  return instance.get();
++}
++
++PlutoniumVim::PlutoniumVim() = default;
++PlutoniumVim::~PlutoniumVim() = default;
++
++void PlutoniumVim::SetListener(Listener* listener) {
++  listener_ = listener;
++  if (listener_) {
++    return;
++  }
++  // Nobody answers: whatever is held goes on, and nothing more is held.
++  while (!queue_.empty()) {
++    Resolve(false);
++  }
++  for (auto& [field, entry] : fields_) {
++    entry.hold_all = false;
++    entry.hold.clear();
++  }
++  window_fields_.clear();
++  taken_.clear();
++}
++
++bool PlutoniumVim::SetHold(int field_id, bool all, std::vector<KeySpec> keys) {
++  FieldEntry* entry = EntryById(field_id);
++  if (!entry) {
++    return false;
++  }
++  entry->hold_all = all;
++  entry->hold = std::move(keys);
++  return true;
++}
++
++int PlutoniumVim::SetWindowField(int32_t window_id, bool on) {
++  if (!on) {
++    window_fields_.erase(window_id);
++    return 0;
++  }
++  auto [it, added] = window_fields_.try_emplace(window_id);
++  if (added) {
++    it->second.id = next_field_id_++;
++  }
++  return it->second.id;
++}
++
++PlutoniumVim::FieldEntry* PlutoniumVim::EntryById(int field_id) {
++  for (auto& [field, entry] : fields_) {
++    if (entry.id == field_id) {
++      return &entry;
++    }
++  }
++  for (auto& [window_id, entry] : window_fields_) {
++    if (entry.id == field_id) {
++      return &entry;
++    }
++  }
++  return nullptr;
++}
++
++void PlutoniumVim::Answer(int key_id, bool consumed) {
++  if (queue_.empty() || queue_.front().key_id != key_id) {
++    return;
++  }
++  Resolve(consumed);
++}
++
++bool PlutoniumVim::Edit(int field_id,
++                        int before,
++                        int after,
++                        const std::u16string& text) {
++  for (auto& [field, entry] : fields_) {
++    if (entry.id == field_id) {
++      field->VimEdit(before, after, text);
++      return true;
++    }
++  }
++  return false;
++}
++
++void PlutoniumVim::FieldChanged(Field* field,
++                                const std::u16string& text,
++                                int cursor,
++                                int anchor,
++                                uint32_t hint,
++                                uint32_t purpose,
++                                bool off,
++                                std::optional<gfx::Rect> caret) {
++  auto [it, added] = fields_.try_emplace(field);
++  FieldEntry& entry = it->second;
++  if (added) {
++    entry.id = next_field_id_++;
++  }
++  const bool was_off = !added && entry.off;
++  entry.off = off;
++  if (!listener_) {
++    return;
++  }
++  if (off) {
++    if (!added && !was_off) {
++      listener_->OnVimFieldGone(entry.id);
++    }
++    return;
++  }
++  FieldState state;
++  state.id = entry.id;
++  state.text = text;
++  state.cursor = cursor;
++  state.anchor = anchor;
++  state.hint = hint;
++  state.purpose = purpose;
++  EmbeddedWindows* windows = EmbeddedWindows::Get();
++  state.window_id = windows->WindowIdForSurface(field->VimSurface());
++  if (caret && state.window_id) {
++    // Surface coordinates to the window's geometry, which the shell shows.
++    gfx::Rect rect = *caret;
++    if (std::optional<EmbeddedWindows::Info> info =
++            windows->GetInfo(state.window_id)) {
++      rect.Offset(-info->geometry.OffsetFromOrigin());
++    }
++    state.caret = rect;
++  }
++  listener_->OnVimFieldChanged(state);
++}
++
++void PlutoniumVim::FieldComposing(Field* field, bool composing) {
++  auto it = fields_.find(field);
++  if (it != fields_.end()) {
++    it->second.composing = composing;
++  }
++}
++
++void PlutoniumVim::FieldGone(Field* field) {
++  auto it = fields_.find(field);
++  if (it == fields_.end()) {
++    return;
++  }
++  const int id = it->second.id;
++  const bool announced = !it->second.off;
++  fields_.erase(it);
++  if (listener_ && announced) {
++    listener_->OnVimFieldGone(id);
++  }
++}
++
++PlutoniumVim::FieldEntry* PlutoniumVim::EntryFor(Surface* focus) {
++  if (!focus) {
++    return nullptr;
++  }
++  for (auto& [field, entry] : fields_) {
++    if (field->VimSurface() == focus) {
++      return entry.off || entry.composing ? nullptr : &entry;
++    }
++  }
++  // A window field (AT-SPI's), when the window has no text-input-v3 one.
++  if (!window_fields_.empty()) {
++    auto it = window_fields_.find(
++        EmbeddedWindows::Get()->WindowIdForSurface(focus));
++    if (it != window_fields_.end()) {
++      return &it->second;
++    }
++  }
++  return nullptr;
++}
++
++bool PlutoniumVim::Wants(const FieldEntry& entry,
++                         const ui::KeyEvent& event) const {
++  const ui::DomKey dom_key = event.GetDomKey();
++  // Super's keys are the desktop's; modifiers alone are nobody's key.
++  if ((event.flags() & ui::EF_COMMAND_DOWN) || IsModifierKey(dom_key)) {
++    return false;
++  }
++  if (entry.hold_all) {
++    return true;
++  }
++  const std::string key = ui::KeycodeConverter::DomKeyToKeyString(dom_key);
++  // Shift is in the key itself ("J"); Ctrl and Alt must match.
++  const int modifiers = ModifiersOf(event) & 3;
++  for (const KeySpec& spec : entry.hold) {
++    if (spec.key == key && (spec.modifiers & 3) == modifiers) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool PlutoniumVim::FilterKey(Surface* focus, ui::KeyEvent* event) {
++  if (!listener_ || (event->properties() &&
++                     event->properties()->contains(kShellKeyEventKey))) {
++    return false;
++  }
++  const ui::DomCode code = event->code();
++  const int32_t window_id =
++      focus ? EmbeddedWindows::Get()->WindowIdForSurface(focus) : 0;
++  if (event->type() == ui::EventType::kKeyReleased) {
++    // Behind a held key, in order; the release of a key the engine took is
++    // the engine's too.
++    if (!queue_.empty()) {
++      queue_.push_back(
++          {0, 0, window_id, std::make_unique<ui::KeyEvent>(*event)});
++      return true;
++    }
++    return taken_.erase(code) > 0;
++  }
++  if (event->type() != ui::EventType::kKeyPressed) {
++    return false;
++  }
++  // Exo drops repeats (apps repeat keys themselves); a key the engine took
++  // repeats in the engine (holding j moves line after line).
++  if (event->is_repeat() && !taken_.contains(code) && queue_.empty()) {
++    return false;
++  }
++  FieldEntry* entry = EntryFor(focus);
++  if (!queue_.empty()) {
++    queue_.push_back({0, entry ? entry->id : 0, window_id,
++                      std::make_unique<ui::KeyEvent>(*event)});
++    return true;
++  }
++  // Only a window the agents' key path reaches can get a held key back.
++  if (!entry || !window_id || !Wants(*entry, *event)) {
++    return false;
++  }
++  queue_.push_back(
++      {0, entry->id, window_id, std::make_unique<ui::KeyEvent>(*event)});
++  Send(queue_.front());
++  return true;
++}
++
++void PlutoniumVim::Send(Pending& pending) {
++  pending.key_id = next_key_id_++;
++  Key key;
++  key.id = pending.key_id;
++  key.field_id = pending.field_id;
++  key.key =
++      ui::KeycodeConverter::DomKeyToKeyString(pending.event->GetDomKey());
++  key.code = ui::KeycodeConverter::DomCodeToCodeString(pending.event->code());
++  key.modifiers = ModifiersOf(*pending.event);
++  key.repeat = pending.event->is_repeat();
++  answer_timer_.Start(FROM_HERE, kAnswerTimeout,
++                      base::BindOnce(&PlutoniumVim::Resolve,
++                                     weak_factory_.GetWeakPtr(), false));
++  listener_->OnVimKey(key);
++}
++
++void PlutoniumVim::Resolve(bool consumed) {
++  answer_timer_.Stop();
++  if (queue_.empty()) {
++    return;
++  }
++  Pending pending = std::move(queue_.front());
++  queue_.pop_front();
++  if (consumed) {
++    taken_.insert(pending.event->code());
++  } else if (!pending.event->is_repeat()) {
++    taken_.erase(pending.event->code());
++    Replay(std::move(pending));
++  }
++  Drain();
++}
++
++void PlutoniumVim::Drain() {
++  while (!queue_.empty()) {
++    Pending& front = queue_.front();
++    if (front.event->type() == ui::EventType::kKeyPressed && listener_) {
++      FieldEntry* entry = EntryById(front.field_id);
++      if (entry && (entry->off || entry->composing)) {
++        entry = nullptr;
++      }
++      const bool repeat_of_taken =
++          front.event->is_repeat() && taken_.contains(front.event->code());
++      if (entry && (repeat_of_taken || (!front.event->is_repeat() &&
++                                        Wants(*entry, *front.event)))) {
++        Send(front);
++        return;
++      }
++    }
++    Pending pending = std::move(queue_.front());
++    queue_.pop_front();
++    if (pending.event->type() == ui::EventType::kKeyReleased &&
++        taken_.erase(pending.event->code())) {
++      continue;
++    }
++    if (!pending.event->is_repeat()) {
++      Replay(std::move(pending));
++    }
++  }
++}
++
++void PlutoniumVim::Replay(Pending pending) {
++  if (!pending.window_id) {
++    return;
++  }
++  std::vector<std::unique_ptr<ui::KeyEvent>> events;
++  events.push_back(std::move(pending.event));
++  EmbeddedWindows::Get()->InjectKeyEvents(pending.window_id, std::move(events));
++}
++
++}  // namespace exo
+diff --git a/components/exo/plutonium_vim.h b/components/exo/plutonium_vim.h
+new file mode 100644
+index 0000000000..d6301b90a3
+--- /dev/null
++++ b/components/exo/plutonium_vim.h
+@@ -0,0 +1,176 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_PLUTONIUM_VIM_H_
++#define COMPONENTS_EXO_PLUTONIUM_VIM_H_
++
++#include <cstdint>
++#include <deque>
++#include <map>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/timer/timer.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/gfx/geometry/rect.h"
++
++namespace ui {
++class KeyEvent;
++}
++
++namespace exo {
++
++class Surface;
++
++// PLUTONIUM: Pluto Vim for native apps (docs/features/PLUTO_VIM.md,
++// "Native apps: text-input-v3"). The engine runs in Plutonium's helper, which
++// sees each text-input-v3 field (its surrounding text, cursor, content type)
++// and, while the field is in a mode that takes keys, each key: Exo holds the
++// key, and every key after it in order, until the helper answers whether the
++// engine took it. A key the engine didn't take goes on to the app as it was.
++// The helper edits the field with delete_surrounding_text and commit_string,
++// and moves its cursor with navigation keys (the agents' key path).
++//
++// Nothing is held without a helper listening, during an input method's
++// composition, in a field that's a password, PIN, sensitive, hidden or a
++// terminal, or for longer than kAnswerTimeout: then the key goes on.
++class PlutoniumVim {
++ public:
++  // A text-input-v3 field (WaylandTextInputV3Delegate).
++  class Field {
++   public:
++    virtual ~Field() = default;
++    // Replaces the |before| UTF-16 units before the cursor and |after| after
++    // it (the selection with them) by |text|, as one edit.
++    virtual void VimEdit(int before, int after, const std::u16string& text) = 0;
++    virtual Surface* VimSurface() = 0;
++  };
++
++  struct FieldState {
++    int id = 0;
++    int32_t window_id = 0;
++    std::u16string text;
++    int cursor = 0;  // UTF-16 offsets into text.
++    int anchor = 0;
++    uint32_t hint = 0;
++    uint32_t purpose = 0;
++    // The cursor rectangle in the window's geometry (what the shell shows).
++    std::optional<gfx::Rect> caret;
++  };
++
++  struct Key {
++    int id = 0;
++    int field_id = 0;
++    std::string key;   // DOM key ("a", "Escape", "ArrowLeft").
++    std::string code;  // DOM code ("KeyA").
++    int modifiers = 0;  // CDP's: Alt 1, Ctrl 2, Meta 4, Shift 8.
++    bool repeat = false;
++  };
++
++  // The helper's side (the Plutonium DevTools domain).
++  class Listener {
++   public:
++    virtual ~Listener() = default;
++    virtual void OnVimFieldChanged(const FieldState& field) = 0;
++    virtual void OnVimFieldGone(int field_id) = 0;
++    virtual void OnVimKey(const Key& key) = 0;
++  };
++
++  // A key the helper wants held in a field (in insert mode, only some are).
++  struct KeySpec {
++    std::string key;
++    int modifiers = 0;
++  };
++
++  static constexpr base::TimeDelta kAnswerTimeout = base::Milliseconds(100);
++
++  static PlutoniumVim* Get();
++
++  PlutoniumVim(const PlutoniumVim&) = delete;
++  PlutoniumVim& operator=(const PlutoniumVim&) = delete;
++
++  // The helper listens (or stops, with null): fields are announced, and
++  // keys are held, only while one does.
++  void SetListener(Listener* listener);
++
++  // From the helper: which keys to hold in |field_id|. |all|: every key but
++  // modifiers and Super's; otherwise only |keys|.
++  bool SetHold(int field_id, bool all, std::vector<KeySpec> keys);
++  // From the helper: the answer for key |key_id|.
++  void Answer(int key_id, bool consumed);
++  bool Edit(int field_id, int before, int after, const std::u16string& text);
++  // From the helper: window |window_id| has a field it reaches some other
++  // way (AT-SPI, for apps without text-input-v3), whose keys it wants held
++  // as a text-input-v3 field's are; 0 to stop. Returns the field's id.
++  int SetWindowField(int32_t window_id, bool on);
++
++  // From WaylandTextInputV3Delegate, on each commit while enabled. |off|:
++  // vim stays out (a password, PIN, sensitive, hidden or terminal field).
++  void FieldChanged(Field* field,
++                    const std::u16string& text,
++                    int cursor,
++                    int anchor,
++                    uint32_t hint,
++                    uint32_t purpose,
++                    bool off,
++                    std::optional<gfx::Rect> caret);
++  void FieldComposing(Field* field, bool composing);
++  void FieldGone(Field* field);
++
++  // From Keyboard::OnKeyEvent(): true if Pluto Vim holds or took the key
++  // (the keyboard then stops it).
++  bool FilterKey(Surface* focus, ui::KeyEvent* event);
++
++ private:
++  friend class base::NoDestructor<PlutoniumVim>;
++
++  struct FieldEntry {
++    int id = 0;
++    bool composing = false;
++    bool off = false;  // Password, PIN, sensitive, hidden, terminal.
++    bool hold_all = false;
++    std::vector<KeySpec> hold;
++  };
++  struct Pending {
++    int key_id = 0;  // 0: queued behind the one being answered.
++    int field_id = 0;
++    int32_t window_id = 0;
++    std::unique_ptr<ui::KeyEvent> event;
++  };
++
++  PlutoniumVim();
++  ~PlutoniumVim();
++
++  FieldEntry* EntryFor(Surface* focus);
++  FieldEntry* EntryById(int field_id);
++  bool Wants(const FieldEntry& entry, const ui::KeyEvent& event) const;
++  void Send(Pending& pending);
++  void Resolve(bool consumed);
++  void Drain();
++  void Replay(Pending pending);
++
++  raw_ptr<Listener> listener_ = nullptr;
++  std::map<Field*, FieldEntry> fields_;
++  // Window fields (SetWindowField), by window id.
++  std::map<int32_t, FieldEntry> window_fields_;
++  int next_field_id_ = 1;
++  int next_key_id_ = 1;
++  // The key being answered first, then the keys behind it, in order.
++  std::deque<Pending> queue_;
++  base::OneShotTimer answer_timer_;
++  // Keys the engine took whose releases and repeats go to it, not the app.
++  std::set<ui::DomCode> taken_;
++
++  base::WeakPtrFactory<PlutoniumVim> weak_factory_{this};
++};
++
++}  // namespace exo
++
++#endif  // COMPONENTS_EXO_PLUTONIUM_VIM_H_
 diff --git a/components/exo/pointer.cc b/components/exo/pointer.cc
 index 315110a03e..a93a6fa1ec 100644
 --- a/components/exo/pointer.cc
@@ -4690,15 +5317,17 @@ index 7a981c1498..3127b96dd0 100644
    raw_ptr<SecurityDelegate> security_delegate_ = nullptr;
  
 diff --git a/components/exo/wayland/BUILD.gn b/components/exo/wayland/BUILD.gn
-index d47a715bbb..a9e033b4f4 100644
+index d47a715bbb..a07c8962f7 100644
 --- a/components/exo/wayland/BUILD.gn
 +++ b/components/exo/wayland/BUILD.gn
-@@ -20,6 +20,14 @@ source_set("wayland") {
+@@ -20,6 +20,16 @@ source_set("wayland") {
      "client_tracker.h",
      "content_type.cc",
      "content_type.h",
 +    "ext_data_control.cc",
 +    "ext_data_control.h",
++    "zwp_primary_selection.cc",
++    "zwp_primary_selection.h",
 +    "ext_idle_notify.cc",
 +    "ext_idle_notify.h",
 +    "ext_image_copy_capture.cc",
@@ -4708,7 +5337,7 @@ index d47a715bbb..a9e033b4f4 100644
      "output_configuration_change.cc",
      "output_configuration_change.h",
      "output_controller.cc",
-@@ -73,6 +81,8 @@ source_set("wayland") {
+@@ -73,6 +83,8 @@ source_set("wayland") {
      "wl_shm.h",
      "wl_subcompositor.cc",
      "wl_subcompositor.h",
@@ -4717,7 +5346,7 @@ index d47a715bbb..a9e033b4f4 100644
      "wp_fractional_scale.cc",
      "wp_fractional_scale.h",
      "wp_presentation.cc",
-@@ -81,6 +91,8 @@ source_set("wayland") {
+@@ -81,6 +93,8 @@ source_set("wayland") {
      "wp_single_pixel_buffer.h",
      "wp_viewporter.cc",
      "wp_viewporter.h",
@@ -4726,13 +5355,14 @@ index d47a715bbb..a9e033b4f4 100644
      "xdg_shell.cc",
      "xdg_shell.h",
      "zaura_output_manager.cc",
-@@ -167,17 +179,21 @@ source_set("wayland") {
+@@ -167,17 +181,22 @@ source_set("wayland") {
      "//third_party/wayland:wayland_server",
      "//third_party/wayland-protocols:alpha_compositing_protocol",
      "//third_party/wayland-protocols:content_type_protocol",
 +    "//third_party/wayland-protocols:cursor_shape_protocol",
      "//third_party/wayland-protocols:cursor_shapes_protocol",
 +    "//third_party/wayland-protocols:ext_data_control_protocol",
++    "//third_party/wayland-protocols:primary_selection_protocol",
      "//third_party/wayland-protocols:extended_drag",
      "//third_party/wayland-protocols:fractional_scale_protocol",
      "//third_party/wayland-protocols:gaming_input_protocol",
@@ -4748,7 +5378,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//third_party/wayland-protocols:pointer_constraints_protocol",
      "//third_party/wayland-protocols:pointer_gestures_protocol",
      "//third_party/wayland-protocols:presentation_time_protocol",
-@@ -193,13 +209,20 @@ source_set("wayland") {
+@@ -193,13 +212,20 @@ source_set("wayland") {
      "//third_party/wayland-protocols:ui_controls_v1_protocol",
      "//third_party/wayland-protocols:viewporter_protocol",
      "//third_party/wayland-protocols:vsync_feedback_protocol",
@@ -4769,7 +5399,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//ui/base/dragdrop/mojom:mojom_shared",
      "//ui/base/wayland:wayland_display_util",
      "//ui/base/wayland:wayland_server_input_types",
-@@ -208,6 +231,7 @@ source_set("wayland") {
+@@ -208,6 +234,7 @@ source_set("wayland") {
      "//ui/events:events_base",
      "//ui/events/devices",
      "//ui/events/ozone/layout",
@@ -4777,7 +5407,7 @@ index d47a715bbb..a9e033b4f4 100644
      "//ui/gfx/linux:drm",
      "//ui/ozone",
      "//ui/views",
-@@ -312,6 +336,7 @@ source_set("unit_tests") {
+@@ -312,6 +339,7 @@ source_set("unit_tests") {
      "zaura_shell_unittest.cc",
      "zcr_remote_shell_impl_unittest.cc",
      "zcr_remote_shell_unittest.cc",
@@ -4786,10 +5416,10 @@ index d47a715bbb..a9e033b4f4 100644
    ]
  
 diff --git a/components/exo/wayland/server.cc b/components/exo/wayland/server.cc
-index c0f85f4f0a..8ed207dfc1 100644
+index c0f85f4f0a..4ba23e7adc 100644
 --- a/components/exo/wayland/server.cc
 +++ b/components/exo/wayland/server.cc
-@@ -6,7 +6,10 @@
+@@ -6,12 +6,16 @@
  
  #include <alpha-compositing-unstable-v1-server-protocol.h>
  #include <content-type-v1-server-protocol.h>
@@ -4800,7 +5430,13 @@ index c0f85f4f0a..8ed207dfc1 100644
  #include <extended-drag-unstable-v1-server-protocol.h>
  #include <gaming-input-unstable-v2-server-protocol.h>
  #include <grp.h>
-@@ -21,15 +24,22 @@
+ #include <idle-inhibit-unstable-v1-server-protocol.h>
+ #include <input-timestamps-unstable-v1-server-protocol.h>
++#include <primary-selection-unstable-v1-server-protocol.h>
+ #include <keyboard-extension-unstable-v1-server-protocol.h>
+ #include <keyboard-shortcuts-inhibit-unstable-v1-server-protocol.h>
+ #include <linux-dmabuf-unstable-v1-server-protocol.h>
+@@ -21,15 +25,22 @@
  #include <pointer-gestures-unstable-v1-server-protocol.h>
  #include <presentation-time-server-protocol.h>
  #include <relative-pointer-unstable-v1-server-protocol.h>
@@ -4823,18 +5459,19 @@ index c0f85f4f0a..8ed207dfc1 100644
  
  #include <array>
  #include <memory>
-@@ -50,6 +60,10 @@
+@@ -50,6 +61,11 @@
  #include "components/exo/security_delegate.h"
  #include "components/exo/wayland/client_tracker.h"
  #include "components/exo/wayland/content_type.h"
 +#include "components/exo/wayland/ext_data_control.h"
++#include "components/exo/wayland/zwp_primary_selection.h"
 +#include "components/exo/wayland/ext_idle_notify.h"
 +#include "components/exo/wayland/ext_image_copy_capture.h"
 +#include "components/exo/wayland/org_kde_kwin_server_decoration.h"
  #include "components/exo/wayland/overlay_prioritizer.h"
  #include "components/exo/wayland/serial_tracker.h"
  #include "components/exo/wayland/server_util.h"
-@@ -63,10 +77,12 @@
+@@ -63,10 +79,12 @@
  #include "components/exo/wayland/wl_shell.h"
  #include "components/exo/wayland/wl_shm.h"
  #include "components/exo/wayland/wl_subcompositor.h"
@@ -4847,7 +5484,7 @@ index c0f85f4f0a..8ed207dfc1 100644
  #include "components/exo/wayland/xdg_shell.h"
  #include "components/exo/wayland/zaura_shell.h"
  #include "components/exo/wayland/zcr_alpha_compositing.h"
-@@ -292,6 +308,9 @@ void Server::Initialize() {
+@@ -292,6 +310,9 @@ void Server::Initialize() {
                     /*version=*/1, display_, bind_content_type);
    wl_global_create(wl_display_.get(), &zcr_cursor_shapes_v1_interface,
                     /*version=*/1, display_, bind_cursor_shapes);
@@ -4857,7 +5494,7 @@ index c0f85f4f0a..8ed207dfc1 100644
    wl_global_create(wl_display_.get(), &zcr_gaming_input_v2_interface,
                     /*version=*/3, display_, bind_gaming_input);
    wl_global_create(wl_display_.get(), &zcr_keyboard_configuration_v1_interface,
-@@ -327,10 +346,26 @@ void Server::Initialize() {
+@@ -327,10 +348,31 @@ void Server::Initialize() {
                     display_, bind_relative_pointer_manager);
    wl_global_create(wl_display_.get(), &zxdg_decoration_manager_v1_interface,
                     /*version=*/1, display_, bind_zxdg_decoration_manager);
@@ -4881,10 +5518,15 @@ index c0f85f4f0a..8ed207dfc1 100644
 +  // PLUTONIUM: ext_data_control_v1 (ext_data_control.h).
 +  wl_global_create(wl_display_.get(), &ext_data_control_manager_v1_interface,
 +                   /*version=*/1, display_, bind_data_control_manager);
++  // PLUTONIUM: zwp_primary_selection_v1 (zwp_primary_selection.h).
++  wl_global_create(wl_display_.get(),
++                   &zwp_primary_selection_device_manager_v1_interface,
++                   /*version=*/1, display_,
++                   bind_primary_selection_device_manager);
  
    ui_controls_holder_ = std::make_unique<UiControls>(this);
  
-@@ -349,6 +384,9 @@ void Server::Initialize() {
+@@ -349,6 +391,9 @@ void Server::Initialize() {
    wl_global_create(wl_display_.get(), &zwp_text_input_manager_v1_interface,
                     /*version=*/1, zwp_text_manager_data_.get(),
                     bind_text_input_manager);
@@ -4894,7 +5536,7 @@ index c0f85f4f0a..8ed207dfc1 100644
  
    zcr_text_input_extension_data_ =
        std::make_unique<WaylandTextInputExtension>();
-@@ -364,6 +402,21 @@ void Server::Initialize() {
+@@ -364,6 +409,21 @@ void Server::Initialize() {
  
    wl_global_create(wl_display_.get(), &zcr_touchpad_haptics_v1_interface,
                     /*version=*/1, display_, bind_touchpad_haptics);

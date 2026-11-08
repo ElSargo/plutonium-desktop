@@ -18,6 +18,8 @@ Keys are handled in four places, each with its own spelling of a combination:
 | Hydra | T3's keybindings (`~/.t3/keybindings.json`), with `when` clauses and, for the file manager only, one-key prefixes (`g g`) | T3's settings and file | `mod+shift+t` (a key, not a code) |
 | Apps (`helper/src/shortcuts.ts`) | Global shortcuts apps bind through the portal | The binder dialog | `CTRL+SHIFT+t` (an XKB keysym) |
 
+Ash also rewrites one key for everything: **Caps Lock is an Escape** that keeps its code, for Pluto Vim (PLUTO_VIM.md, "Caps Lock"). There's no Caps Lock.
+
 The shells' own keys reach the page through `setShellShortcuts(list)`. That's a flat list of combos the browser takes from whatever has the keyboard, with no condition. The dock's actions are shared code (`defineDockActions`), but each shell keeps its own copy of the user's keys.
 
 What goes wrong:

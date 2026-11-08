@@ -16,11 +16,15 @@
 //                                           site extensions, for an agent writing one
 //                                           (SITE_EXTENSIONS.md): on a tab of
 //                                           $PLUTONIUM_THREAD_ID's (one lent to it)
+//   plutonium.ts vim check [--pluto-home <dir>]
+//                                           Pluto Vim's init.js in a dry run: errors
+//                                           and warnings (vimConfig.ts)
 //   plutonium.ts stop-x-displays            stops the threads' X servers a stopped
 //                                           helper left running (plutonium stop)
 //
 // Clients find the daemon's socket in $PLUTONIUM_HELPER (set in every thread
 // process), else from --wayland-display / $PLUTONIUM_WAYLAND_DISPLAY.
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { helperJson } from "./src/client.ts";
@@ -31,6 +35,7 @@ import { ShellPackages } from "./src/shellPackages.ts";
 import { plutoHome } from "./src/shells.ts";
 import { PLUTONIUM_ROOT, runShellsCommand } from "./src/shellsCli.ts";
 import { HELPER_VARIABLE, stopXDisplays, THREAD_ID_VARIABLE, wantsShow, xDisplayStatePath } from "./src/threads.ts";
+import { checkConfig, configDir, INIT } from "./src/vimConfig.ts";
 
 const [command, ...rest] = process.argv.slice(2);
 // An app's own arguments (after `launch <thread-id>`) aren't ours to parse.
@@ -74,6 +79,7 @@ function usage(): never {
       "       plutonium.ts open <url|file>…\n" +
       "       plutonium.ts appearance [light|dark|toggle|default]\n" +
       "       plutonium.ts sites apply|report|read|snapshot <tab-id> | sites check | sites import <file|url> [site]\n" +
+      "       plutonium.ts vim check [--pluto-home <dir>]\n" +
       "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
@@ -236,6 +242,19 @@ switch (command) {
       console.error(`plutonium.ts sites ${action}: ${(error as Error).message}`);
       process.exitCode = 1;
     }
+    break;
+  }
+  case "vim": {
+    // Pluto Vim's init.js, loaded in a dry run against the engine (docs/features/PLUTO_VIM.md, init.js).
+    if (positionals[0] !== "check") usage();
+    const dir = configDir(values["pluto-home"] ?? plutoHome());
+    const result = checkConfig(dir, fileURLToPath(new URL("./web/vim", import.meta.url)));
+    const name = `${dir}/${INIT}`;
+    if (result.ok) console.log(`${name}: ok (${result.summary})`);
+    else console.log(`${name}: doesn't load; a session keeps running the last version that did`);
+    for (const error of result.errors) console.log(`error: ${error}`);
+    for (const warning of result.warnings) console.log(`warning: ${warning}`);
+    process.exitCode = result.ok ? 0 : 1;
     break;
   }
   case "stop-x-displays":

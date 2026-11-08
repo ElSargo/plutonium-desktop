@@ -14,6 +14,7 @@
 - [features/KEYS.md](features/KEYS.md): design: one keymap for every shell and the browser, contexts, chords and modes, the `config.js` script
 - [features/EXTENSIONS.md](features/EXTENSIONS.md): design: Chrome extensions in the shells' tabs: tab ids for the registry, actions and popups through the shell, uBlock Origin
 - [features/SITE_EXTENSIONS.md](features/SITE_EXTENSIONS.md): describe a change to a site and an agent writes it as a site extension, applied live and kept; `site.context` per project; presets for theming and keys (built)
+- [features/PLUTO_VIM.md](features/PLUTO_VIM.md): design: Pluto Vim, vim mode in every text field (Blink, text-input-v3, AT-SPI), a JS engine and `init.js`, registers across the desktop, pages that integrate
 - [features/SHELLS.md](features/SHELLS.md): several shells, tags and groups, the Super+Tab overlay
 - [features/STYX_SHELL.md](features/STYX_SHELL.md): Styx, the scrollable tiling shell; keyboard, touchpad and scrolling fixes
 - [features/UI_LIBRARY.md](features/UI_LIBRARY.md): the shells' UI library: the dock, keys, settings, dragging and widgets Styx, Charon and the plain shell share

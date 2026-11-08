@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 08/14] Plutonium: browser tabs as elements of the shell page
+Date: Mon, 9 Nov 2026 11:23:46 +1300
+Subject: [PATCH 08/15] Plutonium: browser tabs as elements of the shell page
 
 Tabs are real Chromium tabs shown in the shell page: opening, driving and restoring them, incognito tabs, fullscreen, and their requests to the shell.
 

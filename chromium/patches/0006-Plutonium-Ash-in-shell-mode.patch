@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 06/14] Plutonium: Ash in shell mode
+Date: Mon, 9 Nov 2026 11:23:44 +1300
+Subject: [PATCH 06/15] Plutonium: Ash in shell mode
 
 Ash's own UI gets out of the way of the shell page: accelerators and gestures go to the shell, and there are no toasts, nudges or clipboard history.
 
@@ -9,6 +9,7 @@ It holds these changes:
 - no clipboard history nudges in shell mode
 - a touchpad swipe's begin and end keep their finger count
 - no Ash toasts, nudges or clipboard history, no Chrome toasts or clipboard bubble over the shell
+- no Caps Lock: the key is Escape, keeping its code, for Pluto Vim
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -33,13 +34,14 @@ and the parts in these files of:
  .../ash/exo/chrome_security_delegate.cc       |  22 ++-
  .../ash/login/signin/signin_error_notifier.cc |   7 +
  ui/events/ash/event_rewriter_ash.cc           |   9 ++
+ .../ash/keyboard_modifier_event_rewriter.cc   |  12 ++
  ui/events/event.cc                            |   5 +
  ui/wm/core/accelerator_filter.cc              |   4 +
  ui/wm/core/accelerator_filter.h               |   5 +
  ui/wm/core/compound_event_filter.cc           |   2 +
  ui/wm/core/compound_event_filter.h            |   6 +
  ui/wm/core/focus_controller.cc                |   5 +
- 21 files changed, 453 insertions(+), 6 deletions(-)
+ 22 files changed, 465 insertions(+), 6 deletions(-)
 
 diff --git a/ash/accelerators/accelerator_controller_impl.cc b/ash/accelerators/accelerator_controller_impl.cc
 index 5497f10e39..5ca7196375 100644
@@ -867,6 +869,36 @@ index ae8361b378..bfea6f7378 100644
    if (incoming.flags & (EF_COMMAND_DOWN | EF_ALT_DOWN)) {
      MaybeRewriteKeyEventToSixPackKeyAction(delegate_, key_event, state,
                                             last_keyboard_device_id_);
+diff --git a/ui/events/ash/keyboard_modifier_event_rewriter.cc b/ui/events/ash/keyboard_modifier_event_rewriter.cc
+index 067562ee19..922cc4c1fa 100644
+--- a/ui/events/ash/keyboard_modifier_event_rewriter.cc
++++ b/ui/events/ash/keyboard_modifier_event_rewriter.cc
+@@ -7,6 +7,7 @@
+ #include <variant>
+ 
+ #include "ash/constants/ash_features.h"
++#include "base/command_line.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/notreached.h"
+ #include "ui/base/accelerators/ash/quick_insert_event_property.h"
+@@ -182,6 +183,17 @@ std::unique_ptr<Event> KeyboardModifierEventRewriter::RewritePressKeyEvent(
+ 
+ std::optional<KeyboardModifierEventRewriter::RemappedKey>
+ KeyboardModifierEventRewriter::RemapPressKey(const KeyEvent& event) {
++  // Plutonium: a Plutonium shell has no Caps Lock. The key is Escape, keeping
++  // its code, so Pluto Vim (docs/features/PLUTO_VIM.md) can tell it from the
++  // Escape key: in a field it's on in, it takes CapsLock before the page, as
++  // Ctrl+[. Exo gives native apps a plain Escape (components/exo/keyboard.cc).
++  static const bool plutonium_shell =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("plutonium-shell-url");
++  if (plutonium_shell && event.code() == DomCode::CAPS_LOCK &&
++      !(event.flags() & EF_FINAL)) {
++    return {{DomCode::CAPS_LOCK, DomKey::ESCAPE, VKEY_ESCAPE}};
++  }
++
+   if (!delegate_->RewriteModifierKeys() || (event.flags() & EF_FINAL)) {
+     return std::nullopt;
+   }
 diff --git a/ui/events/event.cc b/ui/events/event.cc
 index 20b5f8b72d..ba0cfa736b 100644
 --- a/ui/events/event.cc

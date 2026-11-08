@@ -1,9 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 12/14] Plutonium: Wayland protocols
+Date: Mon, 9 Nov 2026 11:23:50 +1300
+Subject: [PATCH 12/15] Plutonium: Wayland protocols
 
-Protocols apps expect from a desktop: zwp_text_input_v3, xdg_activation_v1, wp_cursor_shape_v1, ext_idle_notify_v1, ext_data_control_v1, and server-side decorations.
+Protocols apps expect from a desktop: zwp_text_input_v3, xdg_activation_v1, wp_cursor_shape_v1, ext_idle_notify_v1, ext_data_control_v1, zwp_primary_selection_v1, and server-side decorations.
 
 It holds these changes:
 - zwp_text_input_v3 in Exo, for GTK 4, Qt 6 and foot
@@ -11,6 +11,8 @@ It holds these changes:
 - wp_cursor_shape_v1, cursors by name for GTK 4, Qt 6 and foot
 - ext_idle_notify_v1, apps hear when the user is idle
 - ext_data_control_v1, the clipboard for clipboard managers
+- Pluto Vim: text-input-v3 fields' state and edits for the engine
+- zwp_primary_selection_v1, and ext_data_control_v1's primary selection: Exo's own, for middle-click paste and Pluto Vim's "*
 
 and the parts in these files of:
 - Exo embedding (Phase 1) and window broker (Phase 2)
@@ -20,21 +22,23 @@ and the parts in these files of:
  .../input_method_configuration.cc             |   7 +-
  components/exo/session_idle.cc                |  36 ++
  components/exo/session_idle.h                 |  49 ++
- components/exo/wayland/ext_data_control.cc    | 318 ++++++++++++
- components/exo/wayland/ext_data_control.h     |  29 ++
- components/exo/wayland/ext_idle_notify.cc     | 185 +++++++
+ components/exo/wayland/ext_data_control.cc    | 385 ++++++++++++
+ components/exo/wayland/ext_data_control.h     |  29 +
+ components/exo/wayland/ext_idle_notify.cc     | 185 ++++++
  components/exo/wayland/ext_idle_notify.h      |  28 +
- .../wayland/org_kde_kwin_server_decoration.cc | 129 +++++
+ .../wayland/org_kde_kwin_server_decoration.cc | 129 ++++
  .../wayland/org_kde_kwin_server_decoration.h  |  24 +
- components/exo/wayland/wp_cursor_shape.cc     | 179 +++++++
+ components/exo/wayland/wp_cursor_shape.cc     | 179 ++++++
  components/exo/wayland/wp_cursor_shape.h      |  27 +
- components/exo/wayland/xdg_activation.cc      | 176 +++++++
- components/exo/wayland/xdg_activation.h       |  29 ++
- .../exo/wayland/zwp_text_input_manager.cc     | 483 ++++++++++++++++++
+ components/exo/wayland/xdg_activation.cc      | 176 ++++++
+ components/exo/wayland/xdg_activation.h       |  29 +
+ .../exo/wayland/zwp_primary_selection.cc      | 301 ++++++++++
+ .../exo/wayland/zwp_primary_selection.h       |  93 +++
+ .../exo/wayland/zwp_text_input_manager.cc     | 562 ++++++++++++++++++
  .../exo/wayland/zwp_text_input_manager.h      |   6 +
- .../zwp_text_input_manager_unittest.cc        | 221 ++++++++
+ .../zwp_text_input_manager_unittest.cc        | 221 +++++++
  third_party/wayland-protocols/BUILD.gn        |  21 +
- 17 files changed, 1946 insertions(+), 1 deletion(-)
+ 19 files changed, 2486 insertions(+), 1 deletion(-)
  create mode 100644 components/exo/session_idle.cc
  create mode 100644 components/exo/session_idle.h
  create mode 100644 components/exo/wayland/ext_data_control.cc
@@ -47,6 +51,8 @@ and the parts in these files of:
  create mode 100644 components/exo/wayland/wp_cursor_shape.h
  create mode 100644 components/exo/wayland/xdg_activation.cc
  create mode 100644 components/exo/wayland/xdg_activation.h
+ create mode 100644 components/exo/wayland/zwp_primary_selection.cc
+ create mode 100644 components/exo/wayland/zwp_primary_selection.h
  create mode 100644 components/exo/wayland/zwp_text_input_manager_unittest.cc
 
 diff --git a/chrome/browser/ash/input_method/input_method_configuration.cc b/chrome/browser/ash/input_method/input_method_configuration.cc
@@ -173,10 +179,10 @@ index 0000000000..67c6a7e7b5
 +#endif  // COMPONENTS_EXO_SESSION_IDLE_H_
 diff --git a/components/exo/wayland/ext_data_control.cc b/components/exo/wayland/ext_data_control.cc
 new file mode 100644
-index 0000000000..cb0a57e0a5
+index 0000000000..b8e7af5da2
 --- /dev/null
 +++ b/components/exo/wayland/ext_data_control.cc
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,385 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -190,6 +196,8 @@ index 0000000000..cb0a57e0a5
 +#include <memory>
 +#include <optional>
 +#include <string>
++#include <utility>
++#include <vector>
 +
 +#include "base/files/scoped_file.h"
 +#include "base/memory/raw_ptr.h"
@@ -202,6 +210,7 @@ index 0000000000..cb0a57e0a5
 +#include "components/exo/display.h"
 +#include "components/exo/seat.h"
 +#include "components/exo/wayland/server_util.h"
++#include "components/exo/wayland/zwp_primary_selection.h"
 +#include "ui/base/clipboard/clipboard.h"
 +#include "ui/base/clipboard/clipboard_buffer.h"
 +#include "ui/base/clipboard/clipboard_monitor.h"
@@ -256,11 +265,27 @@ index 0000000000..cb0a57e0a5
 +  base::WeakPtrFactory<DataControlSourceDelegate> weak_ptr_factory_{this};
 +};
 +
-+struct DataControlSource {
++// A source for the clipboard (a DataSource, as an app's) or for the primary
++// selection (Exo's own, zwp_primary_selection.h).
++struct DataControlSource : public PrimarySelection::Source {
 +  DataControlSource(wl_client* client, wl_resource* resource)
-+      : source(new DataControlSourceDelegate(client, resource)) {}
++      : delegate(new DataControlSourceDelegate(client, resource)),
++        source(delegate) {}
++  ~DataControlSource() override { PrimarySelection::Get()->Unset(this); }
 +
++  // PrimarySelection::Source:
++  const std::vector<std::string>& MimeTypes() const override {
++    return mime_types;
++  }
++  void Send(const std::string& mime_type, base::ScopedFD fd) override {
++    delegate->OnSend(mime_type, std::move(fd));
++  }
++  void Cancelled() override { delegate->OnCancelled(); }
++
++  // Owned by |source|, which deletes it as it goes.
++  raw_ptr<DataControlSourceDelegate, DanglingUntriaged> delegate;
 +  DataSource source;
++  std::vector<std::string> mime_types;
 +  // Given to set_selection or set_primary_selection.
 +  bool used = false;
 +};
@@ -276,6 +301,7 @@ index 0000000000..cb0a57e0a5
 +    return;
 +  }
 +  data->source.Offer(mime_type);
++  data->mime_types.emplace_back(mime_type);
 +}
 +
 +void data_control_source_destroy(wl_client* client, wl_resource* resource) {
@@ -333,21 +359,68 @@ index 0000000000..cb0a57e0a5
 +    data_control_offer_implementation = {data_control_offer_receive,
 +                                         data_control_offer_destroy};
 +
++// An offer of the primary selection: a receive goes to its source.
++void data_control_primary_offer_receive(wl_client* client,
++                                        wl_resource* resource,
++                                        const char* mime_type,
++                                        int fd) {
++  PrimarySelection::Get()->Receive(
++      GetUserDataAs<PrimarySelectionOffer>(resource)->generation, mime_type,
++      base::ScopedFD(fd));
++}
++
++constexpr struct ext_data_control_offer_v1_interface
++    data_control_primary_offer_implementation = {
++        data_control_primary_offer_receive, data_control_offer_destroy};
++
 +////////////////////////////////////////////////////////////////////////////////
 +// ext_data_control_device_v1 interface:
 +
-+// Offers the clipboard when made and whenever it changes.
-+class DataControlDevice : public ui::ClipboardObserver {
++// Offers the clipboard and the primary selection when made and whenever
++// they change.
++class DataControlDevice : public ui::ClipboardObserver,
++                          public PrimarySelection::Observer {
 + public:
 +  DataControlDevice(wl_client* client, wl_resource* resource, Seat* seat)
 +      : client_(client), resource_(resource), seat_(seat) {
 +    ui::ClipboardMonitor::GetInstance()->AddObserver(this);
++    PrimarySelection::Get()->AddObserver(this);
 +    OnClipboardDataChanged();
++    OnPrimarySelectionChanged();
 +  }
 +  DataControlDevice(const DataControlDevice&) = delete;
 +  DataControlDevice& operator=(const DataControlDevice&) = delete;
 +  ~DataControlDevice() override {
++    PrimarySelection::Get()->RemoveObserver(this);
 +    ui::ClipboardMonitor::GetInstance()->RemoveObserver(this);
++  }
++
++  // PrimarySelection::Observer:
++  void OnPrimarySelectionChanged() override {
++    PrimarySelection* selection = PrimarySelection::Get();
++    PrimarySelection::Source* source = selection->current();
++    if (!source) {
++      ext_data_control_device_v1_send_primary_selection(resource_, nullptr);
++      wl_client_flush(client_);
++      return;
++    }
++    wl_resource* offer_resource =
++        wl_resource_create(client_, &ext_data_control_offer_v1_interface,
++                           wl_resource_get_version(resource_), 0);
++    if (!offer_resource) {
++      wl_client_post_no_memory(client_);
++      return;
++    }
++    SetImplementation(
++        offer_resource, &data_control_primary_offer_implementation,
++        std::make_unique<PrimarySelectionOffer>(selection->generation()));
++    ext_data_control_device_v1_send_data_offer(resource_, offer_resource);
++    for (const std::string& mime_type : source->MimeTypes()) {
++      ext_data_control_offer_v1_send_offer(offer_resource, mime_type.c_str());
++    }
++    ext_data_control_device_v1_send_primary_selection(resource_,
++                                                      offer_resource);
++    wl_client_flush(client_);
 +  }
 +
 +  Seat* seat() { return seat_; }
@@ -417,13 +490,13 @@ index 0000000000..cb0a57e0a5
 +void data_control_device_set_primary_selection(wl_client* client,
 +                                               wl_resource* resource,
 +                                               wl_resource* source_resource) {
-+  // There's no primary selection: the source is let go, so that a client
-+  // waiting to serve it (wl-copy --primary) doesn't wait for ever.
++  // Exo's own primary selection (zwp_primary_selection.h).
 +  if (!source_resource) {
++    PrimarySelection::Get()->Set(nullptr);
 +    return;
 +  }
 +  if (DataControlSource* data = TakeSource(resource, source_resource)) {
-+    data->source.Cancelled();
++    PrimarySelection::Get()->Set(data);
 +  }
 +}
 +
@@ -1355,8 +1428,414 @@ index 0000000000..cbe37d8305
 +}  // namespace exo
 +
 +#endif  // COMPONENTS_EXO_WAYLAND_XDG_ACTIVATION_H_
+diff --git a/components/exo/wayland/zwp_primary_selection.cc b/components/exo/wayland/zwp_primary_selection.cc
+new file mode 100644
+index 0000000000..0007945178
+--- /dev/null
++++ b/components/exo/wayland/zwp_primary_selection.cc
+@@ -0,0 +1,301 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/exo/wayland/zwp_primary_selection.h"
++
++#include <primary-selection-unstable-v1-server-protocol.h>
++#include <wayland-server-core.h>
++#include <wayland-server-protocol-core.h>
++
++#include <memory>
++#include <utility>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "components/exo/display.h"
++#include "components/exo/seat.h"
++#include "components/exo/seat_observer.h"
++#include "components/exo/surface.h"
++#include "components/exo/wayland/server_util.h"
++
++namespace exo::wayland {
++
++// static
++PrimarySelection* PrimarySelection::Get() {
++  static base::NoDestructor<PrimarySelection> instance;
++  return instance.get();
++}
++
++PrimarySelection::PrimarySelection() = default;
++PrimarySelection::~PrimarySelection() = default;
++
++void PrimarySelection::Set(Source* source) {
++  if (source == current_) {
++    return;
++  }
++  Source* before = current_;
++  current_ = source;
++  ++generation_;
++  if (before) {
++    before->Cancelled();
++  }
++  Changed();
++}
++
++void PrimarySelection::Unset(Source* source) {
++  if (source != current_) {
++    return;
++  }
++  current_ = nullptr;
++  ++generation_;
++  Changed();
++}
++
++void PrimarySelection::Receive(uint64_t generation,
++                               const std::string& mime_type,
++                               base::ScopedFD fd) {
++  // An offer of a selection that's gone gets nothing: its fd just closes.
++  if (generation != generation_ || !current_) {
++    return;
++  }
++  current_->Send(mime_type, std::move(fd));
++}
++
++void PrimarySelection::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void PrimarySelection::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void PrimarySelection::Changed() {
++  for (Observer& observer : observers_) {
++    observer.OnPrimarySelectionChanged();
++  }
++}
++
++namespace {
++
++////////////////////////////////////////////////////////////////////////////////
++// zwp_primary_selection_offer_v1 interface:
++
++void offer_receive(wl_client* client,
++                   wl_resource* resource,
++                   const char* mime_type,
++                   int fd) {
++  PrimarySelection::Get()->Receive(
++      GetUserDataAs<PrimarySelectionOffer>(resource)->generation, mime_type,
++      base::ScopedFD(fd));
++}
++
++void offer_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct zwp_primary_selection_offer_v1_interface
++    offer_implementation = {offer_receive, offer_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// zwp_primary_selection_source_v1 interface:
++
++class PrimarySource : public PrimarySelection::Source {
++ public:
++  PrimarySource(wl_client* client, wl_resource* resource)
++      : client_(client), resource_(resource) {}
++  PrimarySource(const PrimarySource&) = delete;
++  PrimarySource& operator=(const PrimarySource&) = delete;
++  ~PrimarySource() override { PrimarySelection::Get()->Unset(this); }
++
++  void Offer(const char* mime_type) { mime_types_.emplace_back(mime_type); }
++
++  // PrimarySelection::Source:
++  const std::vector<std::string>& MimeTypes() const override {
++    return mime_types_;
++  }
++  void Send(const std::string& mime_type, base::ScopedFD fd) override {
++    zwp_primary_selection_source_v1_send_send(resource_, mime_type.c_str(),
++                                              fd.get());
++    wl_client_flush(client_);
++  }
++  void Cancelled() override {
++    zwp_primary_selection_source_v1_send_cancelled(resource_);
++    wl_client_flush(client_);
++  }
++
++ private:
++  const raw_ptr<wl_client> client_;
++  const raw_ptr<wl_resource> resource_;
++  std::vector<std::string> mime_types_;
++};
++
++void source_offer(wl_client* client,
++                  wl_resource* resource,
++                  const char* mime_type) {
++  GetUserDataAs<PrimarySource>(resource)->Offer(mime_type);
++}
++
++void source_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct zwp_primary_selection_source_v1_interface
++    source_implementation = {source_offer, source_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// zwp_primary_selection_device_v1 interface:
++
++// Offers the selection to its client while one of the client's surfaces has
++// keyboard focus: when it gains focus, and when the selection changes.
++class PrimaryDevice : public PrimarySelection::Observer, public SeatObserver {
++ public:
++  PrimaryDevice(wl_client* client, wl_resource* resource, Seat* seat)
++      : client_(client), resource_(resource), seat_(seat->GetWeakPtr()) {
++    PrimarySelection::Get()->AddObserver(this);
++    seat_->AddObserver(this, kPriority);
++    if (Focused(seat_->GetFocusedSurface())) {
++      Offer();
++    }
++  }
++  PrimaryDevice(const PrimaryDevice&) = delete;
++  PrimaryDevice& operator=(const PrimaryDevice&) = delete;
++  ~PrimaryDevice() override {
++    PrimarySelection::Get()->RemoveObserver(this);
++    if (seat_) {
++      seat_->RemoveObserver(this);
++    }
++  }
++
++  // PrimarySelection::Observer:
++  void OnPrimarySelectionChanged() override {
++    if (seat_ && Focused(seat_->GetFocusedSurface())) {
++      Offer();
++    }
++  }
++
++  // SeatObserver:
++  void OnSurfaceFocused(Surface* gained_focus,
++                        Surface* lost_focus,
++                        bool has_focused_client) override {
++    if (Focused(gained_focus) && !Focused(lost_focus)) {
++      Offer();
++    }
++  }
++
++ private:
++  static constexpr int kPriority = 1;
++
++  bool Focused(Surface* surface) const {
++    wl_resource* surface_resource =
++        surface ? GetSurfaceResource(surface) : nullptr;
++    return surface_resource &&
++           wl_resource_get_client(surface_resource) == client_;
++  }
++
++  void Offer() {
++    PrimarySelection* selection = PrimarySelection::Get();
++    PrimarySelection::Source* source = selection->current();
++    if (!source) {
++      zwp_primary_selection_device_v1_send_selection(resource_, nullptr);
++      wl_client_flush(client_);
++      return;
++    }
++    wl_resource* offer =
++        wl_resource_create(client_, &zwp_primary_selection_offer_v1_interface,
++                           wl_resource_get_version(resource_), 0);
++    if (!offer) {
++      wl_client_post_no_memory(client_);
++      return;
++    }
++    SetImplementation(
++        offer, &offer_implementation,
++        std::make_unique<PrimarySelectionOffer>(selection->generation()));
++    zwp_primary_selection_device_v1_send_data_offer(resource_, offer);
++    for (const std::string& mime_type : source->MimeTypes()) {
++      zwp_primary_selection_offer_v1_send_offer(offer, mime_type.c_str());
++    }
++    zwp_primary_selection_device_v1_send_selection(resource_, offer);
++    wl_client_flush(client_);
++  }
++
++  const raw_ptr<wl_client> client_;
++  const raw_ptr<wl_resource> resource_;
++  base::WeakPtr<Seat> seat_;
++};
++
++void device_set_selection(wl_client* client,
++                          wl_resource* resource,
++                          wl_resource* source_resource,
++                          uint32_t serial) {
++  PrimarySelection::Get()->Set(
++      source_resource ? GetUserDataAs<PrimarySource>(source_resource)
++                      : nullptr);
++}
++
++void device_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct zwp_primary_selection_device_v1_interface
++    device_implementation = {device_set_selection, device_destroy};
++
++////////////////////////////////////////////////////////////////////////////////
++// zwp_primary_selection_device_manager_v1 interface:
++
++void manager_create_source(wl_client* client,
++                           wl_resource* resource,
++                           uint32_t id) {
++  wl_resource* source =
++      wl_resource_create(client, &zwp_primary_selection_source_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!source) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  SetImplementation(source, &source_implementation,
++                    std::make_unique<PrimarySource>(client, source));
++}
++
++void manager_get_device(wl_client* client,
++                        wl_resource* resource,
++                        uint32_t id,
++                        wl_resource* seat_resource) {
++  wl_resource* device =
++      wl_resource_create(client, &zwp_primary_selection_device_v1_interface,
++                         wl_resource_get_version(resource), id);
++  if (!device) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  // Exo has one seat.
++  Seat* seat = GetUserDataAs<Display>(resource)->seat();
++  SetImplementation(device, &device_implementation,
++                    std::make_unique<PrimaryDevice>(client, device, seat));
++}
++
++void manager_destroy(wl_client* client, wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++constexpr struct zwp_primary_selection_device_manager_v1_interface
++    manager_implementation = {manager_create_source, manager_get_device,
++                              manager_destroy};
++
++}  // namespace
++
++void bind_primary_selection_device_manager(wl_client* client,
++                                           void* data,
++                                           uint32_t version,
++                                           uint32_t id) {
++  wl_resource* resource = wl_resource_create(
++      client, &zwp_primary_selection_device_manager_v1_interface, 1, id);
++  if (!resource) {
++    wl_client_post_no_memory(client);
++    return;
++  }
++  wl_resource_set_implementation(resource, &manager_implementation, data,
++                                 nullptr);
++}
++
++}  // namespace exo::wayland
+diff --git a/components/exo/wayland/zwp_primary_selection.h b/components/exo/wayland/zwp_primary_selection.h
+new file mode 100644
+index 0000000000..957e945a1b
+--- /dev/null
++++ b/components/exo/wayland/zwp_primary_selection.h
+@@ -0,0 +1,93 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_EXO_WAYLAND_ZWP_PRIMARY_SELECTION_H_
++#define COMPONENTS_EXO_WAYLAND_ZWP_PRIMARY_SELECTION_H_
++
++#include <stdint.h>
++
++#include <string>
++#include <vector>
++
++#include "base/files/scoped_file.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++
++struct wl_client;
++
++namespace exo::wayland {
++
++// PLUTONIUM: the primary selection, what's selected and middle-click pastes
++// (zwp_primary_selection_v1, and ext_data_control_v1's primary selection for
++// clipboard managers, wl-copy --primary and Pluto Vim's "*). The browser's
++// clipboard has no primary selection on ChromeOS, so Exo keeps it itself, as
++// other compositors do: it holds the source client's offer, and a receive on
++// an offer goes straight to that client's send with the same fd. Exo copies
++// nothing.
++class PrimarySelection {
++ public:
++  class Source {
++   public:
++    virtual ~Source() = default;
++    virtual const std::vector<std::string>& MimeTypes() const = 0;
++    virtual void Send(const std::string& mime_type, base::ScopedFD fd) = 0;
++    virtual void Cancelled() = 0;
++  };
++
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnPrimarySelectionChanged() = 0;
++  };
++
++  static PrimarySelection* Get();
++
++  PrimarySelection(const PrimarySelection&) = delete;
++  PrimarySelection& operator=(const PrimarySelection&) = delete;
++
++  // |source| is the selection now (null: there is none); the one before it
++  // is cancelled.
++  void Set(Source* source);
++  // |source| is going: if it's the selection, there's none now.
++  void Unset(Source* source);
++
++  Source* current() const { return current_; }
++  // Changes with each Set(): an offer is for the selection of its generation.
++  uint64_t generation() const { return generation_; }
++  // An offer of |generation| asks for |mime_type| into |fd|.
++  void Receive(uint64_t generation,
++               const std::string& mime_type,
++               base::ScopedFD fd);
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++ private:
++  friend class base::NoDestructor<PrimarySelection>;
++  PrimarySelection();
++  ~PrimarySelection();
++
++  void Changed();
++
++  raw_ptr<Source> current_ = nullptr;
++  uint64_t generation_ = 0;
++  base::ObserverList<Observer> observers_;
++};
++
++// An offer of the primary selection, a resource's user data.
++struct PrimarySelectionOffer {
++  explicit PrimarySelectionOffer(uint64_t generation)
++      : generation(generation) {}
++  const uint64_t generation;
++};
++
++void bind_primary_selection_device_manager(wl_client* client,
++                                           void* data,
++                                           uint32_t version,
++                                           uint32_t id);
++
++}  // namespace exo::wayland
++
++#endif  // COMPONENTS_EXO_WAYLAND_ZWP_PRIMARY_SELECTION_H_
 diff --git a/components/exo/wayland/zwp_text_input_manager.cc b/components/exo/wayland/zwp_text_input_manager.cc
-index 9753416fe3..abaee4d064 100644
+index 9753416fe3..3be5fdc476 100644
 --- a/components/exo/wayland/zwp_text_input_manager.cc
 +++ b/components/exo/wayland/zwp_text_input_manager.cc
 @@ -7,11 +7,14 @@
@@ -1374,10 +1853,11 @@ index 9753416fe3..abaee4d064 100644
  
  #include "ash/constants/ash_features.h"
  #include "base/compiler_specific.h"
-@@ -21,6 +24,10 @@
+@@ -21,6 +24,11 @@
  #include "base/strings/utf_offset_string_conversions.h"
  #include "base/strings/utf_string_conversions.h"
  #include "components/exo/display.h"
++#include "components/exo/plutonium_vim.h"
 +#include "components/exo/seat.h"
 +#include "components/exo/seat_observer.h"
 +#include "components/exo/surface.h"
@@ -1385,7 +1865,7 @@ index 9753416fe3..abaee4d064 100644
  #include "components/exo/text_input.h"
  #include "components/exo/wayland/serial_tracker.h"
  #include "components/exo/wayland/server_util.h"
-@@ -1015,6 +1022,472 @@ constexpr struct zcr_text_input_extension_v1_interface
+@@ -1015,6 +1023,550 @@ constexpr struct zcr_text_input_extension_v1_interface
      text_input_extension_implementation = {
          text_input_extension_get_extended_text_input};
  
@@ -1398,7 +1878,8 @@ index 9753416fe3..abaee4d064 100644
 +// sent as its events followed by done, whose serial is the number of commits.
 +class WaylandTextInputV3Delegate : public TextInput::Delegate,
 +                                   public SeatObserver,
-+                                   public SurfaceObserver {
++                                   public SurfaceObserver,
++                                   public PlutoniumVim::Field {
 + public:
 +  WaylandTextInputV3Delegate(wl_resource* text_input, Seat* seat)
 +      : text_input_(text_input), seat_(seat->GetWeakPtr()) {
@@ -1408,6 +1889,7 @@ index 9753416fe3..abaee4d064 100644
 +  WaylandTextInputV3Delegate& operator=(const WaylandTextInputV3Delegate&) =
 +      delete;
 +  ~WaylandTextInputV3Delegate() override {
++    PlutoniumVim::Get()->FieldGone(this);
 +    SetEnteredSurface(nullptr);
 +    if (seat_) {
 +      seat_->RemoveObserver(this);
@@ -1431,6 +1913,9 @@ index 9753416fe3..abaee4d064 100644
 +        static_cast<uint32_t>(ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE),
 +        static_cast<uint32_t>(ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL));
 +    pending_cursor_rectangle_.reset();
++    vim_text_.clear();
++    vim_cursor_ = vim_anchor_ = 0;
++    vim_caret_.reset();
 +  }
 +
 +  void Disable() { pending_enabled_ = false; }
@@ -1456,6 +1941,7 @@ index 9753416fe3..abaee4d064 100644
 +    if (!enabled_) {
 +      if (was_enabled) {
 +        text_input_object_->Deactivate();
++        PlutoniumVim::Get()->FieldGone(this);
 +      }
 +      return;
 +    }
@@ -1466,18 +1952,60 @@ index 9753416fe3..abaee4d064 100644
 +    if (pending_content_type_) {
 +      SetContentType(pending_content_type_->first,
 +                     pending_content_type_->second);
++      std::tie(vim_hint_, vim_purpose_) = *pending_content_type_;
 +      pending_content_type_.reset();
 +    }
 +    if (pending_surrounding_text_) {
 +      const auto& [text, cursor, anchor] = *pending_surrounding_text_;
 +      SetSurroundingText(text, cursor, anchor);
++      SetVimText(text, cursor, anchor);
 +      pending_surrounding_text_.reset();
 +    }
 +    if (pending_cursor_rectangle_) {
 +      text_input_object_->SetCaretBounds(*pending_cursor_rectangle_);
++      vim_caret_ = *pending_cursor_rectangle_;
 +      pending_cursor_rectangle_.reset();
 +    }
++    // PLUTONIUM: Pluto Vim's engine sees the field as the client left it.
++    const bool vim_off =
++        vim_purpose_ == ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PASSWORD ||
++        vim_purpose_ == ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PIN ||
++        vim_purpose_ == ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL ||
++        (vim_hint_ & (ZWP_TEXT_INPUT_V3_CONTENT_HINT_SENSITIVE_DATA |
++                      ZWP_TEXT_INPUT_V3_CONTENT_HINT_HIDDEN_TEXT));
++    PlutoniumVim::Get()->FieldChanged(this, vim_text_, vim_cursor_,
++                                      vim_anchor_, vim_hint_, vim_purpose_,
++                                      vim_off, vim_caret_);
 +  }
++
++  // PlutoniumVim::Field:
++  void VimEdit(int before, int after, const std::u16string& text) override {
++    if (!enabled_) {
++      return;
++    }
++    const int length = static_cast<int>(vim_text_.size());
++    const int cursor = std::clamp(vim_cursor_, 0, length);
++    std::vector<size_t> offsets{
++        static_cast<size_t>(std::clamp(cursor - before, 0, length)),
++        static_cast<size_t>(cursor),
++        static_cast<size_t>(std::clamp(cursor + after, 0, length))};
++    base::UTF16ToUTF8AndAdjustOffsets(vim_text_, &offsets);
++    if (std::ranges::contains(offsets, std::string::npos)) {
++      return;
++    }
++    if (offsets[0] != offsets[1] || offsets[1] != offsets[2]) {
++      zwp_text_input_v3_send_delete_surrounding_text(
++          text_input_, static_cast<uint32_t>(offsets[1] - offsets[0]),
++          static_cast<uint32_t>(offsets[2] - offsets[1]));
++    }
++    if (!text.empty()) {
++      zwp_text_input_v3_send_commit_string(text_input_,
++                                           base::UTF16ToUTF8(text).c_str());
++    }
++    SendDone();
++  }
++
++  Surface* VimSurface() override { return entered_surface_; }
 +
 + private:
 +  static constexpr int kTextInputV3SeatObserverPriority = 1;
@@ -1492,6 +2020,23 @@ index 9753416fe3..abaee4d064 100644
 +    if (entered_surface_) {
 +      entered_surface_->AddSurfaceObserver(this);
 +    }
++  }
++
++  // The surrounding text as Pluto Vim's engine has it: UTF-16, with the
++  // cursor and anchor apart.
++  void SetVimText(std::string_view text, int32_t cursor, int32_t anchor) {
++    if (cursor < 0 || anchor < 0) {
++      return;
++    }
++    std::vector<size_t> offsets{static_cast<size_t>(cursor),
++                                static_cast<size_t>(anchor)};
++    std::u16string u16_text = base::UTF8ToUTF16AndAdjustOffsets(text, &offsets);
++    if (std::ranges::contains(offsets, std::u16string::npos)) {
++      return;
++    }
++    vim_text_ = std::move(u16_text);
++    vim_cursor_ = static_cast<int>(offsets[0]);
++    vim_anchor_ = static_cast<int>(offsets[1]);
 +  }
 +
 +  void SetSurroundingText(std::string_view text,
@@ -1612,6 +2157,7 @@ index 9753416fe3..abaee4d064 100644
 +      }
 +      SetEnteredSurface(nullptr);
 +      enabled_ = false;
++      PlutoniumVim::Get()->FieldGone(this);
 +    }
 +    wl_resource* surface =
 +        gained_focus ? GetSurfaceResource(gained_focus) : nullptr;
@@ -1627,6 +2173,7 @@ index 9753416fe3..abaee4d064 100644
 +    DCHECK_EQ(surface, entered_surface_);
 +    SetEnteredSurface(nullptr);
 +    enabled_ = false;
++    PlutoniumVim::Get()->FieldGone(this);
 +  }
 +
 +  // TextInput::Delegate:
@@ -1654,10 +2201,13 @@ index 9753416fe3..abaee4d064 100644
 +    zwp_text_input_v3_send_preedit_string(text_input_,
 +                                          utf8.empty() ? nullptr : utf8.c_str(),
 +                                          cursor_begin, cursor_end);
++    // While the input method composes, Pluto Vim takes no keys.
++    PlutoniumVim::Get()->FieldComposing(this, !utf8.empty());
 +    SendDone();
 +  }
 +
 +  void Commit(std::u16string_view text) override {
++    PlutoniumVim::Get()->FieldComposing(this, false);
 +    zwp_text_input_v3_send_commit_string(text_input_,
 +                                         base::UTF16ToUTF8(text).c_str());
 +    SendDone();
@@ -1740,6 +2290,14 @@ index 9753416fe3..abaee4d064 100644
 +      pending_surrounding_text_;
 +  std::optional<std::pair<uint32_t, uint32_t>> pending_content_type_;
 +  std::optional<gfx::Rect> pending_cursor_rectangle_;
++
++  // PLUTONIUM: the committed state, for Pluto Vim (UTF-16 offsets).
++  std::u16string vim_text_;
++  int vim_cursor_ = 0;
++  int vim_anchor_ = 0;
++  uint32_t vim_hint_ = ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE;
++  uint32_t vim_purpose_ = ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL;
++  std::optional<gfx::Rect> vim_caret_;
 +};
 +
 +WaylandTextInputV3Delegate* GetTextInputV3Delegate(wl_resource* resource) {
@@ -1858,7 +2416,7 @@ index 9753416fe3..abaee4d064 100644
  }  // namespace
  
  void bind_text_input_manager(wl_client* client,
-@@ -1037,5 +1510,15 @@ void bind_text_input_extension(wl_client* client,
+@@ -1037,5 +1589,15 @@ void bind_text_input_extension(wl_client* client,
                                   data, nullptr);
  }
  

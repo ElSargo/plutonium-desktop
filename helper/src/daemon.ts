@@ -32,6 +32,13 @@ import { type AgentWindow, AgentWindows } from "./agentWindows.ts";
 import { DesktopApps } from "./apps.ts";
 import { SiteIcons } from "./siteIcons.ts";
 import { uiLibraryFile } from "./uiLibrary.ts";
+import { vimBundle } from "./vimBundle.ts";
+import { VimConfig } from "./vimConfig.ts";
+import { VimInjector } from "./vimInject.ts";
+import { NativeVim } from "./vimNative.ts";
+import { AtspiVim } from "./vimAtspi.ts";
+import { ClipboardHistory, RegisterStore, wlClipboard, wlClipboardWatch } from "./vimRegisters.ts";
+import { VimMarks } from "./vimMarks.ts";
 import { BrowserCdp, type CdpEndpoint } from "./cdp.ts";
 import {
   Desktop,
@@ -72,7 +79,7 @@ import { SessionService } from "./services/session.ts";
 import { AppearanceService } from "./services/appearance.ts";
 import { findChecker, unixChecker } from "./password.ts";
 import { type BrowserShell, ShellPackages } from "./shellPackages.ts";
-import { plutoHome, ShellError } from "./shells.ts";
+import { installedShells, plutoHome, ShellError } from "./shells.ts";
 import { SitesService } from "./sites/service.ts";
 import { SiteError } from "./sites/store.ts";
 import { defaultPdfPath, listPrinters, pdfArguments, printPdf, savePdf } from "./printing.ts";
@@ -398,6 +405,9 @@ export class Daemon {
   readonly pages: ThreadPages | null;
   /** Site extensions (sites/): the folders in $PLUTO_HOME/sites, applied to tabs over DevTools. */
   readonly sites: SitesService | null;
+  /** Pluto Vim's registers and native apps' engine, with PLUTONIUM_VIM=1 (the agents' register tools). */
+  private vimRegisters: RegisterStore | null = null;
+  private vimNative: NativeVim | null = null;
   /** When each window last got input (windowInput). */
   private readonly lastInput = new Map<number, number>();
   /** The next desktop service request's handle number (askForService). */
@@ -591,6 +601,98 @@ export class Daemon {
         ? new SitesService({ cdp, desktop: this.desktop, home: options.shells?.home ?? plutoHome(), port: options.port })
         : null;
     if (cdp && this.desktop && options.shells) this.watchCrashes(cdp, this.desktop, options.shells);
+    // Pluto Vim in every page (vimInject.ts), while it's young only when asked for.
+    if (cdp && process.env.PLUTONIUM_VIM === "1") {
+      const vimDir = join(dirname(SHELL_LIBRARY), "vim");
+      const log = (message: string) => console.error(`plutoniumd: ${message}`);
+      const shells = options.shells;
+      let injector: VimInjector | null = null;
+      let native: NativeVim | null = null;
+      // init.js (vimConfig.ts): each good version goes into every page, and native apps' engine.
+      const config = new VimConfig({
+        home: shells?.home ?? plutoHome(),
+        engineDir: vimDir,
+        onChange: () => {
+          void injector?.reconfigure();
+          native?.configure();
+        },
+        notify: (summary, body) => void notifications.notify(["Plutonium", 0, "", summary, body, [], new Map(), -1]),
+        log,
+      });
+      config.start();
+      // Registers: in memory only, never on disk (vimRegisters.ts); clipboard history while init.js asks for it.
+      const history = new ClipboardHistory(wlClipboardWatch(options.waylandDisplay, findExecutable));
+      const registers = new RegisterStore({ clipboard: wlClipboard(options.waylandDisplay, findExecutable), history });
+      this.vimRegisters = registers;
+      const desktop = this.desktop;
+      // Uppercase marks (vimMarks.ts): a jump shows the tab or window through its shell, then moves its field's cursor.
+      const marks = new VimMarks();
+      const jumpToMark = async (name: string) => {
+        const mark = marks.get(name);
+        if (!mark) return log(`pluto vim: mark ${name} isn't set`);
+        if (mark.place.kind === "page") {
+          const { targetId } = mark.place;
+          const tab = desktop?.tabs().find((entry) => entry.targetId === targetId);
+          if (tab) await this.ask(tab.tags[0] ?? "", "focus_tab", { tabId: tab.id }).catch(() => {});
+          await injector?.jumpInPage(targetId, name, mark.offset);
+        } else {
+          const { windowId } = mark.place;
+          const window = desktop?.windows().find((entry) => entry.id === windowId);
+          if (window) await this.ask(window.tags[0] ?? "", "focus", { windowId, threadId: window.tags[0] ?? "" }).catch(() => {});
+          native?.jumpInWindow(windowId, mark.offset);
+        }
+      };
+      injector = new VimInjector(cdp, () => vimBundle(vimDir), log, {
+        config: () => config.expression,
+        registers,
+        onMarkSet: (targetId, name, offset) => marks.set(name, { kind: "page", targetId }, offset),
+        onMarkJump: (name) => void jumpToMark(name),
+        // A tab's thread is its first tag. Shell pages and untagged tabs use global, for now (step 6).
+        placeOf: (targetId) => ({ thread: desktop?.tabs().find((tab) => tab.targetId === targetId)?.tags[0] ?? null }),
+        shellOrigins: () => {
+          const origins: Record<string, string> = {};
+          for (const shell of shells ? installedShells(shells.home) : []) {
+            const origin = shells!.originOf(shell);
+            if (origin) origins[origin] = shell.name;
+          }
+          return origins;
+        },
+      });
+      // Native apps' fields (vimNative.ts): the engine here, over Exo's text-input-v3.
+      native = new NativeVim(cdp, {
+        bundle: () => vimBundle(vimDir),
+        config: () => config.expression,
+        registers,
+        placeOf: (windowId) => ({ thread: desktop?.windows().find((window) => window.id === windowId)?.tags[0] ?? null }),
+        // The shells draw the mode over the window (the shell library's vim badge).
+        showMode: (shown) => this.relay.notifyAll("vim_mode", { ...shown }),
+        onMarkSet: (windowId, name, offset) => marks.set(name, { kind: "native", windowId }, offset),
+        onMarkJump: (name) => void jumpToMark(name),
+        onOptions: (opt) => history.setOn(opt.clipboardHistory === true),
+        log,
+      });
+      this.vimNative = native;
+      const nativeVim = native;
+      // Apps without text-input-v3 (vimAtspi.ts): their editable text over the accessibility bus.
+      const atspi = new AtspiVim(cdp, {
+        windows: () => desktop?.windows() ?? [],
+        hasNativeField: (windowId) => nativeVim.hasNativeField(windowId),
+        addField: (fieldId, buffer) => nativeVim.addField(fieldId, buffer),
+        removeField: (fieldId) => nativeVim.removeField(fieldId),
+        host: nativeVim.fieldHost,
+        log,
+      });
+      const start = () => {
+        void injector.start().catch((error) => console.error(`plutoniumd: pluto vim: ${(error as Error).message}`));
+        // A browser without Pluto Vim's Exo side has no Plutonium.setVimEnabled: pages only.
+        void nativeVim.start()
+          .then(() => atspi.start().catch((error) => log(`pluto vim: no AT-SPI fields (${(error as Error).message})`)))
+          .catch((error) => log(`pluto vim: no native fields (${(error as Error).message})`));
+      };
+      // Again each time the helper connects to the browser (as watchCrashes does): a new connection has no sessions.
+      this.desktop?.enableListeners.add(start);
+      start();
+    }
     if (this.serverTabs) {
       const serverTabs = this.serverTabs;
       this.relay.onDisconnect = (page) => serverTabs.detachPage(page);
@@ -1981,10 +2083,11 @@ export class Daemon {
         response.end(readFileSync(SHELL_LIBRARY));
         return;
       }
-      // The shells' UI library, beside it (uiLibrary.ts).
-      if (method === "GET" && path.startsWith("/v1/ui/")) {
-        const file = uiLibraryFile(join(dirname(SHELL_LIBRARY), "ui"), path.slice("/v1/ui/".length));
-        if (!file) throw new HttpError(404, "No such file in the UI library.");
+      // The shells' UI library, beside it (uiLibrary.ts), and Pluto Vim's engine (PLUTO_VIM.md).
+      if (method === "GET" && (path.startsWith("/v1/ui/") || path.startsWith("/v1/vim/"))) {
+        const library = path.startsWith("/v1/ui/") ? "ui" : "vim";
+        const file = uiLibraryFile(join(dirname(SHELL_LIBRARY), library), path.slice(`/v1/${library}/`.length));
+        if (!file) throw new HttpError(404, `No such file in ${library === "ui" ? "the UI library" : "Pluto Vim"}.`);
         response.writeHead(200, {
           "Content-Type": file.contentType,
           "Access-Control-Allow-Origin": "*",
@@ -2534,6 +2637,25 @@ export class Daemon {
             downloadAction[3]!,
           ),
         );
+      }
+      // Pluto Vim's registers, for the agents' read_register and write_register: the thread's
+      // copy of a thread- or project-scoped register, else the global one.
+      const register = path.match(/^\/v1\/threads\/([^/]+)\/registers\/(.+)$/);
+      if (register) {
+        const threadId = decodeURIComponent(register[1]!);
+        const name = decodeURIComponent(register[2]!);
+        const registers = this.vimRegisters;
+        if (!registers) throw new HttpError(409, "Pluto Vim is off (PLUTONIUM_VIM=1 turns it on).");
+        if (!/^([a-z0-9"+*-]|#[1-9])$/.test(name)) throw new HttpError(400, `Not a register an agent can use: ${name}`);
+        const scope = this.vimNative?.scopeOf(name) ?? "global";
+        if (method === "GET") return sendJson(response, 200, { name, scope, value: await registers.get(name, scope, { thread: threadId }) });
+        if (method === "PUT") {
+          const body = await readJson(request);
+          if (typeof body.text !== "string") throw new HttpError(400, "text is required.");
+          if (name.startsWith("#")) throw new HttpError(400, "Clipboard history is read-only.");
+          await registers.set(name, { text: body.text, linewise: body.linewise === true }, scope, { thread: threadId });
+          return sendJson(response, 200, { name, scope });
+        }
       }
       const tabs = path.match(/^\/v1\/threads\/([^/]+)\/tabs$/);
       if (tabs) {

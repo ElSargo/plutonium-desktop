@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Sargison <sargo@sargo.cc>
-Date: Mon, 2 Nov 2026 12:00:00 +1300
-Subject: [PATCH 10/14] Plutonium: the Plutonium DevTools domain, and DevTools
+Date: Mon, 9 Nov 2026 11:23:48 +1300
+Subject: [PATCH 10/15] Plutonium: the Plutonium DevTools domain, and DevTools
  on a Unix socket
 
 The browser target's Plutonium domain (cros_protocol.pdl) for the helper and its agents: windows, tabs, input, notifications, media, the hardware keys. DevTools are served on a Unix socket that only this user's processes may connect to (--plutonium-remote-debugging-socket).
@@ -12,6 +12,7 @@ It holds these changes:
 - tabs' web notifications and the host's color scheme in the Plutonium domain
 - DevTools Plutonium.setWindowOriginTag
 - DevTools on a Unix socket for this user only (--plutonium-remote-debugging-socket)
+- Pluto Vim for native apps: fields, held keys and edits in the Plutonium domain
 
 and the parts in these files of:
 - Chrome's own UI in the shell (DevTools, context menus, keys)
@@ -31,20 +32,20 @@ and the parts in these files of:
  .../chrome_devtools_manager_delegate.cc       |    9 +
  .../devtools/chrome_devtools_session.cc       |    8 +
  .../devtools/chrome_devtools_session.h        |    3 +
- chrome/browser/devtools/cros_protocol.pdl     |  546 +++++++++
+ chrome/browser/devtools/cros_protocol.pdl     |  632 +++++++++
  .../devtools/devtools_ui_controller.cc        |    6 +-
  chrome/browser/devtools/devtools_window.cc    |   36 +-
  chrome/browser/devtools/devtools_window.h     |   13 +
  .../browser/devtools/devtools_window_views.cc |   20 +
  .../devtools/inspector_protocol_config.json   |    4 +
- .../devtools/protocol/plutonium_handler.cc    | 1089 +++++++++++++++++
- .../devtools/protocol/plutonium_handler.h     |  239 ++++
+ .../devtools/protocol/plutonium_handler.cc    | 1170 +++++++++++++++++
+ .../devtools/protocol/plutonium_handler.h     |  262 ++++
  .../devtools/protocol/plutonium_media.cc      |  132 ++
  .../devtools/protocol/plutonium_media.h       |   78 ++
  .../protocol/plutonium_notifications.cc       |  153 +++
  .../protocol/plutonium_notifications.h        |   77 ++
  .../devtools/remote_debugging_server.cc       |   64 +
- 17 files changed, 2487 insertions(+), 2 deletions(-)
+ 17 files changed, 2677 insertions(+), 2 deletions(-)
  create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.cc
  create mode 100644 chrome/browser/devtools/protocol/plutonium_handler.h
  create mode 100644 chrome/browser/devtools/protocol/plutonium_media.cc
@@ -159,10 +160,10 @@ index f703912a1b..6a8991099e 100644
  };
  
 diff --git a/chrome/browser/devtools/cros_protocol.pdl b/chrome/browser/devtools/cros_protocol.pdl
-index a30bf0d965..3c2d18d12f 100644
+index a30bf0d965..9809de46cb 100644
 --- a/chrome/browser/devtools/cros_protocol.pdl
 +++ b/chrome/browser/devtools/cros_protocol.pdl
-@@ -12,3 +12,549 @@ domain WindowManager
+@@ -12,3 +12,635 @@ domain WindowManager
  
    # Exit the overview mode.
    command exitOverviewMode
@@ -670,6 +671,92 @@ index a30bf0d965..3c2d18d12f 100644
 +    parameters
 +      boolean locked
 +
++  # PLUTONIUM: Pluto Vim for native apps (docs/features/PLUTO_VIM.md, "Native
++  # apps: text-input-v3"). With enabled, this session hears each
++  # text-input-v3 field (vimFieldChanged, vimFieldGone) and each key held for
++  # its engine (vimKey), until it calls this with false or goes. One session
++  # at a time: the last to enable it.
++  command setVimEnabled
++    parameters
++      boolean enabled
++
++  # A key to hold: a DOM key ("j", "Escape") and Alt=1, Ctrl=2 (Shift is in
++  # the key).
++  type VimKeySpec extends object
++    properties
++      string key
++      optional integer modifiers
++
++  # Which keys field |fieldId| holds for the engine: every key but modifiers
++  # and Super's (all), or |keys|.
++  command setVimHold
++    parameters
++      integer fieldId
++      boolean all
++      array of VimKeySpec keys
++
++  # Window |windowId| has a field the helper reaches some other way (AT-SPI,
++  # for apps without text-input-v3): its keys are held as a text-input-v3
++  # field's are (setVimHold, vimKey), until this comes with enabled false.
++  command setVimWindowField
++    parameters
++      integer windowId
++      boolean enabled
++    returns
++      # The field's id (0 when enabled is false).
++      integer fieldId
++
++  # Whether the engine took held key |keyId|. A key not answered in 100 ms
++  # goes on to the app.
++  command answerVimKey
++    parameters
++      integer keyId
++      boolean consumed
++
++  # Replaces |before| UTF-16 units before the field's cursor and |after|
++  # after it by |text|, as one edit (delete_surrounding_text, commit_string).
++  command editVimField
++    parameters
++      integer fieldId
++      integer before
++      integer after
++      string text
++
++  type VimField extends object
++    properties
++      integer id
++      # The field's window (Plutonium window ids: dispatchWindowKeyEvents),
++      # or 0.
++      integer windowId
++      # The surrounding text, with the cursor and anchor in UTF-16 units.
++      string text
++      integer cursor
++      integer anchor
++      # text-input-v3's content hint and purpose.
++      integer hint
++      integer purpose
++      # The cursor rectangle in the window's geometry: x, y, width, height.
++      optional array of integer caret
++
++  # A field was enabled, or the client committed its state.
++  event vimFieldChanged
++    parameters
++      VimField field
++
++  event vimFieldGone
++    parameters
++      integer id
++
++  # A key held for the engine: answer it with answerVimKey.
++  event vimKey
++    parameters
++      integer id
++      integer fieldId
++      string key
++      string code
++      integer modifiers
++      boolean repeat
++
 +  # EXO-SERVICES: a tab's web notification (new Notification(), a service
 +  # worker's showNotification()), for the helper's notifications service.
 +  # Ash's message center has them, and shell mode never shows it.
@@ -919,10 +1006,10 @@ index c972f74e20..885d1c9fba 100644
                  "include": [ "triggerAction", "loadUnpacked", "getStorageItems", "setStorageItems", "removeStorageItems", "clearStorageItems", "uninstall", "getExtensions" ],
 diff --git a/chrome/browser/devtools/protocol/plutonium_handler.cc b/chrome/browser/devtools/protocol/plutonium_handler.cc
 new file mode 100644
-index 0000000000..03a471ba33
+index 0000000000..923f6090e1
 --- /dev/null
 +++ b/chrome/browser/devtools/protocol/plutonium_handler.cc
-@@ -0,0 +1,1089 @@
+@@ -0,0 +1,1170 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1107,6 +1194,7 @@ index 0000000000..03a471ba33
 +}
 +
 +PlutoniumHandler::~PlutoniumHandler() {
++  SetVimEnabled(false);
 +  if (idle_inhibited_) {
 +    exo::SessionIdle::Get()->SetInhibited(false);
 +  }
@@ -1919,6 +2007,86 @@ index 0000000000..03a471ba33
 +  frontend_->LockChanged(locked);
 +}
 +
++Response PlutoniumHandler::SetVimEnabled(bool enabled) {
++  exo::PlutoniumVim* vim = exo::PlutoniumVim::Get();
++  if (enabled) {
++    vim->SetListener(this);
++    vim_listening_ = true;
++  } else if (vim_listening_) {
++    vim->SetListener(nullptr);
++    vim_listening_ = false;
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetVimHold(
++    int field_id,
++    bool all,
++    std::unique_ptr<protocol::Array<Plutonium::VimKeySpec>> keys) {
++  std::vector<exo::PlutoniumVim::KeySpec> specs;
++  for (const std::unique_ptr<Plutonium::VimKeySpec>& key : *keys) {
++    specs.push_back({key->GetKey(), key->GetModifiers(0)});
++  }
++  if (!exo::PlutoniumVim::Get()->SetHold(field_id, all, std::move(specs))) {
++    return Response::InvalidParams("No such field");
++  }
++  return Response::Success();
++}
++
++Response PlutoniumHandler::SetVimWindowField(int window_id,
++                                             bool enabled,
++                                             int* field_id) {
++  *field_id = exo::PlutoniumVim::Get()->SetWindowField(window_id, enabled);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::AnswerVimKey(int key_id, bool consumed) {
++  exo::PlutoniumVim::Get()->Answer(key_id, consumed);
++  return Response::Success();
++}
++
++Response PlutoniumHandler::EditVimField(int field_id,
++                                        int before,
++                                        int after,
++                                        const std::string& text) {
++  if (before < 0 || after < 0) {
++    return Response::InvalidParams("before and after are counts");
++  }
++  if (!exo::PlutoniumVim::Get()->Edit(field_id, before, after,
++                                      base::UTF8ToUTF16(text))) {
++    return Response::InvalidParams("No such field");
++  }
++  return Response::Success();
++}
++
++void PlutoniumHandler::OnVimFieldChanged(
++    const exo::PlutoniumVim::FieldState& field) {
++  auto vim_field = Plutonium::VimField::Create()
++                       .SetId(field.id)
++                       .SetWindowId(field.window_id)
++                       .SetText(base::UTF16ToUTF8(field.text))
++                       .SetCursor(field.cursor)
++                       .SetAnchor(field.anchor)
++                       .SetHint(static_cast<int>(field.hint))
++                       .SetPurpose(static_cast<int>(field.purpose))
++                       .Build();
++  if (field.caret) {
++    vim_field->SetCaret(std::make_unique<protocol::Array<int>>(
++        std::vector<int>{field.caret->x(), field.caret->y(),
++                         field.caret->width(), field.caret->height()}));
++  }
++  frontend_->VimFieldChanged(std::move(vim_field));
++}
++
++void PlutoniumHandler::OnVimFieldGone(int field_id) {
++  frontend_->VimFieldGone(field_id);
++}
++
++void PlutoniumHandler::OnVimKey(const exo::PlutoniumVim::Key& key) {
++  frontend_->VimKey(key.id, key.field_id, key.key, key.code, key.modifiers,
++                    key.repeat);
++}
++
 +Response PlutoniumHandler::GetDisplayConfig(std::string* json) {
 +  PlutoniumShells* shells = PlutoniumShells::Get();
 +  if (!shells) {
@@ -2014,10 +2182,10 @@ index 0000000000..03a471ba33
 +}
 diff --git a/chrome/browser/devtools/protocol/plutonium_handler.h b/chrome/browser/devtools/protocol/plutonium_handler.h
 new file mode 100644
-index 0000000000..c3f20b841b
+index 0000000000..2179522212
 --- /dev/null
 +++ b/chrome/browser/devtools/protocol/plutonium_handler.h
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,262 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2042,6 +2210,7 @@ index 0000000000..c3f20b841b
 +#include "chrome/browser/plutonium_lock.h"
 +#include "chrome/browser/plutonium_shells.h"
 +#include "chrome/browser/plutonium_tabs.h"
++#include "components/exo/plutonium_vim.h"
 +
 +class SkBitmap;
 +
@@ -2059,7 +2228,8 @@ index 0000000000..c3f20b841b
 +                         public PlutoniumDownloads::Observer,
 +                         public PlutoniumCapture::Observer,
 +                         public PlutoniumLock::Observer,
-+                         public PlutoniumShells::Observer {
++                         public PlutoniumShells::Observer,
++                         public exo::PlutoniumVim::Listener {
 + public:
 +  explicit PlutoniumHandler(protocol::UberDispatcher* dispatcher);
 +  PlutoniumHandler(const PlutoniumHandler&) = delete;
@@ -2174,6 +2344,25 @@ index 0000000000..c3f20b841b
 +                                        const std::string& action,
 +                                        std::optional<int> button) override;
 +  protocol::Response SetColorScheme(bool dark) override;
++  protocol::Response SetVimEnabled(bool enabled) override;
++  protocol::Response SetVimHold(
++      int field_id,
++      bool all,
++      std::unique_ptr<protocol::Array<protocol::Plutonium::VimKeySpec>> keys)
++      override;
++  protocol::Response AnswerVimKey(int key_id, bool consumed) override;
++  protocol::Response SetVimWindowField(int window_id,
++                                       bool enabled,
++                                       int* field_id) override;
++  protocol::Response EditVimField(int field_id,
++                                  int before,
++                                  int after,
++                                  const std::string& text) override;
++
++  // exo::PlutoniumVim::Listener:
++  void OnVimFieldChanged(const exo::PlutoniumVim::FieldState& field) override;
++  void OnVimFieldGone(int field_id) override;
++  void OnVimKey(const exo::PlutoniumVim::Key& key) override;
 +
 +  // PlutoniumLock::Observer:
 +  void OnLockChanged(bool locked) override;
@@ -2226,6 +2415,8 @@ index 0000000000..c3f20b841b
 +
 +  std::unique_ptr<protocol::Plutonium::Frontend> frontend_;
 +  bool enabled_ = false;
++  // PLUTONIUM: this session is Pluto Vim's listener (setVimEnabled).
++  bool vim_listening_ = false;
 +  // EXO-LOCK: whether this client said idle is inhibited (SetIdleInhibited()).
 +  bool idle_inhibited_ = false;
 +  base::ScopedObservation<ExoWindowBroker, ExoWindowBroker::Observer>
