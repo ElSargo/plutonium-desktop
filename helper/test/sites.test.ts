@@ -394,3 +394,67 @@ describe("block rules", () => {
     assert.equal(id, expected);
   });
 });
+
+describe("importing", () => {
+  const userScript = `// ==UserScript==
+// @name         Hide GitHub Copilot
+// @match        https://github.com/*
+// @include      http*://gist.github.com/*
+// @include      *://www.google.*/*
+// @exclude      https://github.com/settings/*
+// @run-at       document-idle
+// @grant        GM_addStyle
+// @grant        GM_notification
+// @require      https://example.com/lib.js
+// ==/UserScript==
+GM_addStyle(".copilot { display: none }");
+GM_setValue("n", GM_getValue("n", 0) + 1);
+`;
+
+  test("a user script: its patterns, run-at, and the GM API on site", async () => {
+    const { importUserScript, includeToMatch } = await import("../src/sites/importer.ts");
+    const imported = importUserScript(userScript, "https://example.com/x.user.js");
+    assert.equal(imported.site, "github.com");
+    assert.equal(imported.part, "hide-github-copilot");
+    assert.deepEqual(imported.matches, ["https://github.com/*", "*://gist.github.com/*"]);
+    assert.deepEqual(imported.excludes, ["https://github.com/settings/*"]);
+    assert.equal(imported.runAt, "idle");
+    assert.match(imported.notes.join("\n"), /google\.\*[\s\S]*GM_notification[\s\S]*@require/);
+    // It compiles as a part, and runs with a fake site.
+    const compiled = compilePart({ id: "github.com/x", site: "github.com", name: "x", spec: parseSiteManifest("{}", "x").parts.x ?? { title: "x", enabled: true, runAt: "ready", allFrames: false, preset: null, scope: null }, css: null, js: imported.js, hash: "h" });
+    assert.equal(compiled.error, null);
+    const run = runInNewContext(`(${compiled.run})`, { window: {} }) as (site: unknown, exports: { default?: (site: unknown) => Promise<void> }) => void;
+    const exports: { default?: (site: unknown) => Promise<void> } = {};
+    run({}, exports);
+    const css: string[] = [];
+    const stored: Record<string, unknown> = {};
+    await exports.default!({
+      part: { name: "x" },
+      css: (text: string) => css.push(text),
+      storage: { all: async () => ({ "x:n": 4, n: 99 }), set: async (key: string, value: unknown) => (stored[key] = value) },
+    });
+    assert.deepEqual(css, [".copilot { display: none }"]);
+    assert.deepEqual(stored, { "x:n": 5 });
+    assert.equal(includeToMatch("*"), "<all_urls>");
+    assert.equal(includeToMatch("https://*.example.com/a/*"), "https://*.example.com/a/*");
+  });
+
+  test("a user style: its @-moz-document blocks", async () => {
+    const { importUserStyle, importSource } = await import("../src/sites/importer.ts");
+    const style = `/* ==UserStyle==
+@name        Quiet Wikipedia
+@preprocessor stylus
+==/UserStyle== */
+@-moz-document domain("wikipedia.org"), url-prefix("https://www.mediawiki.org/wiki/") {
+  .mw-banner { display: none; }
+  @media (max-width: 600px) { .x { y: z } }
+}`;
+    const imported = importUserStyle(style, "q.user.css");
+    assert.equal(imported.site, "wikipedia.org");
+    assert.deepEqual(imported.matches, ["*://wikipedia.org/*", "*://*.wikipedia.org/*", "https://www.mediawiki.org/wiki/*"]);
+    assert.match(imported.css ?? "", /\.mw-banner \{ display: none; \}\n  @media \(max-width: 600px\) \{ \.x \{ y: z \} \}/);
+    assert.match(imported.notes.join(), /stylus/);
+    assert.equal(importSource(style, "q").part, "quiet-wikipedia");
+    assert.throws(() => importSource("body {}", "x"), /Neither/);
+  });
+});

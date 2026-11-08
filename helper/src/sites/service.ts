@@ -10,6 +10,7 @@
 //                                           site: its folder, requests.md, and the prompt for an agent
 //   POST /v1/sites/fix                      { tab }: a request to fix what's stale on the tab's sites
 //   GET  /v1/sites/stale                    every stale part, and why
+//   POST /v1/sites/import                   { text, source, site? }: a user script or user style, as a part
 //   GET  /v1/sites/presets                  the presets: { id, title, description }
 //   GET  /v1/sites/log                      the folder's history
 //   POST /v1/sites/reload                   read every site again
@@ -24,8 +25,9 @@ import { ContextSource, type ThreadDirectory } from "./context.ts";
 import { SiteInjector, type SiteEvent, type TabReport } from "./injector.ts";
 import { blockRules, type DnrRule } from "./block.ts";
 import { fixRequest, SiteHealth, type StaleReason } from "./health.ts";
+import { importSource } from "./importer.ts";
 import { installPresets, listPresets } from "./presets.ts";
-import { isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./store.ts";
+import { defaultMatches, isSiteName, SITE_MANIFEST, SiteError, SiteStore, type Site } from "./store.ts";
 
 /** The checkout (or install) the helper runs from. */
 const PLUTONIUM = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -324,7 +326,47 @@ export class SitesService {
     return this.request(tabId, fixRequest(reasons), parts.size === 1 ? { part: [...parts][0] } : {});
   }
 
+  /**
+   * Imports a user script or user style (importer.ts) as a part of the site it
+   * matches (or `siteName`): its file, and its entry and patterns in site.json.
+   */
+  importPart(text: string, source: string, siteName?: string): { site: string; part: string; notes: readonly string[] } {
+    const imported = importSource(text, source);
+    const name = siteName ?? imported.site;
+    if (!isSiteName(name)) throw new SiteError(`Not a site folder name: ${name}.`);
+    const dir = join(this.store.dir, name);
+    mkdirSync(dir, { recursive: true });
+    const manifestFile = join(dir, SITE_MANIFEST);
+    const raw = (existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, "utf8")) : { title: name }) as {
+      matches?: string[];
+      excludes?: string[];
+      parts?: Record<string, Record<string, unknown>>;
+    };
+    const fresh = !existsSync(manifestFile);
+    // A part runs wherever its site matches, so the site's patterns take in the script's.
+    raw.matches = fresh ? [...imported.matches] : [...new Set([...(raw.matches ?? defaultMatches(name)), ...imported.matches])];
+    if (imported.excludes.length) raw.excludes = [...new Set([...(raw.excludes ?? []), ...imported.excludes])];
+    let part = imported.part;
+    for (let n = 2; existsSync(join(dir, `${part}.js`)) || existsSync(join(dir, `${part}.css`)); n++) part = `${imported.part}-${n}`;
+    raw.parts = { ...(raw.parts ?? {}), [part]: { title: imported.title, ...(imported.js ? { runAt: imported.runAt } : {}) } };
+    if (imported.js) writeFileSync(join(dir, `${part}.js`), imported.js);
+    if (imported.css) writeFileSync(join(dir, `${part}.css`), imported.css);
+    writeFileSync(manifestFile, `${JSON.stringify(raw, null, 2)}\n`);
+    const requests = join(dir, "requests.md");
+    if (!existsSync(requests)) writeFileSync(requests, `# What was asked of ${name}\n`);
+    appendFileSync(
+      requests,
+      `\n## ${new Date().toISOString().slice(0, 16).replace("T", " ")} (imported, part ${part})\n\n${imported.title}, imported from ${source}.${imported.notes.length ? `\n\nNot carried over:\n${imported.notes.map((note) => `- ${note}`).join("\n")}` : ""}\n`,
+    );
+    return { site: name, part, notes: imported.notes };
+  }
+
   async route(method: string, path: string, body: () => Promise<Record<string, unknown>>): Promise<unknown> {
+    if (method === "POST" && path === "/v1/sites/import") {
+      const { text, source, site } = await body();
+      if (typeof text !== "string") throw new SiteError("Expected { text, source, site? }.");
+      return this.importPart(text, typeof source === "string" ? source : "an import", typeof site === "string" ? site : undefined);
+    }
     if (method === "POST" && path === "/v1/sites/request") {
       const { tab, text, preset, part } = await body();
       if (typeof tab !== "number") throw new SiteError("Expected { tab, text, preset?, part? }.");

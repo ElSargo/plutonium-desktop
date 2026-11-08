@@ -32,7 +32,8 @@ export function compilePart(part: Part): CompiledPart {
     return { part, run: null, error: "Only `export default` is supported in a part's script." };
   }
   const body = part.js.replace(EXPORT_DEFAULT, "exports.default = ");
-  const run = `function (site, exports) {\n"use strict";\n${body}\n}`;
+  // Not strict: an imported user script is a classic script, and may need sloppy mode.
+  const run = `function (site, exports) {\n${body}\n}`;
   try {
     new Script(`(${run})`, { filename: `${part.id}.js` });
   } catch (error) {

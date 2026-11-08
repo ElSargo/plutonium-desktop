@@ -12,6 +12,7 @@
 //   plutonium.ts appearance [light|dark|toggle|default]
 //                                           light or dark for the whole desktop
 //   plutonium.ts sites apply|report|read|snapshot <tab> | sites check
+//                         | sites import <file|url> [site]
 //                                           site extensions, for an agent writing one
 //                                           (SITE_EXTENSIONS.md): on a tab of
 //                                           $PLUTONIUM_THREAD_ID's (one lent to it)
@@ -72,7 +73,7 @@ function usage(): never {
       "       plutonium.ts mcp\n" +
       "       plutonium.ts open <url|file>…\n" +
       "       plutonium.ts appearance [light|dark|toggle|default]\n" +
-      "       plutonium.ts sites apply|report|read|snapshot <tab-id> | sites check\n" +
+      "       plutonium.ts sites apply|report|read|snapshot <tab-id> | sites check | sites import <file|url> [site]\n" +
       "       plutonium.ts stop-x-displays [--wayland-display <name>]",
   );
   process.exit(2);
@@ -176,6 +177,22 @@ switch (command) {
     // For an agent writing a site extension, with any provider: the same as the
     // site_apply, site_report, read_tab and snapshot_tab tools, on its thread's tab.
     const [action, tab] = rest;
+    if (action === "import") {
+      // A user script or user style, from a file or a URL, as a part of its site.
+      const [, from, site] = rest;
+      if (!from) usage();
+      const { readFileSync } = await import("node:fs");
+      const text = /^https?:\/\//.test(from) ? await (await fetch(from)).text() : readFileSync(from, "utf8");
+      try {
+        const result = await helperJson<{ site: string; part: string; notes: string[] }>(socketPath, "POST", "/v1/sites/import", { text, source: from, site });
+        console.log(`imported as ${result.site}/${result.part}`);
+        for (const note of result.notes) console.log(`  not carried over: ${note}`);
+      } catch (error) {
+        console.error(`plutonium.ts sites import: ${(error as Error).message}`);
+        process.exitCode = 1;
+      }
+      break;
+    }
     if (action === "check") {
       // Stale parts: a site changed under them (SITE_EXTENSIONS.md, "Keeping them working").
       const { stale } = await helperJson<{ stale: { part: string; kind: string; detail: string; url: string }[] }>(socketPath, "GET", "/v1/sites/stale");
