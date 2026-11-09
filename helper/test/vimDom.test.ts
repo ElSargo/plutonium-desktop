@@ -302,9 +302,9 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
       return true;
     });
     assert.ok(r);
+    await page.keyboard.press("2");
     await page.keyboard.press("j");
-    await page.keyboard.press("j");
-    assert.equal(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop), 120);
+    assert.equal(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop), 120, "2j: two lines");
     await page.keyboard.press("G");
     assert.ok(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop > 1000));
     await page.keyboard.press("i");
@@ -332,7 +332,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     await page.waitForTimeout(600);
     await page.keyboard.up("j");
     const held = await top();
-    assert.ok(held > 300, `held j glided (to ${held})`);
+    assert.ok(held > 300, `held j scrolled smoothly (to ${held})`);
     await page.waitForTimeout(200);
     assert.equal(await top(), held, "and stopped when let go");
     await page.evaluate(() => {

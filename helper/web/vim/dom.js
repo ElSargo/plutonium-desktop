@@ -701,8 +701,8 @@ export class PageBuffer {
   }
 
   /**
-   * j or k: a line at once, then, while the key is held, a glide that speeds
-   * up until it's let go (release). With a count, just that many lines.
+   * j or k: a smooth scroll that speeds up while the key is held, until it's
+   * let go (release). With a count, just that many lines.
    */
   #line(dir, detail) {
     if (detail?.count != null) return scrollerOf(this.doc).scrollBy({ top: dir * GLIDE.line * detail.count, behavior: "instant" });
@@ -710,23 +710,20 @@ export class PageBuffer {
     if (this.glide?.dir === dir) return;
     this.release();
     const el = scrollerOf(this.doc);
-    el.scrollBy({ top: dir * GLIDE.line, behavior: "instant" });
     const view = this.doc.defaultView;
-    const glide = { dir, frame: 0, timer: 0 };
+    const glide = { dir, frame: 0 };
     this.glide = glide;
-    glide.timer = view.setTimeout(() => {
-      let last = view.performance.now();
-      let speed = GLIDE.start;
-      const step = (now) => {
-        if (this.glide !== glide) return;
-        const dt = Math.min(0.05, (now - last) / 1000);
-        last = now;
-        speed = Math.min(GLIDE.max, speed + GLIDE.accel * dt);
-        el.scrollBy({ top: dir * speed * dt, behavior: "instant" });
-        glide.frame = view.requestAnimationFrame(step);
-      };
+    let last = view.performance.now();
+    let speed = GLIDE.start;
+    const step = (now) => {
+      if (this.glide !== glide) return;
+      const dt = Math.min(0.05, Math.max(0, now - last) / 1000);
+      last = now;
+      speed = Math.min(GLIDE.max, speed + GLIDE.accel * dt);
+      el.scrollBy({ top: dir * speed * dt, behavior: "instant" });
       glide.frame = view.requestAnimationFrame(step);
-    }, GLIDE.holdMs);
+    };
+    glide.frame = view.requestAnimationFrame(step);
   }
 
   /** The held j or k was let go (or the window lost the keyboard): the glide stops. */
@@ -735,13 +732,12 @@ export class PageBuffer {
     if (!glide) return;
     this.glide = null;
     const view = this.doc.defaultView;
-    view.clearTimeout(glide.timer);
     view.cancelAnimationFrame(glide.frame);
   }
 }
 
-/** Holding j or k (page sessions): a line, then after holdMs a glide from start px/s, speeding up by accel to max. */
-const GLIDE = { line: 60, holdMs: 180, start: 900, accel: 3000, max: 4500 };
+/** j and k (page sessions): a smooth scroll from start px/s, speeding up by accel to max while held; a count is lines. */
+const GLIDE = { line: 60, start: 900, accel: 3000, max: 4500 };
 
 /** Half `el`'s height (or the window's), `times` times: the context's page (Space, Backspace, Ctrl+D, Ctrl+U). */
 function pageBy(el, times) {
