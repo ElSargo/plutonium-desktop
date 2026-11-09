@@ -44,7 +44,7 @@ describe("mappings", () => {
   });
 
   test("insert mode jk leaves insert mode; j then another key types both, in order", async () => {
-    const setup = (v: any) => v.keymap.set("i", "jk", "<Esc>");
+    const setup = (v: any) => v.keymap.set("i", "jk", "<C-[>");
     let r = await run(setup, "|", "foojk", { insert: true });
     assert.equal(r.session.mode, "normal");
     assert.equal(r.text, "fo|o");
@@ -54,7 +54,7 @@ describe("mappings", () => {
   });
 
   test("a key held for a mapping is typed once timeoutlen passes", async () => {
-    const r = await run((v) => v.keymap.set("i", "jk", "<Esc>"), "|", "aj", { insert: true });
+    const r = await run((v) => v.keymap.set("i", "jk", "<C-[>"), "|", "aj", { insert: true });
     assert.equal(r.buffer.value, "a", "j waits");
     await sleep(60);
     await r.session.idle();
@@ -108,7 +108,7 @@ describe("mappings", () => {
   });
 
   test("feedkeys from a function", async () => {
-    const { text } = await run((v) => v.keymap.set("n", "Z", () => v.feedkeys("A!<Esc>")), "|hi", "Z");
+    const { text } = await run((v) => v.keymap.set("n", "Z", () => v.feedkeys("A!<C-[>")), "|hi", "Z");
     assert.equal(text, "hi|!");
   });
 
@@ -137,7 +137,7 @@ describe("motions, operators, text objects, commands", () => {
 
   test("a text object: a URL", async () => {
     const setup = (v: any) => v.textobject("u", (buf: any, around: boolean) => buf.matchAround(/https?:\/\/\S+/, around));
-    const r = await run(setup, "see https://ex|ample.com now", "ciuX<Esc>");
+    const r = await run(setup, "see https://ex|ample.com now", "ciuX<C-[>");
     assert.equal(r.buffer.value, "see X now");
     assert.equal((await run(setup, "see https://ex|ample.com now", "dau")).buffer.value, "see now");
   });
@@ -192,7 +192,7 @@ describe("configure", () => {
     assert.equal(vim.user.commands.size, 0);
     const buffer = field("|ab");
     const session = vim.attach(buffer);
-    await type(session, buffer, "ix<Esc>");
+    await type(session, buffer, "ix<C-[>");
     assert.deepEqual(left, []);
   });
 
@@ -221,7 +221,7 @@ describe("configure", () => {
       v.keymap.set("n", "xx", "dd");
       v.keymap.set("n", "Y", "y$");
       v.keymap.set("n", "Y", "yy");
-      v.keymap.set("i", "jk", "<Esc>");
+      v.keymap.set("i", "jk", "<C-[>");
       v.keymap.set("i", "j", "J");
       v.motion("w", () => null);
     });
@@ -260,7 +260,7 @@ describe("configure", () => {
 
   test("events get the field's mode", async () => {
     const seen: unknown[] = [];
-    await run((v) => v.on("InsertLeave", ({ inserted, mode }: any) => seen.push([inserted, mode])), "|", "ihi<Esc>");
+    await run((v) => v.on("InsertLeave", ({ inserted, mode }: any) => seen.push([inserted, mode])), "|", "ihi<C-[>");
     assert.deepEqual(seen, [["hi", "normal"]]);
   });
 

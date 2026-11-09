@@ -243,6 +243,61 @@ export function keySpec(key: string): KeySpec | null {
   return null;
 }
 
+/**
+ * A native window with the keyboard and no field (HYDRA_KEYBOARD.md, "One
+ * input model"): a page session over Exo's window field, so normal mode has
+ * the page keys there (the shells' places, shows and jumps) and moves the
+ * window's view with its own keys; insert mode is the app's.
+ */
+export class NativePageBuffer {
+  readonly kind = "page";
+  readonly caps = { page: true, readonly: true, exactMotions: false, wholeText: false, selection: false, undo: "none" as const };
+  readonly field = {
+    singleLine: true,
+    actions: () => new Set<string>(),
+    commands: () => new Set<string>(),
+    yields: () => new Set<string>(),
+    action: () => {},
+  };
+  state: VimField;
+  private readonly host: NativeHost;
+
+  constructor(fieldId: number, windowId: number, host: NativeHost) {
+    this.state = { id: fieldId, windowId, text: "", cursor: 0, anchor: 0, hint: 0, purpose: 0 };
+    this.host = host;
+  }
+
+  update(): void {}
+  text() {
+    return { text: "", start: 0, cursor: 0, anchor: 0 };
+  }
+  async move(): Promise<void> {}
+  async edit(): Promise<void> {}
+  async undo(): Promise<void> {}
+  async redo(): Promise<void> {}
+  setCaret(): void {}
+
+  /** What the page keys do in an app: its own keys for scrolling, and back and forward. */
+  pageAction(name: string, detail: { count?: number | null } | undefined): boolean {
+    const keys: Record<string, [string, number]> = {
+      "scroll.down": ["ArrowDown", 0], "scroll.up": ["ArrowUp", 0], "scroll.left": ["ArrowLeft", 0], "scroll.right": ["ArrowRight", 0],
+      "scroll.top": ["Home", 2], "scroll.bottom": ["End", 2], "context.pageDown": ["PageDown", 0], "context.pageUp": ["PageUp", 0],
+      "item.previous": ["ArrowLeft", 1], "item.next": ["ArrowRight", 1],
+    };
+    const key = keys[name];
+    if (!key) return false;
+    const [code, modifiers] = key;
+    const count = Math.max(1, Math.min(50, detail?.count ?? 1));
+    const events: { code: string; modifiers?: number }[] = [];
+    const held = modifiers === 2 ? "ControlLeft" : modifiers === 1 ? "AltLeft" : null;
+    if (held) events.push({ code: held, modifiers });
+    for (let k = 0; k < count; k++) events.push({ code, modifiers }, { code, modifiers: -1 - modifiers });
+    if (held) events.push({ code: held, modifiers: -1 });
+    void this.host.keys(this.state.windowId, events).catch(() => {});
+    return true;
+  }
+}
+
 /** A field's Buffer here: a text-input-v3 field's (NativeBuffer), or AT-SPI's (vimAtspi.ts). */
 interface FieldBuffer {
   readonly kind: string;
@@ -254,6 +309,13 @@ interface FieldBuffer {
 
 interface Session {
   mode: string;
+  readonly page?: boolean;
+  readonly readonly?: boolean;
+  readonly jump?: unknown;
+  readonly cmd?: unknown;
+  readonly displayMode: string;
+  readonly continuations: { keys: string; name: string }[];
+  enterMode(mode: string): void;
   feed(key: string): boolean;
   idle(): Promise<void>;
   typeahead: unknown[];
@@ -283,6 +345,14 @@ export interface NativeVimOptions {
   readonly onMarkJump?: (name: string) => void;
   /** init.js's options, each time it's configured (clipboardHistory turns the helper's history on). */
   readonly onOptions?: (opt: Record<string, unknown>) => void;
+  /** The desktop's mode, changed in a native field or window (HYDRA_KEYBOARD.md, "One input model"). */
+  readonly onDesktopMode?: (mode: string) => void;
+  /** What the shells show of the keyboard (the mode pill), for the app with it. */
+  readonly onState?: (state: Record<string, unknown>) => void;
+  /** A page key an app doesn't have (a place, a show, a jump): the shells'. */
+  readonly onPageKey?: (name: string, detail: Record<string, unknown>) => void;
+  /** A window's app, for the mode pill. */
+  readonly appOf?: (windowId: number) => string;
   readonly log?: (message: string) => void;
   readonly budget?: number;
   readonly quiet?: number;
@@ -305,12 +375,8 @@ export class NativeVim {
   private readonly modes = new Map<number, string | null>();
   private readonly lines = new Map<number, string>();
   private messageTimer: ReturnType<typeof setTimeout> | undefined;
-  /**
-   * The mode each window's field was last in: a field that comes back (focus
-   * left the window and returned, which is a new text input) starts in it, as
-   * a page's field keeps its session.
-   */
-  private readonly windowModes = new Map<number, string>();
+  /** Each native window's page session (its window field's id), once it has had the keyboard. */
+  private readonly windowFields = new Map<number, number>();
   /** A mark jump waiting for its window's field: windowId, offset. */
   private pendingJump: { windowId: number; offset: number; until: number } | null = null;
 
@@ -375,10 +441,15 @@ export class NativeVim {
         ? { get: (name: string, scope: string) => registers.get(name, scope, this.place), set: (name: string, value: unknown, scope: string) => registers.set(name, value, scope, this.place) }
         : undefined;
       context.store = store;
-      // A native app's fields start in insert mode, as typing into an app always has; web fields start
-      // in normal mode (HYDRA_KEYBOARD.md). init.js's vim.opt.startInInsert sets either.
-      this.vim = runInContext("new plutoVim.Vim({ ...(store ? { store } : {}), opt: { startInInsert: true } })", context);
+      // One mode for the desktop (HYDRA_KEYBOARD.md, "One input model"): a field takes it as it comes;
+      // the helper sets it (setDesktopMode) from wherever it changed.
+      this.vim = runInContext("new plutoVim.Vim({ ...(store ? { store } : {}) })", context);
       this.vim.on("error", (error: Error) => this.options.log?.(`pluto vim (native): ${error.message}`));
+      this.vim.on("DesktopMode", ({ mode, remote }: { mode: string; remote: boolean }) => {
+        if (!remote) this.options.onDesktopMode?.(mode);
+        for (const id of this.sessions.keys()) void this.hold(id);
+      });
+      this.vim.on("PageKey", ({ name, detail }: { name: string; detail: Record<string, unknown> }) => this.options.onPageKey?.(name, detail ?? {}));
       // Uppercase marks are the helper's (vimMarks.ts), across pages and apps.
       this.vim.remoteMarks = true;
       this.vim.on("MarkSet", ({ session, name, offset }: { session: Session; name: string; offset: number }) => {
@@ -469,8 +540,7 @@ export class NativeVim {
   /** A field another backend found (AT-SPI's), whose keys Exo holds as a window field. */
   addField(fieldId: number, buffer: FieldBuffer): void {
     const vim = this.engine();
-    const before = this.windowModes.get(buffer.state.windowId);
-    const session = vim.attach(buffer, before ? { startInInsert: before === "insert" } : {}) as Session;
+    const session = vim.attach(buffer) as Session;
     this.sessions.set(fieldId, session);
     vim.emit("FieldEnter", { session });
     void this.hold(fieldId);
@@ -490,10 +560,9 @@ export class NativeVim {
     const vim = this.engine();
     const buffer = new NativeBuffer(field, this.host, this.options.budget, this.options.quiet);
     const jump = this.pendingJump && this.pendingJump.windowId === field.windowId && Date.now() < this.pendingJump.until ? this.pendingJump : null;
-    // A mark jump lands in normal mode; a returning field in its window's last mode.
-    const before = this.windowModes.get(field.windowId);
-    const start = jump ? { startInInsert: false } : before ? { startInInsert: before === "insert" } : {};
-    const session = vim.attach(buffer, start) as Session;
+    // A field takes the desktop's mode; a mark jump lands in normal mode.
+    if (jump) vim.setMode("normal");
+    const session = vim.attach(buffer) as Session;
     this.sessions.set(field.id, session);
     vim.emit("FieldEnter", { session });
     void this.hold(field.id);
@@ -507,7 +576,6 @@ export class NativeVim {
     const session = this.sessions.get(id);
     if (!session) return;
     this.sessions.delete(id);
-    if (session.buffer.state.windowId) this.windowModes.set(session.buffer.state.windowId, session.mode === "insert" ? "insert" : "normal");
     this.holds.delete(id);
     this.busy.delete(id);
     this.lines.delete(id);
@@ -516,8 +584,90 @@ export class NativeVim {
     this.vim?.emit("FieldLeave", { session });
   }
 
+  /**
+   * The desktop's mode changed in a page (the helper says so): the field with
+   * the keyboard takes it, and every field holds what its mode wants.
+   */
+  setDesktopMode(mode: string): void {
+    const vim = this.engine();
+    vim.setMode(mode, { remote: true });
+    for (const session of this.sessions.values()) {
+      if (session.readonly || session.jump || session.cmd) continue;
+      const inserting = session.mode === "insert" || session.mode === "replace";
+      if (inserting !== (mode === "insert")) session.enterMode(mode);
+    }
+    for (const id of this.sessions.keys()) void this.hold(id);
+  }
+
+  /** The desktop's mode, as the native engine has it. */
+  get desktopMode(): string {
+    return this.vim?.mode ?? "normal";
+  }
+
+  /**
+   * A native window has the keyboard: it gets a page session over its window
+   * field (once), so normal mode has the page keys there without a field.
+   */
+  async windowFocused(windowId: number): Promise<void> {
+    if (this.windowFields.has(windowId)) return this.state(this.sessions.get(this.windowFields.get(windowId)!));
+    const vim = this.engine();
+    let fieldId = 0;
+    try {
+      ({ fieldId } = (await this.cdp.send("Plutonium.setVimWindowField", { windowId, enabled: true })) as { fieldId: number });
+    } catch {
+      return;
+    }
+    if (!fieldId || this.windowFields.has(windowId)) return;
+    this.windowFields.set(windowId, fieldId);
+    // AT-SPI's field for the window has the same id, and wins while it's there.
+    if (!this.sessions.has(fieldId)) {
+      this.sessions.set(fieldId, vim.attach(new NativePageBuffer(fieldId, windowId, this.host)) as Session);
+      void this.hold(fieldId);
+    }
+    this.state(this.sessions.get(fieldId));
+  }
+
+  /**
+   * AT-SPI let its field in window `windowId` go: the window's page session
+   * comes back over the same window field, or the window field goes.
+   */
+  async releaseWindowField(windowId: number): Promise<void> {
+    const fieldId = this.windowFields.get(windowId);
+    if (fieldId == null) {
+      await this.cdp.send("Plutonium.setVimWindowField", { windowId, enabled: false }).catch(() => {});
+      return;
+    }
+    this.sessions.set(fieldId, this.engine().attach(new NativePageBuffer(fieldId, windowId, this.host)) as Session);
+    await this.hold(fieldId);
+  }
+
+  /** What the shells show of the keyboard in an app (the mode pill). */
+  private state(session: Session | undefined): void {
+    if (!session || !this.options.onState) return;
+    const windowId = session.buffer.state.windowId;
+    const s = session as Session & { recording?: { register?: string } | null };
+    this.options.onState({
+      mode: this.vim?.mode ?? "normal",
+      sub: session.readonly ? (session.jump ? "jump" : "normal") : session.displayMode,
+      place: session.page ? "app" : "field",
+      label: this.options.appOf?.(windowId) ?? "",
+      site: "",
+      pending: [...session.pending, ...(session.typeahead as { key: string }[]).map((t) => t.key)].join(""),
+      continuations: session.continuations ?? [],
+      recording: s.recording?.register ?? null,
+      cmdline: Boolean(session.cmd),
+      focused: true,
+      windowId,
+    });
+  }
+
   /** What field `id` holds now: every key unless it's in insert mode with nothing pending. */
   private wanted(session: Session): { all: boolean; keys: KeySpec[] } {
+    // A window without a field: every key in normal mode; in insert mode the app's, but Caps Lock
+    // (an Escape to Exo, whose code says which).
+    if (session.page) {
+      return this.vim.mode === "insert" && !session.jump && !session.cmd ? { all: false, keys: [{ key: "Escape" }] } : { all: true, keys: [] };
+    }
     // Recording a macro sees every key, typed text too (each still goes on to the app).
     const insertIdle = session.mode === "insert" && !session.typeahead.length && !session.insertRegister && session.expression === null && !session.recording;
     if (!insertIdle) return { all: true, keys: [] };
@@ -578,6 +728,7 @@ export class NativeVim {
     this.busy.set(event.fieldId, (this.busy.get(event.fieldId) ?? 0) + 1);
     await this.hold(event.fieldId, { all: true, keys: [] });
     if (mine) void answer(true);
+    this.state(session);
     try {
       await session.idle();
     } finally {

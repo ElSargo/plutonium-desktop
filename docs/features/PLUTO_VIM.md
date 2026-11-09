@@ -31,9 +31,9 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
 
 ## Principles
 
-1. **Vim yields to the page.** A page's keydown handlers see every key first. Vim only acts where Blink would otherwise insert text or run a default editing action. Editors with their own key handling (Monaco, CodeMirror, xterm.js) keep working. A page that integrates can give keys up to the engine (Pages that integrate, below).
-2. **Web fields start in normal mode and stay in it** until a key enters insert mode (since 2026-11-09, HYDRA_KEYBOARD.md), unless you choose otherwise for a field, a site or a page that integrates (Pages that integrate, below). Single-line inputs start in insert mode (`vim.opt.inputs`), so typing into a search box never changes, and so do native apps' fields. A page can set the mode (`pvim:set-mode`: Hydra's composer goes back to normal mode once it has sent). A page's read-only text (`data-pvim-readonly`, focusable: Hydra's timeline) is a field too, in normal mode only: motions, visual mode and yanks. Normal mode starts with Escape, Caps Lock or Ctrl+[, which are Pluto Vim's before the page (in single-line inputs Escape stays the page's).
-3. **Escape in normal mode belongs to the page.** The first Escape enters normal mode, and only that: the page never sees it. The second closes the dialog or cancels the edit, as the page expects. Escape is claimed before the page, and passed on whenever vim has no use for it (normal mode with nothing pending, a single-line input).
+1. **In insert mode, vim yields to the page; in normal mode it goes first** (since 2026-11-09, HYDRA_KEYBOARD.md's "One input model"). In insert mode a page's keydown handlers see every key first, and vim only takes Caps Lock, its insert mappings and keys a page gives up (Pages that integrate, below). In normal mode every key is vim's first, and one it has no use for goes on to the page. Editors with their own key handling (Monaco, CodeMirror, xterm.js) are places for typing: insert mode while they have the keyboard.
+2. **One mode for the desktop.** Normal or insert, shared by every page and app through the helper; a field takes it when it gets the keyboard, and only keys and the actions that say so change it. It starts in normal mode. Single-line inputs, passwords, terminals and editors with their own keys are insert mode while they have the keyboard, and give the mode back when they lose it. A click into a field is insert mode. A page can set the mode (`pvim:set-mode`: Hydra's composer goes back to normal mode once it has sent). A page's read-only text (`data-pvim-readonly`, focusable: Hydra's timeline) is a field too, in normal mode only: motions, visual mode and yanks. Off a field, a page session has the page keys and scrolling (HYDRA_KEYBOARD.md).
+3. **Escape belongs to the page, always; Caps Lock is normal mode.** Escape never changes the mode (`vim.opt.escape = "vim"` for vim's Escape). In normal mode it cancels what's in progress (a pending command, visual mode, a jump, the `:` line), and otherwise goes on to the page. Caps Lock, Ctrl+[ to the engine, enters normal mode from anywhere, before the page.
 4. **Edits go through the editor, not around it.** Operators run Blink's editing commands, so pages get real `beforeinput` and `input` events (`deleteWordForward`, `historyUndo`) and frameworks (React, ProseMirror, Lexical, Tiptap) keep their own models. Native apps get edits through text-input-v3 and their own undo.
 5. **Passwords are never touched.** Password fields (web) and fields marked `password`, `sensitive_data` or `hidden_text` (text-input-v3) are always in insert mode, and no config can change that.
 6. **The decision to take a key is synchronous; its effect may not be.** As in KEYS.md: on the web the engine decides in the renderer with no IPC; for native apps the key is held for at most a few milliseconds. A paste from the register store may land a moment after its key.
@@ -65,9 +65,8 @@ Each one is an ordinary insert-mode mapping, so `init.js` can move or remove it.
 
 ### Single-line inputs
 
-Most `<input>` fields are search boxes, address bars and forms, so normal mode doesn't start by itself there. `vim.opt.inputs`:
-- `"manual"` (the default): insert mode with its extras; Ctrl+[ enters normal mode, and the field stays in Pluto Vim's hands until it loses focus;
-- `"on"`: as a textarea, Escape included;
+Most `<input>` fields are search boxes, address bars and forms, so they're insert mode while they have the keyboard, and give the desktop's mode back when they lose it (Principle 2). `vim.opt.inputs`:
+- `"on"` (the default; `"manual"` is the same): insert mode with its extras; Caps Lock enters normal mode there;
 - `"off"`: Pluto Vim stays out entirely.
 
 In normal mode in a single-line input, Enter submits, as it does in insert mode: there is no next line to go to.
@@ -132,7 +131,8 @@ Shell pages are pages too: Hydra's composer, Charon's search and the switcher's 
 Principle 1 makes a page's own keys win, which is right for pages that know nothing of Pluto Vim. A page that does know can do better, and Hydra's composer is the first: it should be usable entirely in vim mode, starting in normal mode if you choose.
 
 The page and the engine share the DOM, not JavaScript, so the protocol is attributes and DOM events on the field:
-- **`data-pvim-start="normal" | "insert"`**: the page's default starting mode. Your config overrides it: `vim.enable({ site, shell, selector, start })` for some fields, or `vim.opt.startInInsert` for every field.
+- **`data-pvim-start`** is gone (2026-11-09): a field takes the desktop's one mode (Principle 2). `vim.opt.startInInsert` is the mode the desktop starts in.
+- **`data-pvim-actions`, `data-pvim-page="all"` and `data-pvim-paused` on the document**: the page's actions everywhere in it, normal mode taking every key off a field, and no keys for the engine at all for now (Hydra's labels showing). `data-pvim-place` names where the keyboard is, for the mode pill.
 - **`pvim:mode` events** on the field, with `{ mode }`, whenever the mode changes, and `data-pvim-mode` on it. The detail reaches the page's own world (Blink clones it across worlds).
 - **`data-pvim-actions="submit history.prev history.next …"`**: what the field can do that isn't editing text. The engine runs one by dispatching `pvim:action` with `{ name }` on the field. Default keys map onto the common ones:
   - normal mode: Enter → `menu.select` or `submit`; `j` and `k` → `menu.next` and `menu.prev`, or past the last or first line `history.next` and `history.prev`;
@@ -273,7 +273,7 @@ export default function setup(vim) {
 
 | | |
 |---|---|
-| `vim.opt` | Options: `startInInsert`, `inputs` (`"manual"`, `"on"`, `"off"`), `clipboard` (`""`, `"unnamedplus"`), `shiftwidth`, `claim` (Escape and Ctrl+[ by default), `displayLines` (default true: j and k move by the lines a web field shows, gj and gk by real lines; with an operator, real lines), `timeoutlen`, `mapleader`. Each is checked as it's set; `clipboardHistory`, `whichwrap` and `iskeyword` come with later steps |
+| `vim.opt` | Options: `startInInsert`, `inputs` (`"manual"`, `"on"`, `"off"`), `clipboard` (`""`, `"unnamedplus"`), `shiftwidth`, `claim` (Ctrl+[ by default: keys taken before the page in insert mode), `escape` (`"page"` by default, `"vim"` for vim's Escape), `displayLines` (default true: j and k move by the lines a web field shows, gj and gk by real lines; with an operator, real lines), `timeoutlen`, `mapleader`. Each is checked as it's set; `clipboardHistory`, `whichwrap` and `iskeyword` come with later steps |
 | `vim.keymap.set(modes, lhs, rhs, opts)` / `.del` | Mappings, in neovim's notation (`<Esc>`, `<C-w>`, `<leader>`). Modes `"n"`, `"i"`, `"v"` (`"x"` is `"v"`, `""` is both), or a list. `rhs` is keys or a function; `<Cmd>Name args<CR>` runs a command. `opts`: `remap` (default false, as in neovim), `expr` (the function's result is the keys), `nowait`, `desc` |
 | `vim.motion(lhs, fn, { kind, arg })` | `fn(buf, { count, hasCount, arg, operator })` returns where the cursor goes, or null. Works after operators too, by `kind`: `"exclusive"`, `"inclusive"`, `"linewise"` |
 | `vim.operator(lhs, fn)` | `fn(buf, range, { count, register })` changes the range with `buf.edit()`. Works with motions, text objects, its doubled form (`gqq`), visual mode and `.` |
@@ -417,8 +417,8 @@ Not yet: frames inside a page (out-of-process iframes need `Target.setAutoAttach
 ### Caps Lock (built)
 
 A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its code (`key: "Escape"`, `keyCode` 27, `code: "CapsLock"`), so Pluto Vim can tell it from the Escape key:
-- **In a field Pluto Vim is on in,** it's Ctrl+[ to the engine (`keyFromEvent`), so it's claimed before the page and enters normal mode even where the page takes Escape (Hydra's composer, ProseMirror). The Escape key stays the page's first.
-- **Everywhere else,** pages see an Escape (a page that reads `code` sees `CapsLock`), and native apps get the Escape key: Exo gives them the Escape key's code, not Caps Lock's.
+- **In a page,** in a field or off one, it's Ctrl+[ to the engine (`keyFromEvent`), so it's claimed before the page and enters normal mode even where the page takes Escape (Hydra's composer, ProseMirror, a terminal). The Escape key is the page's (Principle 3).
+- **In a native app,** Exo holds Escape in insert mode (it matches by DOM key, so Caps Lock too), and the helper tells them apart by code: Caps Lock is the engine's, the Escape key goes on to the app. Off a field the window's page session holds it (HYDRA_KEYBOARD.md). An app sees only the Escape key, with its own code.
 - **Chromium:** `KeyboardModifierEventRewriter::RemapPressKey` in shell mode (patch 0006), ahead of the user's modifier remapping, so `CapsLockEventRewriter` never toggles the lock; `ClientCode` in `components/exo/keyboard.cc` (patch 0002). There is no way to turn Caps Lock on.
 
 

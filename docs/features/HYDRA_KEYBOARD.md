@@ -8,13 +8,32 @@ It sits on two other designs:
 
 ## Principles
 
-1. **One normal mode.** No second, nested normal mode for the UI. The composer's normal mode, Pluto Vim's in every field, is the normal mode: keys that act on the UI sit in it next to the text keys, on keys vim leaves free or barely uses. Pluto Vim's Principle 3 stays: Escape in normal mode with nothing pending belongs to the page.
+1. **One normal mode.** No second, nested normal mode for the UI. The composer's normal mode, Pluto Vim's in every field, is the normal mode: keys that act on the UI sit in it next to the text keys, on keys vim leaves free or barely uses. It's one mode for the whole desktop (One input model, below).
 2. **Jumps first.** Most of the time you want to *be somewhere*, not move there step by step. Every place and every visible thing is a jump away, and going back is one key (the jump list).
 3. **Bare keys for what's frequent.** A bare letter, Space, Tab or Backspace beats any chord. Modifiers are for insert mode and for getting in from outside a field. Super is the fallback from anywhere, not the main way in.
 4. **Vim's keys earn their place by use today, not by history.** What prose and chat use rarely goes (Dropped, below). What vim never had (labeled jumps, spelling fixes, structure motions, folds over UI) gets the keys.
 5. **Modes only where you repeat.** A separate UI mode is for doing the same thing many times in a row (resizing). Everything else is a key in normal mode. A mode shows a badge and its keys, takes every key while it's active, and Escape leaves it back where you were: the same field, mode and cursor.
 6. **Pages fill slots.** The base map is the same in every field. Keys that only mean something in an app (the next thread, page the context) are slots that the page fills through `data-pvim-actions`. A slot a page doesn't fill does nothing.
 7. **Focus always lands somewhere.** Closing, hiding or leaving anything puts focus back where it came from, never on `<body>`.
+
+## One input model
+
+Built 2026-11-09, after the first version's keys turned out to depend on where focus happened to be. That version had five places deciding whether a key was Pluto Vim's, each with its own key table and its own idea of the mode:
+- the composer and the timeline, each a field session with its own mode;
+- Hydra off a field, with a hand-written table of its own;
+- a browser tab off a field, with another;
+- the composer's yields, set by React a render after the mode changed;
+- native fields, whose page keys never reached Hydra.
+
+The model now:
+- **One mode for the desktop**, normal or insert: Hydra, every tab and every app share it. The helper keeps it (`mode.set`, `mode.get`) and tells every page's engine and the native one. A field takes it when it gets the keyboard. Only keys and the actions that say so change it: `i` and its kin, Caps Lock, `gi`/`gA`/Super+Enter, a send (back to normal).
+- **Normal mode: Pluto Vim first.** Every key goes to the engine before the page, and one it has no use for goes on. **Insert mode: the page or app first**, but for Caps Lock and the keys a page gives up (`data-pvim-yield`).
+- **Caps Lock is normal mode, everywhere**: in a field, off one, in a terminal, in an app. **Escape is always the page's or the app's**: it never changes the mode. In normal mode it cancels what's in progress (a pending command, visual mode, a jump, the `:` line), and otherwise goes on.
+- **Off a field is a place too:** a page session (the page itself, or a native window with no field) has the page keys, counts, `j`/`k`/`h`/`l`/`gg`/`G`/Ctrl+D/Ctrl+U to scroll, `gw`, `gi`, `gA`, `y`/`n` on an approval, and `i` `a` `A` `I` `o` `O`. Those go to the page's insert (Hydra's: the composer), or else to insert mode, where the page or app has every key. A tab's `H`/`L` are back and forward. In an app, scrolling is the app's own arrows and Page Up/Down. Other keys are the page's, except in Hydra, which takes every key in normal mode (`data-pvim-page="all"`), so typing doesn't go to the composer.
+- **Places for typing** are insert mode while they have the keyboard: a single-line input, a password, a terminal, an editor with its own keys. When focus leaves one, the mode it had before comes back, unless you changed it there. So `gt`, `gB` and the palette are ready to type, and leaving them puts you back where you were.
+- **A click into a field, a terminal or an editor** is insert mode.
+- **One table:** `PAGE_KEYS` and `PAGE_ACTIONS` in `commands.js`, matched by the engine's own parser (counts, prefixes, the timeout). Hydra declares its actions on the document, so they work from the composer, the timeline and off a field alike. While Hydra's labels show, the engine takes no keys (`data-pvim-paused`).
+- **The mode pill**, in the title bar's status cluster: the mode, where the keyboard is (Composer, Timeline, a tab's site, an app), the keys typed so far and a macro being recorded. After a prefix (`g`, `z`, `]`) waits 400 ms, a which-key list shows what can follow it. Pluto Vim reports it as `pvim:state` in each page; the helper relays the tab's or app's with the keyboard to the shells (`plutonium:pvim-state`).
 
 ## The audit
 
@@ -185,7 +204,7 @@ From 2026-11-09, for trying out:
 - `gi`, `gA`;
 - `s`, with labels over web fields;
 - `gw` after an operator or in visual mode: labels on every word of the field, and the operator takes the word it lands on (`y gw` yanks from here through that word); alone, the page's `jump.word` where it has one;
-- web fields start in normal mode and stay in it until a key enters insert mode; native apps' fields still start in insert mode;
+- one mode for the desktop, Caps Lock to normal mode and Escape always the page's, page sessions off a field and in apps without one, places for typing, and the mode pill (One input model, above);
 - a page's read-only text (`data-pvim-readonly`) is a field: its cursor is drawn, motions, visual mode and `y` work, what would change it does nothing, and `i`, `a` or `c` ask the page to insert;
 - a place, a show or a jump the field's page doesn't have goes to the shell (a browser tab's `gc`, `zt`, `S`), also off a field in a page.
 
@@ -195,18 +214,18 @@ While a jump or the `:` line is typed, every key is Pluto Vim's before the page'
 - `Space`/`Backspace` page the timeline by half pages;
 - the timeline is a read-only field: `gw` onto one of its words, or `gm`, puts the cursor there, so `gw` `y` `gw` (or `v`…`y`) yanks agent output, and `gi` `p` puts it in the composer; `i` there goes back to the composer, typing;
 - after Enter sends a message, the composer is back in normal mode;
-- off a field, `i`, `a` and `A` go to the composer, typing, and letters no longer type into it (T3's type-to-focus);
+- off a field, `i`, `a` and `A` go to the composer, typing (`A` at its end), and in normal mode letters don't type into it (T3's type-to-focus does in insert mode);
 - keys relayed from a browser tab in the panel run here, and the page takes the keyboard for places and labels;
 - Super+Enter: the composer, at its end, in insert mode, from anywhere (a browser tab, an app); Hydra's other keys on Super as KEYS.md's table says;
 - `S` and `gw` label the panel's browser tabs too: Pluto Vim in each tab collects its targets (`web/vim/hints.js`), the helper gathers them (`hints.collect`), and Hydra labels them with its own, over the tab, so labels never clash; a typed label gives the tab the keyboard and goes to its target there (`hints.go`);
 - the labels and the read-only cursor are in Hydra's theme (its tokens; Pluto Vim reads `--pvim-caret` and `--pvim-label-*`), and the cursor follows the timeline as it scrolls or grows;
-- while labels show, the timeline is no field, so its claimed keys don't take the labels' keys;
+- while labels show, Pluto Vim takes no keys (`data-pvim-paused`);
 - `Tab` goes through threads by recent use, drafts included, and `H`/`L` by the sidebar's order;
 - `gt` `gb` `gB` `ga` `gf` `gd` `gs` `gm` `gp` `gx` `gc`;
 - `zt` `zb` `zs` `zf` `zd`, and `zm` (the panel maximized);
 - `S` and `gw` labels on Hydra's page;
 - `y`/`n` on an approval `gp` went to;
-- the same keys when the keyboard isn't in a field.
+- the same keys when the keyboard isn't in a field, from the same table.
 
 **Checked in a slot's Hydra:** `)`, Backspace not deleting in normal mode, `s`, `ysiw*` and `ds*`, `S`, `zt` keeping the keyboard, `gt`, `Tab` between drafts.
 
@@ -243,6 +262,7 @@ Each step is something to try for real before the next one.
 - 2026-11-09: `Tab` goes through threads by recent use, `H`/`L` by the sidebar's order.
 - 2026-11-09: no agent rewrite operator (`ga` as "ask the agent to rewrite"). In Hydra, the composer already is a prompt to an agent, so rewriting it with another agent adds little. `ga` is the last native app instead.
 - 2026-11-09: `g` goes, `z` shows and hides, with the same letters. Vim's `gi` is the composer.
+- 2026-11-09: one input model (above). One mode for the desktop; normal mode is Pluto Vim's first and insert mode the page's; native apps without a field get our keys in normal mode too; a click into a field is insert mode; Caps Lock is normal mode everywhere and Escape is always the page's, so the two never mean the same thing.
 
 ## Open questions
 

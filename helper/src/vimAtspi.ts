@@ -176,6 +176,8 @@ export interface AtspiVimOptions {
   readonly hasNativeField: (windowId: number) => boolean;
   readonly addField: (fieldId: number, buffer: AtspiBuffer) => void;
   readonly removeField: (fieldId: number) => void;
+  /** The field is gone: the window field is let go (by default), or given back to its page session (vimNative.ts). */
+  readonly releaseWindowField?: (windowId: number) => Promise<void>;
   readonly host: NativeHost;
   readonly log?: (message: string) => void;
 }
@@ -246,7 +248,8 @@ export class AtspiVim {
     this.current = null;
     this.debug(`drop field ${current.fieldId}`);
     this.options.removeField(current.fieldId);
-    await this.cdp.send("Plutonium.setVimWindowField", { windowId: current.windowId, enabled: false }).catch(() => {});
+    if (this.options.releaseWindowField) await this.options.releaseWindowField(current.windowId);
+    else await this.cdp.send("Plutonium.setVimWindowField", { windowId: current.windowId, enabled: false }).catch(() => {});
   }
 
   private async focus(app: string, path: string): Promise<void> {

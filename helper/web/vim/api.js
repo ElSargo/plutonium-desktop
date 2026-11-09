@@ -25,6 +25,7 @@ const LATER_OPTIONS = { whichwrap: "whichwrap", iskeyword: "iskeyword" };
 const OPTIONS = {
   startInInsert: (v) => bool(v),
   inputs: (v) => oneOf(v, ["manual", "on", "off"]),
+  escape: (v) => oneOf(v, ["page", "vim"]),
   clipboard: (v) => oneOf(v, ["", "unnamedplus"]),
   shiftwidth: (v) => { if (!Number.isInteger(v) || v < 1 || v > 16) throw new TypeError("a whole number from 1 to 16"); return v; },
   claim: (v) => { if (!Array.isArray(v)) throw new TypeError("a list of keys, like [\"<C-[>\"]"); return v.map(oneKey); },

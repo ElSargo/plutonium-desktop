@@ -48,9 +48,11 @@ function setup(text: string, caret: number) {
   const element = new FakeElement(text, caret);
   let next = 1;
   /** A key held for the window field, as Exo's vimKey; resolves to the answer. */
+  /** Caps Lock is an Escape whose code says so (Ash's), and leaves insert mode; the Escape key is the app's. */
   const press = async (key: string) => {
     const id = next++;
-    for (const l of listeners) l({ method: "Plutonium.vimKey", params: { id, fieldId: 5, key, code: "", modifiers: 0, repeat: false } });
+    const caps = key === "CapsLock";
+    for (const l of listeners) l({ method: "Plutonium.vimKey", params: { id, fieldId: 5, key: caps ? "Escape" : key, code: caps ? "CapsLock" : "", modifiers: 0, repeat: false } });
     for (let k = 0; k < 100 && !answers.has(id); k++) await sleep(2);
     await sleep(10);
     const consumed = answers.get(id);
@@ -73,20 +75,21 @@ describe("Pluto Vim over AT-SPI", () => {
   test("motions are exact, edits are delete and insert, typing goes to the app, Ctrl+Z is undo", async () => {
     const { native, element, press, keys } = setup("hello big world", 15);
     await native.start();
+    native.setDesktopMode("insert");
     const host = (native as any).host;
     const buffer = new AtspiBuffer(element, host, { fieldId: 5, windowId: 3 });
     await buffer.refresh();
     native.addField(5, buffer);
     assert.equal(await press("x"), false, "insert mode: the app's");
     assert.equal(element.text, "hello big worldx");
-    await press("Escape");
+    await press("CapsLock");
     for (const k of "bdw") await press(k);
     assert.equal(element.text, "hello big ");
     assert.ok(element.calls.includes("delete 10 16"), element.calls.join(", "));
     for (const k of "0cw") await press(k);
     await press("h");
     await press("i");
-    await press("Escape");
+    await press("CapsLock");
     assert.equal(element.text, "hi big ");
     await press("u");
     assert.deepEqual(keys.slice(-2), ["ControlLeft", "KeyZ"]);
@@ -98,7 +101,7 @@ describe("Pluto Vim over AT-SPI", () => {
     const buffer = new AtspiBuffer(element, (native as any).host, { fieldId: 5, windowId: 3 });
     await buffer.refresh();
     native.addField(5, buffer);
-    await press("Escape");
+    await press("CapsLock");
     element.chars = [..."xyz abc"];
     element.caret = 4;
     await press("x");

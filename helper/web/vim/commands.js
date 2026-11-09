@@ -544,6 +544,35 @@ export const PAGE_KEYS = [
   { keys: "z ", page: "mode.resize" },
 ].map((entry) => ({ ...entry, action: "page" }));
 
+/**
+ * Off a field (a page session: the page itself, a native window without a
+ * field), normal mode's keys (HYDRA_KEYBOARD.md, "One input model"): the page
+ * keys, what moves the page (the backend's own where the page doesn't take
+ * them: dom.js scrolls, and goes back and forward in a tab), and the keys
+ * that start typing, which go to the page's insert (Hydra's: the composer) or
+ * else to insert mode, where the page or app has every key. Any other key
+ * is the page's.
+ */
+export const PAGE_ACTIONS = [
+  ...PAGE_KEYS,
+  { keys: "j", page: "scroll.down" },
+  { keys: "k", page: "scroll.up" },
+  { keys: "h", page: "scroll.left" },
+  { keys: "l", page: "scroll.right" },
+  { keys: "gg", page: "scroll.top" },
+  { keys: "G", page: "scroll.bottom" },
+  { keys: "<C-d>", page: "context.pageDown" },
+  { keys: "<C-u>", page: "context.pageUp" },
+  { keys: "gw", page: "jump.word" },
+  { keys: "gi", page: "place.composerInsert" },
+  { keys: "gA", page: "place.composerEnd" },
+  // Answers, where the page has something to answer (Hydra: a waiting approval with the keyboard on it).
+  { keys: "y", page: "item.accept", pass: true },
+  { keys: "n", page: "item.decline", pass: true },
+].map((entry) => ({ ...entry, action: "page" })).concat(
+  ["i", "a", "I", "A", "o", "O"].map((keys) => ({ keys, action: "insert", insert: true })),
+);
+
 // ── Actions ──────────────────────────────────────────────────────────────
 // Normal mode's other commands. An alias is the same command in other keys
 // (x is dl); the rest are run by the engine by name.
