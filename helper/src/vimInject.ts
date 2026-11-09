@@ -78,6 +78,8 @@ export interface VimInjectorOptions {
   readonly onMarkJump?: (name: string) => void;
   /** A page key a page doesn't have (a browser tab's gc, zt): its name and detail, for the shells (toShells). */
   readonly onPageKey?: (targetId: string, name: string, detail: Record<string, unknown>) => void;
+  /** The browser's own id of the tab a page is (a shell finds the element showing it by that). */
+  readonly tabIdOf?: (targetId: string) => number | null;
 }
 
 interface PageSession {
@@ -257,6 +259,11 @@ export class VimInjector {
       else if (message.op === "mark.set") this.options.onMarkSet?.(target, message.name, Number((message as { offset?: unknown }).offset));
       else if (message.op === "mark.jump") this.options.onMarkJump?.(message.name);
       else if (message.op === "page.key") this.options.onPageKey?.(target, message.name, ((message as { detail?: unknown }).detail ?? {}) as Record<string, unknown>);
+      else if (message.op === "hints.collect") result = await this.collectHints(target, String((message as { kind?: unknown }).kind ?? ""));
+      else if (message.op === "hints.go") {
+        const { targetId: to, id: which } = message as { targetId?: unknown; id?: unknown };
+        if (typeof to === "string") result = await this.hintGo(to, Number(which));
+      }
     } catch (error) {
       this.log(`pluto vim: register store: ${(error as Error).message}`);
     }
@@ -288,6 +295,48 @@ export class VimInjector {
         expression: `window.dispatchEvent(new CustomEvent("plutonium:page-key", { detail: ${payload} }))`,
       }, page.sessionId).catch(() => {});
     }
+  }
+
+  /** Evaluates `expression` in the engine's world of page `targetId`; its value, or null. */
+  private async inWorld(targetId: string, expression: string): Promise<unknown> {
+    const page = this.sessions.get(targetId);
+    if (!page) return null;
+    try {
+      const { executionContextId } = (await within(this.cdp.send("Page.createIsolatedWorld", { frameId: targetId, worldName: WORLD }, page.sessionId), 300)) as { executionContextId: number };
+      const { result } = (await within(this.cdp.send("Runtime.evaluate", { contextId: executionContextId, expression, returnByValue: true }, page.sessionId), 300)) as { result: { value?: unknown } };
+      return result.value ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A shell's labels (HYDRA_KEYBOARD.md): what each other page we hold (not
+   * a shell's) can label, from its engine's world, at once:
+   * [{ targetId, tabId, items, viewport }]. The shell keeps those its own
+   * page shows.
+   */
+  private async collectHints(from: string, kind: string): Promise<unknown[]> {
+    const origins = this.options.shellOrigins?.() ?? {};
+    const expression = `globalThis.plutoVimPage?.hintTargets(${JSON.stringify(kind)}) ?? null`;
+    const found = await Promise.all([...this.sessions].map(async ([targetId, page]) => {
+      if (targetId === from) return null;
+      try {
+        if (new URL(page.url).origin in origins) return null;
+      } catch {
+        return null;
+      }
+      const value = (await this.inWorld(targetId, expression)) as { items?: unknown[]; viewport?: unknown } | null;
+      if (!value?.items?.length) return null;
+      return { targetId, tabId: this.options.tabIdOf?.(targetId) ?? null, items: value.items, viewport: value.viewport };
+    }));
+    return found.filter(Boolean);
+  }
+
+  /** Goes to target `id` of page `targetId`'s last hints. */
+  private async hintGo(targetId: string, id: number): Promise<boolean> {
+    if (!Number.isSafeInteger(id)) return false;
+    return (await this.inWorld(targetId, `!!globalThis.plutoVimPage?.hintGo(${id})`)) === true;
   }
 
   /** Uppercase mark `name` in page `targetId`: its field takes focus and the cursor goes to the mark. */

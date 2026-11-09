@@ -17,6 +17,7 @@
 
 import { Vim } from "./engine.js";
 import { PAGE_KEYS } from "./commands.js";
+import { collect, go } from "./hints.js";
 import { keyFromEvent, normalizeKey } from "./keys.js";
 
 /** <input> types with a text selection (password is never vim's: Principle 5). */
@@ -577,20 +578,45 @@ export class ReadOnlyBuffer extends EditableBuffer {
       this.root.scrollBy({ top: rect.top - (box.top + box.height / 3), behavior: "instant" });
       return this.#showCaret(offset, extend, true);
     }
+    this.caretAt = { offset, extend };
     if (!this.caretBox) {
       const host = doc.createElement("pvim-caret");
       host.style.cssText = "position:fixed;z-index:2147483646;pointer-events:none;inset:0;width:0;height:0";
       const box = doc.createElement("div");
-      box.style.cssText = "position:fixed;background:rgba(255,200,40,.55);outline:1px solid rgba(0,0,0,.4);border-radius:1px";
+      // The page's theme, through custom properties it may set (they reach into the shadow root): a block
+      // in the caret colour, as a terminal draws one, over the character.
+      box.style.cssText = "position:fixed;box-sizing:border-box;border-radius:2px;" +
+        "background:color-mix(in srgb, var(--pvim-caret, #e2b714) 30%, transparent);" +
+        "border-left:2px solid var(--pvim-caret, #e2b714)";
       host.attachShadow({ mode: "closed" }).append(box);
       this.caretBox = { host, box };
+      // It follows the text: the region scrolling, the page resizing, the text growing (a reply streaming in).
+      const redraw = () => {
+        if (!this.caretBox?.host.isConnected || !this.caretAt) return;
+        cancelAnimationFrame(this.redrawFrame);
+        this.redrawFrame = requestAnimationFrame(() => this.#placeCaret());
+      };
+      this.root.addEventListener("scroll", redraw, { passive: true });
+      doc.defaultView.addEventListener("resize", redraw);
+      new doc.defaultView.ResizeObserver(redraw).observe(this.root);
       this.root.addEventListener("focusout", () => this.caretBox?.host.remove());
     }
-    Object.assign(this.caretBox.box.style, {
-      left: `${rect.left}px`, top: `${rect.top}px`, width: `${Math.max(rect.width, 6)}px`, height: `${rect.height}px`,
+    this.#placeCaret();
+  }
+
+  #placeCaret() {
+    const { offset, extend } = this.caretAt;
+    const rect = this.rectsOf([offset]).get(offset);
+    const box = this.root.getBoundingClientRect();
+    const { host, box: caret } = this.caretBox;
+    // Scrolled out of the region: hidden, not drawn over what's around it.
+    const outside = !rect || rect.top + rect.height <= box.top || rect.top >= box.bottom;
+    host.style.display = extend || outside ? "none" : "";
+    if (!rect) return;
+    Object.assign(caret.style, {
+      left: `${rect.left}px`, top: `${rect.top}px`, width: `${Math.max(rect.width, 2)}px`, height: `${rect.height}px`,
     });
-    if (!this.caretBox.host.isConnected) doc.documentElement.append(this.caretBox.host);
-    this.caretBox.host.style.display = extend ? "none" : "";
+    if (!host.isConnected) this.root.ownerDocument.documentElement.append(host);
   }
 }
 
@@ -759,8 +785,10 @@ export function attach(doc = globalThis.document, options = {}) {
     }
     labels = overlay(doc, "pvim-labels");
     const style = doc.createElement("style");
-    style.textContent = "b{position:fixed;font:bold 12px/1 ui-monospace,monospace;padding:1px 3px;border-radius:3px;" +
-      "color:#1b1b1f;background:#ffd84a;box-shadow:0 0 0 1px rgba(0,0,0,.35)}";
+    // The page's theme where it sets one (--pvim-label-*: Hydra does), else a plain yellow.
+    style.textContent = "b{position:fixed;font:600 11px/1 var(--pvim-label-font, ui-monospace, monospace);padding:2px 4px;" +
+      "border-radius:var(--pvim-label-radius, 4px);color:var(--pvim-label-fg, #1b1b1f);background:var(--pvim-label-bg, #ffd84a);" +
+      "border:1px solid var(--pvim-label-border, rgba(0,0,0,.35));box-shadow:0 1px 3px rgba(0,0,0,.18);text-transform:uppercase}";
     labels.root.append(style);
     for (const target of shown) {
       const r = rects.get(target.offset);
@@ -803,9 +831,20 @@ export function attach(doc = globalThis.document, options = {}) {
   const active = vimField(doc.activeElement);
   if (active) sessionOf(active);
 
+  let hintKept = [];
   return {
     vim,
     sessionOf,
+    /** What a shell's labels can go to here (hints.js): { items, viewport }, kept for hintGo. */
+    hintTargets(kind) {
+      const found = collect(doc, kind === "word" ? "word" : "significant");
+      hintKept = found.kept;
+      return { items: found.items, viewport: found.viewport };
+    },
+    /** Goes to one of the last hintTargets. */
+    hintGo(id) {
+      return go(doc, hintKept[Number(id)]);
+    },
     /** Uppercase mark `name`, set in this page: focuses its field and moves there (the helper asks). */
     jumpToMark(name, offset) {
       const mark = vim.globalMarks.get(name);

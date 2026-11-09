@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** web/vim's modules, each after the ones it imports. */
-export const VIM_MODULES = ["text.js", "prose.js", "keys.js", "registers.js", "remoteStore.js", "commands.js", "userBuffer.js", "engine.js", "api.js", "stringBuffer.js", "dom.js"];
+export const VIM_MODULES = ["text.js", "prose.js", "keys.js", "registers.js", "remoteStore.js", "commands.js", "userBuffer.js", "engine.js", "api.js", "stringBuffer.js", "hints.js", "dom.js"];
 
 function wrap(name: string, source: string): string {
   const exported: string[] = [];

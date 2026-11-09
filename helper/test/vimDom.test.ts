@@ -444,6 +444,26 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.deepEqual(await page.evaluate(() => (window as any).pageKeys), ["place.terminal", "show.panel", "jump.significant"]);
   });
 
+  test("a shell's labels: the page's targets with their rects, and going to one clicks it or puts the cursor there", async () => {
+    const r = await page.evaluate(() => {
+      const w = window as any;
+      const box = document.createElement("div");
+      box.id = "hintbox";
+      box.innerHTML = '<button id="hb">Press here</button> <p id="hp">some words to label</p>';
+      document.body.prepend(box);
+      w.clicked = 0;
+      document.getElementById("hb")!.addEventListener("click", () => w.clicked++);
+      const sig = w.pvim.hintTargets("significant");
+      const button = document.getElementById("hb")!.getBoundingClientRect();
+      const mine = sig.items.find((i: any) => Math.abs(i.x - button.left) < 1 && Math.abs(i.y - button.top) < 1);
+      w.pvim.hintGo(mine.id);
+      const words = w.pvim.hintTargets("word");
+      return { clicked: w.clicked, hasWords: words.items.length > 3, viewport: sig.viewport.width > 0 };
+    });
+    assert.deepEqual(r, { clicked: 1, hasWords: true, viewport: true });
+    await page.evaluate(() => document.getElementById("hintbox")!.remove());
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

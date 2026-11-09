@@ -197,6 +197,9 @@ While a jump or the `:` line is typed, every key is Pluto Vim's before the page'
 - after Enter sends a message, the composer is back in normal mode;
 - off a field, `i`, `a` and `A` go to the composer, typing, and letters no longer type into it (T3's type-to-focus);
 - keys relayed from a browser tab in the panel run here, and the page takes the keyboard for places and labels;
+- `S` and `gw` label the panel's browser tabs too: Pluto Vim in each tab collects its targets (`web/vim/hints.js`), the helper gathers them (`hints.collect`), and Hydra labels them with its own, over the tab, so labels never clash; a typed label gives the tab the keyboard and goes to its target there (`hints.go`);
+- the labels and the read-only cursor are in Hydra's theme (its tokens; Pluto Vim reads `--pvim-caret` and `--pvim-label-*`), and the cursor follows the timeline as it scrolls or grows;
+- while labels show, the timeline is no field, so its claimed keys don't take the labels' keys;
 - `Tab` goes through threads by recent use, drafts included, and `H`/`L` by the sidebar's order;
 - `gt` `gb` `gB` `ga` `gf` `gd` `gs` `gm` `gp` `gx` `gc`;
 - `zt` `zb` `zs` `zf` `zd`, and `zm` (the panel maximized);
@@ -210,7 +213,7 @@ While a jump or the `:` line is typed, every key is Pluto Vim's before the page'
 - spelling (`=`, `]s`, Ctrl+L), `K`, folds (`za`…), the resize mode, Super+Enter and Super+R;
 - `gp` across threads, and `a` on an approval;
 - a full-height composer for `zm`;
-- labels in tabs and native apps.
+- labels in native apps.
 
 **Known issues:**
 - `>>` in Hydra's composer: the editor turns the quote into a block quote but keeps the `> ` text in it, and `<<` leaves the empty block. The composer should do quoting itself, as a page action.
