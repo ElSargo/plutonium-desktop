@@ -144,6 +144,8 @@ export class VimInjector {
       } else if (method === "Target.targetInfoChanged" && value.targetInfo) {
         const known = this.sessions.get(value.targetInfo.targetId);
         if (known) known.url = value.targetInfo.url;
+        // A target that became a page after we let it go (a shell's tab: see attachNew): attached as it is.
+        else if (value.targetInfo.type === "page") void this.attachOpen(value.targetInfo);
       } else if (method === "Target.targetDestroyed" && value.targetId) {
         this.sessions.delete(value.targetId);
       } else if (method === "Target.detachedFromTarget" && value.sessionId) {
@@ -158,10 +160,18 @@ export class VimInjector {
     return this.sessions.size;
   }
 
-  /** A new target, waiting for us: a page gets its script; then it runs, whatever happened. */
+  /**
+   * A new target, waiting for us: a page gets its script; then it runs, whatever happened.
+   * A tab a shell opens (Plutonium's tabs as elements, outside any tab strip) starts as an
+   * "other" target with no URL, which doesn't answer Page commands while it waits (it would
+   * stay paused): it's let go here, and attached when it says it's a page (listen()).
+   */
   private async attachNew(sessionId: string, target: TargetInfo): Promise<void> {
+    // One attach per page: this, or attachOpen's when the page says it's one (listen()), whichever comes first.
+    const mine = target.type === "page" && !this.sessions.has(target.targetId) && !this.attaching.has(target.targetId);
+    if (mine) this.attaching.add(target.targetId);
     try {
-      if (target.type === "page" && !this.sessions.has(target.targetId)) {
+      if (mine) {
         await this.bind(sessionId);
         const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD }, sessionId)) as { identifier: string };
         this.sessions.set(target.targetId, { sessionId, identifier, url: target.url });
@@ -170,6 +180,7 @@ export class VimInjector {
     } catch (error) {
       this.log(`pluto vim: couldn't go into ${target.url || target.type}: ${(error as Error).message}`);
     } finally {
+      if (mine) this.attaching.delete(target.targetId);
       await this.cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => {});
       const page = this.sessions.get(target.targetId);
       if (!page || page.sessionId !== sessionId) await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});

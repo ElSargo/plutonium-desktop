@@ -351,6 +351,24 @@ export class EditableBuffer {
   async #newline() {
     const doc = this.#doc();
     const lines = () => editableModel(this.root).text.split("\n").length;
+    // First as a person makes a new line without sending: Shift+Enter, to the editor's own key handler.
+    // A DOM change that adds a block is Enter to ProseMirror (it runs its Enter handler, and a chat
+    // composer like Hydra's sends), so the editing commands below come only where no handler took it.
+    const view = doc.defaultView;
+    const shiftEnter = new view.KeyboardEvent("keydown", { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true });
+    // The editor reads the text just typed from its mutation observer: let it, before it handles a key.
+    await settled();
+    const start = lines();
+    this.root.dispatchEvent(shiftEnter);
+    if (shiftEnter.defaultPrevented) {
+      await settled();
+      // At the end of a block an editor may hold the new line open with a second break: one newline was asked for.
+      if (lines() - start > 1) {
+        doc.execCommand("forwardDelete");
+        await settled();
+      }
+      return;
+    }
     // A field of one paragraph is likely a composer that keeps it one (lines are line breaks); try that first.
     const blocks = [...this.root.children].filter((child) => BLOCK.test(child.tagName)).length;
     const order = blocks <= 1 ? ["insertLineBreak", "insertParagraph"] : ["insertParagraph", "insertLineBreak"];
