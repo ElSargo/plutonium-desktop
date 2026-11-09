@@ -16,7 +16,7 @@
 // page's own world).
 
 import { Vim } from "./engine.js";
-import { keyFromEvent } from "./keys.js";
+import { keyFromEvent, normalizeKey } from "./keys.js";
 
 /** <input> types with a text selection (password is never vim's: Principle 5). */
 const TEXT_INPUTS = new Set(["text", "search", "url", "tel"]);
@@ -55,17 +55,71 @@ function secret(el) {
 /**
  * What a page that integrates declares on a field (PLUTO_VIM.md, Pages that
  * integrate): its actions and commands, which the engine runs by
- * dispatching pvim:action with { name }, and the keys its own handlers give
- * up (in vim's notation: "<C-n> <Esc>"), for as long as it declares them.
+ * dispatching pvim:action with { name } (and the key's count and text, for
+ * the keys pages fill: HYDRA_KEYBOARD.md), and the keys its own handlers give
+ * up (in vim's notation: "<C-n> <Esc> <Space>"), for as long as it declares them.
  */
 function integration(el) {
   const words = (name) => new Set((el.getAttribute(name) ?? "").split(/\s+/).filter(Boolean));
   return {
     actions: () => words("data-pvim-actions"),
     commands: () => words("data-pvim-commands"),
-    yields: () => words("data-pvim-yield"),
-    action: (name) => el.dispatchEvent(new el.ownerDocument.defaultView.CustomEvent("pvim:action", { detail: { name }, bubbles: true })),
+    yields: () => new Set([...words("data-pvim-yield")].map(normalizeKey)),
+    action: (name, detail) => el.dispatchEvent(new el.ownerDocument.defaultView.CustomEvent("pvim:action", { detail: { ...detail, name }, bubbles: true })),
   };
+}
+
+/** A closed shadow root on the document, for what Pluto Vim draws over a page: the page's styles leave it alone. */
+function overlay(doc, tag) {
+  const host = doc.createElement(tag);
+  host.style.cssText = "position:fixed;z-index:2147483647;pointer-events:none;inset:0;width:0;height:0";
+  const root = host.attachShadow({ mode: "closed" });
+  return { host, root };
+}
+
+/**
+ * Where the characters at `offsets` of a textarea or input are on screen: a
+ * copy of the field's text, laid out as the field lays it out, in a hidden
+ * box over it.
+ */
+function textFieldRects(el, offsets) {
+  const doc = el.ownerDocument;
+  const view = doc.defaultView;
+  const style = view.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  const { host, root } = overlay(doc, "pvim-measure");
+  const mirror = doc.createElement("div");
+  for (const name of ["boxSizing", "width", "height", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderStyle", "fontFamily", "fontSize",
+    "fontWeight", "fontStyle", "fontVariant", "fontStretch", "letterSpacing", "wordSpacing", "lineHeight", "textTransform",
+    "textIndent", "textAlign", "tabSize", "direction"]) mirror.style[name] = style[name];
+  Object.assign(mirror.style, {
+    position: "fixed", left: `${rect.left}px`, top: `${rect.top}px`, visibility: "hidden", overflow: "hidden",
+    whiteSpace: el.tagName === "INPUT" ? "pre" : "pre-wrap", overflowWrap: "break-word", borderColor: "transparent",
+  });
+  const text = el.value;
+  const sorted = [...new Set(offsets)].sort((a, b) => a - b);
+  const spans = new Map();
+  let at = 0;
+  for (const offset of sorted) {
+    mirror.append(doc.createTextNode(text.slice(at, offset)));
+    const span = doc.createElement("span");
+    const ch = text[offset];
+    span.textContent = ch && ch !== "\n" ? ch : "\u200b";
+    mirror.append(span);
+    spans.set(offset, span);
+    at = ch && ch !== "\n" ? offset + 1 : offset;
+  }
+  mirror.append(doc.createTextNode(text.slice(at)));
+  root.append(mirror);
+  doc.documentElement.append(host);
+  const out = new Map();
+  for (const [offset, span] of spans) {
+    const r = span.getBoundingClientRect();
+    out.set(offset, { left: r.left - el.scrollLeft, top: r.top - el.scrollTop, width: r.width, height: r.height });
+  }
+  host.remove();
+  return out;
 }
 
 function setCaret(el, shape, mode) {
@@ -155,6 +209,9 @@ export class TextFieldBuffer {
       el.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
     }
   }
+
+  /** Where the characters at `offsets` are on screen: offset → rect (the jump's labels). */
+  rectsOf(offsets) { return textFieldRects(this.el, offsets); }
 
   setCaret(shape, mode) { setCaret(this.el, shape, mode); }
 }
@@ -401,6 +458,26 @@ export class EditableBuffer {
     this.#doc().execCommand(command);
   }
 
+  /** Where the characters at `offsets` are on screen: offset → rect (the jump's labels). */
+  rectsOf(offsets) {
+    const model = editableModel(this.root);
+    const doc = this.#doc();
+    const out = new Map();
+    for (const offset of offsets) {
+      const range = doc.createRange();
+      const inText = model.texts.find(([node, start]) => offset >= start && offset < start + node.data.length);
+      if (inText) {
+        range.setStart(inText[0], offset - inText[1]);
+        range.setEnd(inText[0], offset - inText[1] + 1);
+      } else {
+        range.setStart(...this.#point(model, offset));
+      }
+      const r = range.getClientRects()[0] ?? range.getBoundingClientRect();
+      if (r && (r.width || r.height)) out.set(offset, { left: r.left, top: r.top, width: r.width, height: r.height });
+    }
+    return out;
+  }
+
   setCaret(shape, mode) { setCaret(this.root, shape, mode); }
 }
 
@@ -525,6 +602,38 @@ export function attach(doc = globalThis.document, options = {}) {
   };
   const onRecording = ({ session, register }) => show(session, register ? `recording @${register}` : null);
 
+  // The labels of a jump (s), over the characters they go to.
+  let labels = null;
+  const onJumpLabels = ({ session, targets }) => {
+    labels?.host.remove();
+    labels = null;
+    const buffer = session?.buffer;
+    const el = buffer?.el ?? buffer?.root;
+    if (!targets?.length || !el || el.ownerDocument !== doc || typeof buffer.rectsOf !== "function") return;
+    const shown = targets.filter((t) => t.label);
+    let rects;
+    try {
+      rects = buffer.rectsOf(shown.map((t) => t.offset));
+    } catch {
+      return;
+    }
+    labels = overlay(doc, "pvim-labels");
+    const style = doc.createElement("style");
+    style.textContent = "b{position:fixed;font:bold 12px/1 ui-monospace,monospace;padding:1px 3px;border-radius:3px;" +
+      "color:#1b1b1f;background:#ffd84a;box-shadow:0 0 0 1px rgba(0,0,0,.35)}";
+    labels.root.append(style);
+    for (const target of shown) {
+      const r = rects.get(target.offset);
+      if (!r || r.top + r.height < 0 || r.top > view.innerHeight || r.left > view.innerWidth) continue;
+      const b = doc.createElement("b");
+      b.textContent = target.label;
+      b.style.left = `${Math.round(r.left)}px`;
+      b.style.top = `${Math.round(r.top + Math.max(0, (r.height - 14) / 2))}px`;
+      labels.root.append(b);
+    }
+    doc.documentElement.append(labels.host);
+  };
+
   const onMode = ({ session, to }) => {
     const el = session.buffer.el ?? session.buffer.root;
     if (!el || el.ownerDocument !== doc) return;
@@ -542,6 +651,7 @@ export function attach(doc = globalThis.document, options = {}) {
     vim.on("CmdlineChanged", onCmdline),
     vim.on("Message", onMessage),
     vim.on("RecordingChanged", onRecording),
+    vim.on("JumpLabels", onJumpLabels),
   ];
   const active = vimField(doc.activeElement);
   if (active) sessionOf(active);
@@ -569,6 +679,7 @@ export function attach(doc = globalThis.document, options = {}) {
       view.removeEventListener("plutoniumvimready", onReady);
       for (const unlisten of unlistens) unlisten();
       line?.host.remove();
+      labels?.host.remove();
     },
   };
 }

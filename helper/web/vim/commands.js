@@ -7,6 +7,7 @@
 
 import * as T from "./text.js";
 import { parseKeys } from "./keys.js";
+import * as P from "./prose.js";
 
 // ── Motions ──────────────────────────────────────────────────────────────
 // fn(ctx) returns the target offset, or null when the motion fails (an
@@ -202,17 +203,28 @@ function bigWordKind(ctx) {
   return ctx.op === "c" && T.cls(ctx.text, ctx.pos, true) !== 0 ? "inclusive" : "exclusive";
 }
 
+/** ]h, [l, …: the count'th line `test` accepts, down (dir 1) or up. */
+function structure(dir, test) {
+  return (ctx) => {
+    let at = ctx.pos;
+    for (let k = 0; k < ctx.count; k++) {
+      const found = P.nextLine(ctx.text, at, dir, test);
+      if (found == null) return k === 0 ? null : at;
+      at = found;
+    }
+    return at;
+  };
+}
+
 const line = (n) => (ctx) => T.firstNonBlank(ctx.text, T.lineStartOf(ctx.text, n(ctx)));
 
 /** @type {Array<{ keys: string, fn: Function, kind: string | Function, arg?: boolean, keepWant?: boolean, wantEnd?: boolean }>} */
 export const MOTIONS = [
   { keys: "h", fn: (c) => left(c, false), kind: "exclusive" },
   { keys: "<Left>", fn: (c) => left(c, false), kind: "exclusive" },
-  { keys: "<BS>", fn: (c) => left(c, true), kind: "exclusive" },
   { keys: "<C-h>", fn: (c) => left(c, true), kind: "exclusive" },
   { keys: "l", fn: (c) => right(c, false), kind: "exclusive" },
   { keys: "<Right>", fn: (c) => right(c, false), kind: "exclusive" },
-  { keys: " ", fn: (c) => right(c, true), kind: "exclusive" },
   { keys: "j", fn: displayOr(1, true), kind: "linewise", keepWant: true },
   { keys: "gj", fn: displayOr(1, false), kind: "linewise", keepWant: true },
   { keys: "<Down>", fn: (c) => vertical(c, 1), kind: "linewise", keepWant: true },
@@ -242,22 +254,8 @@ export const MOTIONS = [
   { keys: "<End>", fn: (c) => T.lastChar(c.text, c.pos), kind: "inclusive", wantEnd: true },
   { keys: "gg", fn: line((c) => (c.hasCount ? c.count - 1 : 0)), kind: "linewise", jump: true },
   { keys: "G", fn: line((c) => (c.hasCount ? c.count - 1 : Infinity)), kind: "linewise", jump: true },
-  {
-    keys: "_",
-    fn: (c) => { const s = lineDown(c, c.count - 1); return s == null ? null : T.firstNonBlank(c.text, s); },
-    kind: "linewise",
-  },
+  // Enter as a motion only where the page doesn't take it (a composer sends with it).
   { keys: "<CR>", fn: (c) => { const s = lineDown(c, c.count); return s == null ? null : T.firstNonBlank(c.text, s); }, kind: "linewise" },
-  { keys: "+", fn: (c) => { const s = lineDown(c, c.count); return s == null ? null : T.firstNonBlank(c.text, s); }, kind: "linewise" },
-  {
-    keys: "-",
-    fn: (c) => {
-      let s = T.lineStart(c.text, c.pos);
-      for (let k = 0; k < c.count; k++) { s = T.prevLineStart(c.text, s); if (s == null) return null; }
-      return T.firstNonBlank(c.text, s);
-    },
-    kind: "linewise",
-  },
   { keys: "f", fn: find("f"), kind: "inclusive", arg: true },
   { keys: "t", fn: find("t"), kind: "inclusive", arg: true },
   { keys: "F", fn: find("F"), kind: "exclusive", arg: true },
@@ -266,6 +264,15 @@ export const MOTIONS = [
   { keys: ",", fn: repeatFind(true), kind: findKind(true) },
   { keys: "}", fn: repeatMotion(T.paragraphForward), kind: "exclusive", jump: true },
   { keys: "{", fn: repeatMotion(T.paragraphBack), kind: "exclusive", jump: true },
+  // Sentences, and Markdown's structure (HYDRA_KEYBOARD.md): headings, list items, code blocks.
+  { keys: ")", fn: repeatMotion(P.sentenceForward), kind: "exclusive", jump: true },
+  { keys: "(", fn: repeatMotion(P.sentenceBack), kind: "exclusive", jump: true },
+  { keys: "]h", fn: structure(1, P.isHeading), kind: "exclusive", jump: true },
+  { keys: "[h", fn: structure(-1, P.isHeading), kind: "exclusive", jump: true },
+  { keys: "]l", fn: structure(1, P.isItem), kind: "exclusive", jump: true },
+  { keys: "[l", fn: structure(-1, P.isItem), kind: "exclusive", jump: true },
+  { keys: "]c", fn: structure(1, P.isFence), kind: "exclusive", jump: true },
+  { keys: "[c", fn: structure(-1, P.isFence), kind: "exclusive", jump: true },
   // Search (the last / or ?, *, #) and marks: jumps, which Ctrl+O goes back over.
   { keys: "n", fn: searchMotion(false), kind: "exclusive", jump: true },
   { keys: "N", fn: searchMotion(true), kind: "exclusive", jump: true },
@@ -461,6 +468,11 @@ export const OBJECTS = {
   "<": bracketObject("<", ">"), ">": bracketObject("<", ">"),
   t: tagObject,
   p: paragraphObject,
+  // Markdown (HYDRA_KEYBOARD.md): a fenced code block, a list item, a section under a heading, a URL.
+  c: (ctx, around) => P.codeBlock(ctx.text, ctx.pos, around),
+  l: (ctx, around) => P.listItem(ctx.text, ctx.pos, around),
+  h: (ctx, around) => P.section(ctx.text, ctx.pos, around),
+  u: (ctx, around) => P.urlObject(ctx.text, ctx.pos, around),
 };
 
 // ── Operators ────────────────────────────────────────────────────────────
@@ -478,6 +490,46 @@ export const OPERATORS = [
   { keys: "gU", op: "gU" },
 ];
 
+/**
+ * Keys a page fills with its own actions (data-pvim-actions; HYDRA_KEYBOARD.md,
+ * "Pages fill slots"): the action of that name, with { count, text } as its
+ * detail. A page that has none: `fallback`, as keys, where vim had a use for
+ * the key; the key goes on to the page with `pass`; otherwise it does nothing.
+ */
+export const PAGE_KEYS = [
+  { keys: " ", page: "context.pageDown", fallback: "l" },
+  { keys: "<BS>", page: "context.pageUp", fallback: "h" },
+  { keys: "<Tab>", page: "item.recent", pass: true },
+  { keys: "H", page: "item.previous" },
+  { keys: "L", page: "item.next" },
+  { keys: "K", page: "details", text: "word" },
+  { keys: "S", page: "jump.significant" },
+  { keys: "gw", page: "jump.word" },
+  { keys: "gx", page: "open", text: "target" },
+  { keys: "gc", page: "place.composer" },
+  { keys: "gm", page: "place.latest" },
+  { keys: "gp", page: "place.pending" },
+  { keys: "gt", page: "place.terminal" },
+  { keys: "gb", page: "place.browser" },
+  { keys: "gB", page: "place.address" },
+  { keys: "ga", page: "place.app" },
+  { keys: "gf", page: "place.files" },
+  { keys: "gd", page: "place.diff" },
+  { keys: "gs", page: "place.sidebar" },
+  { keys: "zt", page: "show.terminal" },
+  { keys: "zb", page: "show.panel" },
+  { keys: "zs", page: "show.sidebar" },
+  { keys: "zf", page: "show.files" },
+  { keys: "zd", page: "show.diff" },
+  { keys: "zm", page: "show.maximize" },
+  { keys: "za", page: "fold.toggle" },
+  { keys: "zo", page: "fold.open" },
+  { keys: "zc", page: "fold.close" },
+  { keys: "zR", page: "fold.openAll" },
+  { keys: "zM", page: "fold.closeAll" },
+  { keys: "z ", page: "mode.resize" },
+].map((entry) => ({ ...entry, action: "page" }));
+
 // ── Actions ──────────────────────────────────────────────────────────────
 // Normal mode's other commands. An alias is the same command in other keys
 // (x is dl); the rest are run by the engine by name.
@@ -488,8 +540,6 @@ export const ACTIONS = [
   { keys: "X", alias: "dh" },
   { keys: "D", alias: "d$" },
   { keys: "C", alias: "c$" },
-  { keys: "s", alias: "cl" },
-  { keys: "S", alias: "cc" },
   { keys: "Y", alias: "yy" },
   { keys: "i", action: "insert", insert: true },
   { keys: "<Insert>", action: "insert", insert: true },
@@ -502,8 +552,8 @@ export const ACTIONS = [
   { keys: "P", action: "putBefore", change: true },
   { keys: "u", action: "undo" },
   { keys: "<C-r>", action: "redo" },
+  { keys: "U", action: "redo" },
   { keys: "r", action: "replaceChar", arg: true, change: true },
-  { keys: "R", action: "replaceMode" },
   { keys: "J", action: "join", change: true },
   { keys: "~", action: "toggleCase", change: true },
   { keys: ".", action: "repeat" },
@@ -514,6 +564,12 @@ export const ACTIONS = [
   { keys: "m", action: "mark", arg: true },
   { keys: "<C-o>", action: "jumpBack" },
   { keys: "<C-i>", action: "jumpForward" },
+  // A labeled jump around here (HYDRA_KEYBOARD.md, "Jumps"): the engine's own, not a page's.
+  { keys: "s", action: "jumpStart" },
+  // The composer, from vim's own meaning of gi: where insert mode last ended; gA its end.
+  { keys: "gi", action: "insertLast", insert: true },
+  { keys: "gA", action: "appendEnd", insert: true },
+  ...PAGE_KEYS,
 ];
 
 /** Visual mode's commands, besides motions and text objects. */
@@ -521,7 +577,7 @@ export const VISUAL_ACTIONS = [
   { keys: "d", op: "d" }, { keys: "x", op: "d" }, { keys: "<Del>", op: "d" },
   { keys: "X", op: "d", lines: true }, { keys: "D", op: "d", lines: true },
   { keys: "y", op: "y" }, { keys: "Y", op: "y", lines: true },
-  { keys: "c", op: "c" }, { keys: "s", op: "c" },
+  { keys: "c", op: "c" }, { keys: "s", action: "surround", arg: true, change: true },
   { keys: "C", op: "c", lines: true }, { keys: "S", op: "c", lines: true }, { keys: "R", op: "c", lines: true },
   { keys: ">", op: ">" }, { keys: "<lt>", op: "<" },
   { keys: "~", op: "g~" }, { keys: "u", op: "gu" }, { keys: "U", op: "gU" },

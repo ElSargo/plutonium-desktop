@@ -16,6 +16,7 @@ import * as T from "./text.js";
 import { isPrintable, parseKeys } from "./keys.js";
 import { Registers, REGISTER_NAMES } from "./registers.js";
 import { ACTIONS, MOTIONS, OBJECTS, OPERATORS, VISUAL_ACTIONS, compile } from "./commands.js";
+import * as P from "./prose.js";
 import { UserBuffer } from "./userBuffer.js";
 
 export const DEFAULT_OPTIONS = {
@@ -26,6 +27,8 @@ export const DEFAULT_OPTIONS = {
   /** "unnamedplus": the unnamed register is the system clipboard. */
   clipboard: "",
   shiftwidth: 2,
+  /** > and <: "quote" puts or takes away a Markdown quote (`> `), for prose; "indent" shifts by shiftwidth, as vim does. */
+  shift: "quote",
   /**
    * Keys Pluto Vim takes before the page's own handlers in a field it's on
    * in: Ctrl+[ and Escape, so normal mode is always one key away, and the
@@ -279,6 +282,8 @@ export function parseCommand(vim, tokens, visual) {
     const doubled = [entry.keys, ...(entry.keys.length > 1 ? [entry.keys.slice(-1)] : [])];
     const count = (count1 ?? 1) * (count2 ?? 1);
     const op = { ...base, type: "operator", op: entry.op, count, hasCount: count1 != null || count2 != null };
+    // ds{c}, cs{a}{b}, ys{motion}{c}: surround (HYDRA_KEYBOARD.md), as vim-surround's.
+    if (rest[0] === "s" && (entry.op === "d" || entry.op === "c" || entry.op === "y")) return parseSurround(vim, op, tokens, at + 1);
     if (doubled.some((keys) => eq(rest, keys))) return { status: "done", cmd: { ...op, line: true } };
     const couldDouble = doubled.some((keys) => startsWith(rest, keys));
     if (rest[0] === "i" || rest[0] === "a") {
@@ -310,6 +315,53 @@ export function parseCommand(vim, tokens, visual) {
   if (at !== tokens.length) return BAD;
   return { status: "done", cmd: { ...base, type: entry.type, entry, arg } };
 }
+
+/** The rest of ds, cs and ys, from tokens[at]: a surround command, or MORE, or BAD. */
+function parseSurround(vim, op, tokens, at) {
+  const char = (k) => (k < tokens.length ? argOf(tokens[k], false) : undefined);
+  const cmd = { ...op, type: "surround" };
+  if (op.op === "d" || op.op === "c") {
+    const target = char(at);
+    if (target === undefined) return MORE;
+    if (target == null) return BAD;
+    if (op.op === "d") return at + 1 === tokens.length ? { status: "done", cmd: { ...cmd, kind: "delete", target } } : BAD;
+    const replacement = char(at + 1);
+    if (replacement === undefined) return MORE;
+    if (replacement == null || at + 2 !== tokens.length) return BAD;
+    return { status: "done", cmd: { ...cmd, kind: "change", target, replacement } };
+  }
+  // ys: a text object or a motion, then what to surround it with.
+  if (at >= tokens.length) return MORE;
+  let end;
+  if (tokens[at] === "i" || tokens[at] === "a") {
+    if (at + 1 >= tokens.length) return MORE;
+    const object = vim.objects[tokens[at + 1]];
+    if (!object) return BAD;
+    cmd.object = object;
+    cmd.around = tokens[at] === "a";
+    end = at + 2;
+  } else {
+    const motion = match(vim.tables.motions, tokens, at);
+    if (motion === MORE) return MORE;
+    if (motion === BAD) return BAD;
+    cmd.motion = motion.entry;
+    end = motion.end;
+    if (motion.entry.arg) {
+      const arg = char(end);
+      if (arg === undefined) return MORE;
+      if (arg == null) return BAD;
+      cmd.arg = arg;
+      end++;
+    }
+  }
+  const surround = char(end);
+  if (surround === undefined) return MORE;
+  if (surround == null || end + 1 !== tokens.length) return BAD;
+  return { status: "done", cmd: { ...cmd, kind: "add", with: surround } };
+}
+
+/** The labels a jump gives its targets, nearest first: the home row, then the rest. */
+const JUMP_LABELS = "asdfjklghqweruioptyzxcvbnm";
 
 // ── A field's session ────────────────────────────────────────────────────
 
@@ -362,6 +414,10 @@ export class Session {
     this.typeahead = [];
     this.mapTimer = null;
     this.mapDepth = 0;
+    /** A labeled jump being typed (s): { query, text, pos, targets }; null otherwise. */
+    this.jump = null;
+    /** Where insert mode last ended, for gi. */
+    this.lastInsertAt = null;
     if (this.off) return;
     this.#caret();
     if (this.mode === "insert") this.#enqueue(() => this.#beginInsert(null));
@@ -588,10 +644,10 @@ export class Session {
   }
 
   /** Runs a page's action (data-pvim-actions) on this field: false if it has none of that name. */
-  runAction(name) {
+  runAction(name, detail) {
     const field = this.buffer.field;
     if (!field?.actions?.().has(name)) return false;
-    field.action(name);
+    field.action(name, detail);
     return true;
   }
 
@@ -641,6 +697,7 @@ export class Session {
   }
 
   #feedRaw(key) {
+    if (this.jump) return this.#feedJump(key);
     if (this.cmd) return this.#feedCmdline(key);
     if (this.mode === "insert") return this.#feedInsert(key);
     if (this.mode === "replace") return this.#feedReplace(key);
@@ -715,6 +772,9 @@ export class Session {
     this.pending = [];
     this.#caret();
     if (parsed === BAD) return keys.length > 1 || isPrintable(key);
+    // A page's key (data-pvim-actions), and the jump: they act at once, not on the queue.
+    if (parsed.cmd.entry?.action === "page") return this.#pageKey(parsed.cmd);
+    if (parsed.cmd.entry?.action === "jumpStart") return this.#startJump();
     // q{register} starts recording now, not when the queue gets to it: the next key is the macro's.
     if (parsed.cmd.entry?.action === "record") {
       if (/^[a-zA-Z0-9"]$/.test(parsed.cmd.arg)) {
@@ -724,6 +784,104 @@ export class Session {
       return true;
     }
     this.#dispatch({ ...parsed.cmd, mode: this.mode });
+    return true;
+  }
+
+  /**
+   * A key a page fills (commands.js, PAGE_KEYS): its action, with the count
+   * and, for some, the text under the cursor; else the key's fallback, or the
+   * key to the page.
+   */
+  #pageKey(cmd) {
+    const { entry } = cmd;
+    const detail = { count: cmd.hasCount ? cmd.count : null };
+    if (entry.text) {
+      const { text, cursor } = this.#read();
+      const pos = T.clampNormal(text, cursor);
+      const url = entry.text === "target" ? P.urlAt(text, pos) : null;
+      detail.text = url && pos >= url.from && pos < url.to ? text.slice(url.from, url.to) : bigWordAt(text, pos);
+    }
+    if (this.runAction(entry.page, detail)) return true;
+    if (entry.fallback) {
+      const count = cmd.hasCount ? String(cmd.count).split("") : [];
+      for (const key of [...count, ...parseKeys(entry.fallback)]) this.#feedRaw(key);
+      return true;
+    }
+    return !entry.pass;
+  }
+
+  // ── The labeled jump (s) ───────────────────────────────────────────────
+
+  #startJump() {
+    const { text, cursor } = this.#read();
+    this.jump = { query: "", text, pos: T.clampNormal(text, cursor), targets: [] };
+    this.#caret();
+    this.vim.emit("JumpLabels", { session: this, query: "", targets: [] });
+    return true;
+  }
+
+  /**
+   * A key while a jump is typed: a label goes there; any other character
+   * narrows the matches (the labels never use a character that would
+   * continue one); Enter goes to the nearest; Escape cancels.
+   */
+  #feedJump(key) {
+    const jump = this.jump;
+    if (key === "<Esc>" || key === "<C-[>") return this.#endJump(null);
+    if (key === "<CR>") return this.#endJump(jump.targets[0]?.offset ?? null);
+    if (key === "<BS>") {
+      if (!jump.query) return this.#endJump(null);
+      jump.query = jump.query.slice(0, -1);
+      this.#labelJump();
+      return true;
+    }
+    if (!isPrintable(key)) return this.#endJump(null);
+    const hit = jump.query ? jump.targets.find((t) => t.label === key) : null;
+    if (hit) return this.#endJump(hit.offset);
+    jump.query += key;
+    this.#labelJump();
+    if (!jump.targets.length) {
+      this.#message(`no match: ${jump.query}`);
+      return this.#endJump(null);
+    }
+    return true;
+  }
+
+  #labelJump() {
+    const jump = this.jump;
+    const { query, text, pos } = jump;
+    jump.targets = [];
+    if (query) {
+      // Smart case: lower case matches either case.
+      const exact = query !== query.toLowerCase();
+      const hay = exact ? text : text.toLowerCase();
+      const continues = new Set();
+      for (let at = hay.indexOf(query); at !== -1; at = hay.indexOf(query, at + 1)) {
+        if (at !== pos) jump.targets.push({ offset: at, length: query.length });
+        const after = text[at + query.length];
+        if (after) continues.add(after.toLowerCase());
+      }
+      jump.targets.sort((a, b) => Math.abs(a.offset - pos) - Math.abs(b.offset - pos) || a.offset - b.offset);
+      const labels = [...JUMP_LABELS].filter((ch) => !continues.has(ch));
+      jump.targets.forEach((target, k) => { if (k < labels.length) target.label = labels[k]; });
+    }
+    this.vim.emit("JumpLabels", { session: this, query, targets: jump.targets });
+  }
+
+  #endJump(offset) {
+    const from = this.jump?.pos;
+    this.jump = null;
+    this.vim.emit("JumpLabels", { session: this, query: null, targets: null });
+    this.#caret();
+    if (offset != null) {
+      this.#enqueue(async () => {
+        const { text } = this.#read();
+        this.#pushJump(from);
+        const at = T.clampNormal(text, offset);
+        this.want = at - T.lineStart(text, at);
+        await this.#move(at);
+      });
+    }
     return true;
   }
 
@@ -903,6 +1061,7 @@ export class Session {
     for (const mark of this.vim.globalMarks.values()) if (mark.session === this) mark.offset = shift(mark.offset);
     this.jumps = this.jumps.map(shift);
     if (this.previousJump != null) this.previousJump = shift(this.previousJump);
+    if (this.lastInsertAt != null) this.lastInsertAt = shift(this.lastInsertAt);
   }
 
   // ── The : line ─────────────────────────────────────────────────────────
@@ -1063,6 +1222,7 @@ export class Session {
       else if (entry.action === "visual") next = cmd.mode === "visual" ? "normal" : "visual";
       else if (entry.action === "visualLine") next = cmd.mode === "vline" ? "normal" : "vline";
       else if (entry.action === "replaceMode") next = "replace";
+      else if (entry.action === "surround") next = "normal";
     }
     if (this.oneShot && next === "normal") {
       this.oneShot = false;
@@ -1141,6 +1301,7 @@ export class Session {
       case "object": await this.#runVisualObject(cmd); break;
       case "visualOp": await this.#runVisualOp(cmd); break;
       case "action": await this.#runAction(cmd); break;
+      case "surround": await this.#runSurround(cmd); break;
     }
     // After Ctrl+O: the one command has run; insert mode again.
     if (cmd.thenInsert && !this.insert) await this.#beginInsert(null);
@@ -1223,6 +1384,41 @@ export class Session {
     return this.#apply(cmd.op, range, cmd, text, pos);
   }
 
+  /** ds, cs and ys (parseSurround). */
+  async #runSurround(cmd) {
+    const { text, cursor } = this.#read();
+    const pos = T.clampNormal(text, cursor);
+    if (!cmd.replay) this.vim.lastChange = { cmd, inserted: "" };
+    if (cmd.kind === "add") {
+      let range;
+      if (cmd.object) range = cmd.object(this.#ctx(text, pos, cmd, "y"), cmd.around);
+      else {
+        const ctx = this.#ctx(text, pos, cmd, "y");
+        const target = cmd.motion.fn(ctx);
+        if (target != null) range = this.#motionRange(text, pos, target, typeof cmd.motion.kind === "function" ? cmd.motion.kind(ctx) : cmd.motion.kind);
+      }
+      if (!range) return;
+      return this.#wrap(range.from, range.to, cmd.with);
+    }
+    const pair = P.findSurround(text, pos, cmd.target, cmd.count);
+    if (!pair) return;
+    const [open, close] = pair;
+    const [a, b] = cmd.kind === "change" ? P.surroundPair(cmd.replacement) : ["", ""];
+    await this.#edit(close, close + 1, b);
+    await this.#edit(open, open + 1, a);
+    await this.#move(open);
+    this.#endChange();
+  }
+
+  /** Puts the pair `ch` names around from…to (to exclusive), and the cursor on the opening one. */
+  async #wrap(from, to, ch) {
+    const [open, close] = P.surroundPair(ch);
+    await this.#edit(to, to, close);
+    await this.#edit(from, from, open);
+    await this.#move(from);
+    this.#endChange();
+  }
+
   /** A command that couldn't run: back to normal mode, if it had left it. */
   async #failed(cmd) {
     if (cmd.next === "insert" && this.mode === "insert") this.#setMode("normal");
@@ -1284,8 +1480,11 @@ export class Session {
         const first = T.lineStart(text, from);
         const last = T.lineEnd(text, linewise ? to : Math.max(from, to - 1));
         const lines = text.slice(first, last).split("\n");
-        const width = this.vim.opt.shiftwidth * (cmd.line || cmd.mode !== "normal" ? cmd.count : 1);
+        const times = cmd.line || cmd.mode !== "normal" ? cmd.count : 1;
+        const width = this.vim.opt.shiftwidth * times;
+        const quote = this.vim.opt.shift !== "indent";
         const shifted = lines.map((l) => {
+          if (quote) return op === ">" ? quoteLine(l, times) : unquoteLine(l, times);
           if (op === ">") return l === "" ? l : " ".repeat(width) + l;
           let cut = 0;
           while (cut < l.length && cut < width && (l[cut] === " " || l[cut] === "\t")) { if (l[cut++] === "\t") break; }
@@ -1293,7 +1492,9 @@ export class Session {
         }).join("\n");
         await this.#edit(first, last, shifted);
         const after = text.slice(0, first) + shifted + text.slice(last);
-        await this.#move(T.firstNonBlank(after, first));
+        // A quoted line's cursor goes past its markers, onto the text.
+        const markers = quote ? /^\s*(?:> ?)*/.exec(shifted)[0].length : 0;
+        await this.#move(quote ? T.clampNormal(after, first + markers) : T.firstNonBlank(after, first));
         this.#endChange();
         return;
       }
@@ -1427,6 +1628,18 @@ export class Session {
       case "appendLineEnd":
         await this.#move(T.lineEnd(text, pos));
         return this.#beginInsert(cmd);
+      case "insertLast":
+        await this.#move(Math.min(this.lastInsertAt ?? cursor, text.length));
+        return this.#beginInsert(cmd);
+      case "appendEnd":
+        await this.#move(text.length);
+        return this.#beginInsert(cmd);
+      case "surround": {
+        if (cmd.mode !== "visual" && cmd.mode !== "vline") return;
+        const range = this.#visualRange(text, cmd.mode);
+        this.vCursor = range.from;
+        return this.#wrap(range.from, range.to, cmd.arg);
+      }
       case "openBelow": {
         if (single) { await this.#move(T.lineEnd(text, pos)); return this.#beginInsert(cmd); }
         const end = T.lineEnd(text, pos);
@@ -1662,6 +1875,7 @@ export class Session {
       this.#endChange(steps, session.changeBefore);
       this.vim.emit("InsertLeave", { session: this, inserted });
     }
+    this.lastInsertAt = cursor;
     if (!keepCursor) {
       const at = cursor > T.lineStart(text, cursor) ? T.prev(text, cursor) : cursor;
       await this.#move(at);
@@ -1836,4 +2050,27 @@ export function insertedText(before, after) {
   let suffix = 0;
   while (suffix < max - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
   return after.slice(prefix, after.length - suffix);
+}
+
+/** The WORD (no blanks) at pos, for K's and gx's text. */
+function bigWordAt(text, pos) {
+  let from = pos;
+  let to = pos;
+  while (from > 0 && !/\s/.test(text[from - 1])) from--;
+  while (to < text.length && !/\s/.test(text[to])) to++;
+  return text.slice(from, to);
+}
+
+/** > on a line: one more level of Markdown quote ("> > text" nests; an empty line gets a bare >). */
+function quoteLine(line, times) {
+  let out = line;
+  for (let k = 0; k < times; k++) out = out === "" ? ">" : `> ${out}`;
+  return out;
+}
+
+/** < on a line: one level of Markdown quote less, if it has one. */
+function unquoteLine(line, times) {
+  let out = line;
+  for (let k = 0; k < times; k++) out = out.replace(/^ {0,3}> ?/, "");
+  return out;
 }

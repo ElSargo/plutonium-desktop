@@ -73,6 +73,7 @@ const PAGE = (pm: boolean) => `<!doctype html>
   window.escapes = [];
   window.addEventListener("keydown", (e) => { if (e.key === "Escape") window.escapes.push(e.defaultPrevented); });
   window.pvim = attach(document, { opt: { startInInsert: true } });
+  window.bufferFor = bufferFor;
   window.state = (sel) => {
     const el = document.querySelector(sel);
     const t = bufferFor(el).text();
@@ -352,6 +353,42 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     await keys("#ta", "Enter");
     assert.equal((await state("#ta")).text, "b b");
     assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-line").length), 0);
+  });
+
+  test("s: the jump's labels are drawn over the field while it's typed, and the label goes there", async () => {
+    await fresh("#ta", "one two one three one");
+    await keys("#ta", "Escape", "0", "s", "o");
+    assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-labels").length), 1);
+    // Where the labels go: each character's own place, in the field's layout.
+    const placed = await page.evaluate(() => {
+      const el = document.getElementById("ta") as HTMLTextAreaElement;
+      const rects = (window as any).bufferFor(el).rectsOf([4, 8, 18]);
+      const box = el.getBoundingClientRect();
+      return { xs: [4, 8, 18].map((o) => rects.get(o).left), inside: [...rects.values()].every((r: any) => r.left >= box.left && r.top >= box.top && r.top < box.bottom) };
+    });
+    assert.ok(placed.inside, "labels are over the field");
+    assert.ok(placed.xs[0] < placed.xs[1] && placed.xs[1] < placed.xs[2], "and further along the line for later offsets");
+    await keys("#ta", "Enter");
+    assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-labels").length), 0);
+    assert.equal((await state("#ta")).cursor, 6, "Enter goes to the nearest match (two's o)");
+  });
+
+  test("a contenteditable's character rects are the browser's own", async () => {
+    const same = await page.evaluate(() => {
+      const el = document.getElementById("ce")!;
+      const rects = (window as any).bufferFor(el).rectsOf([4, 8]);
+      const range = document.createRange();
+      const text = el.querySelector("p")!.firstChild!;
+      range.setStart(text, 4);
+      range.setEnd(text, 5);
+      const want = range.getBoundingClientRect();
+      const second = el.querySelectorAll("p")[1].firstChild!;
+      range.setStart(second, 0);
+      range.setEnd(second, 1);
+      const want2 = range.getBoundingClientRect();
+      return Math.abs(rects.get(4).left - want.left) < 1 && Math.abs(rects.get(8).top - want2.top) < 1;
+    });
+    assert.ok(same);
   });
 
   test("a password field is never vim's", async () => {

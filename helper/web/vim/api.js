@@ -32,6 +32,7 @@ const OPTIONS = {
   mapleader: (v) => oneKey(v),
   clipboardHistory: (v) => bool(v),
   displayLines: (v) => bool(v),
+  shift: (v) => { if (v !== "quote" && v !== "indent") throw new TypeError('"quote" (> and < quote Markdown) or "indent"'); return v; },
 };
 
 function bool(v) {
