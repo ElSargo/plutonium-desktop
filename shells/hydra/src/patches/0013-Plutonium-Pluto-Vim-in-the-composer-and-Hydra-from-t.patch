@@ -1,0 +1,980 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oliver Sargison <sargo@sargo.cc>
+Date: Mon, 9 Nov 2026 10:11:35 +1300
+Subject: [PATCH 13/13] Plutonium: Pluto Vim in the composer, and Hydra from
+ the keyboard
+
+The composer declares what it can do to Plutonium's vim mode
+(PLUTO_VIM.md, "Pages that integrate"): submit, the prompt history, the
+open / or @ menu (Ctrl+N, Ctrl+P, Ctrl+Y and Ctrl+E, yielded while it's
+open, since Ctrl+N is a new thread), and the model and stash commands.
+Each action runs the composer's own key handling.
+
+It also fills the keys HYDRA_KEYBOARD.md gives pages (plutonium/
+hydraKeys.ts): Space and Backspace page the timeline, Tab goes back
+through recently used threads and H/L through the sidebar's, the g places
+(gt the terminal, gb/gB the browser, ga an app, gf files, gd the diff, gs
+the sidebar, gm the latest message, gp a waiting approval, gx what's under
+the cursor) and the z shows (zt, zb, zs, zf, zd, zm). S labels what's on
+screen and gw every word (plutonium/hints.ts). Outside insert mode the
+editor yields Space, Backspace and Tab, which ProseMirror would take
+first. The same keys work when the keyboard is on something that isn't a
+field; y and n answer an approval gp went to. T3's commands run by name
+through useChatShortcuts (plutonium:command), else as their keys.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/chat/ChatComposer.tsx |  12 +
+ .../chat/ComposerPendingApprovalActions.tsx   |   2 +
+ .../src/components/chat/useChatShortcuts.ts   |  19 +
+ apps/web/src/plutonium/hints.ts               | 292 ++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 415 ++++++++++++++++++
+ apps/web/src/plutonium/plutoVim.ts            | 145 ++++++
+ 6 files changed, 885 insertions(+)
+ create mode 100644 apps/web/src/plutonium/hints.ts
+ create mode 100644 apps/web/src/plutonium/hydraKeys.ts
+ create mode 100644 apps/web/src/plutonium/plutoVim.ts
+
+diff --git a/apps/web/src/components/chat/ChatComposer.tsx b/apps/web/src/components/chat/ChatComposer.tsx
+index 25b7f5ce6f..9e3592a6ab 100644
+--- a/apps/web/src/components/chat/ChatComposer.tsx
++++ b/apps/web/src/components/chat/ChatComposer.tsx
+@@ -278,6 +278,7 @@ import {
+ } from "./preparingComposerImages";
+ import { ComposerControlsBar } from "./ComposerControlsBar";
+ import { composerCommandKeyHandler } from "./composerCommandKey";
++import { usePlutoVimComposer } from "../../plutonium/plutoVim";
+ 
+ function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
+   const armed = Date.now() <= deadline.current;
+@@ -2499,6 +2500,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+     });
+ 
+   const onComposerCommandKeyStable = useStableCallback(onComposerCommandKey);
++  // Plutonium's vim mode: the composer's actions and commands (plutonium/plutoVim.ts).
++  usePlutoVimComposer({
++    onCommandKey: onComposerCommandKeyStable,
++    menuOpen: composerMenuOpen,
++    commands: {
++      model: () => setIsComposerModelPickerOpen(true),
++      stash: () => toggleStashMenuStable(),
++    },
++    threadRef: routeThreadRef,
++    keybindings,
++  });
+   const isPathQueryActiveStable = useStableCallback(
+     () => resolveActiveComposerTrigger().trigger?.kind === "path",
+   );
+diff --git a/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx b/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx
+index 67860e45ef..bfff4a07a6 100644
+--- a/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx
++++ b/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx
+@@ -52,6 +52,8 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
+         const buttonProps = {
+           disabled: disabled || isResponding || !canRespond,
+           "aria-description": option.warning,
++          // Plutonium: gp and y/n reach these (plutonium/hydraKeys.ts).
++          "data-pvim-approval": option.decision,
+           onClick: () => {
+             if (!disabled && !isResponding && canRespond) {
+               void onRespondToApproval(requestId, option.decision);
+diff --git a/apps/web/src/components/chat/useChatShortcuts.ts b/apps/web/src/components/chat/useChatShortcuts.ts
+index 637546f65d..d04cbd346b 100644
+--- a/apps/web/src/components/chat/useChatShortcuts.ts
++++ b/apps/web/src/components/chat/useChatShortcuts.ts
+@@ -120,6 +120,25 @@ export function useChatShortcuts(input: ChatShortcutsInput) {
+     event.preventDefault();
+     event.stopPropagation();
+   });
++  // Plutonium: HYDRA_KEYBOARD.md's keys run commands by name (plutonium/hydraKeys.ts, runCommand).
++  const runNamedCommand = useEffectEvent((event: Event) => {
++    const detail = (event as CustomEvent<{ command: KeybindingCommand; handled: boolean }>).detail;
++    if (!input.enabled || detail.handled) return;
++    const run =
++      input.commands[detail.command] ??
++      composerShortcutCommands(input.composerRef, input.branchToolbarRef)[detail.command] ??
++      input.fallback(detail.command);
++    if (!run) return;
++    run({ event: new KeyboardEvent("keydown"), terminalFocusOwner: getTerminalFocusOwner() });
++    detail.handled = true;
++  });
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a window listener for commands Plutonium runs by name, held while mounted
++  useEffect(() => {
++    if (embedded) return;
++    const onCommand = (event: Event) => runNamedCommand(event);
++    window.addEventListener("plutonium:command", onCommand);
++    return () => window.removeEventListener("plutonium:command", onCommand);
++  }, [embedded]);
+   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches keydown listeners for chat shortcuts and find dismissal: on the window, or on an embedded chat's composer
+   useEffect(() => {
+     if (embedded) {
+diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
+new file mode 100644
+index 0000000000..f7053e52d9
+--- /dev/null
++++ b/apps/web/src/plutonium/hints.ts
+@@ -0,0 +1,292 @@
++// Plutonium: labels over the page for HYDRA_KEYBOARD.md's jumps. S labels the
++// significant things on screen (what can be clicked or typed into, and the
++// fixed places, whose labels are their g letters); gw labels every word.
++// Typing a label goes there. While the labels show, every key is theirs.
++
++const ALPHABET = "asdfjklghqweruioptyzxcvbnm";
++
++/** Fixed places: their label is their `g` key's letter (gc, gt, gb, gf, gd, gs), so the ones used most get learned. */
++const PLACES: ReadonlyArray<readonly [string, string]> = [
++  ["c", '[data-testid="composer-editor"]'],
++  ["t", "[data-thread-terminal-drawer]"],
++  ["b", "embed[data-preview-server-tab]"],
++  ["f", "[data-plutonium-files]"],
++];
++
++const SIGNIFICANT = [
++  "a[href]",
++  "button:not([disabled])",
++  '[role="button"]',
++  '[role="tab"]',
++  '[role="link"]',
++  '[role="menuitem"]',
++  '[role="option"]',
++  '[role="treeitem"]',
++  "input:not([type=hidden]):not([disabled])",
++  "textarea:not([disabled])",
++  "select",
++  '[contenteditable="true"]',
++  "summary",
++  '[tabindex]:not([tabindex="-1"])',
++  "native-window",
++].join(",");
++
++interface Target {
++  readonly rect: DOMRect;
++  readonly element: Element;
++  /** For gw: the word's range in its text node. */
++  readonly range?: Range;
++  label: string;
++}
++
++let active: { readonly cancel: () => void } | null = null;
++
++export function hintsShowing(): boolean {
++  return active !== null;
++}
++
++function onScreen(rect: DOMRect): boolean {
++  return (
++    rect.width >= 2 &&
++    rect.height >= 2 &&
++    rect.bottom > 0 &&
++    rect.right > 0 &&
++    rect.top < window.innerHeight &&
++    rect.left < window.innerWidth
++  );
++}
++
++/** Whether `element` is what's drawn at its own centre: not hidden behind a dialog or another panel. */
++function onTop(element: Element, rect: DOMRect): boolean {
++  const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + Math.min(rect.width / 2, 12)));
++  const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
++  const hit = document.elementFromPoint(x, y);
++  return hit !== null && (element === hit || element.contains(hit) || hit.contains(element));
++}
++
++function significantTargets(): Target[] {
++  const out: Target[] = [];
++  const taken = new Set<Element>();
++  for (const [label, selector] of PLACES) {
++    const element = document.querySelector(selector);
++    const rect = element?.getBoundingClientRect();
++    if (element && rect && onScreen(rect)) {
++      out.push({ element, rect, label });
++      taken.add(element);
++    }
++  }
++  for (const element of document.querySelectorAll(SIGNIFICANT)) {
++    if (taken.has(element) || element.closest('[aria-hidden="true"], [inert]')) continue;
++    // Inside a place already labelled (the composer's own buttons stay labelled; its editor's children don't).
++    if (
++      [...taken].some(
++        (place) =>
++          place !== element &&
++          place.contains(element) &&
++          place.matches('[contenteditable="true"], embed, native-window'),
++      )
++    )
++      continue;
++    const rect = element.getBoundingClientRect();
++    if (!onScreen(rect) || !onTop(element, rect)) continue;
++    // Nested interactive elements (a button in a row): one label, the outer one's, unless they're far apart.
++    const outer = out.find(
++      (t) =>
++        t.element.contains(element) &&
++        Math.abs(t.rect.left - rect.left) < 8 &&
++        Math.abs(t.rect.top - rect.top) < 8,
++    );
++    if (outer) continue;
++    out.push({ element, rect, label: "" });
++    taken.add(element);
++  }
++  return out;
++}
++
++const WORD = /[\p{L}\p{N}_][\p{L}\p{N}_'’-]{2,}/gu;
++
++function wordTargets(): Target[] {
++  const out: Target[] = [];
++  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
++    acceptNode: (node) => {
++      const parent = node.parentElement;
++      if (!parent || parent.closest("script, style, noscript, [aria-hidden='true']"))
++        return NodeFilter.FILTER_REJECT;
++      return NodeFilter.FILTER_ACCEPT;
++    },
++  });
++  for (let node = walker.nextNode(); node && out.length < 600; node = walker.nextNode()) {
++    const text = node.textContent ?? "";
++    const parent = node.parentElement!;
++    const box = parent.getBoundingClientRect();
++    if (!onScreen(box)) continue;
++    for (const match of text.matchAll(WORD)) {
++      const range = document.createRange();
++      range.setStart(node, match.index);
++      range.setEnd(node, match.index + match[0].length);
++      const rect = range.getClientRects()[0];
++      if (!rect || !onScreen(rect as DOMRect) || !onTop(parent, rect as DOMRect)) continue;
++      out.push({ element: parent, rect: rect as DOMRect, range, label: "" });
++    }
++  }
++  // Nearest the composer (where the keyboard usually is) first, so they get the short labels.
++  const editor = document.querySelector('[data-testid="composer-editor"]')?.getBoundingClientRect();
++  if (editor) {
++    const dist = (r: DOMRect) => Math.hypot(r.left - editor.left, r.top - editor.top);
++    out.sort((a, b) => dist(a.rect) - dist(b.rect));
++  }
++  return out;
++}
++
++/** Labels for `count` targets, none a prefix of another, without the reserved letters as first letters. */
++function makeLabels(count: number, reserved: ReadonlySet<string>): string[] {
++  const letters = [...ALPHABET].filter((ch) => !reserved.has(ch));
++  if (count <= letters.length) return letters.slice(0, count);
++  // Some letters alone, the rest start two-letter labels.
++  let singles = letters.length;
++  while (singles > 0 && singles + (letters.length - singles) * ALPHABET.length < count) singles--;
++  const out = letters.slice(0, singles);
++  for (const first of letters.slice(singles)) {
++    for (const second of ALPHABET) {
++      if (out.length >= count) return out;
++      out.push(first + second);
++    }
++  }
++  return out;
++}
++
++function draw(targets: readonly Target[]): {
++  readonly host: HTMLElement;
++  readonly items: Map<Target, HTMLElement>;
++} {
++  const host = document.createElement("plutonium-hints");
++  host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
++  const root = host.attachShadow({ mode: "closed" });
++  const style = document.createElement("style");
++  style.textContent =
++    "b{position:fixed;font:bold 11px/1 ui-monospace,monospace;padding:2px 3px;border-radius:3px;" +
++    "color:#1b1b1f;background:#ffd84a;box-shadow:0 0 0 1px rgba(0,0,0,.35);text-transform:uppercase}" +
++    "b.place{background:#7fd3ff}b i{font-style:normal;opacity:.45}";
++  root.append(style);
++  const items = new Map<Target, HTMLElement>();
++  for (const target of targets) {
++    const b = document.createElement("b");
++    b.textContent = target.label;
++    if (
++      target.label.length === 1 &&
++      PLACES.some(([label]) => label === target.label) &&
++      !target.range
++    )
++      b.className = "place";
++    b.style.left = `${Math.max(0, Math.round(target.rect.left))}px`;
++    b.style.top = `${Math.max(0, Math.round(target.rect.top))}px`;
++    root.append(b);
++    items.set(target, b);
++  }
++  document.documentElement.append(host);
++  return { host, items };
++}
++
++/** Goes to a target: a field gets the keyboard (a word in it, the cursor), anything else is clicked. */
++function go(target: Target): void {
++  const { element } = target;
++  const editable = element.closest<HTMLElement>('[contenteditable="true"], textarea, input');
++  if (target.range) {
++    if (editable) {
++      editable.focus();
++      const selection = window.getSelection();
++      selection?.collapse(target.range.startContainer, target.range.startOffset);
++      return;
++    }
++    const clickable = element.closest<HTMLElement>(
++      "a[href], button, [role='button'], [role='tab'], [role='treeitem']",
++    );
++    if (clickable) {
++      clickable.focus({ preventScroll: true });
++      clickable.click();
++      return;
++    }
++    // Plain text: the word, selected, ready to copy.
++    const selection = window.getSelection();
++    selection?.removeAllRanges();
++    selection?.addRange(target.range);
++    return;
++  }
++  const html = element as HTMLElement & { focusWindow?: () => void };
++  if (typeof html.focusWindow === "function") return html.focusWindow();
++  if (element.matches("embed, [data-thread-terminal-drawer], [data-plutonium-files]")) {
++    const inner = element.matches("embed")
++      ? html
++      : element.querySelector<HTMLElement>("textarea, [tabindex]");
++    (inner ?? html).focus();
++    return;
++  }
++  if (editable && editable === element) {
++    editable.focus();
++    return;
++  }
++  html.focus({ preventScroll: true });
++  html.click();
++}
++
++/**
++ * Shows labels for `kind`, and takes every key until one is typed (go there),
++ * Escape, or a key no label starts with. `onEnd` runs when they're gone.
++ */
++export function showHints(kind: "significant" | "word", onEnd?: () => void): void {
++  active?.cancel();
++  const targets = kind === "significant" ? significantTargets() : wordTargets();
++  if (targets.length === 0) {
++    onEnd?.();
++    return;
++  }
++  const reserved = new Set(targets.filter((t) => t.label).map((t) => t.label));
++  const unlabelled = targets.filter((t) => !t.label);
++  makeLabels(unlabelled.length, reserved).forEach((label, k) => {
++    unlabelled[k]!.label = label;
++  });
++  const shown = targets.filter((t) => t.label);
++  const { host, items } = draw(shown);
++  let typed = "";
++
++  const end = () => {
++    window.removeEventListener("keydown", onKey, true);
++    window.removeEventListener("pointerdown", end, true);
++    window.removeEventListener("blur", end);
++    window.removeEventListener("scroll", end, true);
++    host.remove();
++    active = null;
++    onEnd?.();
++  };
++  const onKey = (event: KeyboardEvent) => {
++    if (event.key === "Shift" || event.key === "Control" || event.key === "Alt") return;
++    event.preventDefault();
++    event.stopImmediatePropagation();
++    if (event.key === "Escape" || event.ctrlKey || event.altKey || event.metaKey) return end();
++    if (event.key === "Backspace") {
++      typed = typed.slice(0, -1);
++    } else if (event.key.length === 1) {
++      typed += event.key.toLowerCase();
++    } else return end();
++    const matching = shown.filter((t) => t.label.startsWith(typed));
++    if (matching.length === 0) return end();
++    const exact = matching.find((t) => t.label === typed);
++    if (exact && matching.length === 1) {
++      end();
++      go(exact);
++      return;
++    }
++    for (const [target, el] of items) {
++      const on = target.label.startsWith(typed);
++      el.style.display = on ? "" : "none";
++      if (on)
++        el.innerHTML = `<i>${target.label.slice(0, typed.length)}</i>${target.label.slice(typed.length)}`;
++    }
++  };
++  // Registered after the page's own, at the window's capture phase: every key while they show is theirs.
++  window.addEventListener("keydown", onKey, true);
++  window.addEventListener("pointerdown", end, true);
++  window.addEventListener("blur", end);
++  window.addEventListener("scroll", end, true);
++  active = { cancel: end };
++}
+diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
+new file mode 100644
+index 0000000000..c1537c1188
+--- /dev/null
++++ b/apps/web/src/plutonium/hydraKeys.ts
+@@ -0,0 +1,415 @@
++// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
++// the g places and z shows, run as Pluto Vim page actions from the composer
++// (plutoVim.ts), and the same keys when the keyboard isn't in a field.
++import type {
++  KeybindingCommand,
++  ResolvedKeybindingsConfig,
++  ScopedThreadRef,
++} from "@t3tools/contracts";
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import type { AnyRouter } from "@tanstack/react-router";
++
++import { dispatchPreviewAction } from "~/components/preview/previewActionBus";
++import { focusActiveDrawerTerminal } from "~/lib/terminalFocus";
++import { isMacPlatform } from "~/lib/utils";
++import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
++import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
++import { buildThreadRouteParams } from "~/threadRoutes";
++
++import { toggleFilePane } from "./files/filePanes";
++import { hintsShowing, showHints } from "./hints";
++import { focusRightPanelSurface } from "./panelKeys";
++
++const EDITOR = '[data-testid="composer-editor"]';
++const TIMELINE = ".messages-timeline-scroll";
++
++export interface HydraKeysContext {
++  readonly threadRef: ScopedThreadRef;
++  readonly keybindings: ResolvedKeybindingsConfig;
++  readonly router: AnyRouter;
++  readonly openLink: (url: string) => void;
++}
++
++/** The composer that mounted last: the one the keys act for. */
++let current: HydraKeysContext | null = null;
++
++export function setHydraKeysContext(context: HydraKeysContext | null): void {
++  current = context;
++}
++
++// ── T3's own commands ────────────────────────────────────────────────────
++
++/**
++ * Runs one of T3's keybinding commands: through the chat's shortcut handlers
++ * (useChatShortcuts listens for plutonium:command), else as its key, which
++ * the sidebar's and the layout's window listeners act on.
++ */
++export function runCommand(command: KeybindingCommand): boolean {
++  const detail = { command, handled: false };
++  window.dispatchEvent(new CustomEvent("plutonium:command", { detail }));
++  if (detail.handled) return true;
++  const binding = current?.keybindings.find((entry) => entry.command === command);
++  if (!binding) return false;
++  const { shortcut } = binding;
++  const mac = isMacPlatform(navigator.platform);
++  document.body.dispatchEvent(
++    new KeyboardEvent("keydown", {
++      key: shortcut.key,
++      metaKey: shortcut.metaKey || (shortcut.modKey && mac),
++      ctrlKey: shortcut.ctrlKey || (shortcut.modKey && !mac),
++      shiftKey: shortcut.shiftKey,
++      altKey: shortcut.altKey,
++      bubbles: true,
++      cancelable: true,
++    }),
++  );
++  return true;
++}
++
++// ── Threads ──────────────────────────────────────────────────────────────
++
++/** Threads by recent use, the newest first: route paths. */
++const recent: string[] = [];
++/** A run of Tab presses: where it started, and how far back it is. */
++let cycle: { readonly order: readonly string[]; index: number; at: number } | null = null;
++const CYCLE_MS = 1200;
++
++/** The composer's thread is in use now: it goes to the front. */
++export function noteThreadUsed(router: AnyRouter, threadRef: ScopedThreadRef): void {
++  const path = router.buildLocation({
++    to: "/$environmentId/$threadId",
++    params: buildThreadRouteParams(threadRef),
++  }).pathname;
++  // A thread a Tab run lands on doesn't reorder the run.
++  if (cycle && performance.now() - cycle.at < CYCLE_MS) return;
++  const at = recent.indexOf(path);
++  if (at >= 0) recent.splice(at, 1);
++  recent.unshift(path);
++  if (recent.length > 50) recent.pop();
++}
++
++function recentThread(count: number): void {
++  const context = current;
++  if (!context) return;
++  const now = performance.now();
++  if (!cycle || now - cycle.at > CYCLE_MS) cycle = { order: [...recent], index: 0, at: now };
++  cycle.index = Math.min(cycle.index + count, cycle.order.length - 1);
++  cycle.at = now;
++  const path = cycle.order[cycle.index];
++  if (!path || path === context.router.state.location.pathname) return;
++  void context.router.history.push(path);
++  // When the run ends, the thread it stopped on is the newest.
++  const order = cycle.order;
++  const index = cycle.index;
++  setTimeout(() => {
++    if (
++      cycle &&
++      cycle.order === order &&
++      cycle.index === index &&
++      performance.now() - cycle.at >= CYCLE_MS - 20
++    ) {
++      cycle = null;
++      const moved = recent.indexOf(path);
++      if (moved >= 0) recent.splice(moved, 1);
++      recent.unshift(path);
++    }
++  }, CYCLE_MS);
++}
++
++// ── Regions ──────────────────────────────────────────────────────────────
++
++function panel(threadRef: ScopedThreadRef) {
++  return useRightPanelStore.getState().byThreadKey[scopedThreadKey(threadRef)] ?? null;
++}
++
++/** Puts a panel surface in front and gives it the keyboard. */
++function showSurface(threadRef: ScopedThreadRef, surface: RightPanelSurface): void {
++  const store = useRightPanelStore.getState();
++  store.activateSurface(threadRef, surface.id);
++  store.show(threadRef);
++  void focusRightPanelSurface(surface);
++}
++
++/** The count'th surface of a kind (1 by default), else the active one if it's of that kind. */
++function surfaceOf(
++  threadRef: ScopedThreadRef,
++  kind: RightPanelSurface["kind"],
++  count: number | null,
++) {
++  const state = panel(threadRef);
++  const surfaces = (state?.surfaces ?? []).filter((surface) => surface.kind === kind);
++  if (count != null) return surfaces[count - 1] ?? null;
++  return (
++    surfaces.find((surface) => surface.id === state?.activeSurfaceId) ?? surfaces.at(-1) ?? null
++  );
++}
++
++/** Runs `show`, then gives the keyboard back to the composer if it had it: z… keys don't move focus. */
++function keepFocus(show: () => void): void {
++  const had = document.activeElement;
++  show();
++  if (!(had instanceof HTMLElement) || !had.isConnected) return;
++  requestAnimationFrame(() =>
++    requestAnimationFrame(() => {
++      if (document.activeElement !== had && had.isConnected) had.focus({ preventScroll: true });
++    }),
++  );
++}
++
++function focusEditor(where: "keep" | "end"): void {
++  const editor = document.querySelector<HTMLElement>(EDITOR);
++  if (!editor) return;
++  editor.focus();
++  if (where === "end") {
++    const selection = window.getSelection();
++    selection?.selectAllChildren(editor);
++    selection?.collapseToEnd();
++  }
++}
++
++async function waitFor<T>(find: () => T | null | undefined, ms = 1500): Promise<T | null> {
++  const deadline = performance.now() + ms;
++  while (performance.now() < deadline) {
++    const found = find();
++    if (found) return found;
++    await new Promise((resolve) => requestAnimationFrame(resolve));
++  }
++  return null;
++}
++
++function pageTimeline(dir: 1 | -1, count: number | null): void {
++  const timeline = document.querySelector<HTMLElement>(TIMELINE);
++  if (!timeline) return;
++  timeline.scrollBy({
++    top: dir * timeline.clientHeight * 0.85 * (count ?? 1),
++    behavior: "instant" as ScrollBehavior,
++  });
++}
++
++/** gp: this thread's waiting approval gets the keyboard, where y and n answer it. */
++function focusPending(): boolean {
++  const accept = document.querySelector<HTMLElement>(
++    '[data-pvim-approval="accept"]:not([disabled])',
++  );
++  if (!accept) return false;
++  accept.focus();
++  return true;
++}
++
++function answerPending(decision: "accept" | "decline"): boolean {
++  const button = document.querySelector<HTMLElement>(
++    `[data-pvim-approval="${decision}"]:not([disabled])`,
++  );
++  if (!button) return false;
++  button.click();
++  return true;
++}
++
++/** While S or gw labels show, every key is theirs: the composer stops yielding keys to vim. */
++function withoutYields(show: (done: () => void) => void): void {
++  const editors = [...document.querySelectorAll(EDITOR)];
++  const saved = editors.map((el) => el.getAttribute("data-pvim-yield") ?? "");
++  for (const el of editors) el.setAttribute("data-pvim-yield", "");
++  show(() =>
++    editors.forEach(
++      (el, k) => el.isConnected && el.setAttribute("data-pvim-yield", saved[k] ?? ""),
++    ),
++  );
++}
++
++// ── The actions ──────────────────────────────────────────────────────────
++
++export interface ActionDetail {
++  readonly count?: number | null;
++  readonly text?: string;
++}
++
++type Action = (detail: ActionDetail, context: HydraKeysContext) => void;
++
++const ACTIONS: Record<string, Action> = {
++  "context.pageDown": ({ count }) => pageTimeline(1, count ?? null),
++  "context.pageUp": ({ count }) => pageTimeline(-1, count ?? null),
++  "item.recent": ({ count }) => recentThread(count ?? 1),
++  "item.previous": () => runCommand("thread.previous"),
++  "item.next": () => runCommand("thread.next"),
++  "jump.significant": () => withoutYields((done) => showHints("significant", done)),
++  "jump.word": () => withoutYields((done) => showHints("word", done)),
++  open: ({ text }, { openLink, threadRef }) => {
++    const target = text?.replace(/[.,;:!?)]+$/, "") ?? "";
++    if (!target) return;
++    if (/^(https?:\/\/|www\.)/.test(target))
++      openLink(target.startsWith("www.") ? `https://${target}` : target);
++    else if (/[/.]/.test(target)) {
++      const store = useRightPanelStore.getState();
++      store.openFile(threadRef, target.replace(/^@/, ""));
++      store.show(threadRef);
++    }
++  },
++  "place.composer": () => focusEditor("keep"),
++  "place.latest": () => {
++    const timeline = document.querySelector<HTMLElement>(TIMELINE);
++    timeline?.scrollTo({ top: timeline.scrollHeight, behavior: "instant" as ScrollBehavior });
++  },
++  "place.pending": () => {
++    focusPending();
++  },
++  "place.terminal": (_, { threadRef }) => {
++    const { terminalOpen } = selectThreadTerminalUiState(
++      useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
++      threadRef,
++    );
++    if (!terminalOpen) runCommand("terminal.toggle");
++    void waitFor(
++      () =>
++        selectThreadTerminalUiState(
++          useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
++          threadRef,
++        ).terminalOpen,
++    ).then(() => focusActiveDrawerTerminal(threadRef));
++  },
++  "place.browser": ({ count }, { threadRef }) => {
++    const surface = surfaceOf(threadRef, "preview", count ?? null);
++    if (surface) showSurface(threadRef, surface);
++    else runCommand("preview.newTab");
++  },
++  "place.address": ({ count }, { threadRef }) => {
++    const surface = surfaceOf(threadRef, "preview", count ?? null);
++    if (!surface) return void runCommand("preview.newTab");
++    const store = useRightPanelStore.getState();
++    store.activateSurface(threadRef, surface.id);
++    store.show(threadRef);
++    // The browser view subscribes to preview actions once it's mounted.
++    void waitFor(() =>
++      document.activeElement instanceof HTMLInputElement
++        ? true
++        : (dispatchPreviewAction("focus-url"), null),
++    );
++  },
++  "place.app": ({ count }, { threadRef }) => {
++    const surface = surfaceOf(threadRef, "app", count ?? null);
++    if (surface) showSurface(threadRef, surface);
++  },
++  "place.files": (_, { threadRef }) => {
++    const pane = () => document.querySelector<HTMLElement>("[data-plutonium-files]");
++    if (!pane()) toggleFilePane(threadRef);
++    void waitFor(pane).then((el) => (el?.querySelector<HTMLElement>("[tabindex]") ?? el)?.focus());
++  },
++  "place.diff": (_, { threadRef }) => {
++    const surface = surfaceOf(threadRef, "diff", null);
++    if (surface) showSurface(threadRef, surface);
++    else runCommand("diff.toggle");
++  },
++  "place.sidebar": () => {
++    const row =
++      document.querySelector<HTMLElement>(
++        '[data-sidebar] [aria-current="page"], [aria-current="page"][data-thread-key]',
++      ) ?? document.querySelector<HTMLElement>('[aria-current="page"]');
++    row?.focus();
++  },
++  "show.terminal": () => keepFocus(() => runCommand("terminal.toggle")),
++  "show.panel": () => keepFocus(() => runCommand("rightPanel.toggle")),
++  "show.sidebar": () => keepFocus(() => runCommand("sidebar.toggle")),
++  "show.files": (_, { threadRef }) => keepFocus(() => toggleFilePane(threadRef)),
++  "show.diff": () => keepFocus(() => runCommand("diff.toggle")),
++  "show.maximize": () => keepFocus(() => runCommand("rightPanel.toggleMaximized")),
++};
++
++export const HYDRA_ACTIONS: readonly string[] = Object.keys(ACTIONS);
++
++export function runHydraAction(name: string, detail: ActionDetail): boolean {
++  const action = ACTIONS[name];
++  if (!action || !current) return false;
++  action(detail, current);
++  return true;
++}
++
++// ── Off a field ──────────────────────────────────────────────────────────
++
++/**
++ * The same keys when the keyboard isn't in a text field (a button S went to,
++ * a row, the page): Pluto Vim only acts in fields. Keys that are a page's
++ * own there (a terminal, the file manager, a menu, a dialog) stay theirs.
++ */
++const OFF_FIELD: Record<string, string> = {
++  S: "jump.significant",
++  H: "item.previous",
++  L: "item.next",
++  gw: "jump.word",
++  gi: "place.composer",
++  gA: "place.composer",
++  gc: "place.composer",
++  gm: "place.latest",
++  gp: "place.pending",
++  gt: "place.terminal",
++  gb: "place.browser",
++  gB: "place.address",
++  ga: "place.app",
++  gf: "place.files",
++  gd: "place.diff",
++  gs: "place.sidebar",
++  zt: "show.terminal",
++  zb: "show.panel",
++  zs: "show.sidebar",
++  zf: "show.files",
++  zd: "show.diff",
++  zm: "show.maximize",
++};
++
++const OWN_KEYS =
++  'input, textarea, select, [contenteditable="true"], [data-terminal-owner], [data-plutonium-files], [role="menu"], [role="listbox"], [role="dialog"], [role="combobox"], [cmdk-root], embed, native-window';
++
++let pending = "";
++let pendingTimer: ReturnType<typeof setTimeout> | undefined;
++
++function onOffFieldKey(event: KeyboardEvent): void {
++  if (
++    event.defaultPrevented ||
++    event.ctrlKey ||
++    event.altKey ||
++    event.metaKey ||
++    hintsShowing() ||
++    !current
++  )
++    return;
++  const target = event.target instanceof Element ? event.target : null;
++  if (target?.closest(OWN_KEYS)) return;
++  if (event.key === "y" || event.key === "n") {
++    // A waiting approval with the keyboard on it (gp): y approves, n declines.
++    if (
++      target?.closest("[data-pvim-approval]") &&
++      answerPending(event.key === "y" ? "accept" : "decline")
++    ) {
++      event.preventDefault();
++      return;
++    }
++  }
++  if (event.key.length !== 1) return;
++  const keys = pending + event.key;
++  const exact = OFF_FIELD[keys];
++  const more = Object.keys(OFF_FIELD).some(
++    (lhs) => lhs.length > keys.length && lhs.startsWith(keys),
++  );
++  clearTimeout(pendingTimer);
++  if (exact) {
++    pending = "";
++    event.preventDefault();
++    if (keys === "gA") focusEditor("end");
++    else runHydraAction(exact, {});
++    return;
++  }
++  if (more) {
++    pending = keys;
++    event.preventDefault();
++    pendingTimer = setTimeout(() => (pending = ""), 1000);
++    return;
++  }
++  pending = "";
++}
++
++let installed = false;
++
++export function installOffFieldKeys(): void {
++  if (installed || typeof window === "undefined") return;
++  installed = true;
++  window.addEventListener("keydown", onOffFieldKey);
++}
+diff --git a/apps/web/src/plutonium/plutoVim.ts b/apps/web/src/plutonium/plutoVim.ts
+new file mode 100644
+index 0000000000..c0ef12d687
+--- /dev/null
++++ b/apps/web/src/plutonium/plutoVim.ts
+@@ -0,0 +1,145 @@
++// The composer integrates with Plutonium's vim mode (PLUTO_VIM.md, "Pages that integrate"):
++// it declares its actions in data-pvim-* attributes and runs each pvim:action with its own key
++// handling, and fills HYDRA_KEYBOARD.md's keys (hydraKeys.ts). Outside insert mode it yields
++// Space, Backspace and Tab, which the editor would take first; Ctrl+N/P/Y/E while a menu is open.
++import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
++import { useRouter } from "@tanstack/react-router";
++import { useEffect, useState } from "react";
++
++import { useOpenLink } from "../browser/useOpenLink";
++import { useStableCallback } from "../hooks/useStableCallback";
++import {
++  HYDRA_ACTIONS,
++  installOffFieldKeys,
++  noteThreadUsed,
++  runHydraAction,
++  setHydraKeysContext,
++} from "./hydraKeys";
++
++const EDITOR = '[data-testid="composer-editor"]';
++
++const ACTION_KEYS: Record<string, string> = {
++  submit: "Enter",
++  "history.prev": "ArrowUp",
++  "history.next": "ArrowDown",
++  "menu.select": "Enter",
++  "menu.next": "ArrowDown",
++  "menu.prev": "ArrowUp",
++  "menu.close": "Escape",
++};
++
++export interface PlutoVimComposer {
++  readonly onCommandKey: (key: string, event: KeyboardEvent) => boolean;
++  readonly menuOpen: boolean;
++  /** Actions that aren't keys, which are also `:` commands. */
++  readonly commands: Record<string, () => void>;
++  /** The thread the composer is for, and what HYDRA_KEYBOARD.md's keys need from the page. */
++  readonly threadRef: ScopedThreadRef;
++  readonly keybindings: ResolvedKeybindingsConfig;
++  /** A side chat's composer: the keys act for the main one. */
++  readonly embedded?: boolean;
++}
++
++export function usePlutoVimComposer(composer: PlutoVimComposer): void {
++  const { menuOpen, threadRef, keybindings, embedded = false } = composer;
++  const open = useOpenLink(threadRef);
++  const openLink = useStableCallback(
++    (url: string) => void open(url).catch((cause: unknown) => console.error(cause)),
++  );
++  const commandNames = Object.keys(composer.commands).join(" ");
++  const router = useRouter();
++  /** Pluto Vim's mode in the editor (pvim:mode): insert mode keeps Space, Backspace and Tab the editor's. */
++  const [vimMode, setVimMode] = useState<string>("insert");
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the page-wide keys (hydraKeys.ts) which thread and keybindings they act for, and installs their listener once
++  useEffect(() => {
++    if (embedded) return;
++    setHydraKeysContext({ threadRef, keybindings, router, openLink });
++    installOffFieldKeys();
++  }, [embedded, threadRef, keybindings, router, openLink]);
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records the thread as used for Tab's recent order when it's shown
++  useEffect(() => {
++    if (!embedded) noteThreadUsed(router, threadRef);
++  }, [embedded, router, threadRef]);
++
++  const onAction = useStableCallback((event: Event) => {
++    const el = event.target instanceof Element ? event.target.closest(EDITOR) : null;
++    const detail = (
++      event as CustomEvent<{
++        name?: unknown;
++        count?: number | null;
++        text?: string;
++        handled?: boolean;
++      } | null>
++    ).detail;
++    const name = detail?.name;
++    if (!el || !detail || typeof name !== "string" || detail.handled) return;
++    detail.handled = true;
++    const command = composer.commands[name];
++    if (command) return command();
++    if (
++      runHydraAction(name, {
++        count: detail.count ?? null,
++        ...(detail.text ? { text: detail.text } : {}),
++      })
++    )
++      return;
++    const key = ACTION_KEYS[name];
++    if (!key) return;
++    const handled = composer.onCommandKey(key, new KeyboardEvent("keydown", { key }));
++    // With Ctrl+Enter to send (Settings, the send shortcut), a plain Enter isn't a send.
++    if (!handled && name === "submit") {
++      composer.onCommandKey(key, new KeyboardEvent("keydown", { key, ctrlKey: true }));
++    }
++  });
++
++  const normal = vimMode !== "insert";
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the editor DOM's data-pvim-* attributes (read by the vim engine in another world) in step with the open menu and vim's mode
++  useEffect(() => {
++    const actions = [
++      "submit",
++      "history.prev",
++      "history.next",
++      ...(menuOpen ? ["menu.select", "menu.next", "menu.prev", "menu.close"] : []),
++      ...(embedded ? [] : HYDRA_ACTIONS),
++      ...commandNames.split(" ").filter(Boolean),
++    ].join(" ");
++    const yields = [
++      ...(menuOpen ? ["<C-n>", "<C-p>", "<C-y>", "<C-e>"] : []),
++      // ProseMirror deletes on Backspace and the composer moves focus on Tab before vim sees them.
++      ...(normal && !embedded ? ["<Space>", "<BS>", "<Tab>"] : []),
++    ].join(" ");
++    const declare = (el: Element) => {
++      el.setAttribute("data-pvim-actions", actions);
++      el.setAttribute("data-pvim-yield", yields);
++      el.setAttribute("data-pvim-commands", commandNames);
++    };
++    document.querySelectorAll(EDITOR).forEach(declare);
++    // A thread switch remounts the editor: declare it again when it takes focus.
++    const onFocus = (event: FocusEvent) => {
++      const el = event.target instanceof Element ? event.target.closest<HTMLElement>(EDITOR) : null;
++      if (!el) return;
++      declare(el);
++      // A field starts in the mode its rules say (pvim:mode fires only on changes).
++      if (el.dataset.pvimMode) setVimMode(el.dataset.pvimMode);
++    };
++    const onMode = (event: Event) => {
++      const el = event.target instanceof Element ? event.target.closest(EDITOR) : null;
++      const mode = (event as CustomEvent<{ mode?: unknown } | null>).detail?.mode;
++      if (el && typeof mode === "string") setVimMode(mode);
++    };
++    document.addEventListener("focusin", onFocus, true);
++    document.addEventListener("pvim:mode", onMode);
++    return () => {
++      document.removeEventListener("focusin", onFocus, true);
++      document.removeEventListener("pvim:mode", onMode);
++    };
++  }, [menuOpen, commandNames, normal, embedded]);
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a document listener for the vim engine's pvim:action events, held while mounted
++  useEffect(() => {
++    document.addEventListener("pvim:action", onAction);
++    return () => document.removeEventListener("pvim:action", onAction);
++  }, [onAction]);
++}
