@@ -160,8 +160,7 @@ describe("operators", () => {
     await expectKeys("foo b|ar", "ciwx<Esc>", "foo |x");
     await expectKeys("a|bc\nd", "ccx<Esc>", "|x\nd");
     await expectKeys("a|bc", "Cx<Esc>", "a|x");
-    await expectKeys("a|bc", "sx<Esc>", "a|xc");
-    await expectKeys("|a\nb", "Sx<Esc>", "|x\nb");
+    await expectKeys("a|bc", "clx<Esc>", "a|xc");
   });
 
   test("c with a motion that fails stays in normal mode", async () => {
@@ -180,10 +179,20 @@ describe("operators", () => {
     await expectKeys("|ab", "yl3p", "aaa|ab");
   });
 
-  test("> and < shift lines", async () => {
-    await expectKeys("|a\nb", ">>", "  |a\nb");
-    await expectKeys("|a\nb", ">j", "  |a\n  b");
-    await expectKeys("    |a", "<<", "  |a");
+  test("> and < shift lines, with shift = indent", async () => {
+    const opt = { shift: "indent" };
+    await expectKeys("|a\nb", ">>", "  |a\nb", { opt });
+    await expectKeys("|a\nb", ">j", "  |a\n  b", { opt });
+    await expectKeys("    |a", "<<", "  |a", { opt });
+  });
+
+  test("> and < quote Markdown by default", async () => {
+    await expectKeys("|a\nb", ">>", "> |a\nb");
+    await expectKeys("|a\n\nb", ">ip", "> |a\n\nb");
+    await expectKeys("|a\n\nb", ">G", "> |a\n>\n> b");
+    await expectKeys("|> a", ">>", "> > |a");
+    await expectKeys("|> > a", "<<", "> |a");
+    await expectKeys("|a", "<<", "|a");
   });
 
   test("g~, gu and gU", async () => {
@@ -239,7 +248,7 @@ describe("visual mode", () => {
     const r = await run("|a\nb\nc", "Vj");
     assert.equal(r.buffer.selection(), "a\nb");
     await expectKeys("|a\nb\nc", "Vjd", "|c");
-    await expectKeys("|a\nb", "Vj>", "  |a\n  b");
+    await expectKeys("|a\nb", "Vj>", "> |a\n> b");
   });
 
   test("text objects in visual mode", async () => {
@@ -364,12 +373,6 @@ describe("replace", () => {
     await expectKeys("a|bc", "r<CR>", "a\n|c");
   });
 
-  test("R overwrites, Backspace restores", async () => {
-    await expectKeys("|abcd", "Rxy<Esc>", "x|ycd");
-    await expectKeys("|abcd", "Rxyz<BS><Esc>", "x|ycd");
-    await expectKeys("|ab", "Rxyz<Esc>", "xy|z");
-  });
-
   test("J joins lines", async () => {
     await expectKeys("|a\n  b\nc", "J", "a| b\nc");
     await expectKeys("|a\nb\nc", "3J", "a b| c");
@@ -385,7 +388,6 @@ describe("repeat and undo", () => {
     await expectKeys("|foo foo", "cwbar<Esc>w.", "bar ba|r");
     await expectKeys("|a\nb", "Ax<Esc>j.", "ax\nb|x");
     await expectKeys("|a\nb", "ox<Esc>.", "a\nx\n|x\nb");
-    await expectKeys("|abcd", "Rxy<Esc>l.", "xyx|y");
     await expectKeys("|a b c", "x.", "|b c");
     await expectKeys("|abcdefg", "vlld.", "|g");
   });
@@ -650,5 +652,142 @@ describe("marks and jumps", () => {
     assert.deepEqual(jumps, ["A"]);
     await type(sa, a, "0`A");
     assert.equal(mark(a), "o|ne", "in its own field it's found here");
+  });
+});
+
+// HYDRA_KEYBOARD.md, "The base map".
+describe("the base map", () => {
+  test("dropped keys do nothing, and Space and Backspace are l and h without a page", async () => {
+    await expectKeys("a|bc", "S", "a|bc");
+    await expectKeys("a|bc", "H", "a|bc");
+    await expectKeys("a|bc", "L", "a|bc");
+    await expectKeys("|abc", " ", "a|bc");
+    await expectKeys("ab|c", "<BS>", "a|bc");
+    await expectKeys("|abc", "2 ", "ab|c");
+    await expectKeys("|a\n  b", "+", "|a\n  b");
+  });
+
+  test("Tab is the page's without one", async () => {
+    const r = await run("|abc", "<Tab>");
+    assert.deepEqual(r.taken, [false]);
+  });
+
+  test("U redoes", async () => {
+    await expectKeys("|abc", "xuU", "|bc");
+  });
+
+  test("sentences: ( and )", async () => {
+    await expectKeys("|One. Two! Three?", ")", "One. |Two! Three?");
+    await expectKeys("|One. Two! Three?", "2)", "One. Two! |Three?");
+    await expectKeys("One. Two! Th|ree?", "(", "One. Two! |Three?");
+    await expectKeys("One. Two! |Three?", "(", "One. |Two! Three?");
+    await expectKeys("|a b.\n\nc d", ")", "a b.\n|\nc d");
+    await expectKeys("|One (two.) Three", ")", "One (two.) |Three");
+    await expectKeys("|One. Two", "d)", "|Two");
+  });
+
+  test("Markdown: headings, list items, code blocks", async () => {
+    const doc = "|# A\ntext\n## B\n- x\n- y\n```\n# not\n```\n# C";
+    await expectKeys(doc, "]h", "# A\ntext\n|## B\n- x\n- y\n```\n# not\n```\n# C");
+    await expectKeys(doc, "2]h", "# A\ntext\n## B\n- x\n- y\n```\n# not\n```\n|# C");
+    await expectKeys(doc, "]l]l", "# A\ntext\n## B\n- x\n|- y\n```\n# not\n```\n# C");
+    await expectKeys(doc, "]c", "# A\ntext\n## B\n- x\n- y\n|```\n# not\n```\n# C");
+    await expectKeys("# A\nt|ext", "[h", "|# A\ntext");
+  });
+
+  test("text objects: code blocks, list items, sections, URLs", async () => {
+    await expectKeys("a\n```js\nx|\ny\n```\nb", "dic", "a\n```js\n|```\nb");
+    await expectKeys("a\n```js\nx|\ny\n```\nb", "dac", "a\n|b");
+    await expectKeys("- one\n- t|wo\n  more\n- three", "dal", "- one\n|- three");
+    await expectKeys("- one\n- t|wo\n- three", "cilX<Esc>", "- one\n- |X\n- three");
+    await expectKeys("# A\na|\n\n# B\nb", "dih", "# A\n|\n# B\nb");
+    await expectKeys("# A\na|\n## A1\nx\n# B\nb", "dah", "|# B\nb");
+    await expectKeys("see https://x.io/a(b)|c. ok", "diu", "see |. ok");
+    await expectKeys("see https://x.|io/p, ok", "diu", "see |, ok");
+    await expectKeys("(see https://x.|io/p) ok", "yiuP", "(see https://x.io/|phttps://x.io/p) ok");
+  });
+
+  test("surround: ds, cs, ys, and s in visual mode", async () => {
+    await expectKeys('say "h|i" now', 'ds"', "say |hi now");
+    await expectKeys("f(a, |b)", "ds(", "f|a, b");
+    await expectKeys("f(a, |b)", "dsb", "f|a, b");
+    await expectKeys('say "h|i"', "cs\"'", "say |'hi'");
+    await expectKeys("x [|a] y", "cs[(", "x |(a) y");
+    await expectKeys("a w|ord b", "ysiw*", "a |*word* b");
+    await expectKeys("a w|ord b", "ysiw)", "a |(word) b");
+    await expectKeys("|one two", "yse`", "|`one` two");
+    await expectKeys("a |bc d", "vls_", "a |_bc_ d");
+    const r = await run("a w|ord b", "ysiw*");
+    assert.equal(r.mode, "normal");
+    await expectKeys("|a b", "ysiw\"W.", '"a" |"b"');
+  });
+
+  test("gi goes back to where insert mode ended; gA appends at the end", async () => {
+    await expectKeys("|abc\ndef", "lix<Esc>jgiy<Esc>", "ax|ybc\ndef");
+    await expectKeys("a|bc\ndef", "gA!<Esc>", "abc\ndef|!");
+  });
+
+  test("s: a labeled jump, nearest first, and Enter goes to the nearest", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const seen: any[] = [];
+    vim.on("JumpLabels", ({ query, targets }: any) => seen.push({ query, targets }));
+    const buffer = field("|one two one three one");
+    const session = vim.attach(buffer);
+    await session.idle();
+    await type(session, buffer, "so");
+    const shown = seen.at(-1);
+    assert.equal(shown.query, "o");
+    // "o" in one, two, one, one: the cursor's own match isn't a target; nearest first.
+    assert.deepEqual(shown.targets.map((t: any) => t.offset), [6, 8, 18]);
+    // Labels never use a character that would continue a match ("n" after "o" in one, and " " after "two").
+    assert.ok(shown.targets.every((t: any) => t.label && t.label !== "n"));
+    const label = shown.targets.find((t: any) => t.offset === 8).label;
+    await type(session, buffer, label);
+    assert.equal(mark(buffer), "one two |one three one");
+    assert.equal(seen.at(-1).targets, null);
+    assert.equal(session.mode, "normal");
+    await type(session, buffer, "<C-o>");
+    assert.equal(mark(buffer), "|one two one three one", "a jump is in the jump list");
+  });
+
+  test("s: more characters narrow it; Enter takes the nearest; Escape and no match cancel", async () => {
+    await expectKeys("|ab ac ad ac", "sac<CR>", "ab |ac ad ac");
+    await expectKeys("|ab ac ad", "sa<Esc>x", "|b ac ad");
+    await expectKeys("|ab ac", "szx", "|b ac");
+    await expectKeys("|ab AB", "sA<CR>", "ab |AB");
+  });
+});
+
+describe("pages fill keys", () => {
+  function pageField(marked: string, actions: string[]) {
+    const buffer = field(marked);
+    const ran: any[] = [];
+    buffer.field = {
+      ...buffer.field,
+      actions: () => new Set(actions),
+      action: (name: string, detail: any) => ran.push({ name, ...detail }),
+    };
+    return { buffer, ran };
+  }
+
+  test("a page's action runs with its count and the text under the cursor", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const { buffer, ran } = pageField("see https://x.io/|a now", ["context.pageDown", "open", "place.terminal", "item.recent"]);
+    const session = vim.attach(buffer);
+    await session.idle();
+    const taken = await type(session, buffer, " 3 gxgt<Tab>");
+    assert.deepEqual(ran, [
+      { name: "context.pageDown", count: null },
+      { name: "context.pageDown", count: 3 },
+      { name: "open", count: null, text: "https://x.io/a" },
+      { name: "place.terminal", count: null },
+      { name: "item.recent", count: null },
+    ]);
+    assert.ok(taken.every(Boolean));
+    assert.equal(mark(buffer), "see https://x.io/|a now", "the cursor didn't move");
+  });
+
+  test("keys a page doesn't fill: g and z keys do nothing", async () => {
+    await expectKeys("a|bc", "gtzaZ", "a|bc");
   });
 });
