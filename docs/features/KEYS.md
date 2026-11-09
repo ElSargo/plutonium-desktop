@@ -1,6 +1,6 @@
 # Keys: one keymap, contexts, chords and a config script
 
-**Status: design, nothing built yet** (2026-11-08; revised 2026-11-09 for Pluto Vim, which is built, and [HYDRA_KEYBOARD.md](HYDRA_KEYBOARD.md)). This is the plumbing: where keys are decided, which ones the desktop owns, and how they're configured. What the keys do inside fields and in Hydra's UI is PLUTO_VIM.md and HYDRA_KEYBOARD.md. The goals:
+**Status: step 1 built (Hydra's keys on Super, 2026-11-09); the rest is design** (2026-11-08; revised 2026-11-09 for Pluto Vim, which is built, and [HYDRA_KEYBOARD.md](HYDRA_KEYBOARD.md)). This is the plumbing: where keys are decided, which ones the desktop owns, and how they're configured. What the keys do inside fields and in Hydra's UI is PLUTO_VIM.md and HYDRA_KEYBOARD.md. The goals:
 - every shell and the browser use one set of actions, with one set of default keys, so rebinding an action rebinds it everywhere;
 - Hydra puts what acts on the desktop on Super, and gives Ctrl and Alt back to the apps and tabs in its panel;
 - bindings can depend on context (which app has the keyboard, a mode, state a script sets);
@@ -85,7 +85,7 @@ These merge niri's (Styx), GNOME's (Charon) and Hydra's keys. **Bold** marks a c
 | `files.find` / `files.findHome` | Super+P / Super+Shift+P | **new** | **new** | ✓ |
 | `files.carry` | **Super+Y**, Super+Shift+Y on the search ("yank", as the file manager's `y`) | — | — | **was Super+O** |
 | `window.close` | Super+Q | ✓ | **new** (Alt+F4 stays) | **new**: closes the panel tab |
-| `focus.{left,right,up,down}` | Super+arrows and Super+H/J/K/L | ✓ | **Exception:** Super+arrows and H/J/K/L tile, as GNOME's; focus moves with Alt+Tab | Super+←/→ and H/L: previous and next panel tab (**was Ctrl+Tab**); ↑/K is the dock's layout, ↓/J unbound |
+| `focus.{left,right,up,down}` | Super+arrows and Super+H/J/K/L | ✓ | **Exception:** Super+arrows and H/J/K/L tile, as GNOME's; focus moves with Alt+Tab | Super+←/→ and Super+H: previous and next panel tab (**was Ctrl+Tab**); Super+L too once the lock moves (step 3: the browser takes Super+L until then); ↑/K is the dock's layout, ↓/J unbound |
 | `overview.toggle` | Super+O | ✓ | ✓ (and Super tap) | — |
 | `workspace.{previous,next}` | Super+PageUp/PageDown, Super+U/I | ✓ | ✓ | **new**: the previous or next thread |
 | `workspace.n` | Super+Alt+1…9 | ✓ | ✓ | **new**: the Nth thread, in the sidebar's order (pinned first) |
@@ -106,7 +106,7 @@ Hydra's own actions on Super, which no shared action uses:
 | `hydra.thread.{previous,next}` | covered by `workspace.*` | Ctrl+Shift+[ / ] |
 | `hydra.dock.toggleLayout` | Super+↑ and Super+K | Super+K **new** |
 | `hydra.composer.append` | **Super+Enter**: the composer, at the end, in insert mode (HYDRA_KEYBOARD.md's `gA`, from anywhere) | **new** |
-| `hydra.layout.resize` (a mode) | **Super+R** (HYDRA_KEYBOARD.md, "The resize mode") | **new** |
+| `hydra.layout.resize` (a mode) | **Super+R** (HYDRA_KEYBOARD.md, "The resize mode"), once the mode is built | **new** |
 
 Everything else in T3 (the composer, chat, find, diff, the model picker, preview zoom and refresh) keeps its Ctrl keys and is never registered as a shell shortcut. Each Hydra Ctrl key that moves to Super stays as a page-only alias, so T3's keys still work while Hydra's page has the keyboard.
 
@@ -240,7 +240,7 @@ Shells stay scriptable as they are: a shell's own page and native side are alrea
 
 ## The work, in order
 
-1. **Hydra's keys** (T3 patches 0001 and 0007): its keys move as in the tables above, Super+Alt+1…9 to threads included, Super+Enter and Super+R too. Only Super combos are registered as shell shortcuts. Ctrl aliases stay, page only. Needs no new machinery. HYDRA_KEYBOARD.md's steps 1–5 need none of this list and can go first or alongside.
+1. **Hydra's keys** (T3 patches 0001, 0007, 0008 and 0013; **built** 2026-11-09): its keys move as in the tables above, Super+Alt+1…9 to threads included, Super+Enter and Super+R too. Only Super combos are registered as shell shortcuts. Ctrl aliases stay, page only. Needs no new machinery. How it's done: the Super keys are `PLUTONIUM_SUPER_KEYS` in `packages/shared/src/keybindings.ts`, each beside the default it moves from; a keybindings.json T3 already wrote gets them through the server's late defaults, beside that default if it's still there (a key you rebound stays yours); `panelKeys.ts` registers every Super binding as a shell shortcut, and none without Super; Super+Enter is Hydra's own (`shellKeys.ts`). Not yet: Super+L (the browser's lock, step 3), Super+R (no resize mode), screenshots and `keys.help`. HYDRA_KEYBOARD.md's steps 1–5 need none of this list and can go first or alongside.
 2. **The catalogue and `keys.json`:** shared action ids in the UI library, the helper's store and routes, the existing overrides moved in, Styx, Charon and plain on the catalogue, and the new default keys. Hydra maps its shared actions onto it.
 3. **The browser's keys from the helper** (Chromium: `plutonium_keys.cc`): Super+F, Super+Tab, the lock and the display keys as catalogue actions.
 4. **Contexts:** the shell library evaluates `when` and recomputes the browser's list on focus changes; `keys check` across layers.

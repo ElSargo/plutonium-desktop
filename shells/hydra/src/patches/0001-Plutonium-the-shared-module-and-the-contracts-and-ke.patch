@@ -24,17 +24,17 @@ Folded from:
 - preview recordings are captures every shell sees
 - native windows are their threads' server tabs
 ---
- packages/contracts/src/desktopBrowser.ts      |  40 ++++++
+ packages/contracts/src/desktopBrowser.ts      |  40 ++++
  packages/contracts/src/ipc.ts                 |   2 +
- packages/contracts/src/keybindings.ts         | 126 ++++++++++++++++++
- packages/contracts/src/orchestratorMcp.ts     |  16 +++
- packages/contracts/src/previewAutomation.ts   |  92 ++++++++++++-
+ packages/contracts/src/keybindings.ts         | 126 +++++++++++
+ packages/contracts/src/orchestratorMcp.ts     |  16 ++
+ packages/contracts/src/previewAutomation.ts   |  92 +++++++-
  .../provider-core/src/server/mcpSession.ts    |  12 +-
- packages/shared/package.json                  |   8 ++
- packages/shared/src/keybindings.ts            | 111 +++++++++++++++
- packages/shared/src/plutonium.ts              | 124 +++++++++++++++++
- packages/shared/src/plutoniumWindowTabs.ts    |  25 ++++
- 10 files changed, 549 insertions(+), 7 deletions(-)
+ packages/shared/package.json                  |   8 +
+ packages/shared/src/keybindings.ts            | 212 ++++++++++++++++++
+ packages/shared/src/plutonium.ts              | 124 ++++++++++
+ packages/shared/src/plutoniumWindowTabs.ts    |  25 +++
+ 10 files changed, 650 insertions(+), 7 deletions(-)
  create mode 100644 packages/shared/src/plutonium.ts
  create mode 100644 packages/shared/src/plutoniumWindowTabs.ts
 
@@ -490,7 +490,7 @@ index 19542c4459..82baedba2a 100644
    },
    "scripts": {
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index 32292c0f9e..ec2f968ae0 100644
+index 32292c0f9e..93098ff911 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
 @@ -5,6 +5,10 @@ import {
@@ -504,8 +504,118 @@ index 32292c0f9e..ec2f968ae0 100644
    type ResolvedKeybindingRule,
    type ResolvedKeybindingsConfig,
    THREAD_JUMP_KEYBINDING_COMMANDS,
-@@ -157,6 +161,107 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -144,6 +148,106 @@ type WhenToken =
+   | { type: "lparen" }
+   | { type: "rparen" };
+ 
++/**
++ * Plutonium (KEYS.md, step 1): desktop and region keys on Super, each beside the default it moves from
++ * (which stays, page only). An existing keybindings.json gets them beside that default (late defaults).
++ */
++export const PLUTONIUM_SUPER_KEYS: ReadonlyArray<{
++  readonly id: string;
++  readonly alongside: KeybindingRule;
++  readonly rule: KeybindingRule;
++}> = (
++  [
++    [
++      { key: "mod+j", command: "terminal.toggle" },
++      { key: "meta+`", command: "terminal.toggle" },
++    ],
++    [
++      { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
++      { key: "meta+t", command: "terminal.new" },
++    ],
++    [
++      { key: "mod+alt+b", command: "rightPanel.toggle" },
++      { key: "meta+\\", command: "rightPanel.toggle" },
++    ],
++    [
++      { key: "mod+b", command: "sidebar.toggle" },
++      { key: "meta+shift+\\", command: "sidebar.toggle" },
++    ],
++    [
++      { key: "mod+k", command: "commandPalette.toggle", when: "!terminalFocus" },
++      { key: "meta+shift+space", command: "commandPalette.toggle" },
++    ],
++    [
++      { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
++      { key: "meta+n", command: "chat.new" },
++    ],
++    [
++      { key: "mod+w", command: "rightPanel.close", when: "!terminalFocus" },
++      { key: "meta+q", command: "rightPanel.close" },
++    ],
++    [
++      { key: "ctrl+tab", command: "rightPanel.nextTab" },
++      { key: "meta+arrowright", command: "rightPanel.nextTab" },
++    ],
++    [
++      { key: "ctrl+shift+tab", command: "rightPanel.previousTab" },
++      { key: "meta+arrowleft", command: "rightPanel.previousTab" },
++    ],
++    [
++      { key: "ctrl+shift+tab", command: "rightPanel.previousTab" },
++      { key: "meta+h", command: "rightPanel.previousTab" },
++    ],
++    [
++      { key: "mod+shift+[", command: "thread.previous" },
++      { key: "meta+u", command: "thread.previous" },
++    ],
++    [
++      { key: "mod+shift+[", command: "thread.previous" },
++      { key: "meta+pageup", command: "thread.previous" },
++    ],
++    [
++      { key: "mod+shift+]", command: "thread.next" },
++      { key: "meta+i", command: "thread.next" },
++    ],
++    [
++      { key: "mod+shift+]", command: "thread.next" },
++      { key: "meta+pagedown", command: "thread.next" },
++    ],
++    ...THREAD_JUMP_KEYBINDING_COMMANDS.map(
++      (command, index) =>
++        [
++          { key: `mod+${index + 1}`, command, when: "!modelPickerOpen && isDesktop" },
++          { key: `meta+alt+${index + 1}`, command },
++        ] as const,
++    ),
++    [
++      { key: "mod+t", command: "preview.newTab" },
++      { key: "meta+b", command: "preview.newTab" },
++    ],
++    [
++      { key: "meta+space", command: "appLauncher.toggle" },
++      { key: "meta+d", command: "appLauncher.toggle" },
++    ],
++    [
++      { key: "meta+o", command: "files.carry" },
++      { key: "meta+y", command: "files.carry" },
++    ],
++    [
++      { key: "meta+shift+o", command: "files.carryFuzzy" },
++      { key: "meta+shift+y", command: "files.carryFuzzy" },
++    ],
++    [
++      { key: "meta+arrowup", command: "dock.toggleLayout", when: "plutoniumShell" },
++      { key: "meta+k", command: "dock.toggleLayout", when: "plutoniumShell" },
++    ],
++  ] satisfies ReadonlyArray<readonly [KeybindingRule, KeybindingRule]>
++).map(([alongside, rule]) => ({
++  id: `plutonium-super:${rule.command}:${rule.key}`,
++  alongside,
++  rule,
++}));
++
+ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "mod+b", command: "sidebar.toggle" },
+   { key: "f6", command: "workspace.focusNext" },
+@@ -155,8 +259,110 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
+   { key: "mod+j", command: "terminal.toggle" },
    { key: "mod+alt+b", command: "rightPanel.toggle" },
++  ...PLUTONIUM_SUPER_KEYS.map(({ rule }) => rule),
    { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
    { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
 +  // Right panel tabs, and the app launcher (Plutonium). These also work while
@@ -612,7 +722,7 @@ index 32292c0f9e..ec2f968ae0 100644
    { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
    { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
    { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
-@@ -245,6 +350,12 @@ function normalizeKeyToken(token: string): string {
+@@ -245,6 +451,12 @@ function normalizeKeyToken(token: string): string {
  }
  
  export function parseKeybindingShortcut(value: string): KeybindingShortcut | null {

@@ -29,12 +29,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../src/components/chat/useChatShortcuts.ts   |  19 +
  apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
  apps/web/src/plutonium/hints.ts               | 402 ++++++++++++++
- apps/web/src/plutonium/hydraKeys.ts           | 492 ++++++++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 502 ++++++++++++++++++
  apps/web/src/plutonium/plutoVim.ts            | 181 +++++++
- 7 files changed, 1109 insertions(+), 6 deletions(-)
+ apps/web/src/plutonium/shellKeys.ts           |   6 +
+ 8 files changed, 1125 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
  create mode 100644 apps/web/src/plutonium/plutoVim.ts
+ create mode 100644 apps/web/src/plutonium/shellKeys.ts
 
 diff --git a/apps/web/src/components/chat/ChatComposer.tsx b/apps/web/src/components/chat/ChatComposer.tsx
 index 25b7f5ce6f..9e3592a6ab 100644
@@ -537,10 +539,10 @@ index 0000000000..58173d01af
 +}
 diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
 new file mode 100644
-index 0000000000..066b8b8d56
+index 0000000000..0a44464f0b
 --- /dev/null
 +++ b/apps/web/src/plutonium/hydraKeys.ts
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,502 @@
 +// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
 +// the g places and z shows, run as Pluto Vim page actions from the composer
 +// (plutoVim.ts), and the same keys when the keyboard isn't in a field.
@@ -948,6 +950,15 @@ index 0000000000..066b8b8d56
 +let pending = "";
 +let pendingTimer: ReturnType<typeof setTimeout> | undefined;
 +
++/** Super+Enter (shellKeys.ts): the composer, at its end, in insert mode, from anywhere. */
++function onSuperKey(event: KeyboardEvent): void {
++  if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key !== "Enter")
++    return;
++  event.preventDefault();
++  event.stopImmediatePropagation();
++  if (!event.repeat) focusEditor("end", true);
++}
++
 +function onOffFieldKey(event: KeyboardEvent): void {
 +  if (
 +    event.defaultPrevented ||
@@ -1028,6 +1039,7 @@ index 0000000000..066b8b8d56
 +export function installOffFieldKeys(): void {
 +  if (installed || typeof window === "undefined") return;
 +  installed = true;
++  window.addEventListener("keydown", onSuperKey, true);
 +  window.addEventListener("keydown", onOffFieldKey, true);
 +  window.addEventListener("plutonium:page-key", onRelayedKey);
 +}
@@ -1220,3 +1232,15 @@ index 0000000000..5b5bf26ce7
 +    return () => document.removeEventListener("pvim:action", onAction);
 +  }, [onAction]);
 +}
+diff --git a/apps/web/src/plutonium/shellKeys.ts b/apps/web/src/plutonium/shellKeys.ts
+new file mode 100644
+index 0000000000..71427555b7
+--- /dev/null
++++ b/apps/web/src/plutonium/shellKeys.ts
+@@ -0,0 +1,6 @@
++// Plutonium: Super keys Hydra handles itself, not through a T3 command (KEYS.md, Hydra's actions):
++// registered as shell shortcuts with the commands' (panelKeys.ts), run by hydraKeys.ts.
++export const HYDRA_SHELL_SHORTCUTS: readonly string[] = [
++  // The composer, at its end, in insert mode: "write a message", from anywhere.
++  "Super+Enter",
++];

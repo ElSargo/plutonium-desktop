@@ -197,6 +197,7 @@ While a jump or the `:` line is typed, every key is Pluto Vim's before the page'
 - after Enter sends a message, the composer is back in normal mode;
 - off a field, `i`, `a` and `A` go to the composer, typing, and letters no longer type into it (T3's type-to-focus);
 - keys relayed from a browser tab in the panel run here, and the page takes the keyboard for places and labels;
+- Super+Enter: the composer, at its end, in insert mode, from anywhere (a browser tab, an app); Hydra's other keys on Super as KEYS.md's table says;
 - `S` and `gw` label the panel's browser tabs too: Pluto Vim in each tab collects its targets (`web/vim/hints.js`), the helper gathers them (`hints.collect`), and Hydra labels them with its own, over the tab, so labels never clash; a typed label gives the tab the keyboard and goes to its target there (`hints.go`);
 - the labels and the read-only cursor are in Hydra's theme (its tokens; Pluto Vim reads `--pvim-caret` and `--pvim-label-*`), and the cursor follows the timeline as it scrolls or grows;
 - while labels show, the timeline is no field, so its claimed keys don't take the labels' keys;
@@ -210,7 +211,7 @@ While a jump or the `:` line is typed, every key is Pluto Vim's before the page'
 **Checked in a slot's Hydra:** `)`, Backspace not deleting in normal mode, `s`, `ysiw*` and `ds*`, `S`, `zt` keeping the keyboard, `gt`, `Tab` between drafts.
 
 **Not yet:**
-- spelling (`=`, `]s`, Ctrl+L), `K`, folds (`za`…), the resize mode, Super+Enter and Super+R;
+- spelling (`=`, `]s`, Ctrl+L), `K`, folds (`za`…), the resize mode and Super+R;
 - `gp` across threads, and `a` on an approval;
 - a full-height composer for `zm`;
 - labels in native apps.

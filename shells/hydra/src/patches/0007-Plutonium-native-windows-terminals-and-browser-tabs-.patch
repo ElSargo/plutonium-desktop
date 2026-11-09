@@ -52,6 +52,7 @@ Folded from:
  .../pullRequest/PullRequestsPage.tsx          |    2 +
  .../settings/KeybindingsSettings.logic.ts     |    1 +
  .../web/src/components/ui/standalone-page.tsx |    6 +-
+ apps/web/src/keybindings.test.ts              |    3 +-
  apps/web/src/keybindings.ts                   |   25 +
  apps/web/src/lib/terminalFocus.ts             |    2 +
  apps/web/src/plutonium/AppLauncher.tsx        |  237 +++
@@ -76,7 +77,7 @@ Folded from:
  apps/web/src/plutonium/importTab.ts           |   67 +
  apps/web/src/plutonium/openedItems.test.ts    |  176 +++
  apps/web/src/plutonium/openedItems.ts         |  255 ++++
- apps/web/src/plutonium/panelKeys.ts           |  303 ++++
+ apps/web/src/plutonium/panelKeys.ts           |  294 ++++
  apps/web/src/plutonium/remoteWindows.test.ts  |   64 +
  apps/web/src/plutonium/remoteWindows.ts       |  187 +++
  apps/web/src/plutonium/threadTag.ts           |   41 +
@@ -86,7 +87,7 @@ Folded from:
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 55 files changed, 6757 insertions(+), 87 deletions(-)
+ 56 files changed, 6750 insertions(+), 88 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
@@ -1378,6 +1379,20 @@ index 0881b84c52..da50c294c2 100644
            <span className="text-lg font-medium tracking-tight">Code</span>
          </span>
          {context ? <span className="text-sm">{context}</span> : null}
+diff --git a/apps/web/src/keybindings.test.ts b/apps/web/src/keybindings.test.ts
+index 1f0a096fcc..f1538fbbd8 100644
+--- a/apps/web/src/keybindings.test.ts
++++ b/apps/web/src/keybindings.test.ts
+@@ -782,7 +782,8 @@ describe("composer and pull request shortcuts", () => {
+       ["k", "pullRequest.copyNumber"],
+       ["8", "thread.copyReference"],
+       ["c", null],
+-      ["y", null],
++      // Plutonium: Super+Shift+Y picks up a file from the search (KEYS.md); Cmd on a Mac.
++      ["y", "files.carryFuzzy"],
+     ] as const) {
+       assert.strictEqual(
+         resolveShortcutCommand(event({ key, metaKey: true, shiftKey: true }), bindings, {
 diff --git a/apps/web/src/keybindings.ts b/apps/web/src/keybindings.ts
 index fc96aa1f85..4be11d671e 100644
 --- a/apps/web/src/keybindings.ts
@@ -6658,10 +6673,10 @@ index 0000000000..720579de8a
 +}
 diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
 new file mode 100644
-index 0000000000..e2d9372939
+index 0000000000..3d85981302
 --- /dev/null
 +++ b/apps/web/src/plutonium/panelKeys.ts
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,294 @@
 +// Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
 +// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
 +// dock.ts), and moving keyboard focus into a tab's content (an app's window,
@@ -6699,26 +6714,13 @@ index 0000000000..e2d9372939
 +import { findFloating, pickAndCarry } from "./files/carry";
 +import { openFilePane, toggleFilePane } from "./files/filePanes";
 +import { FILE_MANAGER_OPENERS } from "./files/ownsKey";
++import { HYDRA_SHELL_SHORTCUTS } from "./shellKeys";
 +import { plutoniumShell } from "./windowStore";
 +
 +const TAB_JUMP: readonly KeybindingCommand[] = RIGHT_PANEL_TAB_JUMP_KEYBINDING_COMMANDS;
 +const DOCK_SLOT: readonly KeybindingCommand[] = DOCK_SLOT_KEYBINDING_COMMANDS;
 +const DOCK_SLOT_OTHER: readonly KeybindingCommand[] = DOCK_SLOT_OTHER_LAYOUT_KEYBINDING_COMMANDS;
 +const DOCK_ASSIGN: readonly KeybindingCommand[] = DOCK_ASSIGN_KEYBINDING_COMMANDS;
-+
-+/** Commands that must reach the page even while an app or tab has the keyboard. */
-+const SHELL_COMMANDS = new Set<KeybindingCommand>([
-+  ...TAB_JUMP,
-+  "rightPanel.nextTab",
-+  "rightPanel.previousTab",
-+  "preview.newTab",
-+  "appLauncher.toggle",
-+  ...FILE_MANAGER_OPENERS,
-+  ...DOCK_SLOT,
-+  ...DOCK_SLOT_OTHER,
-+  ...DOCK_ASSIGN,
-+  "dock.toggleLayout",
-+]);
 +
 +const CODE_BY_KEY: Readonly<Record<string, string>> = {
 +  " ": "Space",
@@ -6771,16 +6773,20 @@ index 0000000000..e2d9372939
 +  return [...parts, code].join("+");
 +}
 +
-+/** Tells the browser which of `keybindings` the page handles itself. */
++/**
++ * Tells the browser which keys the page takes even while a tab or an app in
++ * it has the keyboard: every binding on Super, and no other (KEYS.md,
++ * Principles 1 and 2: Super is the desktop's, the rest is the app's). Hydra's
++ * Ctrl keys stay, for this page only.
++ */
 +function registerShellShortcuts(keybindings: ResolvedKeybindingsConfig): void {
 +  const shortcuts = [
-+    ...new Set(
-+      keybindings
-+        .filter((rule) => SHELL_COMMANDS.has(rule.command))
-+        // Ctrl+E stays with what has the keyboard: only Super reaches past a tab or an app.
-+        .filter((rule) => !String(rule.command).startsWith("files.") || rule.shortcut.metaKey)
++    ...new Set([
++      ...keybindings
++        .filter((rule) => rule.shortcut.metaKey && !rule.shortcut.modKey)
 +        .flatMap((rule) => toShellShortcut(rule.shortcut) ?? []),
-+    ),
++      ...HYDRA_SHELL_SHORTCUTS,
++    ]),
 +  ];
 +  void plutoniumShell().then((shell) => shell?.setShellShortcuts?.(shortcuts));
 +}

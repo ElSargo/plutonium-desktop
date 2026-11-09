@@ -1226,10 +1226,10 @@ index cd422343c1..a296d63eea 100644
  const THREAD_KEYBINDING_COMMANDS = [
    "thread.stop",
 diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
-index ec2f968ae0..9e73ef110b 100644
+index 93098ff911..8ce31a2406 100644
 --- a/packages/shared/src/keybindings.ts
 +++ b/packages/shared/src/keybindings.ts
-@@ -246,17 +246,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+@@ -347,17 +347,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
    { key: "q", command: "files.closePane", when: "filesFocus" },
    // The dock (Plutonium): Super+1…9 a slot, with Ctrl in its other layout,
    // with Shift to put what has the keyboard there; Super+Up split ↔ fold.
