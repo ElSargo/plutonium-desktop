@@ -117,13 +117,13 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
   from outside its user namespace. No relay. Existing containers must be made
   again (`plutonium doctor` says so).
 - [x] **Fullscreen for embedded apps and tabs; keys that work everywhere.**
-  Done (`CONTROLS.md`): Super+F, apps' and pages' own fullscreen, shell
-  shortcuts, the helper's app list and launcher.
+  Done (`CONTROLS.md`): Super+Shift+F (Super+F until 2026-11-08), apps' and
+  pages' own fullscreen, shell shortcuts, the helper's app list and launcher.
 - [x] **Pointer capture for embedded apps** (lock + relative motion,
   confinement, Super+Escape). Done (`CONTROLS.md`). Still to do: a real game,
   confinement regions, X11-hosted sessions.
-- [ ] **Super+F on X11-hosted sessions** (Plasma `:0`) not pressed for real;
-  KWin may take Super combinations. S
+- [ ] **Super+F and Super+Shift+F on X11-hosted sessions** (Plasma `:0`) not
+  pressed for real; KWin may take Super combinations. S
 - [ ] **A popped-out foot looked more translucent than its alpha** (DRM,
   2026-10-17). Not investigated. S
 - [x] **Shell mode locks every browser window in fullscreen**, not just the
@@ -470,6 +470,16 @@ JSON registry, viz hit-test rewrite limited to browser-linked children.
 - [ ] **Window sizing on real input.** S · Verify on DRM: the "last pressed"
   rule for several elements on one window, pointer input on a scaled
   (`object-fit: contain`) window, and the niri/T3 animations at full speed.
+- [ ] **Super+F as maximize in Hydra, GNOME and on DRM.** S · Since
+  2026-11-08 Super+F asks the shell to maximize (`CONTROLS.md`, "Maximize"),
+  and the switcher's left click shows a window and asks for the same.
+  Verified on Xvfb with plain and niri; Hydra's panel (T3 patches 0006,
+  0007), GNOME's tiling, menus over a fullscreen element and the backdrop
+  behind a smaller presented window not yet, nor anything on DRM.
+- [ ] **See Hydra's dock reflow on screen.** S · T3 patch 0012 (2026-11-08):
+  slots grow to 2rem, the room left over goes between them, and a reflow
+  glides over 260 ms (not while the sidebar is dragged, nor with reduced
+  motion). Only unit tests and the typecheck have run.
 - [x] **Shells use `windowrequest` move/resize.** M · An app's title-bar drag
   or edge resize could become niri's interactive move or column resize. The
   page would need the pointer for the rest of the drag. Done 2026-10-26
@@ -931,6 +941,42 @@ shell find it.
   its events), `shell.storage` in `~/.pluto/data/<name>/`
   ([DESKTOP_SERVICES.md](features/DESKTOP_SERVICES.md#a-native-side-and-storage)).
   Later: `plutonium shells new --native` to start one from a template.
+
+## Designs not built yet
+
+Each design doc lists its work in order; these are the items to start from.
+
+- [ ] **One keymap, contexts, chords and `config.js`**
+  ([KEYS.md](features/KEYS.md)). L · Designed 2026-11-08. First Hydra's keys
+  on Super (T3 patches 0001, 0007), then the shared catalogue and
+  `keys.json`, the browser's keys from the helper, contexts, the config
+  process, the keyboard grab with chords and modes, and keyboard-shortcut
+  inhibit in Exo.
+- [ ] **Hydra from the keyboard**
+  ([HYDRA_KEYBOARD.md](features/HYDRA_KEYBOARD.md)). L · Designed
+  2026-11-09. First Pluto Vim's slimmer base map (`s`, `( )`, `U`, Markdown
+  motions and objects, surround), then Hydra's slots and `g` places, `z`
+  shows and folds, the `S` and `gw` jumps, spelling keys, Super+Enter and the
+  resize mode, `:` as the palette, labels in tabs and native apps, and the
+  audit checked on screen.
+- [ ] **Projects above threads** ([PROJECTS.md](features/PROJECTS.md)). L ·
+  Designed 2026-11-08. Projects in the helper (read from T3's), inheritance,
+  the folder's config and trust, project windows, agent scope, the agent
+  engine as a core service with its own API, per-project browser profiles.
+  Overlaps "Per-thread Exo servers/sockets" and "T3 sidebar: show a thread's
+  open apps and tabs" above.
+- [ ] **Site extensions written by agents**
+  ([SITE_EXTENSIONS.md](features/SITE_EXTENSIONS.md)). L · Designed
+  2026-11-08. `~/.pluto/sites/` and the `site` API over DevTools first (no
+  Chromium patch), then runs in a Sites project with the tab lent to them,
+  Hydra's button and popover, the presets (Theme, Keys, Declutter), stale
+  detection, and the sites host extension on EXTENSIONS.md.
+- [ ] **Chrome extensions in tabs** ([EXTENSIONS.md](features/EXTENSIONS.md)).
+  L · Designed 2026-11-08. First check what works with `--load-extension`
+  (uBlock Origin Lite, Dark Reader), then tab ids and a window controller for
+  the registry's tabs, actions and popups in the shell, install and
+  permission prompts, `plutonium extensions`; MV2 for uBlock Origin as a
+  small patch while it stays small.
 
 ## Design questions
 

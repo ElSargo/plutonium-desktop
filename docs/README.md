@@ -12,9 +12,11 @@
 - [features/TABS.md](features/TABS.md): browser tabs as elements
 - [features/CONTROLS.md](features/CONTROLS.md): fullscreen, shell shortcuts, pointer capture, the app launcher
 - [features/KEYS.md](features/KEYS.md): design: one keymap for every shell and the browser, contexts, chords and modes, the `config.js` script
+- [features/HYDRA_KEYBOARD.md](features/HYDRA_KEYBOARD.md): design: Hydra as fast from the keyboard as with the mouse: one normal mode, jumps, `g` places and `z` folds, a slimmer vim base map, the resize mode, an audit of every mouse interaction
 - [features/EXTENSIONS.md](features/EXTENSIONS.md): design: Chrome extensions in the shells' tabs: tab ids for the registry, actions and popups through the shell, uBlock Origin
 - [features/SITE_EXTENSIONS.md](features/SITE_EXTENSIONS.md): describe a change to a site and an agent writes it as a site extension, applied live and kept; `site.context` per project; presets for theming and keys (built)
 - [features/PLUTO_VIM.md](features/PLUTO_VIM.md): design: Pluto Vim, vim mode in every text field (Blink, text-input-v3, AT-SPI), a JS engine and `init.js`, registers across the desktop, pages that integrate
+- [features/PROJECTS.md](features/PROJECTS.md): design: projects above threads, per-project config and trust, scope for agents and windows, the agent engine as a core service
 - [features/SHELLS.md](features/SHELLS.md): several shells, tags and groups, the Super+Tab overlay
 - [features/STYX_SHELL.md](features/STYX_SHELL.md): Styx, the scrollable tiling shell; keyboard, touchpad and scrolling fixes
 - [features/UI_LIBRARY.md](features/UI_LIBRARY.md): the shells' UI library: the dock, keys, settings, dragging and widgets Styx, Charon and the plain shell share
