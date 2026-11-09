@@ -1,6 +1,6 @@
 # Keys: one keymap, contexts, chords and a config script
 
-**Status: design, nothing built yet** (2026-11-08). The goals:
+**Status: design, nothing built yet** (2026-11-08; revised 2026-11-09 for Pluto Vim, which is built, and [HYDRA_KEYBOARD.md](HYDRA_KEYBOARD.md)). This is the plumbing: where keys are decided, which ones the desktop owns, and how they're configured. What the keys do inside fields and in Hydra's UI is PLUTO_VIM.md and HYDRA_KEYBOARD.md. The goals:
 - every shell and the browser use one set of actions, with one set of default keys, so rebinding an action rebinds it everywhere;
 - Hydra puts what acts on the desktop on Super, and gives Ctrl and Alt back to the apps and tabs in its panel;
 - bindings can depend on context (which app has the keyboard, a mode, state a script sets);
@@ -17,6 +17,8 @@ Keys are handled in four places, each with its own spelling of a combination:
 | Styx, Charon, plain | The UI library's `Keymap` (`helper/web/ui/keys.js`): actions with default keys, the user's overrides, conflicts, which combos to register | The key editor, kept in **each shell's own storage** | `Super+Ctrl+Alt+Shift+<code>` |
 | Hydra | T3's keybindings (`~/.t3/keybindings.json`), with `when` clauses and, for the file manager only, one-key prefixes (`g g`) | T3's settings and file | `mod+shift+t` (a key, not a code) |
 | Apps (`helper/src/shortcuts.ts`) | Global shortcuts apps bind through the portal | The binder dialog | `CTRL+SHIFT+t` (an XKB keysym) |
+
+A fifth layer, inside text fields: **Pluto Vim** ([PLUTO_VIM.md](PLUTO_VIM.md)), with its own sequence matcher (mappings that wait, `timeoutlen`, counts), its own config (`~/.pluto/vim/init.js`) and vim's notation (`<C-w>`, a character, not a code).
 
 Ash also rewrites one key for everything: **Caps Lock is an Escape** that keeps its code, for Pluto Vim (PLUTO_VIM.md, "Caps Lock"). There's no Caps Lock.
 
@@ -37,7 +39,8 @@ What goes wrong:
 4. **H/J/K/L are the arrows.** Every default with an arrow key has the same binding with H, J, K or L in its place (Super+← and Super+H, Super+Ctrl+↓ and Super+Ctrl+J), in every shell, so arrow users and vim users both get their keys. The catalogue generates the twins; rebinding an arrow binding offers to rebind its twin too.
 5. **One place for the user's keys:** `~/.pluto/keys.json`, read by every shell and by the browser. A rebinding applies to every shell, unless it's scoped to one.
 6. **The decision to take a key is synchronous; what the key does may be asynchronous.** The browser decides from a table, with no script in the key path. A stuck script can't freeze the keyboard.
-7. **There are keys no config can take away:** Ctrl+Alt+Backspace (end the session), Ctrl+Alt+F1…F12 (VTs), and the lock screen's keys. Super+Tab and Super+F can be moved but not unbound, so a broken config always leaves a way to switch shells.
+7. **There are keys no config can take away:** Ctrl+Alt+Backspace (end the session), Ctrl+Alt+F1…F12 (VTs), and the lock screen's keys. Super+Tab and Super+Shift+F can be moved but not unbound, so a broken config always leaves a way to switch shells and to leave fullscreen.
+8. **The order a key goes through:** (1) the browser's own keys; (2) shell shortcuts (Super combos, and the fixed list in Principle 2); (3) keys Pluto Vim claims before the page in a field it's on in (Escape, Ctrl+[, Caps Lock, keys a page yields); (4) the page's own handlers; (5) Pluto Vim; (6) the field's default. Conflict checks cover every layer, Pluto Vim's claims and insert-mode mappings included (a `jk` mapping holds `j` in every field).
 
 ## The keymap
 
@@ -46,6 +49,8 @@ What goes wrong:
 One spelling everywhere: the UI library's `Super+Ctrl+Alt+Shift+<KeyboardEvent.code>` (`Super+Shift+KeyP`). Codes are physical keys, so Super+1 and Super+H stay where they are on any layout. In `keys.json` and `config.js`, short forms are accepted and normalized: `super+shift+p`, `Super+/`.
 
 A chord is combos separated by spaces: `Super+KeyG KeyW`. T3's `g g` is the same thing with no modifier on the first key. Hydra's patch converts at its edge. T3's own file keeps its spelling, and the desktop's shared actions come from `keys.json`.
+
+**Vim's notation is accepted too, by the same parser:** `<D-d>` is Super+D (neovim's spelling for the Super or Cmd key), `<C-S-p>` Ctrl+Shift+P. The two keep their meanings: a combo with Super is matched by its code (the physical key, for any layout), and a key in a Pluto Vim mapping by the character it types. One parser and one set of names, so you write one notation, and `config.js` and `init.js` read the same.
 
 ### Actions
 
@@ -67,7 +72,8 @@ These merge niri's (Styx), GNOME's (Charon) and Hydra's keys. **Bold** marks a c
 | Action | Key | Styx | Charon | Hydra |
 |---|---|---|---|---|
 | `shells.switcher` | Super+Tab | ✓ | ✓ | ✓ |
-| `window.fullscreen` | Super+F | ✓ | ✓ | ✓ |
+| `window.maximize` | Super+F (since 2026-11-08, `CONTROLS.md`, "Maximize"): the shell decides what maximized means | ✓ (the column) | ✓ (tiled to the work area) | ✓ (the panel) |
+| `window.fullscreen` | Super+Shift+F (Super+F until 2026-11-08) | ✓ | ✓ | ✓ |
 | `pointer.release` | Super+Escape | ✓ | ✓ | ✓ |
 | `screen.lock` | **Super+Alt+Shift+L** (hard to press by accident; frees Super+L for focus) | **was Super+Alt+L** | **was Super+L** | **was Super+L** |
 | `display.focus{Left,Right}` / `window.toDisplay{…}` | Super+Shift+←/→ or H/L / Super+Ctrl+Shift+←/→ or H/L | ✓ | H/L **new** | H/L **new** |
@@ -79,7 +85,6 @@ These merge niri's (Styx), GNOME's (Charon) and Hydra's keys. **Bold** marks a c
 | `files.find` / `files.findHome` | Super+P / Super+Shift+P | **new** | **new** | ✓ |
 | `files.carry` | **Super+Y**, Super+Shift+Y on the search ("yank", as the file manager's `y`) | — | — | **was Super+O** |
 | `window.close` | Super+Q | ✓ | **new** (Alt+F4 stays) | **new**: closes the panel tab |
-| `window.maximize` | Super+M | ✓ (the column) | **new** (Super+↑ and Super+K stay, as tiling) | **new**: panel maximized |
 | `focus.{left,right,up,down}` | Super+arrows and Super+H/J/K/L | ✓ | **Exception:** Super+arrows and H/J/K/L tile, as GNOME's; focus moves with Alt+Tab | Super+←/→ and H/L: previous and next panel tab (**was Ctrl+Tab**); ↑/K is the dock's layout, ↓/J unbound |
 | `overview.toggle` | Super+O | ✓ | ✓ (and Super tap) | — |
 | `workspace.{previous,next}` | Super+PageUp/PageDown, Super+U/I | ✓ | ✓ | **new**: the previous or next thread |
@@ -100,6 +105,8 @@ Hydra's own actions on Super, which no shared action uses:
 | `hydra.sidebar.toggle` | **Super+Shift+\\** | Ctrl+B |
 | `hydra.thread.{previous,next}` | covered by `workspace.*` | Ctrl+Shift+[ / ] |
 | `hydra.dock.toggleLayout` | Super+↑ and Super+K | Super+K **new** |
+| `hydra.composer.append` | **Super+Enter**: the composer, at the end, in insert mode (HYDRA_KEYBOARD.md's `gA`, from anywhere) | **new** |
+| `hydra.layout.resize` (a mode) | **Super+R** (HYDRA_KEYBOARD.md, "The resize mode") | **new** |
 
 Everything else in T3 (the composer, chat, find, diff, the model picker, preview zoom and refresh) keeps its Ctrl keys and is never registered as a shell shortcut. Each Hydra Ctrl key that moves to Super stays as a page-only alias, so T3's keys still work while Hydra's page has the keyboard.
 
@@ -137,17 +144,25 @@ A binding can have a `when`, in T3's grammar (identifiers, `!`, `&&`, `||`), eva
 | `mode == "resize"` | the current mode (Chords and modes) |
 | anything the config sets | `desktop.context.set("gaming", true)` |
 | a shell's own (Hydra's `terminalFocus`, `composerFocus`, …) | only that shell's actions see them |
+| `editableFocus`, `vimMode == "normal"` | a text field has the keyboard; Pluto Vim's mode in it (`insert`, `normal`, `visual`, `cmdline`), from `pvim:mode` and the native badge |
+| `region == "timeline"` | the region of Hydra with focus (HYDRA_KEYBOARD.md) |
+
+**Contexts form a tree,** as Zed's do: display › shell › window or tab › frame › field. Each level adds its own names. `>` means "inside": `shellHydra > composer`, `tab > editableFocus`. When several bindings match, the one from the deeper context wins, then the user's over the defaults.
 
 How it's evaluated:
 - **On the page:** the shell library sees every key the browser forwards, and evaluates `when` before running an action.
 - **Deciding which keys to take:** the browser's list (`setShellShortcuts`) holds only the combos whose `when` is true now. The shell library recomputes the list whenever a context changes (`windowfocus` and `windowblur`, a tab's focus, a mode, `context.set`), and sends it only when it changed. So Super+Q in Blender (`!(app == "org.blender.Blender")`) reaches Blender, with no script in the key path.
 - **Inhibit:** while `inhibited` is true, only the browser's unremovable keys are taken (Principle 7). Exo has no `zwp_keyboard_shortcuts_inhibit_manager_v1` yet. It's a Chromium patch, which the browser then reports to the page as a context.
 
+A Pluto Vim mode change recomputes the list only when some binding's `when` reads `vimMode`. Most don't, and a mode change happens on every Escape, so it shouldn't cost an IPC round trip each time.
+
 There is a gap between a focus change and the new list reaching the browser, of about one IPC round trip. A key pressed in that gap is decided by the previous list. The other option is evaluating `when` inside the browser. That needs the browser to understand contexts, so it isn't worth it unless the gap turns out to matter in practice.
 
 ## Chords and modes
 
 Both need one new browser primitive: **a keyboard grab** (`windowBroker.grabKeyboard()` → a handle with `release()`). While a grab is held, every key goes to the shell page, and the app with the keyboard keeps its focus: it gets no blur, so menus stay open and games don't pause. The grab ends when it's released, when the page goes away, or after a time limit (a safety net, default 10 s). Today, the only way to get the key after a prefix is to move focus to the page, and that sends the app a blur.
+
+**One sequence matcher.** Chords and modes use Pluto Vim's matcher (`helper/web/vim/engine.js`), not a second one: it already has keys that wait, `timeoutlen`, prefixes, `nowait` and counts, and `plutonium vim check` already warns about prefixes. A desktop mode is a set of mappings, as a vim mode is, run under the keyboard grab instead of in a field. Counts come with it (`Super+G 3 L`), and `keys check` and `vim check` report the same things the same way.
 
 - **Chords.** A chord's first combo is an ordinary shell shortcut. When it's pressed, the library grabs the keyboard and waits for the next key, for up to 1.5 s. Escape cancels, and an unbound key cancels and is dropped. A prefix can't also be a binding of its own: `keys check` and the key editor say so.
 - **The which-key overlay.** If no key comes within 400 ms of a prefix, the shell library shows the possible next keys, read from the keymap. `keys.help` is the same overlay showing every key.
@@ -160,6 +175,7 @@ Both need one new browser primitive: **a keyboard grab** (`windowBroker.grabKeyb
   }, { enter: "Super+KeyR" });
   ```
   The mode shows in the overlay, and as `mode == "resize"` in contexts.
+- **One command line.** Pluto Vim's `:` line and Hydra's command palette become one: it takes ex commands, `init.js`'s commands and every catalogue action by name (`:Run launcher.open`, `:snooze 1h`), with history and `@:`, as Zed's palette does. `:` in normal mode opens it; outside a field, the palette's Super key does. The shell draws it when no field owns it, as it draws the native mode badge.
 - **Taps and holds.** A trigger can also be `tap` (a modifier pressed and released alone: Charon's Super tap), `release`, `hold` (with a time), or `double`. Push-to-talk needs press and release, as the portal path already has.
 
 ## The config script
@@ -224,14 +240,17 @@ Shells stay scriptable as they are: a shell's own page and native side are alrea
 
 ## The work, in order
 
-1. **Hydra's keys** (T3 patches 0001 and 0007): its keys move as in the tables above, Super+Alt+1…9 to threads included. Only Super combos are registered as shell shortcuts. Ctrl aliases stay, page only. Needs no new machinery.
+1. **Hydra's keys** (T3 patches 0001 and 0007): its keys move as in the tables above, Super+Alt+1…9 to threads included, Super+Enter and Super+R too. Only Super combos are registered as shell shortcuts. Ctrl aliases stay, page only. Needs no new machinery. HYDRA_KEYBOARD.md's steps 1–5 need none of this list and can go first or alongside.
 2. **The catalogue and `keys.json`:** shared action ids in the UI library, the helper's store and routes, the existing overrides moved in, Styx, Charon and plain on the catalogue, and the new default keys. Hydra maps its shared actions onto it.
 3. **The browser's keys from the helper** (Chromium: `plutonium_keys.cc`): Super+F, Super+Tab, the lock and the display keys as catalogue actions.
 4. **Contexts:** the shell library evaluates `when` and recomputes the browser's list on focus changes; `keys check` across layers.
 5. **The config process and its API.** Most of it wraps routes the helper has.
-6. **The keyboard grab** (Chromium, Exo), then chords, which-key, modes, and tap and hold triggers.
+6. **The keyboard grab** (Chromium, Exo), then chords, which-key, modes, and tap and hold triggers, on Pluto Vim's matcher; the `:` line and the palette as one.
 7. **Keyboard-shortcut inhibit** (Exo): `zwp_keyboard_shortcuts_inhibit_manager_v1` as a context.
 
 ## Decisions
 
 - 2026-11-08: one desktop-wide default set; Super+Alt+1…9 in Hydra goes to threads; the launcher keeps Super+Space and Super+D; the lock moves to Super+Alt+Shift+L; H/J/K/L twin the arrows everywhere; shells may make exceptions to the shared defaults, listed in the table.
+- 2026-11-09: Super+F is maximize and Super+Shift+F fullscreen (CONTROLS.md, from 2026-11-08); the table follows.
+- 2026-11-09: one sequence matcher, Pluto Vim's, for chords and modes; one parser for both notations (codes for Super combos, characters in vim mappings); contexts as a tree with `>`; Pluto Vim's mode and field focus as contexts; Pluto Vim as a layer in the order a key goes through; the `:` line and the palette as one.
+- 2026-11-09: Super+Enter is the composer at its end, in insert mode, and Super+R Hydra's resize mode (HYDRA_KEYBOARD.md).
