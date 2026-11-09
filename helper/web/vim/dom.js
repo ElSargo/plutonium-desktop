@@ -214,6 +214,11 @@ export class TextFieldBuffer {
   redo() { this.el.ownerDocument.execCommand("redo"); }
 
   /** j and k's display lines (vim.opt.displayLines): a textarea's, as it wraps; undefined for an <input>. */
+  /** Space, Backspace, Ctrl+D and Ctrl+U page what's around the field. */
+  pageAction(name, detail) {
+    return fieldPageAction(this.el, false, name, detail);
+  }
+
   displayLine(offset, dir, count) {
     const { el } = this;
     const sel = el.ownerDocument.getSelection?.();
@@ -378,6 +383,11 @@ export class EditableBuffer {
   }
 
   /** j and k's display lines (vim.opt.displayLines), as the editing host wraps them. */
+  /** Space, Backspace, Ctrl+D and Ctrl+U page what's around the field; read-only text pages itself. */
+  pageAction(name, detail) {
+    return fieldPageAction(this.root, Boolean(this.caps.readonly), name, detail);
+  }
+
   displayLine(offset, dir, count) {
     const sel = this.#doc().getSelection();
     if (!sel?.modify || !sel.rangeCount || !this.root.contains(sel.anchorNode)) return undefined;
@@ -627,8 +637,8 @@ export class ReadOnlyBuffer extends EditableBuffer {
 
 // ── Off a field ──────────────────────────────────────────────────────────
 
-/** The box `doc`'s page keys scroll: around the keyboard's element, else under the middle of the window, else the document. */
-function scrollerOf(doc) {
+/** The box `doc`'s page keys scroll: around `from` (the keyboard's element), else under the middle of the window, else the document. */
+function scrollerOf(doc, from = doc.activeElement && doc.activeElement !== doc.body ? doc.activeElement : null) {
   const view = doc.defaultView;
   const scrolls = (el) => {
     if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) return false;
@@ -639,7 +649,7 @@ function scrollerOf(doc) {
     for (; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) if (scrolls(el)) return el;
     return null;
   };
-  const active = doc.activeElement && doc.activeElement !== doc.body ? up(doc.activeElement) : null;
+  const active = from ? up(from) : null;
   return active ?? up(doc.elementFromPoint(view.innerWidth / 2, view.innerHeight / 2)) ?? doc.scrollingElement ?? doc.documentElement;
 }
 
@@ -675,20 +685,81 @@ export class PageBuffer {
     const by = (top, left = 0) => box().scrollBy({ top, left, behavior: "instant" });
     const line = 60;
     switch (name) {
-      case "scroll.down": return by(line * count), true;
-      case "scroll.up": return by(-line * count), true;
+      case "scroll.down": return this.#line(1, detail), true;
+      case "scroll.up": return this.#line(-1, detail), true;
       case "scroll.left": return by(0, -line * count), true;
       case "scroll.right": return by(0, line * count), true;
       case "scroll.top": return box().scrollTo({ top: 0, behavior: "instant" }), true;
       case "scroll.bottom": { const el = box(); el.scrollTo({ top: el.scrollHeight, behavior: "instant" }); return true; }
-      case "context.pageDown": { const el = box(); el.scrollBy({ top: (el.clientHeight || view.innerHeight) * 0.5 * count, behavior: "instant" }); return true; }
-      case "context.pageUp": { const el = box(); el.scrollBy({ top: -(el.clientHeight || view.innerHeight) * 0.5 * count, behavior: "instant" }); return true; }
+      case "context.pageDown":
+      case "context.pageUp": return pageBy(box(), name === "context.pageDown" ? count : -count), true;
       // In a tab, H and L are back and forward (Hydra's are threads: it declares them).
       case "item.previous": return view.history.back(), true;
       case "item.next": return view.history.forward(), true;
       default: return false;
     }
   }
+
+  /**
+   * j or k: a line at once, then, while the key is held, a glide that speeds
+   * up until it's let go (release). With a count, just that many lines.
+   */
+  #line(dir, detail) {
+    if (detail?.count != null) return scrollerOf(this.doc).scrollBy({ top: dir * GLIDE.line * detail.count, behavior: "instant" });
+    // The key's repeats while it glides: it's going already.
+    if (this.glide?.dir === dir) return;
+    this.release();
+    const el = scrollerOf(this.doc);
+    el.scrollBy({ top: dir * GLIDE.line, behavior: "instant" });
+    const view = this.doc.defaultView;
+    const glide = { dir, frame: 0, timer: 0 };
+    this.glide = glide;
+    glide.timer = view.setTimeout(() => {
+      let last = view.performance.now();
+      let speed = GLIDE.start;
+      const step = (now) => {
+        if (this.glide !== glide) return;
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        speed = Math.min(GLIDE.max, speed + GLIDE.accel * dt);
+        el.scrollBy({ top: dir * speed * dt, behavior: "instant" });
+        glide.frame = view.requestAnimationFrame(step);
+      };
+      glide.frame = view.requestAnimationFrame(step);
+    }, GLIDE.holdMs);
+  }
+
+  /** The held j or k was let go (or the window lost the keyboard): the glide stops. */
+  release() {
+    const glide = this.glide;
+    if (!glide) return;
+    this.glide = null;
+    const view = this.doc.defaultView;
+    view.clearTimeout(glide.timer);
+    view.cancelAnimationFrame(glide.frame);
+  }
+}
+
+/** Holding j or k (page sessions): a line, then after holdMs a glide from start px/s, speeding up by accel to max. */
+const GLIDE = { line: 60, holdMs: 180, start: 900, accel: 3000, max: 4500 };
+
+/** Half `el`'s height (or the window's), `times` times: the context's page (Space, Backspace, Ctrl+D, Ctrl+U). */
+function pageBy(el, times) {
+  const height = el === el.ownerDocument.scrollingElement || el === el.ownerDocument.documentElement
+    ? el.ownerDocument.defaultView.innerHeight : el.clientHeight;
+  el.scrollBy({ top: height * 0.5 * times, behavior: "instant" });
+}
+
+/**
+ * In a field, the context's page keys (Space, Backspace, Ctrl+D, Ctrl+U)
+ * scroll what's around it, not its own text: the page a tab's textarea is in.
+ * Read-only text scrolls itself, where it can.
+ */
+function fieldPageAction(el, own, name, detail) {
+  if (name !== "context.pageDown" && name !== "context.pageUp") return false;
+  const count = detail?.count ?? 1;
+  pageBy(scrollerOf(el.ownerDocument, own ? el : el.parentElement), name === "context.pageDown" ? count : -count);
+  return true;
 }
 
 // ── A document ───────────────────────────────────────────────────────────
@@ -798,8 +869,11 @@ export function attach(doc = globalThis.document, options = {}) {
 
   // The window: leaving it, a typing place gives back the mode it took (another page or app has the
   // keyboard now); coming back, it takes it again.
+  // A held j or k glides until it's let go.
+  const onKeyUp = () => page?.buffer.release?.();
   const onWindowBlur = () => {
     page?.cancelPending();
+    page?.buffer.release?.();
     if (restore) placeChanged(null);
     stateChanged();
   };
@@ -1005,6 +1079,7 @@ export function attach(doc = globalThis.document, options = {}) {
   doc.addEventListener("focusin", onFocus, true);
   doc.addEventListener("focusout", onBlur, true);
   doc.addEventListener("pointerdown", onPointerDown, true);
+  view.addEventListener("keyup", onKeyUp, true);
   view.addEventListener("focus", onWindowFocus);
   view.addEventListener("blur", onWindowBlur);
   view.addEventListener("keydown", onClaimed, true);
@@ -1057,6 +1132,7 @@ export function attach(doc = globalThis.document, options = {}) {
       doc.removeEventListener("pvim:set-mode", onSetMode);
       doc.removeEventListener("focusout", onBlur, true);
       doc.removeEventListener("pointerdown", onPointerDown, true);
+      view.removeEventListener("keyup", onKeyUp, true);
       view.removeEventListener("focus", onWindowFocus);
       view.removeEventListener("blur", onWindowBlur);
       view.removeEventListener("keydown", onClaimed, true);

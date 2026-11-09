@@ -839,8 +839,15 @@ export class Session {
     if (parsed.cmd.entry?.action === "jumpStart") return this.#startJump();
     const labelled = parsed.cmd.type === "motion" ? parsed.cmd.entry : parsed.cmd.motion;
     if (labelled?.labelJump) {
-      // gw alone: every word on screen, where the page has that; else, and after an operator, the field's.
-      if (parsed.cmd.type === "motion" && !visual && this.runAction("jump.word", {})) return true;
+      // gw alone: every word on screen, the page's own where it has that, else the desktop's (the shell
+      // labels the screen, this page or app included: PageKey); after an operator, the field's words.
+      if (parsed.cmd.type === "motion" && !visual) {
+        if (this.runAction("jump.word", {})) return true;
+        if (this.vim.listeners.get("PageKey")?.size) {
+          this.vim.emit("PageKey", { session: this, name: "jump.word", detail: { count: null } });
+          return true;
+        }
+      }
       return this.#startWordJump({ ...parsed.cmd, mode: this.mode });
     }
     // q{register} starts recording now, not when the queue gets to it: the next key is the macro's.

@@ -515,6 +515,10 @@ export const PAGE_KEYS = [
   { keys: " ", page: "context.pageDown", fallback: "l" },
   { keys: "<BS>", page: "context.pageUp", fallback: "h" },
   { keys: "<Tab>", page: "item.recent", pass: true },
+  // The context's page from anywhere in normal mode, a field included: the timeline in Hydra, the
+  // page around a tab's field, never the field's own text (vim's Ctrl+D and Ctrl+U scroll the window).
+  { keys: "<C-d>", page: "context.pageDown" },
+  { keys: "<C-u>", page: "context.pageUp" },
   { keys: "H", page: "item.previous" },
   { keys: "L", page: "item.next" },
   { keys: "K", page: "details", text: "word" },
@@ -561,8 +565,6 @@ export const PAGE_ACTIONS = [
   { keys: "l", page: "scroll.right" },
   { keys: "gg", page: "scroll.top" },
   { keys: "G", page: "scroll.bottom" },
-  { keys: "<C-d>", page: "context.pageDown" },
-  { keys: "<C-u>", page: "context.pageUp" },
   { keys: "gw", page: "jump.word" },
   { keys: "gi", page: "place.composerInsert" },
   { keys: "gA", page: "place.composerEnd" },
