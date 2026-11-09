@@ -19,7 +19,8 @@ Folded from:
  apps/server/src/auth/EnvironmentAuth.ts       |   4 +
  apps/server/src/auth/utils.ts                 |  13 ++-
  apps/server/src/cli/auth.ts                   |  13 ++-
- apps/server/src/keybindings.ts                |   3 +-
+ apps/server/src/keybindings.test.ts           |  28 ++++-
+ apps/server/src/keybindings.ts                |   6 +-
  .../Adapters/ClaudeAdapterV2.ts               |   4 +-
  .../Adapters/CodexAdapterV2.ts                |   3 +
  apps/server/src/plutonium/networkAccess.ts    | 108 ++++++++++++++++++
@@ -28,7 +29,7 @@ Folded from:
  apps/server/src/server.ts                     |  10 ++
  apps/server/src/terminal/Manager.ts           |  10 ++
  apps/server/src/ws.ts                         |  38 ++----
- 12 files changed, 338 insertions(+), 36 deletions(-)
+ 13 files changed, 368 insertions(+), 37 deletions(-)
  create mode 100644 apps/server/src/plutonium/networkAccess.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.test.ts
  create mode 100644 apps/server/src/plutonium/threadPermissions.ts
@@ -132,11 +133,74 @@ index b75fba88bd..12c99be3c5 100644
            });
            yield* Console.log(
              formatIssuedSession(issued, {
+diff --git a/apps/server/src/keybindings.test.ts b/apps/server/src/keybindings.test.ts
+index cb92c24242..4d0f9bd296 100644
+--- a/apps/server/src/keybindings.test.ts
++++ b/apps/server/src/keybindings.test.ts
+@@ -338,7 +338,10 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
+       });
+ 
+       const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+-      assert.isFalse(persisted.some((entry) => entry.command === "terminal.toggle"));
++      // The conflicting default (mod+j) is skipped; Plutonium's Super key for the command isn't in conflict.
++      assert.isFalse(
++        persisted.some((entry) => entry.command === "terminal.toggle" && entry.key === "mod+j"),
++      );
+       assert.isTrue(persisted.some((entry) => entry.command === "script.custom-action.run"));
+ 
+       assert.isTrue(
+@@ -353,6 +356,29 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
+     );
+   });
+ 
++  it.effect("adds Plutonium's Super keys beside the defaults an existing config still has", () =>
++    Effect.gen(function* () {
++      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
++      yield* writeKeybindingsConfig(keybindingsConfigPath, [
++        { key: "mod+j", command: "terminal.toggle" },
++        { key: "mod+shift+y", command: "sidebar.toggle" },
++      ]);
++      yield* Effect.gen(function* () {
++        const keybindings = yield* Keybindings.Keybindings;
++        yield* keybindings.syncDefaultKeybindingsOnStartup;
++      });
++      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
++      assert.isTrue(
++        persisted.some((entry) => entry.command === "terminal.toggle" && entry.key === "meta+`"),
++      );
++      assert.isTrue(
++        persisted.some((entry) => entry.command === "terminal.toggle" && entry.key === "mod+j"),
++      );
++      // Only beside a default that's still there: the sidebar's key is the user's own.
++      assert.isFalse(persisted.some((entry) => entry.key === "meta+shift+\\"));
++    }).pipe(Effect.provide(layerKeybindings())),
++  );
++
+   it.effect("appends additional custom keybindings for the same command", () =>
+     Effect.gen(function* () {
+       const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
 diff --git a/apps/server/src/keybindings.ts b/apps/server/src/keybindings.ts
-index 0a5bfdd424..406b8c3d3f 100644
+index 0a5bfdd424..6995dad010 100644
 --- a/apps/server/src/keybindings.ts
 +++ b/apps/server/src/keybindings.ts
-@@ -152,7 +152,8 @@ function encodeShortcut(shortcut: KeybindingShortcut): string | null {
+@@ -36,6 +36,7 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+ import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
+ import {
+   DEFAULT_KEYBINDINGS,
++  PLUTONIUM_SUPER_KEYS,
+   mergeWithDefaultKeybindings,
+   compileResolvedKeybindingRule,
+   compileResolvedKeybindingsConfig,
+@@ -112,6 +113,8 @@ const LATE_DEFAULT_KEYBINDINGS: ReadonlyArray<{
+       when: "composerFocus && draftThreadRoute",
+     },
+   },
++  // Plutonium: the Super keys (KEYS.md), beside the defaults they move from.
++  ...PLUTONIUM_SUPER_KEYS,
+ ];
+ 
+ function keybindingShortcutContext(rule: KeybindingRule): string | null {
+@@ -152,7 +155,8 @@ function encodeShortcut(shortcut: KeybindingShortcut): string | null {
    if (!shortcut.key) return null;
    if (shortcut.key !== "+" && shortcut.key.includes("+")) return null;
    const key = shortcut.key === " " ? "space" : shortcut.key;
