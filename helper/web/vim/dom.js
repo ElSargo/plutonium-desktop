@@ -548,8 +548,9 @@ export function attach(doc = globalThis.document, options = {}) {
     const key = keyFromEvent(event);
     if (!key) return;
     const session = sessionOf(field);
-    // Claimed: vim.opt.claim, and the keys the page gives up while it says so (data-pvim-yield, in vim's notation).
-    const claim = vim.opt.claim.includes(key) || session.buffer.field.yields().has(key);
+    // Claimed: vim.opt.claim, every key while a jump or the : line is typed, and the keys the page
+    // gives up while it says so (data-pvim-yield, in vim's notation).
+    const claim = vim.opt.claim.includes(key) || session.claimsAll || session.buffer.field.yields().has(key);
     if (claim !== claimed) return;
     if (session.feed(key)) {
       event.preventDefault();

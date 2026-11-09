@@ -942,6 +942,15 @@ export class Session {
     }
   }
 
+  /**
+   * Whether every key is vim's before the page's handlers: while a jump or
+   * the command line is typed, Enter and the rest are theirs (a composer
+   * would otherwise send on Enter).
+   */
+  get claimsAll() {
+    return Boolean(this.jump || this.cmd);
+  }
+
   /** The command line as it's typed (":s/a/b/", "/foo", "=1+2"), or null. */
   get cmdline() {
     return this.cmd ? `${this.cmd.kind}${this.cmd.text}` : null;

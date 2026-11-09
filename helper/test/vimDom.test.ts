@@ -346,6 +346,27 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.ok((await page.evaluate(() => (window as any).actions)).includes("mode insert"));
   });
 
+  test("while a jump or the : line is typed, Enter is vim's before the page's own handler", async () => {
+    await page.evaluate(() => {
+      const w = window as any;
+      w.sent = 0;
+      const el = document.createElement("textarea");
+      el.id = "sends";
+      el.value = "one two";
+      // A chat composer's Enter: it sends, and the page sees the key first.
+      el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); w.sent++; } });
+      document.body.append(el);
+      el.focus();
+      el.setSelectionRange(0, 0);
+    });
+    await keys("#sends", "Control+BracketLeft", "s", "t", "Enter");
+    assert.equal(await page.evaluate(() => (window as any).sent), 0);
+    assert.equal((await state("#sends")).cursor, 4, "Enter went to the match");
+    await keys("#sends", ":", "s/one/1/", "Enter");
+    assert.equal(await page.evaluate(() => (window as any).sent), 0);
+    assert.equal((await state("#sends")).text, "1 two");
+  });
+
   test("the : line is drawn under the field as it's typed, and runs on Enter", async () => {
     await fresh("#ta", "a a");
     await keys("#ta", "Escape", ":", "s/a/b/g");

@@ -1,6 +1,6 @@
 # Hydra from the keyboard: one normal mode, jumps, `g` and `z`
 
-**Status: design, nothing built yet** (2026-11-09). Stock T3 is built for the mouse. It has about 120 bindings, but nearly all of them open or toggle something: the sidebar, the terminal, the palette, a picker. Once you're in the UI, almost nothing moves to an item or acts on one. The exception is the file manager, which has a full vim grammar. The goal: **everything in Hydra is as fast from the keyboard as with the mouse, or faster**, and comfortable to do all day.
+**Status: a first version to try, off unless `PLUTONIUM_VIM=1`** (2026-11-09; "What's built" below says what is and isn't). Stock T3 is built for the mouse. It has about 120 bindings, but nearly all of them open or toggle something: the sidebar, the terminal, the palette, a picker. Once you're in the UI, almost nothing moves to an item or acts on one. The exception is the file manager, which has a full vim grammar. The goal: **everything in Hydra is as fast from the keyboard as with the mouse, or faster**, and comfortable to do all day.
 
 It sits on two other designs:
 - [PLUTO_VIM.md](PLUTO_VIM.md): the vim engine in every text field. This doc changes its base keymap.
@@ -170,6 +170,43 @@ While focus is in Hydra's page, the page takes these keys itself, so the first v
 | `S`, `gw` labels, the resize mode | Hydra's page first, then the helper for tabs and native apps |
 | Super+Enter, Super+R | Shell shortcuts, after KEYS.md step 1 |
 | Spelling suggestions | To decide (Open questions) |
+
+## What's built
+
+From 2026-11-09, for trying out:
+
+**In every field** (Pluto Vim's engine):
+- the base map's drops;
+- `(` `)`, `]h [h`, `]l [l`, `]c [c`;
+- `ic` `il` `ih` `iu`;
+- `U`;
+- `>` `<` as quotes (`vim.opt.shift = "indent"` for vim's);
+- surround (`ds`, `cs`, `ys`, `s` in visual mode);
+- `gi`, `gA`;
+- `s`, with labels over web fields.
+
+While a jump or the `:` line is typed, every key is Pluto Vim's before the page's (so Enter never sends).
+
+**In Hydra** (T3 patch 0013, `plutonium/{hydraKeys,hints}.ts`):
+- `Space`/`Backspace` page the timeline;
+- `Tab` goes through threads by recent use, drafts included, and `H`/`L` by the sidebar's order;
+- `gt` `gb` `gB` `ga` `gf` `gd` `gs` `gm` `gp` `gx` `gc`;
+- `zt` `zb` `zs` `zf` `zd`, and `zm` (the panel maximized);
+- `S` and `gw` labels on Hydra's page;
+- `y`/`n` on an approval `gp` went to;
+- the same keys when the keyboard isn't in a field.
+
+**Checked in a slot's Hydra:** `)`, Backspace not deleting in normal mode, `s`, `ysiw*` and `ds*`, `S`, `zt` keeping the keyboard, `gt`, `Tab` between drafts.
+
+**Not yet:**
+- spelling (`=`, `]s`, Ctrl+L), `K`, folds (`za`…), the resize mode, Super+Enter and Super+R;
+- `gp` across threads, and `a` on an approval;
+- a full-height composer for `zm`;
+- labels in tabs and native apps.
+
+**Known issues:**
+- `>>` in Hydra's composer: the editor turns the quote into a block quote but keeps the `> ` text in it, and `<<` leaves the empty block. The composer should do quoting itself, as a page action.
+- `place.sidebar`'s selector is a guess, not checked.
 
 ## The work, in order
 

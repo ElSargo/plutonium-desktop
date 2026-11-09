@@ -27,10 +27,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/web/src/components/chat/ChatComposer.tsx |  12 +
  .../chat/ComposerPendingApprovalActions.tsx   |   2 +
  .../src/components/chat/useChatShortcuts.ts   |  19 +
- apps/web/src/plutonium/hints.ts               | 292 ++++++++++++
- apps/web/src/plutonium/hydraKeys.ts           | 415 ++++++++++++++++++
- apps/web/src/plutonium/plutoVim.ts            | 145 ++++++
- 6 files changed, 885 insertions(+)
+ apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
+ apps/web/src/plutonium/hints.ts               | 289 ++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 410 ++++++++++++++++++
+ apps/web/src/plutonium/plutoVim.ts            | 146 +++++++
+ 7 files changed, 879 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
  create mode 100644 apps/web/src/plutonium/plutoVim.ts
@@ -108,12 +109,30 @@ index 637546f65d..d04cbd346b 100644
    // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches keydown listeners for chat shortcuts and find dismissal: on the window, or on an embedded chat's composer
    useEffect(() => {
      if (embedded) {
+diff --git a/apps/web/src/plutonium/files/FileManager.tsx b/apps/web/src/plutonium/files/FileManager.tsx
+index c1fcfad0a2..e0904539d6 100644
+--- a/apps/web/src/plutonium/files/FileManager.tsx
++++ b/apps/web/src/plutonium/files/FileManager.tsx
+@@ -1004,12 +1004,7 @@ function Toolbar({ state }: { state: FileManagerState }) {
+         }}
+       >
+         {VIEWS.map(({ view, icon: Icon, label }) => (
+-          <ToggleGroupItem
+-            key={view}
+-            value={view}
+-            aria-label={label}
+-            title={label}
+-          >
++          <ToggleGroupItem key={view} value={view} aria-label={label} title={label}>
+             <Icon className="size-3.5" />
+             <span className="hidden @2xl/toolbar:inline">{label}</span>
+           </ToggleGroupItem>
 diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
 new file mode 100644
-index 0000000000..f7053e52d9
+index 0000000000..f668c9be48
 --- /dev/null
 +++ b/apps/web/src/plutonium/hints.ts
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,289 @@
 +// Plutonium: labels over the page for HYDRA_KEYBOARD.md's jumps. S labels the
 +// significant things on screen (what can be clicked or typed into, and the
 +// fixed places, whose labels are their g letters); gw labels every word.
@@ -152,6 +171,8 @@ index 0000000000..f7053e52d9
 +  readonly element: Element;
 +  /** For gw: the word's range in its text node. */
 +  readonly range?: Range;
++  /** One of PLACES, labelled with its g letter. */
++  readonly place?: boolean;
 +  label: string;
 +}
 +
@@ -187,7 +208,7 @@ index 0000000000..f7053e52d9
 +    const element = document.querySelector(selector);
 +    const rect = element?.getBoundingClientRect();
 +    if (element && rect && onScreen(rect)) {
-+      out.push({ element, rect, label });
++      out.push({ element, rect, label, place: true });
 +      taken.add(element);
 +    }
 +  }
@@ -288,12 +309,7 @@ index 0000000000..f7053e52d9
 +  for (const target of targets) {
 +    const b = document.createElement("b");
 +    b.textContent = target.label;
-+    if (
-+      target.label.length === 1 &&
-+      PLACES.some(([label]) => label === target.label) &&
-+      !target.range
-+    )
-+      b.className = "place";
++    if (target.place) b.className = "place";
 +    b.style.left = `${Math.max(0, Math.round(target.rect.left))}px`;
 +    b.style.top = `${Math.max(0, Math.round(target.rect.top))}px`;
 +    root.append(b);
@@ -408,10 +424,10 @@ index 0000000000..f7053e52d9
 +}
 diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
 new file mode 100644
-index 0000000000..c1537c1188
+index 0000000000..4db8023820
 --- /dev/null
 +++ b/apps/web/src/plutonium/hydraKeys.ts
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,410 @@
 +// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
 +// the g places and z shows, run as Pluto Vim page actions from the composer
 +// (plutoVim.ts), and the same keys when the keyboard isn't in a field.
@@ -428,7 +444,6 @@ index 0000000000..c1537c1188
 +import { isMacPlatform } from "~/lib/utils";
 +import { type RightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 +import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
-+import { buildThreadRouteParams } from "~/threadRoutes";
 +
 +import { toggleFilePane } from "./files/filePanes";
 +import { hintsShowing, showHints } from "./hints";
@@ -488,12 +503,8 @@ index 0000000000..c1537c1188
 +let cycle: { readonly order: readonly string[]; index: number; at: number } | null = null;
 +const CYCLE_MS = 1200;
 +
-+/** The composer's thread is in use now: it goes to the front. */
-+export function noteThreadUsed(router: AnyRouter, threadRef: ScopedThreadRef): void {
-+  const path = router.buildLocation({
-+    to: "/$environmentId/$threadId",
-+    params: buildThreadRouteParams(threadRef),
-+  }).pathname;
++/** The composer's thread is in use now: its address (a thread's, or a draft's) goes to the front. */
++export function noteThreadUsed(path: string): void {
 +  // A thread a Tab run lands on doesn't reorder the run.
 +  if (cycle && performance.now() - cycle.at < CYCLE_MS) return;
 +  const at = recent.indexOf(path);
@@ -829,16 +840,16 @@ index 0000000000..c1537c1188
 +}
 diff --git a/apps/web/src/plutonium/plutoVim.ts b/apps/web/src/plutonium/plutoVim.ts
 new file mode 100644
-index 0000000000..c0ef12d687
+index 0000000000..b0554654fc
 --- /dev/null
 +++ b/apps/web/src/plutonium/plutoVim.ts
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,146 @@
 +// The composer integrates with Plutonium's vim mode (PLUTO_VIM.md, "Pages that integrate"):
 +// it declares its actions in data-pvim-* attributes and runs each pvim:action with its own key
 +// handling, and fills HYDRA_KEYBOARD.md's keys (hydraKeys.ts). Outside insert mode it yields
 +// Space, Backspace and Tab, which the editor would take first; Ctrl+N/P/Y/E while a menu is open.
 +import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
-+import { useRouter } from "@tanstack/react-router";
++import { useRouter, useRouterState } from "@tanstack/react-router";
 +import { useEffect, useState } from "react";
 +
 +import { useOpenLink } from "../browser/useOpenLink";
@@ -883,6 +894,7 @@ index 0000000000..c0ef12d687
 +  );
 +  const commandNames = Object.keys(composer.commands).join(" ");
 +  const router = useRouter();
++  const pathname = useRouterState({ select: (state) => state.location.pathname });
 +  /** Pluto Vim's mode in the editor (pvim:mode): insert mode keeps Space, Backspace and Tab the editor's. */
 +  const [vimMode, setVimMode] = useState<string>("insert");
 +
@@ -895,8 +907,8 @@ index 0000000000..c0ef12d687
 +
 +  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records the thread as used for Tab's recent order when it's shown
 +  useEffect(() => {
-+    if (!embedded) noteThreadUsed(router, threadRef);
-+  }, [embedded, router, threadRef]);
++    if (!embedded) noteThreadUsed(pathname);
++  }, [embedded, pathname]);
 +
 +  const onAction = useStableCallback((event: Event) => {
 +    const el = event.target instanceof Element ? event.target.closest(EDITOR) : null;
