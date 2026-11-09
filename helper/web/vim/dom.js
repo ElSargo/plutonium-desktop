@@ -839,6 +839,45 @@ export function attach(doc = globalThis.document, options = {}) {
     }
   };
 
+  /** The word at a session's cursor, selected: visual mode from it to its end (gv). */
+  const selectWord = (session) => {
+    if (session.mode === "visual" || session.mode === "vline") session.enterMode("normal");
+    if (session.mode === "insert" || session.mode === "replace") session.enterMode("normal");
+    session.feed("v");
+    session.feed("e");
+    stateChanged();
+  };
+
+  /**
+   * A page's own text, to read and select from the keyboard (gw and gv on a
+   * word that isn't in a field): the region it's in (the article, the main
+   * part, else the body) is read-only text for as long as it has the
+   * keyboard, as Hydra's timeline is, with the cursor on the word, and with
+   * `select` the word selected.
+   */
+  const readAt = (range, select) => {
+    const node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+    if (!node) return false;
+    let region = node.closest("[data-pvim-readonly]");
+    if (!region) {
+      region = node.closest("article, main, [role='main']") ?? doc.body;
+      region.setAttribute("data-pvim-readonly", "page");
+      if (!region.hasAttribute("tabindex")) {
+        region.setAttribute("tabindex", "-1");
+        region.setAttribute("data-pvim-tabindex", "");
+        region.style.outline = "none";
+      }
+    }
+    doc.getSelection()?.collapse(range.startContainer, range.startOffset);
+    region.focus({ preventScroll: true });
+    const field = vimField(region);
+    if (!field) return false;
+    const session = sessionOf(field);
+    session.buffer.showCursor?.();
+    if (select) selectWord(session);
+    return true;
+  };
+
   const onFocus = (event) => {
     const el = target(event);
     placeChanged(el);
@@ -855,11 +894,24 @@ export function attach(doc = globalThis.document, options = {}) {
   const onBlur = (event) => {
     const field = vimField(target(event));
     const session = field && sessions.get(field);
+    // A page's text made readable for a moment (readAt) is no field once the keyboard leaves it.
+    if (field?.getAttribute("data-pvim-readonly") === "page") {
+      field.removeAttribute("data-pvim-readonly");
+      if (field.hasAttribute("data-pvim-tabindex")) {
+        field.removeAttribute("tabindex");
+        field.removeAttribute("data-pvim-tabindex");
+      }
+    }
     if (session) {
       // Keys held for a mapping would land wherever focus went: they're dropped.
       session.cancelPending();
       vim.emit("FieldLeave", { session });
     }
+    // Focus went nowhere (no focusin follows: Enter in an address bar, a closed dialog): a typing place
+    // gives back the mode it took, as if the page had the keyboard.
+    queueMicrotask(() => {
+      if (doc.hasFocus() && (!doc.activeElement || doc.activeElement === doc.body)) placeChanged(doc.body);
+    });
     stateChanged();
   };
 
@@ -915,6 +967,9 @@ export function attach(doc = globalThis.document, options = {}) {
     if (session.feed(key)) {
       event.preventDefault();
       event.stopImmediatePropagation();
+    } else if (key === "<Esc>" && field?.getAttribute("data-pvim-readonly") === "page") {
+      // Escape with nothing in progress in a page's text (readAt): back to the page, where j and k scroll.
+      field.blur();
     }
     stateChanged();
   };
@@ -957,7 +1012,8 @@ export function attach(doc = globalThis.document, options = {}) {
       const session = sessionAt(el);
       const detail = {
         mode: vim.mode,
-        sub: session && !session.readonly ? session.displayMode : session?.jump ? "jump" : "normal",
+        // Read-only text has visual mode too; a page session only a jump.
+        sub: session && !session.page ? (session.jump ? "jump" : session.displayMode) : session?.jump ? "jump" : "normal",
         ...placeOf(el),
         site: doc.location?.host ?? "",
         pending: session ? [...session.pending, ...session.typeahead.map((t) => t.key)].join("") : "",
@@ -1064,9 +1120,14 @@ export function attach(doc = globalThis.document, options = {}) {
 
   // A page that integrates sets the mode: pvim:set-mode with { mode } on a field (that field's), or
   // anywhere else (the desktop's).
+  // "visual" on a field: the word at its cursor, selected (gv's labels, from a page that draws them).
   const onSetMode = (event) => {
     const field = vimField(target(event));
     const mode = event.detail?.mode;
+    if (mode === "visual") {
+      if (field) selectWord(sessionOf(field));
+      return;
+    }
     if (mode !== "normal" && mode !== "insert") return;
     if (field) sessionOf(field).enterMode(mode);
     else vim.setMode(mode);
@@ -1105,8 +1166,21 @@ export function attach(doc = globalThis.document, options = {}) {
       return { items: found.items, viewport: found.viewport };
     },
     /** Goes to one of the last hintTargets. */
-    hintGo(id) {
-      return go(doc, hintKept[Number(id)]);
+    hintGo(id, how = "go") {
+      const target = hintKept[Number(id)];
+      if (!target?.el?.isConnected) return false;
+      const select = how === "select";
+      if (!target.range) return go(doc, target);
+      const editable = target.el.closest('input, textarea, [contenteditable=""], [contenteditable="true"]');
+      if (editable) {
+        go(doc, target);
+        const field = vimField(editable);
+        if (select && field) selectWord(sessionOf(field));
+        return true;
+      }
+      // A word in a link or a button: gw clicks it; gv never does.
+      if (!select && target.el.closest("a[href], button, [role='button'], [role='link'], [role='tab']")) return go(doc, target);
+      return readAt(target.range, select);
     },
     /** Uppercase mark `name`, set in this page: focuses its field and moves there (the helper asks). */
     jumpToMark(name, offset) {

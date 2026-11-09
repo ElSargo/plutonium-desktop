@@ -523,6 +523,9 @@ export const PAGE_KEYS = [
   { keys: "L", page: "item.next" },
   { keys: "K", page: "details", text: "word" },
   { keys: "S", page: "jump.significant" },
+  // gw's labels on every word on screen, but a label never clicks: it selects that word (visual mode),
+  // in a field, in Hydra's timeline or in a page's text, to extend and yank.
+  { keys: "gv", page: "jump.select" },
   { keys: "gx", page: "open", text: "target" },
   { keys: "gc", page: "place.composer" },
   { keys: "gm", page: "place.latest" },

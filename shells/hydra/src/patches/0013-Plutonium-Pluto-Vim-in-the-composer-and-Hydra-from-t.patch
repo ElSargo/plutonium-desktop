@@ -27,14 +27,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/web/src/components/chat/ChatComposer.tsx |  12 +
  .../chat/ComposerPendingApprovalActions.tsx   |   2 +
  .../src/components/chat/useChatShortcuts.ts   |  19 +
- apps/web/src/plutonium/ModePill.tsx           | 195 ++++++++
+ apps/web/src/plutonium/ModePill.tsx           | 196 ++++++++
  apps/web/src/plutonium/PlutoniumStatus.tsx    |   2 +
  apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
- apps/web/src/plutonium/hints.ts               | 404 +++++++++++++++++
- apps/web/src/plutonium/hydraKeys.ts           | 422 ++++++++++++++++++
+ apps/web/src/plutonium/hints.ts               | 433 ++++++++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 423 +++++++++++++++++
  apps/web/src/plutonium/plutoVim.ts            | 155 +++++++
  apps/web/src/plutonium/shellKeys.ts           |   6 +
- 10 files changed, 1218 insertions(+), 6 deletions(-)
+ 10 files changed, 1249 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/ModePill.tsx
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
@@ -116,10 +116,10 @@ index 637546f65d..d04cbd346b 100644
      if (embedded) {
 diff --git a/apps/web/src/plutonium/ModePill.tsx b/apps/web/src/plutonium/ModePill.tsx
 new file mode 100644
-index 0000000000..cf092a0328
+index 0000000000..249ce75818
 --- /dev/null
 +++ b/apps/web/src/plutonium/ModePill.tsx
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,196 @@
 +// Plutonium: the keyboard's state in the status cluster (HYDRA_KEYBOARD.md, "One input model"):
 +// the desktop's mode, where the keyboard is, the keys typed so far, a macro recording, and what a
 +// waiting prefix can go on to. From pvim:state (this page's Pluto Vim) and plutonium:pvim-state
@@ -173,6 +173,7 @@ index 0000000000..cf092a0328
 +  "fold.closeAll": "fold all",
 +  "mode.resize": "resize",
 +  "jump.word": "any word on screen",
++  "jump.select": "select a word on screen",
 +  "scroll.top": "top",
 +  open: "open link or file",
 +  insertLast: "where you typed last",
@@ -355,10 +356,10 @@ index c1fcfad0a2..e0904539d6 100644
            </ToggleGroupItem>
 diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
 new file mode 100644
-index 0000000000..9ca79b1820
+index 0000000000..49e1bfc18b
 --- /dev/null
 +++ b/apps/web/src/plutonium/hints.ts
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,433 @@
 +// Plutonium: labels for HYDRA_KEYBOARD.md's jumps (S: what can be clicked or typed into, gw: every
 +// word), here and in the panel's browser tabs (their targets come from Pluto Vim there, through the
 +// helper). Typing a label goes there; while they show, every key is theirs.
@@ -628,45 +629,70 @@ index 0000000000..9ca79b1820
 +  return { host, items };
 +}
 +
-+/** Goes to a target: a field gets the keyboard (a word in it, the cursor), anything else is clicked. */
-+function go(target: Target): void {
++/**
++ * Text Pluto Vim reads for a moment (as it does a page's: dom.js's readAt): the
++ * region a word is in, while it has the keyboard; dom.js drops it after.
++ */
++function readableRegion(element: Element): HTMLElement | null {
++  const existing = element.closest<HTMLElement>("[data-pvim-readonly]");
++  if (existing) return existing;
++  const region =
++    element.closest<HTMLElement>("main, [role='main'], section, aside, nav, header") ??
++    element.parentElement;
++  if (!region) return null;
++  region.setAttribute("data-pvim-readonly", "page");
++  if (!region.hasAttribute("tabindex")) {
++    region.setAttribute("tabindex", "-1");
++    region.setAttribute("data-pvim-tabindex", "");
++    region.style.outline = "none";
++  }
++  return region;
++}
++
++/**
++ * Goes to a target: a field gets the keyboard (a word in it, the cursor), text
++ * gets a cursor to read with, anything else is clicked. `select` (gv): a word
++ * is selected in visual mode, and nothing is ever clicked.
++ */
++function go(target: Target, select = false): void {
 +  const { element, remote } = target;
 +  if (remote) {
 +    // The tab takes the keyboard, then goes to its target (Pluto Vim there clicks, focuses or places the cursor).
 +    remote.embed.focus();
 +    document.dispatchEvent(
-+      new CustomEvent("pvim:hint-go", { detail: { targetId: remote.targetId, id: remote.id } }),
++      new CustomEvent("pvim:hint-go", {
++        detail: { targetId: remote.targetId, id: remote.id, how: select ? "select" : "go" },
++      }),
 +    );
 +    return;
 +  }
 +  if (!element) return;
 +  const editable = element.closest<HTMLElement>('[contenteditable="true"], textarea, input');
 +  if (target.range) {
-+    // A word in the timeline: the keyboard goes there, with the cursor on the word, to read and yank.
-+    const timeline = element.closest<HTMLElement>(TIMELINE) ? prepareTimeline() : null;
-+    if (timeline && !editable) {
-+      window.getSelection()?.collapse(target.range.startContainer, target.range.startOffset);
-+      timeline.focus({ preventScroll: true });
-+      return;
-+    }
++    const place = (into: HTMLElement) => {
++      window.getSelection()?.collapse(target.range!.startContainer, target.range!.startOffset);
++      if (into !== editable) into.focus({ preventScroll: true });
++      // The word, selected (Pluto Vim's visual mode over it).
++      if (select)
++        into.dispatchEvent(
++          new CustomEvent("pvim:set-mode", { detail: { mode: "visual" }, bubbles: true }),
++        );
++    };
 +    if (editable) {
 +      editable.focus();
-+      const selection = window.getSelection();
-+      selection?.collapse(target.range.startContainer, target.range.startOffset);
-+      return;
++      return place(editable);
 +    }
 +    const clickable = element.closest<HTMLElement>(
 +      "a[href], button, [role='button'], [role='tab'], [role='treeitem']",
 +    );
-+    if (clickable) {
++    if (clickable && !select) {
 +      clickable.focus({ preventScroll: true });
 +      clickable.click();
 +      return;
 +    }
-+    // Plain text: the word, selected, ready to copy.
-+    const selection = window.getSelection();
-+    selection?.removeAllRanges();
-+    selection?.addRange(target.range);
++    // Text (the timeline, or any other): the keyboard goes there, with the cursor on the word, to read and yank.
++    const region = element.closest(TIMELINE) ? prepareTimeline() : readableRegion(element);
++    if (region) place(region);
 +    return;
 +  }
 +  const html = element as HTMLElement & { focusWindow?: () => void };
@@ -690,7 +716,11 @@ index 0000000000..9ca79b1820
 + * Shows labels for `kind`, and takes every key until one is typed (go there),
 + * Escape, or a key no label starts with. `onEnd` runs when they're gone.
 + */
-+export async function showHints(kind: "significant" | "word", onEnd?: () => void): Promise<void> {
++export async function showHints(
++  kind: "significant" | "word" | "select",
++  onEnd?: () => void,
++): Promise<void> {
++  const select = kind === "select";
 +  active?.cancel();
 +  // While the tabs answer, keys typed already are the labels' (they're drawn a moment later).
 +  const early: KeyboardEvent[] = [];
@@ -702,7 +732,7 @@ index 0000000000..9ca79b1820
 +  window.addEventListener("keydown", hold, true);
 +  active = { cancel: () => window.removeEventListener("keydown", hold, true) };
 +  const own = kind === "significant" ? significantTargets() : wordTargets();
-+  const targets = [...own, ...(await tabTargets(kind))];
++  const targets = [...own, ...(await tabTargets(select ? "word" : kind))];
 +  window.removeEventListener("keydown", hold, true);
 +  if (targets.length === 0) {
 +    active = null;
@@ -742,7 +772,7 @@ index 0000000000..9ca79b1820
 +    const exact = matching.find((t) => t.label === typed);
 +    if (exact && matching.length === 1) {
 +      end();
-+      go(exact);
++      go(exact, select);
 +      return;
 +    }
 +    for (const [target, el] of items) {
@@ -765,10 +795,10 @@ index 0000000000..9ca79b1820
 +}
 diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
 new file mode 100644
-index 0000000000..b72db495c2
+index 0000000000..5b294167dc
 --- /dev/null
 +++ b/apps/web/src/plutonium/hydraKeys.ts
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,423 @@
 +// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
 +// the g places and z shows, run as Pluto Vim page actions, declared on the document so they
 +// work wherever the keyboard is in Hydra: the composer (plutoVim.ts), the timeline, or off a
@@ -1022,6 +1052,7 @@ index 0000000000..b72db495c2
 +  "item.next": () => runCommand("thread.next"),
 +  "jump.significant": () => paused((done) => showHints("significant", done)),
 +  "jump.word": () => paused((done) => showHints("word", done)),
++  "jump.select": () => paused((done) => showHints("select", done)),
 +  open: ({ text }, { openLink, threadRef }) => {
 +    const target = text?.replace(/[.,;:!?)]+$/, "") ?? "";
 +    if (!target) return;

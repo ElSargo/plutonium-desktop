@@ -904,6 +904,8 @@ describe("normal mode by default, read-only fields, gw, pages' modes and relayed
     await type(session, buffer, "gw");
     assert.deepEqual(relayed, ["jump.word"]);
     assert.equal(session.jump, null, "no labels of the field's own");
+    await type(session, buffer, "gv");
+    assert.deepEqual(relayed, ["jump.word", "jump.select"], "gv: the labels that select");
   });
 
   test("gw alone is the page's jump.word where it has one", async () => {
