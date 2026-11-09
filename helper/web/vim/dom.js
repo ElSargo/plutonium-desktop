@@ -74,6 +74,33 @@ function setCaret(el, shape, mode) {
   if (css?.supports?.("caret-shape", shape)) el.style.setProperty("caret-shape", shape);
 }
 
+/**
+ * Where `count` display lines down (dir 1) or up (-1) from a caret is, by the
+ * browser's own line movement (Selection.modify, which works in text
+ * controls too), in `offsetOf()`'s terms; null when there's no line there
+ * (on the last line the browser goes to its end instead: still the same line).
+ * `place(offset)` puts a collapsed caret; the caller puts its selection back.
+ * At a soft wrap the end of a line and the start of the next are one offset:
+ * { end: true } says the browser left the caret at the end of the line.
+ */
+function displayLine(sel, place, offsetOf, offset, dir, count) {
+  place(offset);
+  sel.modify("move", "backward", "lineboundary");
+  const from = offsetOf();
+  place(offset);
+  for (let k = 0; k < count; k++) sel.modify("move", dir > 0 ? "forward" : "backward", "line");
+  const at = offsetOf();
+  if (at == null || at === offset) return null;
+  sel.modify("move", "backward", "lineboundary");
+  const lineStart = offsetOf();
+  if (lineStart === from) return null;
+  if (lineStart == null || lineStart >= at) return { offset: at, end: false };
+  // Mid-line, or the end of a wrapped line: placed afresh, a caret at a soft wrap starts the next line.
+  place(at);
+  sel.modify("move", "backward", "lineboundary");
+  return { offset: at, end: offsetOf() === at };
+}
+
 function insertText(doc, insert, collapsed) {
   if (insert === "") {
     if (!collapsed) doc.execCommand("delete");
@@ -115,6 +142,19 @@ export class TextFieldBuffer {
 
   undo() { this.el.ownerDocument.execCommand("undo"); }
   redo() { this.el.ownerDocument.execCommand("redo"); }
+
+  /** j and k's display lines (vim.opt.displayLines): a textarea's, as it wraps; undefined for an <input>. */
+  displayLine(offset, dir, count) {
+    const { el } = this;
+    const sel = el.ownerDocument.getSelection?.();
+    if (el.tagName !== "TEXTAREA" || !sel?.modify || el.ownerDocument.activeElement !== el) return undefined;
+    const { selectionStart, selectionEnd, selectionDirection } = el;
+    try {
+      return displayLine(sel, (at) => el.setSelectionRange(at, at), () => el.selectionEnd, offset, dir, count);
+    } finally {
+      el.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+    }
+  }
 
   setCaret(shape, mode) { setCaret(this.el, shape, mode); }
 }
@@ -262,6 +302,21 @@ export class EditableBuffer {
     if (extend && sel.rangeCount) sel.extend(node, nodeOffset);
     else sel.collapse(node, nodeOffset);
     this.#selectionChanged();
+  }
+
+  /** j and k's display lines (vim.opt.displayLines), as the editing host wraps them. */
+  displayLine(offset, dir, count) {
+    const sel = this.#doc().getSelection();
+    if (!sel?.modify || !sel.rangeCount || !this.root.contains(sel.anchorNode)) return undefined;
+    const model = editableModel(this.root);
+    const saved = [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset];
+    const place = (at) => sel.collapse(...this.#point(model, at));
+    const offsetOf = () => (this.root.contains(sel.focusNode) ? this.#offset(model, sel.focusNode, sel.focusOffset) : null);
+    try {
+      return displayLine(sel, place, offsetOf, offset, dir, count);
+    } finally {
+      sel.setBaseAndExtent(...saved);
+    }
   }
 
   async edit({ from, to }, insert) {

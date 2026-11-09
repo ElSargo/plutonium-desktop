@@ -187,6 +187,55 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal((await state("#ta")).text, "hello world");
   });
 
+  test("Escape that leaves insert mode is vim's alone; one vim has no use for is the page's", async () => {
+    await fresh("#ta", "");
+    await page.evaluate(() => { (window as any).escapes.length = 0; });
+    await keys("#ta", "hello", "Escape");
+    assert.equal((await state("#ta")).mode, "normal");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [], "the page never saw the first Escape");
+    await keys("#ta", "v", "Escape");
+    assert.equal((await state("#ta")).mode, "normal");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [], "nor the one leaving visual mode");
+    await keys("#ta", "Escape");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [false], "in normal mode it's the page's, untouched");
+  });
+
+  test("a wrapping textarea: j and k move by display lines, gj and gk by real ones, dj takes real lines", async () => {
+    const long = "word ".repeat(24).trim(); // 119 characters: three lines or more at 40 columns
+    await fresh("#ta", `${long}\nsecond\nthird`);
+    await keys("#ta", "Escape", "g", "g");
+    assert.equal((await state("#ta")).cursor, 0);
+    await keys("#ta", "j");
+    let s = await state("#ta");
+    assert.ok(s.cursor > 20 && s.cursor < 60, `j stayed in the wrapped line (at ${s.cursor})`);
+    await keys("#ta", "k");
+    assert.equal((await state("#ta")).cursor, 0, "k went back up");
+    await keys("#ta", "g", "j");
+    assert.equal((await state("#ta")).cursor, long.length + 1, "gj went to the next real line");
+    await keys("#ta", "g", "k");
+    assert.equal((await state("#ta")).cursor, 0, "gk back to the first");
+    await keys("#ta", "d", "j");
+    assert.equal((await state("#ta")).text, "third", "dj deleted two real lines");
+    await keys("#ta", "u", "g", "g", "5", "j");
+    s = await state("#ta");
+    assert.ok(s.text.startsWith(long) && s.cursor > long.length + 1, `5j crossed into later lines (at ${s.cursor})`);
+  });
+
+  test("display lines off (vim.opt.displayLines = false): j is a real line, gj a display line", async () => {
+    await page.evaluate(() => { (window as any).pvim.vim.opt.displayLines = false; });
+    try {
+      const long = "word ".repeat(24).trim();
+      await fresh("#ta", `${long}\nsecond`);
+      await keys("#ta", "Escape", "g", "g", "j");
+      assert.equal((await state("#ta")).cursor, long.length + 1);
+      await keys("#ta", "g", "g", "g", "j");
+      const s = await state("#ta");
+      assert.ok(s.cursor > 20 && s.cursor < 60, `gj stayed in the wrapped line (at ${s.cursor})`);
+    } finally {
+      await page.evaluate(() => { (window as any).pvim.vim.opt.displayLines = true; });
+    }
+  });
+
   test("a textarea: cw then u undoes the whole change; edits are real input events", async () => {
     await fresh("#ta", "one two");
     await page.evaluate(() => { (window as any).inputs.length = 0; });
@@ -302,6 +351,29 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal(await page.evaluate(() => (document.getElementById("pw") as HTMLInputElement).value), "x");
   });
 
+  test("a wrapping contenteditable: j moves by display lines, gj by blocks", async () => {
+    const long = "word ".repeat(24).trim();
+    await page.evaluate((long) => {
+      const el = document.getElementById("ce")!;
+      el.style.width = "20em";
+      el.innerHTML = `<p>${long}</p><p>after</p>`;
+      el.focus();
+      getSelection()!.collapse(el.querySelector("p")!.firstChild, 0);
+    }, long);
+    try {
+      await keys("#ce", "Escape");
+      await keys("#ce", "j");
+      const s = await state("#ce");
+      assert.ok(s.cursor > 5 && s.cursor < long.length, `j stayed in the wrapped paragraph (at ${s.cursor})`);
+      await keys("#ce", "k");
+      assert.equal((await state("#ce")).cursor, 0);
+      await keys("#ce", "g", "j");
+      assert.equal((await state("#ce")).cursor, long.length + 1, "gj went to the next block");
+    } finally {
+      await page.evaluate(() => { document.getElementById("ce")!.style.width = ""; });
+    }
+  });
+
   test("a contenteditable: blocks are lines", async () => {
     await page.evaluate(() => {
       const el = document.getElementById("ce")!;
@@ -336,10 +408,10 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     const pmText = () => page.evaluate(() => (window as any).pmText());
     assert.equal(await pmText(), "alpha beta\ngamma");
     const host = "#pm > .ProseMirror";
-    // ProseMirror's base keymap takes Escape (select the parent node): the page's key wins, so Ctrl+[.
+    // ProseMirror's base keymap takes Escape (select the parent node): vim claims it first, in insert mode.
     await keys(host, "Escape");
-    assert.equal((await state(host)).mode, "insert");
-    await keys(host, "Control+BracketLeft");
+    assert.equal((await state(host)).mode, "normal");
+    await keys(host, "i", "Control+BracketLeft");
     assert.equal((await state(host)).mode, "normal");
     await keys(host, "d", "w");
     assert.equal(await pmText(), "beta\ngamma");

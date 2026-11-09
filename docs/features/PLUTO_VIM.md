@@ -32,8 +32,8 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
 ## Principles
 
 1. **Vim yields to the page.** A page's keydown handlers see every key first. Vim only acts where Blink would otherwise insert text or run a default editing action. Editors with their own key handling (Monaco, CodeMirror, xterm.js) keep working. A page that integrates can give keys up to the engine (Pages that integrate, below).
-2. **Fields start in insert mode,** unless you choose otherwise for a field, a site or a page that integrates (Pages that integrate, below). Typing into a search box never changes. Normal mode starts with Caps Lock or Ctrl+[, which are Pluto Vim's before the page, or with Escape where the page leaves it alone.
-3. **Escape in normal mode belongs to the page.** The first Escape enters normal mode; the second closes the dialog or cancels the edit, as the page expects.
+2. **Fields start in insert mode,** unless you choose otherwise for a field, a site or a page that integrates (Pages that integrate, below). Typing into a search box never changes. Normal mode starts with Escape, Caps Lock or Ctrl+[, which are Pluto Vim's before the page (in single-line inputs Escape stays the page's).
+3. **Escape in normal mode belongs to the page.** The first Escape enters normal mode, and only that: the page never sees it. The second closes the dialog or cancels the edit, as the page expects. Escape is claimed before the page, and passed on whenever vim has no use for it (normal mode with nothing pending, a single-line input).
 4. **Edits go through the editor, not around it.** Operators run Blink's editing commands, so pages get real `beforeinput` and `input` events (`deleteWordForward`, `historyUndo`) and frameworks (React, ProseMirror, Lexical, Tiptap) keep their own models. Native apps get edits through text-input-v3 and their own undo.
 5. **Passwords are never touched.** Password fields (web) and fields marked `password`, `sensitive_data` or `hidden_text` (text-input-v3) are always in insert mode, and no config can change that.
 6. **The decision to take a key is synchronous; its effect may not be.** As in KEYS.md: on the web the engine decides in the renderer with no IPC; for native apps the key is held for at most a few milliseconds. A paste from the register store may land a moment after its key.
@@ -56,7 +56,7 @@ It sits next to [KEYS.md](KEYS.md): the desktop's keymap decides what Super comb
 Insert mode is the field's own typing plus a few of vim's insert-mode keys, so registers are within reach without leaving it. They work in every field Pluto Vim is on in, single-line inputs included:
 - **Ctrl+R {register}** puts a register (`Ctrl+R +`, `Ctrl+R a`, `Ctrl+R #1`); Ctrl+R Ctrl+R puts it literally, as in vim.
 - **Ctrl+O** runs one normal-mode command and comes back to insert mode (`Ctrl+O "ayiw`, `Ctrl+O p`).
-- **Caps Lock** and **Ctrl+[** enter normal mode, before the page. In multi-line fields Escape does too, where the page doesn't take it first; in single-line inputs Escape stays the page's (it clears search boxes and closes autocompletes).
+- **Escape**, **Caps Lock** and **Ctrl+[** enter normal mode, before the page. In single-line inputs Escape stays the page's (it clears search boxes and closes autocompletes).
 - Ctrl+W and Ctrl+U, as in the first version above.
 
 Each one is an ordinary insert-mode mapping, so `init.js` can move or remove it. Two limits:
@@ -273,7 +273,7 @@ export default function setup(vim) {
 
 | | |
 |---|---|
-| `vim.opt` | Options: `startInInsert`, `inputs` (`"manual"`, `"on"`, `"off"`), `clipboard` (`""`, `"unnamedplus"`), `shiftwidth`, `claim`, `timeoutlen`, `mapleader`. Each is checked as it's set; `clipboardHistory`, `whichwrap` and `iskeyword` come with later steps |
+| `vim.opt` | Options: `startInInsert`, `inputs` (`"manual"`, `"on"`, `"off"`), `clipboard` (`""`, `"unnamedplus"`), `shiftwidth`, `claim` (Escape and Ctrl+[ by default), `displayLines` (default true: j and k move by the lines a web field shows, gj and gk by real lines; with an operator, real lines), `timeoutlen`, `mapleader`. Each is checked as it's set; `clipboardHistory`, `whichwrap` and `iskeyword` come with later steps |
 | `vim.keymap.set(modes, lhs, rhs, opts)` / `.del` | Mappings, in neovim's notation (`<Esc>`, `<C-w>`, `<leader>`). Modes `"n"`, `"i"`, `"v"` (`"x"` is `"v"`, `""` is both), or a list. `rhs` is keys or a function; `<Cmd>Name args<CR>` runs a command. `opts`: `remap` (default false, as in neovim), `expr` (the function's result is the keys), `nowait`, `desc` |
 | `vim.motion(lhs, fn, { kind, arg })` | `fn(buf, { count, hasCount, arg, operator })` returns where the cursor goes, or null. Works after operators too, by `kind`: `"exclusive"`, `"inclusive"`, `"linewise"` |
 | `vim.operator(lhs, fn)` | `fn(buf, range, { count, register })` changes the range with `buf.edit()`. Works with motions, text objects, its doubled form (`gqq`), visual mode and `.` |
@@ -442,6 +442,8 @@ A Plutonium shell has no Caps Lock. Ash makes the key an Escape that keeps its c
 - 2026-11-09: searches and `:s` take JavaScript regular expressions, not vim's: it's the language `init.js` is written in, and a second regex dialect in the engine would be a large, buggy translation. Replacements keep vim's `&` and `\1`.
 - 2026-11-09: clipboard history is watched only while `vim.opt.clipboardHistory` is on, and kept in the helper's memory, like the registers.
 - 2026-11-08: native motions are best effort, balancing accuracy against round trips: one batch, one correction, a time budget.
+- 2026-11-09: Escape is claimed before the page, as Ctrl+[ is (`vim.opt.claim`), but only taken when vim acts on it: leaving insert, visual or replace mode, or cancelling a pending command or the `:` line. Before, the page saw it first, and pages that act on Escape without preventing its default (chat pages stop a reply or blur the field) did so as vim entered normal mode. An Escape in normal mode with nothing pending, and in single-line inputs, still goes on to the page. ProseMirror's own Escape (select the parent node) is no longer reachable in insert mode.
+- 2026-11-09: j and k move by display lines in web fields (`vim.opt.displayLines`, on by default), gj and gk by real ones: prose wraps far more than it breaks lines. The browser does the moving (`Selection.modify(…, "line")`, textareas included), so it's exact for any font. A run of j and k is counted from where it started, as the browser's arrow keys keep their column, so k after j comes back exactly. With an operator j and k stay real lines (`dj` deletes two lines). Native and AT-SPI fields have no layout to ask, so they keep real lines.
 
 ## Open questions
 

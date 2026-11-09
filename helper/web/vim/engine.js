@@ -28,11 +28,20 @@ export const DEFAULT_OPTIONS = {
   shiftwidth: 2,
   /**
    * Keys Pluto Vim takes before the page's own handlers in a field it's on
-   * in: Ctrl+[, so normal mode is always reachable, even where the page
-   * takes Escape (ProseMirror's keymap, Hydra's composer) and Ctrl+[ (T3's
-   * navigation.back). Every other key is the page's first (Principle 1).
+   * in: Ctrl+[ and Escape, so normal mode is always one key away, and the
+   * Escape that leaves insert or visual mode (or cancels a pending command)
+   * never reaches the page too: ProseMirror's keymap, Hydra's composer and
+   * chat pages (stop, blur) take it. An Escape vim has no use for (normal
+   * mode, nothing pending; a single-line input) still goes on to the page
+   * (Principle 3). Every other key is the page's first (Principle 1).
    */
-  claim: ["<C-[>"],
+  claim: ["<C-[>", "<Esc>"],
+  /**
+   * j and k move by display lines (gj and gk by real ones) where the field
+   * can say where its lines wrap: web pages' fields. With an operator (dj,
+   * yk) they're real lines, as in vim.
+   */
+  displayLines: true,
   /** How long a key that starts a mapping waits for the rest of it, in milliseconds. */
   timeoutlen: 1000,
   /** What <leader> stands for in a mapping, when it's made. */
@@ -591,7 +600,11 @@ export class Session {
     if (!field?.actions) return false;
     if (this.runAction(key === "j" ? "menu.next" : "menu.prev")) return true;
     const { text, cursor } = this.#read();
-    const edge = key === "k" ? T.lineStart(text, cursor) === 0 : text.indexOf("\n", cursor) === -1;
+    // The first or last line the field shows, with display lines; else the first or last real line.
+    const display = this.vim.opt.displayLines && typeof this.buffer.displayLine === "function"
+      ? this.buffer.displayLine(cursor, key === "j" ? 1 : -1, 1) : undefined;
+    const edge = display !== undefined ? display === null
+      : key === "k" ? T.lineStart(text, cursor) === 0 : text.indexOf("\n", cursor) === -1;
     return edge && this.runAction(key === "j" ? "history.next" : "history.prev");
   }
 
