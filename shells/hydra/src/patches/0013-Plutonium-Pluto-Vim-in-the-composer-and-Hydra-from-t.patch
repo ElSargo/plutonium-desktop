@@ -30,11 +30,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/web/src/plutonium/ModePill.tsx           | 196 ++++++++
  apps/web/src/plutonium/PlutoniumStatus.tsx    |   2 +
  apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
- apps/web/src/plutonium/hints.ts               | 433 ++++++++++++++++++
+ apps/web/src/plutonium/hints.ts               | 434 ++++++++++++++++++
  apps/web/src/plutonium/hydraKeys.ts           | 423 +++++++++++++++++
  apps/web/src/plutonium/plutoVim.ts            | 155 +++++++
  apps/web/src/plutonium/shellKeys.ts           |   6 +
- 10 files changed, 1249 insertions(+), 6 deletions(-)
+ 10 files changed, 1250 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/ModePill.tsx
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
@@ -356,10 +356,10 @@ index c1fcfad0a2..e0904539d6 100644
            </ToggleGroupItem>
 diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
 new file mode 100644
-index 0000000000..49e1bfc18b
+index 0000000000..699a0b0dc8
 --- /dev/null
 +++ b/apps/web/src/plutonium/hints.ts
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,434 @@
 +// Plutonium: labels for HYDRA_KEYBOARD.md's jumps (S: what can be clicked or typed into, gw: every
 +// word), here and in the panel's browser tabs (their targets come from Pluto Vim there, through the
 +// helper). Typing a label goes there; while they show, every key is theirs.
@@ -545,7 +545,8 @@ index 0000000000..49e1bfc18b
 +      if (detail?.id !== id) return;
 +      done(detail.tabs ?? []);
 +    };
-+    const timer = setTimeout(() => done([]), 300);
++    // A long page's words take a moment to gather (keys typed meanwhile wait for the labels).
++    const timer = setTimeout(() => done([]), 1500);
 +    const done = (value: readonly TabHints[]) => {
 +      clearTimeout(timer);
 +      document.removeEventListener("pvim:hint-targets", onReply);
