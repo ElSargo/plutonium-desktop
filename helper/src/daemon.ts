@@ -2283,6 +2283,21 @@ export class Daemon {
     if (method === "GET" && path === "/v1/shells") {
       return sendJson(response, 200, this.options.shells?.status() ?? []);
     }
+    // A website's own icon (src/siteIcons.ts): a page can't always show it itself.
+    // Before the site extensions' routes, which take /v1/sites/<name> for a site.
+    if (method === "GET" && path === "/v1/sites/icon") {
+      const found = await this.siteIcons.icon(url.searchParams.get("url") ?? "");
+      if (!found) throw new HttpError(404, "No icon.");
+      // A site's SVG is the site's: nothing in it runs, should it be opened here.
+      response.writeHead(200, {
+        "Content-Type": found.contentType,
+        "Cache-Control": "max-age=3600",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.end(found.data);
+      return;
+    }
     // Site extensions (SITE_EXTENSIONS.md).
     if (path === "/v1/sites" || path.startsWith("/v1/sites/")) {
       if (!this.sites) throw new HttpError(501, "Site extensions need the browser's DevTools (and PLUTONIUM_SITES isn't 0).");
@@ -2415,20 +2430,6 @@ export class Daemon {
       const found = this.apps.icon(decodeURIComponent(icon[1]!));
       if (!found) throw new HttpError(404, "No icon.");
       response.writeHead(200, { "Content-Type": found.contentType, "Cache-Control": "max-age=3600" });
-      response.end(found.data);
-      return;
-    }
-    // A website's own icon (src/siteIcons.ts): a page can't always show it itself.
-    if (method === "GET" && path === "/v1/sites/icon") {
-      const found = await this.siteIcons.icon(url.searchParams.get("url") ?? "");
-      if (!found) throw new HttpError(404, "No icon.");
-      // A site's SVG is the site's: nothing in it runs, should it be opened here.
-      response.writeHead(200, {
-        "Content-Type": found.contentType,
-        "Cache-Control": "max-age=3600",
-        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
-        "X-Content-Type-Options": "nosniff",
-      });
       response.end(found.data);
       return;
     }

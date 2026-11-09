@@ -255,6 +255,13 @@ describe("helper end to end", () => {
     assert.equal(status, 403);
   });
 
+  test("the site icon route isn't taken for a site extension named icon", async () => {
+    const port = (daemon as unknown as { options: { port: number } }).options.port;
+    // Nothing listens on port 1: the icon route answers its own 404, not the sites routes'.
+    const reply = await shellRequest(port, "GET", `/v1/sites/icon?url=${encodeURIComponent("http://127.0.0.1:1/")}`);
+    assert.deepEqual(reply, { status: 404, body: { error: "No icon." } });
+  });
+
   test("the MCP server initializes and lists its tools", async () => {
     const init = (await agent.request("initialize", { protocolVersion: "2025-06-18" })) as {
       result: { protocolVersion: string; capabilities: unknown };
