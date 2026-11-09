@@ -77,7 +77,7 @@ Folded from:
  apps/web/src/plutonium/importTab.ts           |   67 +
  apps/web/src/plutonium/openedItems.test.ts    |  176 +++
  apps/web/src/plutonium/openedItems.ts         |  255 ++++
- apps/web/src/plutonium/panelKeys.ts           |  294 ++++
+ apps/web/src/plutonium/panelKeys.ts           |  295 ++++
  apps/web/src/plutonium/remoteWindows.test.ts  |   64 +
  apps/web/src/plutonium/remoteWindows.ts       |  187 +++
  apps/web/src/plutonium/threadTag.ts           |   41 +
@@ -87,7 +87,7 @@ Folded from:
  apps/web/src/rightPanelStore.test.ts          |   26 +-
  apps/web/src/rightPanelStore.ts               |   79 +-
  .../src/shortcuts/commandPaletteCommands.ts   |    4 +-
- 56 files changed, 6750 insertions(+), 88 deletions(-)
+ 56 files changed, 6751 insertions(+), 88 deletions(-)
  create mode 100644 apps/web/src/plutonium/AppLauncher.tsx
  create mode 100644 apps/web/src/plutonium/PlutoniumWindows.tsx
  create mode 100644 apps/web/src/plutonium/RemoteWindowView.tsx
@@ -6673,10 +6673,10 @@ index 0000000000..720579de8a
 +}
 diff --git a/apps/web/src/plutonium/panelKeys.ts b/apps/web/src/plutonium/panelKeys.ts
 new file mode 100644
-index 0000000000..3d85981302
+index 0000000000..e8cd0a8fd1
 --- /dev/null
 +++ b/apps/web/src/plutonium/panelKeys.ts
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,295 @@
 +// Plutonium: keyboard control of the right panel's tabs (Alt+1…9, Ctrl+Tab,
 +// Ctrl+Shift+Tab, Ctrl+T for a new browser tab) and the dock (Super+1…9,
 +// dock.ts), and moving keyboard focus into a tab's content (an app's window,
@@ -6724,6 +6724,7 @@ index 0000000000..3d85981302
 +
 +const CODE_BY_KEY: Readonly<Record<string, string>> = {
 +  " ": "Space",
++  space: "Space",
 +  tab: "Tab",
 +  enter: "Enter",
 +  escape: "Escape",
