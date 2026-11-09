@@ -791,3 +791,89 @@ describe("pages fill keys", () => {
     await expectKeys("a|bc", "gtzaZ", "a|bc");
   });
 });
+
+// HYDRA_KEYBOARD.md: what came of trying the first version.
+describe("normal mode by default, read-only fields, gw, pages' modes and relayed keys", () => {
+  test("fields start in normal mode by default; single-line inputs in insert mode", async () => {
+    const vim = new Vim();
+    const a = vim.attach(field("|abc"));
+    const b = vim.attach(field("|abc", { singleLine: true }));
+    await a.idle();
+    assert.equal(a.mode, "normal");
+    assert.equal(b.mode, "insert");
+  });
+
+  test("gw: labels every word of the field, and as an operator's motion takes the word it lands on", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const seen: any[] = [];
+    vim.on("JumpLabels", ({ targets }: any) => seen.push(targets));
+    const buffer = field("|one two three four");
+    const session = vim.attach(buffer);
+    await session.idle();
+    await type(session, buffer, "ygw");
+    const targets = seen.at(-1);
+    assert.deepEqual(targets.map((t: any) => t.offset), [4, 8, 14]);
+    const three = targets.find((t: any) => t.offset === 8).label;
+    await type(session, buffer, three);
+    assert.equal(seen.at(-1), null);
+    await type(session, buffer, "$p");
+    assert.equal(mark(buffer), "one two three fourone two thre|e");
+    // Alone it moves; in visual mode it extends.
+    await type(session, buffer, "0gw");
+    await type(session, buffer, seen.at(-1).find((t: any) => t.offset === 4).label);
+    assert.equal(buffer.cursor, 4);
+  });
+
+  test("gw alone is the page's jump.word where it has one", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const buffer = field("|a b");
+    const ran: string[] = [];
+    buffer.field = { ...buffer.field, actions: () => new Set(["jump.word"]), action: (name: string) => ran.push(name) };
+    const session = vim.attach(buffer);
+    await session.idle();
+    await type(session, buffer, "gw");
+    assert.deepEqual(ran, ["jump.word"]);
+  });
+
+  test("a read-only field: motions, visual mode and yanks; changes do nothing; i is the page's insert", async () => {
+    const vim = new Vim({ opt: { startInInsert: true } });
+    const buffer = field("one |two three");
+    buffer.caps = { ...buffer.caps, readonly: true };
+    const ran: string[] = [];
+    buffer.field = { ...buffer.field, actions: () => new Set(["insert"]), action: (name: string) => ran.push(name) };
+    const session = vim.attach(buffer);
+    await session.idle();
+    assert.equal(session.mode, "normal", "never insert mode");
+    await type(session, buffer, "dwxcw");
+    assert.equal(buffer.value, "one two three");
+    assert.equal(session.mode, "normal");
+    await type(session, buffer, "yiw");
+    assert.equal((await vim.registers.get('"')).text, "two");
+    await type(session, buffer, "i");
+    assert.deepEqual(ran, ["insert", "insert"], "cw and i ask the page");
+  });
+
+  test("a page sets the mode (enterMode)", async () => {
+    const vim = new Vim({ opt: { startInInsert: true } });
+    const buffer = field("ab|");
+    const session = vim.attach(buffer);
+    await session.idle();
+    session.enterMode("normal");
+    await session.idle();
+    assert.equal(session.mode, "normal");
+    session.enterMode("insert");
+    await session.idle();
+    assert.equal(session.mode, "insert");
+  });
+
+  test("a place or a show the field's page doesn't have is relayed (PageKey); a slot it doesn't fill isn't", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const relayed: string[] = [];
+    vim.on("PageKey", ({ name }: any) => relayed.push(name));
+    const buffer = field("|abc");
+    const session = vim.attach(buffer);
+    await session.idle();
+    await type(session, buffer, "gtztSHgx");
+    assert.deepEqual(relayed, ["place.terminal", "show.terminal", "jump.significant", "open"]);
+  });
+});

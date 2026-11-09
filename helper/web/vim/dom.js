@@ -16,6 +16,7 @@
 // page's own world).
 
 import { Vim } from "./engine.js";
+import { PAGE_KEYS } from "./commands.js";
 import { keyFromEvent, normalizeKey } from "./keys.js";
 
 /** <input> types with a text selection (password is never vim's: Principle 5). */
@@ -24,12 +25,21 @@ const TEXT_INPUTS = new Set(["text", "search", "url", "tel"]);
 /** Fields with key handling of their own, which keep it. */
 const OWN_KEYS = '[data-pvim="off"], .monaco-editor, .cm-editor, .xterm';
 
+/** Off a field: the desktop's keys a page passes on (its places, shows and jumps), as typed → action. */
+const OFF_FIELD_KEYS = new Map([
+  ...PAGE_KEYS.filter((e) => /^(place|show|jump)\./.test(e.page) && !e.keys.includes(" ")).map((e) => [e.keys, e.page]),
+  ["gw", "jump.word"],
+  ["gi", "place.composerInsert"],
+]);
+
 const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
 
 /** The field a key or focus at `target` belongs to (an editing host, for contenteditable), or null. */
 export function fieldOf(target) {
   if (!target || target.nodeType !== 1) return null;
   if (target.closest(OWN_KEYS)) return null;
+  // A region the page shows as text to read (Hydra's timeline), while it has the keyboard itself.
+  if (target.hasAttribute("data-pvim-readonly")) return target;
   const view = target.ownerDocument.defaultView;
   if (target instanceof view.HTMLTextAreaElement) return hidden(target) || secret(target) ? null : target;
   if (target instanceof view.HTMLInputElement) return TEXT_INPUTS.has(target.type) && !secret(target) ? target : null;
@@ -488,7 +498,100 @@ async function settled() {
 
 /** The Buffer for a field fieldOf() returned. */
 export function bufferFor(el) {
+  if (el.hasAttribute("data-pvim-readonly")) return new ReadOnlyBuffer(el);
   return el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? new TextFieldBuffer(el) : new EditableBuffer(el);
+}
+
+// ── A read-only region ───────────────────────────────────────────────────
+
+/**
+ * Text a page shows to read, not to edit (data-pvim-readonly, focusable:
+ * Hydra's timeline). The cursor is the document's selection inside it, which
+ * a non-editable region doesn't draw, so it's drawn here; visual mode is the
+ * selection itself, and y copies it. Edits do nothing (the engine refuses
+ * them first).
+ */
+export class ReadOnlyBuffer extends EditableBuffer {
+  constructor(root) {
+    super(root);
+    this.caps = { ...this.caps, readonly: true, undo: "none" };
+    this.caretBox = null;
+  }
+
+  text() {
+    const snap = super.text();
+    // Nothing chosen in it yet: the cursor starts at the first character on screen, not the top of a long thread.
+    const sel = this.root.ownerDocument.getSelection();
+    if (!sel?.anchorNode || !this.root.contains(sel.anchorNode)) {
+      const [first] = this.visibleRange();
+      return { ...snap, cursor: first, anchor: first };
+    }
+    return snap;
+  }
+
+  move(target) {
+    super.move(target);
+    this.#showCaret(target.offset, target.extend);
+  }
+
+  async edit() {}
+  undo() {}
+  redo() {}
+
+  /** Draws the cursor where the selection is (it takes focus: its cursor shows before the first key). */
+  showCursor() {
+    const { cursor } = this.text();
+    this.#showCaret(cursor, false);
+  }
+
+  /** The offsets of the text on screen: [first, last]. */
+  visibleRange() {
+    const model = editableModel(this.root);
+    const box = this.root.getBoundingClientRect();
+    let first = null;
+    let last = 0;
+    for (const [node, start] of model.texts) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      const r = parent.getBoundingClientRect();
+      if (r.bottom < box.top || r.top > box.bottom || r.height === 0) continue;
+      if (first == null) first = start;
+      last = start + node.data.length;
+    }
+    return [first ?? 0, first == null ? model.text.length : last];
+  }
+
+  setCaret(shape, mode) {
+    super.setCaret(shape, mode);
+    if (!this.caretBox) return;
+    this.caretBox.host.style.display = mode === "visual" || mode === "vline" ? "none" : "";
+  }
+
+  #showCaret(offset, extend, scrolled = false) {
+    const doc = this.root.ownerDocument;
+    const rect = this.rectsOf([offset]).get(offset);
+    if (!rect) return;
+    // Keep the cursor on screen: the region is its own scroller (or inside one).
+    const box = this.root.getBoundingClientRect();
+    if (!scrolled && (rect.top < box.top || rect.top + rect.height > box.bottom)) {
+      this.root.scrollBy({ top: rect.top - (box.top + box.height / 3), behavior: "instant" });
+      return this.#showCaret(offset, extend, true);
+    }
+    if (!this.caretBox) {
+      const host = doc.createElement("pvim-caret");
+      host.style.cssText = "position:fixed;z-index:2147483646;pointer-events:none;inset:0;width:0;height:0";
+      const box = doc.createElement("div");
+      box.style.cssText = "position:fixed;background:rgba(255,200,40,.55);outline:1px solid rgba(0,0,0,.4);border-radius:1px";
+      host.attachShadow({ mode: "closed" }).append(box);
+      this.caretBox = { host, box };
+      this.root.addEventListener("focusout", () => this.caretBox?.host.remove());
+    }
+    Object.assign(this.caretBox.box.style, {
+      left: `${rect.left}px`, top: `${rect.top}px`, width: `${Math.max(rect.width, 6)}px`, height: `${rect.height}px`,
+    });
+    if (!this.caretBox.host.isConnected) doc.documentElement.append(this.caretBox.host);
+    this.caretBox.host.style.display = extend ? "none" : "";
+  }
 }
 
 // ── A document ───────────────────────────────────────────────────────────
@@ -528,7 +631,10 @@ export function attach(doc = globalThis.document, options = {}) {
 
   const onFocus = (event) => {
     const field = vimField(target(event));
-    if (field) vim.emit("FieldEnter", { session: sessionOf(field) });
+    if (!field) return;
+    const session = sessionOf(field);
+    session.buffer.showCursor?.();
+    vim.emit("FieldEnter", { session });
   };
 
   const onBlur = (event) => {
@@ -540,11 +646,40 @@ export function attach(doc = globalThis.document, options = {}) {
     vim.emit("FieldLeave", { session });
   };
 
+  // Off a field, in a page that doesn't take them itself (a browser tab in Hydra's panel): the
+  // desktop's places, shows and jumps go to the shell (PageKey; HYDRA_KEYBOARD.md).
+  let offPending = "";
+  let offTimer = null;
+  const offField = (event) => {
+    if (event.ctrlKey || event.altKey || event.metaKey || !vim.listeners.get("PageKey")?.size) return;
+    const el = target(event);
+    if (el?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]') || el?.closest?.(OWN_KEYS)) return;
+    const key = keyFromEvent(event);
+    if (!key || [...key].length !== 1) return;
+    const keys = offPending + key;
+    const exact = OFF_FIELD_KEYS.get(keys);
+    clearTimeout(offTimer);
+    offPending = "";
+    if (exact) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      vim.emit("PageKey", { session: null, name: exact, detail: { count: null } });
+    } else if ([...OFF_FIELD_KEYS.keys()].some((lhs) => lhs.length > keys.length && lhs.startsWith(keys))) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      offPending = keys;
+      offTimer = setTimeout(() => { offPending = ""; }, 1000);
+    }
+  };
+
   const handle = (event, claimed) => {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (!event.isTrusted && !options.untrusted) return;
     const field = vimField(target(event));
-    if (!field) return;
+    if (!field) {
+      if (!claimed) offField(event);
+      return;
+    }
     const key = keyFromEvent(event);
     if (!key) return;
     const session = sessionOf(field);
@@ -641,6 +776,13 @@ export function attach(doc = globalThis.document, options = {}) {
     el.dispatchEvent(new view.CustomEvent("pvim:mode", { detail: { mode: to }, bubbles: true }));
   };
 
+  // A page that integrates sets the mode: pvim:set-mode with { mode } on the field.
+  const onSetMode = (event) => {
+    const field = vimField(target(event));
+    const mode = event.detail?.mode;
+    if (field && (mode === "normal" || mode === "insert")) sessionOf(field).enterMode(mode);
+  };
+  doc.addEventListener("pvim:set-mode", onSetMode);
   doc.addEventListener("focusin", onFocus, true);
   doc.addEventListener("focusout", onBlur, true);
   view.addEventListener("keydown", onClaimed, true);
@@ -673,6 +815,7 @@ export function attach(doc = globalThis.document, options = {}) {
     get hooked() { return hooked; },
     detach() {
       doc.removeEventListener("focusin", onFocus, true);
+      doc.removeEventListener("pvim:set-mode", onSetMode);
       doc.removeEventListener("focusout", onBlur, true);
       view.removeEventListener("keydown", onClaimed, true);
       view.removeEventListener("keydown", onKey);

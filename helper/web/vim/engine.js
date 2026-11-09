@@ -20,8 +20,11 @@ import * as P from "./prose.js";
 import { UserBuffer } from "./userBuffer.js";
 
 export const DEFAULT_OPTIONS = {
-  /** Fields start in insert mode (Principle 2). */
-  startInInsert: true,
+  /**
+   * Fields start in normal mode, and stay in it until a key enters insert
+   * mode (HYDRA_KEYBOARD.md). Single-line inputs follow `inputs` instead.
+   */
+  startInInsert: false,
   /** Single-line inputs: "manual" (Ctrl+[ enters normal mode), "on" (as a textarea), "off". */
   inputs: "manual",
   /** "unnamedplus": the unnamed register is the system clipboard. */
@@ -374,7 +377,9 @@ export class Session {
     this.off = single && vim.opt.inputs === "off";
     const startInInsert = options.startInInsert ?? (single && vim.opt.inputs === "manual" ? true : vim.opt.startInInsert);
     /** "normal", "insert", "visual", "vline" or "replace". */
-    this.mode = startInInsert ? "insert" : "normal";
+    /** A field the page shows but can't be edited (data-pvim-readonly: Hydra's timeline): motions, visual mode and yanks only. */
+    this.readonly = Boolean(buffer.caps?.readonly);
+    this.mode = startInInsert && !this.readonly ? "insert" : "normal";
     this.pending = [];
     /** The column j and k keep (Infinity after $); null until a motion sets it. */
     this.want = null;
@@ -772,9 +777,20 @@ export class Session {
     this.pending = [];
     this.#caret();
     if (parsed === BAD) return keys.length > 1 || isPrintable(key);
-    // A page's key (data-pvim-actions), and the jump: they act at once, not on the queue.
+    // A read-only field: what would change it does nothing; what would type goes to the page's insert.
+    if (this.readonly && changes(parsed.cmd)) {
+      if (entersInsert(parsed.cmd)) this.runAction("insert");
+      return true;
+    }
+    // A page's key (data-pvim-actions), and the jumps: they act at once, not on the queue.
     if (parsed.cmd.entry?.action === "page") return this.#pageKey(parsed.cmd);
     if (parsed.cmd.entry?.action === "jumpStart") return this.#startJump();
+    const labelled = parsed.cmd.type === "motion" ? parsed.cmd.entry : parsed.cmd.motion;
+    if (labelled?.labelJump) {
+      // gw alone: every word on screen, where the page has that; else, and after an operator, the field's.
+      if (parsed.cmd.type === "motion" && !visual && this.runAction("jump.word", {})) return true;
+      return this.#startWordJump({ ...parsed.cmd, mode: this.mode });
+    }
     // q{register} starts recording now, not when the queue gets to it: the next key is the macro's.
     if (parsed.cmd.entry?.action === "record") {
       if (/^[a-zA-Z0-9"]$/.test(parsed.cmd.arg)) {
@@ -807,7 +823,67 @@ export class Session {
       for (const key of [...count, ...parseKeys(entry.fallback)]) this.#feedRaw(key);
       return true;
     }
+    // A place or a show this page doesn't have is the desktop's (a browser tab in Hydra's panel: gc, zt).
+    if (RELAYED.test(entry.page)) {
+      this.vim.emit("PageKey", { session: this, name: entry.page, detail });
+      return true;
+    }
     return !entry.pass;
+  }
+
+  /**
+   * Sets the mode from outside: a page that integrates (pvim:set-mode: the
+   * composer is back in normal mode after it sends) or the host.
+   */
+  enterMode(mode) {
+    if (this.off || this.jump || this.cmd) return;
+    this.pending = [];
+    if (mode === "normal") {
+      if (this.mode === "insert") this.#leaveInsert({ keepCursor: true });
+      else if (this.mode === "visual" || this.mode === "vline") {
+        this.#setMode("normal");
+        this.#enqueue(() => this.#exitVisual());
+      }
+    } else if (mode === "insert" && this.mode !== "insert" && !this.readonly) {
+      this.oneShot = false;
+      this.#setMode("insert");
+      this.#enqueue(() => this.#beginInsert(null));
+    }
+  }
+
+  // ── gw: a labeled jump to any word in the field ────────────────────────
+
+  /** Labels every word of the field (what it shows of it, where it can say), nearest first; `cmd` runs on the one chosen. */
+  #startWordJump(cmd) {
+    const { text, cursor } = this.#read();
+    const visual = cmd.mode === "visual" || cmd.mode === "vline";
+    const pos = visual ? this.vCursor : T.clampNormal(text, cursor);
+    const [from, to] = this.buffer.visibleRange?.() ?? [0, text.length];
+    const targets = [];
+    for (const m of text.slice(from, to).matchAll(/[\p{L}\p{N}_]+/gu)) {
+      const at = from + m.index;
+      if (at !== pos) targets.push({ offset: at, length: m[0].length });
+    }
+    targets.sort((a, b) => Math.abs(a.offset - pos) - Math.abs(b.offset - pos) || a.offset - b.offset);
+    const labels = labelsFor(targets.length);
+    targets.forEach((target, k) => { target.label = labels[k]; });
+    if (!targets.length) return true;
+    this.jump = { words: true, typed: "", query: "", text, pos, targets, cmd };
+    this.#caret();
+    this.vim.emit("JumpLabels", { session: this, query: "", targets });
+    return true;
+  }
+
+  #feedWordJump(key) {
+    const jump = this.jump;
+    if (key === "<BS>" && jump.typed) jump.typed = jump.typed.slice(0, -1);
+    else if (isPrintable(key)) jump.typed += key.toLowerCase();
+    else return this.#endJump(null);
+    const matching = jump.targets.filter((t) => t.label.startsWith(jump.typed));
+    if (!matching.length) return this.#endJump(null);
+    if (matching.length === 1 && matching[0].label === jump.typed) return this.#endJump(matching[0].offset);
+    this.vim.emit("JumpLabels", { session: this, query: jump.typed, targets: matching });
+    return true;
   }
 
   // ── The labeled jump (s) ───────────────────────────────────────────────
@@ -828,6 +904,7 @@ export class Session {
   #feedJump(key) {
     const jump = this.jump;
     if (key === "<Esc>" || key === "<C-[>") return this.#endJump(null);
+    if (jump.words) return this.#feedWordJump(key);
     if (key === "<CR>") return this.#endJump(jump.targets[0]?.offset ?? null);
     if (key === "<BS>") {
       if (!jump.query) return this.#endJump(null);
@@ -870,9 +947,18 @@ export class Session {
 
   #endJump(offset) {
     const from = this.jump?.pos;
+    const cmd = this.jump?.cmd;
     this.jump = null;
     this.vim.emit("JumpLabels", { session: this, query: null, targets: null });
     this.#caret();
+    if (cmd) {
+      // gw as a motion: the command it was part of runs now, to the word chosen.
+      if (offset == null) return true;
+      this.jumpTarget = offset;
+      this.#dispatch(cmd);
+      this.#enqueue(() => { this.jumpTarget = null; });
+      return true;
+    }
     if (offset != null) {
       this.#enqueue(async () => {
         const { text } = this.#read();
@@ -948,7 +1034,9 @@ export class Session {
    * would otherwise send on Enter).
    */
   get claimsAll() {
-    return Boolean(this.jump || this.cmd);
+    // A read-only field has no editor of its own to give keys to first; the page's other handlers
+    // (Hydra's type-to-focus) would take them.
+    return Boolean(this.jump || this.cmd || this.readonly);
   }
 
   /** The command line as it's typed (":s/a/b/", "/foo", "=1+2"), or null. */
@@ -2082,4 +2170,34 @@ function unquoteLine(line, times) {
   let out = line;
   for (let k = 0; k < times; k++) out = out.replace(/^ {0,3}> ?/, "");
   return out;
+}
+
+/** Pages' places, shows and jumps a page that lacks them hands to the desktop (PageKey). */
+const RELAYED = /^(place|show|jump|fold|mode)\.|^open$/;
+
+/** Whether a command would change the field (refused in a read-only one). */
+function changes(cmd) {
+  if (cmd.type === "operator") return cmd.op !== "y";
+  if (cmd.type === "surround") return true;
+  if (cmd.type === "visualOp") return cmd.entry.op !== "y";
+  if (cmd.type === "action") {
+    const { entry } = cmd;
+    return Boolean(entry.insert || entry.change || ["undo", "redo", "replaceMode", "repeat", "surround"].includes(entry.action));
+  }
+  return false;
+}
+
+function entersInsert(cmd) {
+  return (cmd.type === "action" && cmd.entry.insert) || (cmd.type === "operator" && cmd.op === "c");
+}
+
+/** Labels for `count` jump targets, none a prefix of another: single letters while they last, then pairs. */
+export function labelsFor(count) {
+  const letters = [...JUMP_LABELS];
+  if (count <= letters.length) return letters.slice(0, count);
+  let singles = letters.length;
+  while (singles > 0 && singles + (letters.length - singles) * letters.length < count) singles--;
+  const out = letters.slice(0, singles);
+  for (const first of letters.slice(singles)) for (const second of letters) out.push(first + second);
+  return out.slice(0, count);
 }

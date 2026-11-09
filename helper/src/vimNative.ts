@@ -375,7 +375,9 @@ export class NativeVim {
         ? { get: (name: string, scope: string) => registers.get(name, scope, this.place), set: (name: string, value: unknown, scope: string) => registers.set(name, value, scope, this.place) }
         : undefined;
       context.store = store;
-      this.vim = runInContext("new plutoVim.Vim(store ? { store } : {})", context);
+      // A native app's fields start in insert mode, as typing into an app always has; web fields start
+      // in normal mode (HYDRA_KEYBOARD.md). init.js's vim.opt.startInInsert sets either.
+      this.vim = runInContext("new plutoVim.Vim({ ...(store ? { store } : {}), opt: { startInInsert: true } })", context);
       this.vim.on("error", (error: Error) => this.options.log?.(`pluto vim (native): ${error.message}`));
       // Uppercase marks are the helper's (vimMarks.ts), across pages and apps.
       this.vim.remoteMarks = true;
