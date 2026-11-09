@@ -80,8 +80,20 @@ export class RemoteStore {
  * they're its (vimMarks.ts): a mark set here is told to it, and a jump to one
  * asks it to go there, this page included (page.jumpToMark).
  */
-export function connectHost(vim, store) {
+export function connectHost(vim, store, doc = globalThis.document) {
   if (!store.remote) return;
+  // A shell's labels (HYDRA_KEYBOARD.md): the shell's page asks for the targets in the tabs it shows
+  // (pvim:hint-request { id, kind } → pvim:hint-targets { id, tabs }), and sends one there (pvim:hint-go).
+  doc?.addEventListener("pvim:hint-request", (event) => {
+    const { id, kind } = event.detail ?? {};
+    void store.call("hints.collect", { kind }).then((tabs) => {
+      doc.dispatchEvent(new doc.defaultView.CustomEvent("pvim:hint-targets", { detail: { id, tabs: tabs ?? [] } }));
+    });
+  });
+  doc?.addEventListener("pvim:hint-go", (event) => {
+    const { targetId, id } = event.detail ?? {};
+    void store.call("hints.go", { targetId, id });
+  });
   vim.remoteMarks = true;
   vim.on("MarkSet", ({ name, offset }) => void store.call("mark.set", { name, offset }));
   vim.on("MarkJump", ({ name }) => void store.call("mark.jump", { name }));

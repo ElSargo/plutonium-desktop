@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../chat/ComposerPendingApprovalActions.tsx   |   2 +
  .../src/components/chat/useChatShortcuts.ts   |  19 +
  apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
- apps/web/src/plutonium/hints.ts               | 314 ++++++++++++
- apps/web/src/plutonium/hydraKeys.ts           | 469 ++++++++++++++++++
+ apps/web/src/plutonium/hints.ts               | 402 ++++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 492 ++++++++++++++++++
  apps/web/src/plutonium/plutoVim.ts            | 181 +++++++
- 7 files changed, 998 insertions(+), 6 deletions(-)
+ 7 files changed, 1109 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
  create mode 100644 apps/web/src/plutonium/plutoVim.ts
@@ -129,14 +129,14 @@ index c1fcfad0a2..e0904539d6 100644
            </ToggleGroupItem>
 diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
 new file mode 100644
-index 0000000000..bf1cfb5a53
+index 0000000000..58173d01af
 --- /dev/null
 +++ b/apps/web/src/plutonium/hints.ts
-@@ -0,0 +1,314 @@
-+// Plutonium: labels over the page for HYDRA_KEYBOARD.md's jumps. S labels the
-+// significant things on screen (what can be clicked or typed into, and the
-+// fixed places, whose labels are their g letters); gw labels every word.
-+// Typing a label goes there. While the labels show, every key is theirs.
+@@ -0,0 +1,402 @@
++// Plutonium: labels for HYDRA_KEYBOARD.md's jumps (S: what can be clicked or typed into, gw: every
++// word), here and in the panel's browser tabs (their targets come from Pluto Vim there, through the
++// helper). Typing a label goes there; while they show, every key is theirs.
++import { plutoniumShell } from "./windowStore";
 +
 +const ALPHABET = "asdfjklghqweruioptyzxcvbnm";
 +
@@ -186,7 +186,9 @@ index 0000000000..bf1cfb5a53
 +
 +interface Target {
 +  readonly rect: DOMRect;
-+  readonly element: Element;
++  readonly element?: Element;
++  /** In a browser tab: Pluto Vim's id for it there, and the element showing the tab. */
++  readonly remote?: { readonly targetId: string; readonly id: number; readonly embed: HTMLElement };
 +  /** For gw: the word's range in its text node. */
 +  readonly range?: Range;
 +  /** One of PLACES, labelled with its g letter. */
@@ -247,7 +249,7 @@ index 0000000000..bf1cfb5a53
 +    // Nested interactive elements (a button in a row): one label, the outer one's, unless they're far apart.
 +    const outer = out.find(
 +      (t) =>
-+        t.element.contains(element) &&
++        t.element?.contains(element) === true &&
 +        Math.abs(t.rect.left - rect.left) < 8 &&
 +        Math.abs(t.rect.top - rect.top) < 8,
 +    );
@@ -293,6 +295,64 @@ index 0000000000..bf1cfb5a53
 +  return out;
 +}
 +
++interface TabHints {
++  readonly targetId: string;
++  readonly tabId: number | null;
++  readonly items: readonly { id: number; x: number; y: number; w: number; h: number }[];
++  readonly viewport?: { width: number; height: number };
++}
++
++/**
++ * The targets in the browser tabs this page shows, placed over the element
++ * showing each (its scale included). Pluto Vim in this page asks the helper;
++ * no answer within a moment (it isn't on) is none.
++ */
++async function tabTargets(kind: "significant" | "word"): Promise<Target[]> {
++  if (!document.querySelector('[data-testid="composer-editor"][data-pvim-mode]')) return [];
++  const id = Math.random().toString(36).slice(2);
++  const tabs = await new Promise<readonly TabHints[]>((resolve) => {
++    const onReply = (event: Event) => {
++      const detail = (event as CustomEvent<{ id?: string; tabs?: TabHints[] } | null>).detail;
++      if (detail?.id !== id) return;
++      done(detail.tabs ?? []);
++    };
++    const timer = setTimeout(() => done([]), 300);
++    const done = (value: readonly TabHints[]) => {
++      clearTimeout(timer);
++      document.removeEventListener("pvim:hint-targets", onReply);
++      resolve(value);
++    };
++    document.addEventListener("pvim:hint-targets", onReply);
++    document.dispatchEvent(new CustomEvent("pvim:hint-request", { detail: { id, kind } }));
++  });
++  if (!tabs.length) return [];
++  const shell = await plutoniumShell();
++  const out: Target[] = [];
++  for (const tab of tabs) {
++    const contentId = tab.tabId == null ? undefined : shell?.tabs?.get(tab.tabId)?.contentId;
++    if (!contentId) continue;
++    const embed = document.querySelector<HTMLElement>(
++      `embed[data-content-id="${CSS.escape(contentId)}"]`,
++    );
++    if (!embed || embed.closest('[aria-hidden="true"]')) continue;
++    const box = embed.getBoundingClientRect();
++    if (!onScreen(box)) continue;
++    const cssWidth = Number(embed.dataset.previewCssWidth) || tab.viewport?.width || box.width;
++    const scale = box.width / cssWidth;
++    for (const item of tab.items) {
++      const rect = new DOMRect(
++        box.left + item.x * scale,
++        box.top + item.y * scale,
++        item.w * scale,
++        item.h * scale,
++      );
++      if (rect.top < box.top || rect.top >= box.bottom || rect.left >= box.right) continue;
++      out.push({ rect, remote: { targetId: tab.targetId, id: item.id, embed }, label: "" });
++    }
++  }
++  return out;
++}
++
 +/** Labels for `count` targets, none a prefix of another, without the reserved letters as first letters. */
 +function makeLabels(count: number, reserved: ReadonlySet<string>): string[] {
 +  const letters = [...ALPHABET].filter((ch) => !reserved.has(ch));
@@ -318,10 +378,13 @@ index 0000000000..bf1cfb5a53
 +  host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
 +  const root = host.attachShadow({ mode: "closed" });
 +  const style = document.createElement("style");
++  // Hydra's own look, from its theme's tokens (they reach into the shadow root), light and dark.
 +  style.textContent =
-+    "b{position:fixed;font:bold 11px/1 ui-monospace,monospace;padding:2px 3px;border-radius:3px;" +
-+    "color:#1b1b1f;background:#ffd84a;box-shadow:0 0 0 1px rgba(0,0,0,.35);text-transform:uppercase}" +
-+    "b.place{background:#7fd3ff}b i{font-style:normal;opacity:.45}";
++    "b{position:fixed;font:600 11px/1 var(--font-mono, ui-monospace, monospace);padding:2px 4px;" +
++    "border-radius:calc(var(--radius, 8px) - 3px);color:var(--popover-foreground);background:var(--popover);" +
++    "border:1px solid var(--border);box-shadow:0 1px 4px rgb(0 0 0 / 0.18);text-transform:uppercase;letter-spacing:.02em}" +
++    "b.place{color:var(--primary-foreground);background:var(--primary);border-color:transparent}" +
++    "b i{font-style:normal;color:var(--muted-foreground)}b.place i{color:inherit;opacity:.6}";
 +  root.append(style);
 +  const items = new Map<Target, HTMLElement>();
 +  for (const target of targets) {
@@ -339,7 +402,16 @@ index 0000000000..bf1cfb5a53
 +
 +/** Goes to a target: a field gets the keyboard (a word in it, the cursor), anything else is clicked. */
 +function go(target: Target): void {
-+  const { element } = target;
++  const { element, remote } = target;
++  if (remote) {
++    // The tab takes the keyboard, then goes to its target (Pluto Vim there clicks, focuses or places the cursor).
++    remote.embed.focus();
++    document.dispatchEvent(
++      new CustomEvent("pvim:hint-go", { detail: { targetId: remote.targetId, id: remote.id } }),
++    );
++    return;
++  }
++  if (!element) return;
 +  const editable = element.closest<HTMLElement>('[contenteditable="true"], textarea, input');
 +  if (target.range) {
 +    // A word in the timeline: the keyboard goes there, with the cursor on the word, to read and yank.
@@ -390,10 +462,22 @@ index 0000000000..bf1cfb5a53
 + * Shows labels for `kind`, and takes every key until one is typed (go there),
 + * Escape, or a key no label starts with. `onEnd` runs when they're gone.
 + */
-+export function showHints(kind: "significant" | "word", onEnd?: () => void): void {
++export async function showHints(kind: "significant" | "word", onEnd?: () => void): Promise<void> {
 +  active?.cancel();
-+  const targets = kind === "significant" ? significantTargets() : wordTargets();
++  // While the tabs answer, keys typed already are the labels' (they're drawn a moment later).
++  const early: KeyboardEvent[] = [];
++  const hold = (event: KeyboardEvent) => {
++    event.preventDefault();
++    event.stopImmediatePropagation();
++    early.push(event);
++  };
++  window.addEventListener("keydown", hold, true);
++  active = { cancel: () => window.removeEventListener("keydown", hold, true) };
++  const own = kind === "significant" ? significantTargets() : wordTargets();
++  const targets = [...own, ...(await tabTargets(kind))];
++  window.removeEventListener("keydown", hold, true);
 +  if (targets.length === 0) {
++    active = null;
 +    onEnd?.();
 +    return;
 +  }
@@ -446,13 +530,17 @@ index 0000000000..bf1cfb5a53
 +  window.addEventListener("blur", end);
 +  window.addEventListener("scroll", end, true);
 +  active = { cancel: end };
++  for (const event of early) {
++    if (!active) break;
++    onKey(event);
++  }
 +}
 diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
 new file mode 100644
-index 0000000000..26aa5b645a
+index 0000000000..066b8b8d56
 --- /dev/null
 +++ b/apps/web/src/plutonium/hydraKeys.ts
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,492 @@
 +// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
 +// the g places and z shows, run as Pluto Vim page actions from the composer
 +// (plutoVim.ts), and the same keys when the keyboard isn't in a field.
@@ -663,17 +751,40 @@ index 0000000000..26aa5b645a
 +  return true;
 +}
 +
-+/** While S or gw labels show, every key is theirs: the composer stops yielding keys to vim. */
++/**
++ * While S or gw labels show, every key is theirs: the composer stops yielding
++ * keys to vim, and the timeline (a read-only field, which claims every key
++ * first) is no field until they're gone.
++ */
 +function withoutYields(show: (done: () => void) => void): void {
 +  const editors = [...document.querySelectorAll(EDITOR)];
 +  const saved = editors.map((el) => el.getAttribute("data-pvim-yield") ?? "");
 +  for (const el of editors) el.setAttribute("data-pvim-yield", "");
-+  show(() =>
++  const timeline = document.querySelector<HTMLElement>(`${TIMELINE}[data-pvim-readonly]`);
++  timeline?.setAttribute("data-pvim", "off");
++  show(() => {
 +    editors.forEach(
 +      (el, k) => el.isConnected && el.setAttribute("data-pvim-yield", saved[k] ?? ""),
-+    ),
-+  );
++    );
++    timeline?.removeAttribute("data-pvim");
++  });
 +}
++
++/**
++ * Pluto Vim draws its own cursor (in read-only text) and its s labels: in
++ * Hydra's theme, through the custom properties it reads (dom.js).
++ */
++function themePlutoVim(): void {
++  if (typeof document === "undefined") return;
++  const root = document.documentElement.style;
++  root.setProperty("--pvim-caret", "var(--primary)");
++  root.setProperty("--pvim-label-bg", "var(--popover)");
++  root.setProperty("--pvim-label-fg", "var(--popover-foreground)");
++  root.setProperty("--pvim-label-border", "var(--border)");
++  root.setProperty("--pvim-label-font", "var(--font-mono)");
++  root.setProperty("--pvim-label-radius", "calc(var(--radius) - 3px)");
++}
++themePlutoVim();
 +
 +// ── The actions ──────────────────────────────────────────────────────────
 +
