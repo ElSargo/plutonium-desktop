@@ -697,7 +697,11 @@ export function attach(doc = globalThis.document, options = {}) {
   // The rest, after the page's own handlers on the field and the document; once Blink offers keys
   // (Plutonium's key hook), from its plutoniumvimkey instead, after every handler of the page's.
   let hooked = false;
-  const onKey = (event) => { if (!hooked) handle(event, false); };
+  const onKey = (event) => {
+    if (!hooked) return handle(event, false);
+    // Blink's hook offers only keys a field would edit with: off a field, keys come as keydown only.
+    if (!vimField(target(event)) && !event.defaultPrevented && event.isTrusted) offField(event);
+  };
   const onOffer = (event) => handle(event, false);
   const onReady = (event) => { if (event.isTrusted) hooked = true; };
 
