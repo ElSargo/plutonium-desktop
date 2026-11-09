@@ -90,6 +90,25 @@ test("pages open at start get the script, run in their document too; new ones wa
   assert.equal(injector.pages, 1);
 });
 
+test("a shell's tab (an \"other\" target with no URL that becomes a page) gets the script; so does a page that turns up later", async () => {
+  const { cdp, calls, emit } = fakeCdp([]);
+  const injector = new VimInjector(cdp, () => "");
+  await injector.start();
+  emit("Target.attachedToTarget", { sessionId: "tab", waitingForDebugger: true, targetInfo: { targetId: "t1", type: "other", url: "" } });
+  await tick();
+  assert.deepEqual(calls.filter((c) => c.sessionId === "tab").map((c) => c.method), ["Runtime.runIfWaitingForDebugger", "Target.detachFromTarget"].slice(0, 1), "let go at once: it doesn't answer Page commands while it waits");
+  assert.equal(injector.pages, 0);
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "t1", type: "page", url: "https://www.google.com/" } });
+  await tick();
+  assert.deepEqual(calls.filter((c) => c.method === "Target.attachToTarget").map((c) => c.params.targetId), ["t1"], "attached once it's a page");
+  const script = calls.filter((c) => c.method === "Page.addScriptToEvaluateOnNewDocument").at(-1)!;
+  assert.equal(script.params.runImmediately, true, "and run in the document it has");
+  assert.equal(injector.pages, 1);
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "t1", type: "page", url: "https://www.google.com/search" } });
+  await tick();
+  assert.equal(calls.filter((c) => c.method === "Target.attachToTarget").length, 1, "already ours: not attached again");
+});
+
 test("a new page runs even when its script couldn't go in", async () => {
   const { cdp, calls, emit } = fakeCdp([]);
   (cdp as any).send = async (method: string, params: any = {}, sessionId?: string) => {

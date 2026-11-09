@@ -62,6 +62,7 @@ const PAGE = (pm: boolean) => `<!doctype html>
 <div id="ce" contenteditable="true"><p>one two</p><p>three</p></div>
 <div id="pm"></div>
 <div id="composer"></div>
+<div id="rich"></div>
 <script type="module">
   import { attach, bufferFor } from "/vim/dom.js";
   window.submitted = [];
@@ -103,8 +104,17 @@ const PAGE = (pm: boolean) => `<!doctype html>
     hard_break: { inline: true, group: "inline", selectable: false, toDOM: () => ["br"], parseDOM: [{ tag: "br" }], leafText: () => "\\n" },
   } });
   window.composerView = new EditorView(document.getElementById("composer"), {
-    state: EditorState.create({ doc: one.node("doc", null, [one.node("paragraph")]), plugins: [history(), keymap({ "Mod-z": undo, "Mod-y": redo, Enter: () => true }), keymap(baseKeymap)] }),
+    state: EditorState.create({ doc: one.node("doc", null, [one.node("paragraph")]), plugins: [history(), keymap({ "Mod-z": undo, "Mod-y": redo, Enter: () => { window.composerSends++; return true; } }), keymap(baseKeymap)] }),
   });
+  window.composerSends = 0;
+  // Like Hydra's rich composer: paragraphs are lines, Enter sends, Shift+Enter is a new paragraph.
+  const { splitBlock } = await import("prosemirror-commands");
+  window.richSends = 0;
+  window.richView = new EditorView(document.getElementById("rich"), {
+    state: EditorState.create({ doc: schema.node("doc", null, [schema.node("paragraph", null, [schema.text("first")]), schema.node("paragraph", null, [schema.text("second")])]),
+      plugins: [history(), keymap({ Enter: () => { window.richSends++; return true; }, "Shift-Enter": splitBlock }), keymap(baseKeymap)] }),
+  });
+  window.richText = () => { const d = window.richView.state.doc; return d.textBetween(0, d.content.size, "\\n"); };
   window.composerDoc = () => window.composerView.state.doc.toJSON();
   ` : ""}
   window.ready = true;
@@ -435,5 +445,19 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     await keys(host, "y", "y", "P");
     const again = await page.evaluate(() => (window as any).composerDoc());
     assert.deepEqual(again.content[0].content.map((n: any) => n.type === "text" ? n.text : `<${n.type}>`), ["one", "<hard_break>", "two", "<hard_break>", "two"]);
+    await keys(host, "G", "y", "y", "p", "k", "y", "y", "p", "o", "x", "Control+BracketLeft");
+    assert.equal(await page.evaluate(() => (window as any).composerSends), 0, "a put or o never sends: only the Enter key does");
+  });
+
+  test("a composer whose Enter sends: yy p and o make lines and never send", { skip: pm ? false : "no T3 Code checkout for ProseMirror" }, async () => {
+    const host = "#rich > .ProseMirror";
+    await page.locator(host).click();
+    await keys(host, "Control+BracketLeft", "g", "g", "y", "y", "p");
+    assert.equal(await page.evaluate(() => (window as any).richText()), "first\nfirst\nsecond");
+    await keys(host, "G", "o", "third", "Control+BracketLeft", "y", "y", "P");
+    assert.equal(await page.evaluate(() => (window as any).richText()), "first\nfirst\nsecond\nthird\nthird");
+    assert.equal(await page.evaluate(() => (window as any).richSends), 0, "nothing was sent");
+    await keys(host, "i", "Enter");
+    assert.equal(await page.evaluate(() => (window as any).richSends), 1, "the Enter key still sends");
   });
 });
