@@ -109,6 +109,42 @@ test("a shell's tab (an \"other\" target with no URL that becomes a page) gets t
   assert.equal(calls.filter((c) => c.method === "Target.attachToTarget").length, 1, "already ours: not attached again");
 });
 
+test("a page we hold that goes to an http(s) address is checked for the engine in its new document", async () => {
+  const { cdp, calls, emit } = fakeCdp([{ targetId: "tab", type: "page", url: "about:blank" }]);
+  const logs: string[] = [];
+  const injector = new VimInjector(cdp, () => "/* bundle */", (m) => logs.push(m));
+  await injector.start();
+  calls.length = 0;
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "tab", type: "page", url: "https://www.google.com/" } });
+  await tick();
+  assert.deepEqual(calls.map((c) => c.method), ["Page.createIsolatedWorld", "Runtime.evaluate"], "the script, run in the document it has (it does nothing where the engine is)");
+  assert.deepEqual(logs, ["pluto vim: in https://www.google.com/"]);
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "tab", type: "page", url: "https://www.google.com/" } });
+  await tick();
+  assert.equal(calls.length, 2, "the same address again (a title change): nothing");
+});
+
+test("an attach that never answers is given up on, and the page is attached again when it moves on", async () => {
+  const { cdp, calls, emit } = fakeCdp([]);
+  const send = cdp.send.bind(cdp);
+  let hang = true;
+  (cdp as any).send = (method: string, params: any = {}, sessionId?: string) =>
+    method === "Page.addScriptToEvaluateOnNewDocument" && hang ? (calls.push({ method, params, sessionId }), new Promise(() => {})) : send(method, params, sessionId);
+  const logs: string[] = [];
+  const injector = new VimInjector(cdp, () => "", (m) => logs.push(m), { attachTimeoutMs: 30 });
+  await injector.start();
+  // The tab turns into a page while it's still paused: its script never answers.
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "tab", type: "page", url: "about:blank" } });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(injector.pages, 0);
+  assert.match(logs.join("\n"), /couldn't go into about:blank: no answer in 30 ms/);
+  hang = false;
+  emit("Target.targetInfoChanged", { targetInfo: { targetId: "tab", type: "page", url: "https://www.google.com/" } });
+  await tick();
+  assert.equal(injector.pages, 1, "attached at its next change");
+  assert.equal(calls.filter((c) => c.method === "Page.addScriptToEvaluateOnNewDocument").at(-1)!.params.runImmediately, true);
+});
+
 test("a new page runs even when its script couldn't go in", async () => {
   const { cdp, calls, emit } = fakeCdp([]);
   (cdp as any).send = async (method: string, params: any = {}, sessionId?: string) => {

@@ -38,6 +38,18 @@ const BINDING = "plutoVimStore";
 const REPLY = "plutoVimStoreReply";
 /** When a page open at start is checked again for the engine (ensure). */
 const ENSURE_AGAIN_MS = 1000;
+/** How long a command attaching to a page may take: a page paused for the debugger may never answer. */
+const ATTACH_TIMEOUT_MS = 5000;
+
+/** `promise`, or a rejection after `ms`: a command that never answers doesn't hold the rest up. */
+function within<T>(promise: Promise<T>, ms: number = ATTACH_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
 
 interface TargetInfo {
   readonly targetId: string;
@@ -55,6 +67,8 @@ export interface VimInjectorOptions {
   readonly config?: () => string;
   /** The installed shells by origin, for vim.disable({ shell }). */
   readonly shellOrigins?: () => Record<string, string>;
+  /** How long an attach command may take before it's given up on (tests). */
+  readonly attachTimeoutMs?: number;
   /** The register store every page shares; without it each page keeps its own. */
   readonly registers?: RegisterStore;
   /** Where a page's fields are, for registers' thread and project scopes. */
@@ -68,6 +82,8 @@ interface PageSession {
   readonly sessionId: string;
   identifier: string;
   url: string;
+  /** Whether "pluto vim: in" was logged for it: once, at its first http(s) document. */
+  logged?: boolean;
 }
 
 export class VimInjector {
@@ -143,7 +159,7 @@ export class VimInjector {
         void this.attachNew(value.sessionId, value.targetInfo);
       } else if (method === "Target.targetInfoChanged" && value.targetInfo) {
         const known = this.sessions.get(value.targetInfo.targetId);
-        if (known) known.url = value.targetInfo.url;
+        if (known) this.navigated(value.targetInfo.targetId, known, value.targetInfo.url);
         // A target that became a page after we let it go (a shell's tab: see attachNew): attached as it is.
         else if (value.targetInfo.type === "page") void this.attachOpen(value.targetInfo);
       } else if (method === "Target.targetDestroyed" && value.targetId) {
@@ -172,10 +188,11 @@ export class VimInjector {
     if (mine) this.attaching.add(target.targetId);
     try {
       if (mine) {
-        await this.bind(sessionId);
-        const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD }, sessionId)) as { identifier: string };
-        this.sessions.set(target.targetId, { sessionId, identifier, url: target.url });
-        if (wantsVim(target.url)) this.log(`pluto vim: in ${target.url}`);
+        await within(this.bind(sessionId), this.options.attachTimeoutMs);
+        const { identifier } = (await within(this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD }, sessionId), this.options.attachTimeoutMs)) as { identifier: string };
+        const page: PageSession = { sessionId, identifier, url: target.url, logged: wantsVim(target.url) };
+        this.sessions.set(target.targetId, page);
+        if (page.logged) this.log(`pluto vim: in ${target.url}`);
       }
     } catch (error) {
       this.log(`pluto vim: couldn't go into ${target.url || target.type}: ${(error as Error).message}`);
@@ -194,12 +211,12 @@ export class VimInjector {
     if (target.type !== "page" || this.sessions.has(target.targetId) || this.attaching.has(target.targetId)) return;
     this.attaching.add(target.targetId);
     try {
-      const { sessionId } = (await this.cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true })) as { sessionId: string };
-      await this.bind(sessionId);
-      const { identifier } = (await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD, runImmediately: true }, sessionId)) as { identifier: string };
-      const page = { sessionId, identifier, url: target.url };
+      const { sessionId } = (await within(this.cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true }), this.options.attachTimeoutMs)) as { sessionId: string };
+      await within(this.bind(sessionId), this.options.attachTimeoutMs);
+      const { identifier } = (await within(this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: this.pageScript(), worldName: WORLD, runImmediately: true }, sessionId), this.options.attachTimeoutMs)) as { identifier: string };
+      const page: PageSession = { sessionId, identifier, url: target.url, logged: wantsVim(target.url) };
       this.sessions.set(target.targetId, page);
-      if (wantsVim(target.url)) this.log(`pluto vim: in ${target.url}`);
+      if (page.logged) this.log(`pluto vim: in ${target.url}`);
       await this.ensure(target.targetId, page);
       setTimeout(() => void this.ensure(target.targetId, page), ENSURE_AGAIN_MS).unref?.();
     } catch (error) {
@@ -262,6 +279,25 @@ export class VimInjector {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * A page we hold went to `url`. Its script should have run in the new
+   * document, but a page attached as it turned from "other" into a page (a
+   * shell's tab: about:blank, then the address) can miss its first real
+   * document: the engine is checked for there (the script does nothing where
+   * it already is), now and once the document has settled.
+   */
+  private navigated(targetId: string, page: PageSession, url: string): void {
+    const changed = page.url !== url;
+    page.url = url;
+    if (!changed || !wantsVim(url)) return;
+    if (!page.logged) {
+      page.logged = true;
+      this.log(`pluto vim: in ${url}`);
+    }
+    void this.ensure(targetId, page);
+    setTimeout(() => void this.ensure(targetId, page), ENSURE_AGAIN_MS).unref?.();
   }
 
   /** Runs the script in the page's world now, if it's still ours; it does nothing where the engine already is. */
