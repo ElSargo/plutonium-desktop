@@ -88,7 +88,7 @@ What stays is the core: `hjkl`, `w b e`, `0 ^ $`, `gg G`, `f t ; ,`, `i a I A o 
 
 | Key | Does | Slot |
 |---|---|---|
-| `Space` / `Backspace` | **New.** Page the context down or up without moving the cursor: in Hydra the timeline, in a browser tab the page. In insert mode, PageDown and PageUp | `context.pageDown`, `context.pageUp` |
+| `Space` / `Backspace` | **New.** Half a page of the context down or up, without moving the cursor: in Hydra the timeline, in a browser tab the page. In insert mode, PageDown and PageUp | `context.pageDown`, `context.pageUp` |
 | `Tab` | **New.** The last thread, and further back through the recently used ones while you keep pressing it within a moment, as Alt+Tab does | `item.recent` |
 | `H` / `L` | **New.** The previous or next thread in the sidebar's order; history in a browser tab | `item.previous`, `item.next` |
 | `:` | The command line and the palette as one (KEYS.md, "One command line") | |
@@ -183,12 +183,20 @@ From 2026-11-09, for trying out:
 - `>` `<` as quotes (`vim.opt.shift = "indent"` for vim's);
 - surround (`ds`, `cs`, `ys`, `s` in visual mode);
 - `gi`, `gA`;
-- `s`, with labels over web fields.
+- `s`, with labels over web fields;
+- `gw` after an operator or in visual mode: labels on every word of the field, and the operator takes the word it lands on (`y gw` yanks from here through that word); alone, the page's `jump.word` where it has one;
+- web fields start in normal mode and stay in it until a key enters insert mode; native apps' fields still start in insert mode;
+- a page's read-only text (`data-pvim-readonly`) is a field: its cursor is drawn, motions, visual mode and `y` work, what would change it does nothing, and `i`, `a` or `c` ask the page to insert;
+- a place, a show or a jump the field's page doesn't have goes to the shell (a browser tab's `gc`, `zt`, `S`), also off a field in a page.
 
 While a jump or the `:` line is typed, every key is Pluto Vim's before the page's (so Enter never sends).
 
 **In Hydra** (T3 patch 0013, `plutonium/{hydraKeys,hints}.ts`):
-- `Space`/`Backspace` page the timeline;
+- `Space`/`Backspace` page the timeline by half pages;
+- the timeline is a read-only field: `gw` onto one of its words, or `gm`, puts the cursor there, so `gw` `y` `gw` (or `v`…`y`) yanks agent output, and `gi` `p` puts it in the composer; `i` there goes back to the composer, typing;
+- after Enter sends a message, the composer is back in normal mode;
+- off a field, `i`, `a` and `A` go to the composer, typing, and letters no longer type into it (T3's type-to-focus);
+- keys relayed from a browser tab in the panel run here, and the page takes the keyboard for places and labels;
 - `Tab` goes through threads by recent use, drafts included, and `H`/`L` by the sidebar's order;
 - `gt` `gb` `gB` `ga` `gf` `gd` `gs` `gm` `gp` `gx` `gc`;
 - `zt` `zb` `zs` `zf` `zd`, and `zm` (the panel maximized);
@@ -225,6 +233,7 @@ Each step is something to try for real before the next one.
 ## Decisions
 
 - 2026-11-09: one normal mode, not a nested one for the UI. Separate modes only where something repeats (resizing).
+- 2026-11-09, after trying it: paging is half pages (a full page lost the reader's place, and the composer covers part of the timeline); web fields start and stay in normal mode, since `i` is cheap; the timeline is a read-only field, so agent output can be selected and yanked from the keyboard; a browser tab's places and shows reach Hydra.
 - 2026-11-09: vim's keys stay by use today. The dropped list above, and what vim never had gets the keys.
 - 2026-11-09: three jumps: `s` around here, `S` significant things, `gw` any word on screen (to see whether it's worth its key).
 - 2026-11-09: `Tab` goes through threads by recent use, `H`/`L` by the sidebar's order.

@@ -238,7 +238,8 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     }
     await cdp.send("Runtime.evaluate", { expression: "document.getElementById('ta').focus()" }, sessionId);
     await sleep(100);
-    await press(sessionId, "abjk");
+    // Fields start in normal mode (HYDRA_KEYBOARD.md): i, then the mapping.
+    await press(sessionId, "iabjk");
     assert.equal(await value("document.getElementById('ta').value"), "ab");
     assert.equal(await value("document.getElementById('ta').dataset.pvimMode"), "normal", "jk left insert mode");
     assert.equal(await value("typeof plutoVim"), "undefined", "the engine stays in its own world");

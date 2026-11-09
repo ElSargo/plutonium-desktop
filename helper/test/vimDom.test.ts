@@ -412,6 +412,38 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.ok(same);
   });
 
+  test("a read-only region: the cursor is drawn, motions and visual mode work, y yanks, x does nothing", async () => {
+    await page.evaluate(() => {
+      const el = document.createElement("div");
+      el.id = "ro";
+      el.tabIndex = -1;
+      el.setAttribute("data-pvim-readonly", "");
+      el.innerHTML = "<p>alpha beta gamma</p><p>delta</p>";
+      document.body.append(el);
+      el.focus();
+    });
+    await keys("#ro", "w", "v", "e", "y");
+    const yanked = await page.evaluate(async () => (await (window as any).pvim.vim.registers.get('"'))?.text);
+    assert.equal(yanked, "beta");
+    await keys("#ro", "x", "d", "d");
+    assert.equal(await page.evaluate(() => document.getElementById("ro")!.textContent), "alpha beta gammadelta");
+    assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-caret").length), 1, "its cursor is drawn");
+    assert.equal((await state("#ro")).mode, "normal");
+  });
+
+  test("off a field, a page's place keys go to the desktop (PageKey); a field's keys stay the field's", async () => {
+    await page.evaluate(() => {
+      const w = window as any;
+      w.pageKeys = [];
+      w.pvim.vim.on("PageKey", ({ name }: any) => w.pageKeys.push(name));
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.focus();
+    });
+    await page.keyboard.type("gtzbS");
+    await page.waitForTimeout(100);
+    assert.deepEqual(await page.evaluate(() => (window as any).pageKeys), ["place.terminal", "show.panel", "jump.significant"]);
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

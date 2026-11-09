@@ -647,6 +647,7 @@ export class Daemon {
         registers,
         onMarkSet: (targetId, name, offset) => marks.set(name, { kind: "page", targetId }, offset),
         onMarkJump: (name) => void jumpToMark(name),
+        onPageKey: (targetId, name, detail) => void injector?.toShells(targetId, name, detail),
         // A tab's thread is its first tag. Shell pages and untagged tabs use global, for now (step 6).
         placeOf: (targetId) => ({ thread: desktop?.tabs().find((tab) => tab.targetId === targetId)?.tags[0] ?? null }),
         shellOrigins: () => {

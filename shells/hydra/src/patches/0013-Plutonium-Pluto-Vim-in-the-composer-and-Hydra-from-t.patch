@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../chat/ComposerPendingApprovalActions.tsx   |   2 +
  .../src/components/chat/useChatShortcuts.ts   |  19 +
  apps/web/src/plutonium/files/FileManager.tsx  |   7 +-
- apps/web/src/plutonium/hints.ts               | 289 ++++++++++++
- apps/web/src/plutonium/hydraKeys.ts           | 410 ++++++++++++++++++
- apps/web/src/plutonium/plutoVim.ts            | 146 +++++++
- 7 files changed, 879 insertions(+), 6 deletions(-)
+ apps/web/src/plutonium/hints.ts               | 314 ++++++++++++
+ apps/web/src/plutonium/hydraKeys.ts           | 469 ++++++++++++++++++
+ apps/web/src/plutonium/plutoVim.ts            | 181 +++++++
+ 7 files changed, 998 insertions(+), 6 deletions(-)
  create mode 100644 apps/web/src/plutonium/hints.ts
  create mode 100644 apps/web/src/plutonium/hydraKeys.ts
  create mode 100644 apps/web/src/plutonium/plutoVim.ts
@@ -129,16 +129,34 @@ index c1fcfad0a2..e0904539d6 100644
            </ToggleGroupItem>
 diff --git a/apps/web/src/plutonium/hints.ts b/apps/web/src/plutonium/hints.ts
 new file mode 100644
-index 0000000000..f668c9be48
+index 0000000000..bf1cfb5a53
 --- /dev/null
 +++ b/apps/web/src/plutonium/hints.ts
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,314 @@
 +// Plutonium: labels over the page for HYDRA_KEYBOARD.md's jumps. S labels the
 +// significant things on screen (what can be clicked or typed into, and the
 +// fixed places, whose labels are their g letters); gw labels every word.
 +// Typing a label goes there. While the labels show, every key is theirs.
 +
 +const ALPHABET = "asdfjklghqweruioptyzxcvbnm";
++
++export const TIMELINE = ".messages-timeline-scroll";
++
++/**
++ * The timeline as a read-only Pluto Vim field (data-pvim-readonly): it can
++ * take the keyboard, and then motions, visual mode and y work in it. Its
++ * actions are declared by plutoVim.ts when it takes focus.
++ */
++export function prepareTimeline(): HTMLElement | null {
++  const timeline = document.querySelector<HTMLElement>(TIMELINE);
++  if (!timeline) return null;
++  if (!timeline.hasAttribute("data-pvim-readonly")) {
++    timeline.setAttribute("data-pvim-readonly", "timeline");
++    timeline.tabIndex = -1;
++    timeline.style.outline = "none";
++  }
++  return timeline;
++}
 +
 +/** Fixed places: their label is their `g` key's letter (gc, gt, gb, gf, gd, gs), so the ones used most get learned. */
 +const PLACES: ReadonlyArray<readonly [string, string]> = [
@@ -324,6 +342,13 @@ index 0000000000..f668c9be48
 +  const { element } = target;
 +  const editable = element.closest<HTMLElement>('[contenteditable="true"], textarea, input');
 +  if (target.range) {
++    // A word in the timeline: the keyboard goes there, with the cursor on the word, to read and yank.
++    const timeline = element.closest<HTMLElement>(TIMELINE) ? prepareTimeline() : null;
++    if (timeline && !editable) {
++      window.getSelection()?.collapse(target.range.startContainer, target.range.startOffset);
++      timeline.focus({ preventScroll: true });
++      return;
++    }
 +    if (editable) {
 +      editable.focus();
 +      const selection = window.getSelection();
@@ -424,10 +449,10 @@ index 0000000000..f668c9be48
 +}
 diff --git a/apps/web/src/plutonium/hydraKeys.ts b/apps/web/src/plutonium/hydraKeys.ts
 new file mode 100644
-index 0000000000..4db8023820
+index 0000000000..26aa5b645a
 --- /dev/null
 +++ b/apps/web/src/plutonium/hydraKeys.ts
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,469 @@
 +// Plutonium: Hydra's side of HYDRA_KEYBOARD.md: the slots (Space, Backspace, Tab, H, L),
 +// the g places and z shows, run as Pluto Vim page actions from the composer
 +// (plutoVim.ts), and the same keys when the keyboard isn't in a field.
@@ -446,11 +471,11 @@ index 0000000000..4db8023820
 +import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
 +
 +import { toggleFilePane } from "./files/filePanes";
-+import { hintsShowing, showHints } from "./hints";
++import { hintsShowing, prepareTimeline, showHints, TIMELINE } from "./hints";
 +import { focusRightPanelSurface } from "./panelKeys";
++import { plutoniumShell } from "./windowStore";
 +
 +const EDITOR = '[data-testid="composer-editor"]';
-+const TIMELINE = ".messages-timeline-scroll";
 +
 +export interface HydraKeysContext {
 +  readonly threadRef: ScopedThreadRef;
@@ -581,15 +606,23 @@ index 0000000000..4db8023820
 +  );
 +}
 +
-+function focusEditor(where: "keep" | "end"): void {
++/** Sets Pluto Vim's mode in a field (dom.js listens for pvim:set-mode). */
++export function setVimMode(el: Element, mode: "normal" | "insert"): void {
++  el.dispatchEvent(new CustomEvent("pvim:set-mode", { detail: { mode }, bubbles: true }));
++}
++
++/** The composer gets the keyboard (from a tab or an app too); `insert` puts it in insert mode, else its mode stays. */
++function focusEditor(where: "keep" | "end", insert = false): void {
 +  const editor = document.querySelector<HTMLElement>(EDITOR);
 +  if (!editor) return;
++  void plutoniumShell().then((shell) => shell?.focusPage?.());
 +  editor.focus();
 +  if (where === "end") {
 +    const selection = window.getSelection();
 +    selection?.selectAllChildren(editor);
 +    selection?.collapseToEnd();
 +  }
++  if (insert) setVimMode(editor, "insert");
 +}
 +
 +async function waitFor<T>(find: () => T | null | undefined, ms = 1500): Promise<T | null> {
@@ -606,7 +639,7 @@ index 0000000000..4db8023820
 +  const timeline = document.querySelector<HTMLElement>(TIMELINE);
 +  if (!timeline) return;
 +  timeline.scrollBy({
-+    top: dir * timeline.clientHeight * 0.85 * (count ?? 1),
++    top: dir * timeline.clientHeight * 0.5 * (count ?? 1),
 +    behavior: "instant" as ScrollBehavior,
 +  });
 +}
@@ -671,9 +704,24 @@ index 0000000000..4db8023820
 +    }
 +  },
 +  "place.composer": () => focusEditor("keep"),
++  "place.composerInsert": () => focusEditor("keep", true),
++  "place.composerEnd": () => focusEditor("end", true),
++  // In the timeline (read-only): i, a, c… go back to the composer, typing.
++  insert: () => focusEditor("keep", true),
++  // The timeline, at its end, with the keyboard in it: a cursor to read and yank with.
 +  "place.latest": () => {
-+    const timeline = document.querySelector<HTMLElement>(TIMELINE);
-+    timeline?.scrollTo({ top: timeline.scrollHeight, behavior: "instant" as ScrollBehavior });
++    const timeline = prepareTimeline();
++    if (!timeline) return;
++    timeline.scrollTo({ top: timeline.scrollHeight, behavior: "instant" as ScrollBehavior });
++    requestAnimationFrame(() => {
++      const walker = document.createTreeWalker(timeline, NodeFilter.SHOW_TEXT);
++      let last: Node | null = null;
++      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
++        if (node.textContent?.trim()) last = node;
++      }
++      if (last) window.getSelection()?.collapse(last, 0);
++      timeline.focus({ preventScroll: true });
++    });
 +  },
 +  "place.pending": () => {
 +    focusPending();
@@ -760,8 +808,11 @@ index 0000000000..4db8023820
 +  H: "item.previous",
 +  L: "item.next",
 +  gw: "jump.word",
-+  gi: "place.composer",
-+  gA: "place.composer",
++  gi: "place.composerInsert",
++  gA: "place.composerEnd",
++  i: "place.composerInsert",
++  a: "place.composerInsert",
++  A: "place.composerEnd",
 +  gc: "place.composer",
 +  gm: "place.latest",
 +  gp: "place.pending",
@@ -781,7 +832,7 @@ index 0000000000..4db8023820
 +};
 +
 +const OWN_KEYS =
-+  'input, textarea, select, [contenteditable="true"], [data-terminal-owner], [data-plutonium-files], [role="menu"], [role="listbox"], [role="dialog"], [role="combobox"], [cmdk-root], embed, native-window';
++  'input, textarea, select, [contenteditable="true"], [data-pvim-readonly], [data-terminal-owner], [data-plutonium-files], [role="menu"], [role="listbox"], [role="dialog"], [role="combobox"], [cmdk-root], embed, native-window';
 +
 +let pending = "";
 +let pendingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -818,8 +869,7 @@ index 0000000000..4db8023820
 +  if (exact) {
 +    pending = "";
 +    event.preventDefault();
-+    if (keys === "gA") focusEditor("end");
-+    else runHydraAction(exact, {});
++    runHydraAction(exact, {});
 +    return;
 +  }
 +  if (more) {
@@ -829,21 +879,55 @@ index 0000000000..4db8023820
 +    return;
 +  }
 +  pending = "";
++  // With Pluto Vim on, typing off a field doesn't type into the composer (T3's type-to-focus): i does.
++  if (event.key !== " " && document.querySelector(`${EDITOR}[data-pvim-mode]`))
++    event.preventDefault();
++}
++
++/**
++ * A page key from a tab or an app (the helper relays a place, a show or a
++ * jump the page there doesn't have: plutonium:page-key).
++ */
++function onRelayedKey(event: Event): void {
++  const detail = (
++    event as CustomEvent<{ name?: unknown; count?: number | null; text?: string } | null>
++  ).detail;
++  if (!detail || typeof detail.name !== "string" || !current) return;
++  const name = detail.name;
++  const run = () =>
++    runHydraAction(name, {
++      count: detail.count ?? null,
++      ...(detail.text ? { text: detail.text } : {}),
++    });
++  // Labels and places are this page's: it takes the keyboard first.
++  if (name.startsWith("jump.") || name.startsWith("place.")) {
++    void plutoniumShell().then((shell) => {
++      shell?.focusPage?.();
++      requestAnimationFrame(run);
++    });
++  } else run();
 +}
 +
 +let installed = false;
 +
++/**
++ * At the window's capture phase, before T3's own (its type-to-focus would
++ * take letters first): called when this module loads, before T3 attaches.
++ */
 +export function installOffFieldKeys(): void {
 +  if (installed || typeof window === "undefined") return;
 +  installed = true;
-+  window.addEventListener("keydown", onOffFieldKey);
++  window.addEventListener("keydown", onOffFieldKey, true);
++  window.addEventListener("plutonium:page-key", onRelayedKey);
 +}
++
++installOffFieldKeys();
 diff --git a/apps/web/src/plutonium/plutoVim.ts b/apps/web/src/plutonium/plutoVim.ts
 new file mode 100644
-index 0000000000..b0554654fc
+index 0000000000..5b5bf26ce7
 --- /dev/null
 +++ b/apps/web/src/plutonium/plutoVim.ts
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,181 @@
 +// The composer integrates with Plutonium's vim mode (PLUTO_VIM.md, "Pages that integrate"):
 +// it declares its actions in data-pvim-* attributes and runs each pvim:action with its own key
 +// handling, and fills HYDRA_KEYBOARD.md's keys (hydraKeys.ts). Outside insert mode it yields
@@ -860,7 +944,9 @@ index 0000000000..b0554654fc
 +  noteThreadUsed,
 +  runHydraAction,
 +  setHydraKeysContext,
++  setVimMode as setFieldMode,
 +} from "./hydraKeys";
++import { TIMELINE } from "./hints";
 +
 +const EDITOR = '[data-testid="composer-editor"]';
 +
@@ -911,7 +997,10 @@ index 0000000000..b0554654fc
 +  }, [embedded, pathname]);
 +
 +  const onAction = useStableCallback((event: Event) => {
-+    const el = event.target instanceof Element ? event.target.closest(EDITOR) : null;
++    const target = event.target instanceof Element ? event.target : null;
++    const el = target?.closest(EDITOR) ?? null;
++    // The timeline, as a read-only field (hints.ts, prepareTimeline): Hydra's actions only.
++    const timeline = el ? null : (target?.closest(TIMELINE) ?? null);
 +    const detail = (
 +      event as CustomEvent<{
 +        name?: unknown;
@@ -921,8 +1010,15 @@ index 0000000000..b0554654fc
 +      } | null>
 +    ).detail;
 +    const name = detail?.name;
-+    if (!el || !detail || typeof name !== "string" || detail.handled) return;
++    if ((!el && !timeline) || !detail || typeof name !== "string" || detail.handled) return;
 +    detail.handled = true;
++    if (timeline) {
++      runHydraAction(name, {
++        count: detail.count ?? null,
++        ...(detail.text ? { text: detail.text } : {}),
++      });
++      return;
++    }
 +    const command = composer.commands[name];
 +    if (command) return command();
 +    if (
@@ -965,7 +1061,13 @@ index 0000000000..b0554654fc
 +    document.querySelectorAll(EDITOR).forEach(declare);
 +    // A thread switch remounts the editor: declare it again when it takes focus.
 +    const onFocus = (event: FocusEvent) => {
-+      const el = event.target instanceof Element ? event.target.closest<HTMLElement>(EDITOR) : null;
++      const target = event.target instanceof Element ? event.target : null;
++      // The timeline as a read-only field: Hydra's actions (places, shows, insert back in the composer).
++      if (!embedded && target?.matches(`${TIMELINE}[data-pvim-readonly]`)) {
++        target.setAttribute("data-pvim-actions", HYDRA_ACTIONS.join(" "));
++        return;
++      }
++      const el = target?.closest<HTMLElement>(EDITOR) ?? null;
 +      if (!el) return;
 +      declare(el);
 +      // A field starts in the mode its rules say (pvim:mode fires only on changes).
@@ -983,6 +1085,23 @@ index 0000000000..b0554654fc
 +      document.removeEventListener("pvim:mode", onMode);
 +    };
 +  }, [menuOpen, commandNames, normal, embedded]);
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a document listener that puts the composer back in normal mode once Enter has sent its message
++  useEffect(() => {
++    if (embedded) return;
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
++      const el = event.target instanceof Element ? event.target.closest<HTMLElement>(EDITOR) : null;
++      if (!el || el.dataset.pvimMode !== "insert") return;
++      // Sent: the editor is empty once the composer has taken the message.
++      setTimeout(() => {
++        if (el.isConnected && el.dataset.pvimMode === "insert" && !el.innerText.trim())
++          setFieldMode(el, "normal");
++      }, 150);
++    };
++    document.addEventListener("keydown", onKeyDown, true);
++    return () => document.removeEventListener("keydown", onKeyDown, true);
++  }, [embedded]);
 +
 +  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a document listener for the vim engine's pvim:action events, held while mounted
 +  useEffect(() => {

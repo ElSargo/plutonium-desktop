@@ -76,6 +76,8 @@ export interface VimInjectorOptions {
   /** An uppercase mark set in page `targetId` (m{A-Z}), and a jump to one from a page. */
   readonly onMarkSet?: (targetId: string, name: string, offset: number) => void;
   readonly onMarkJump?: (name: string) => void;
+  /** A page key a page doesn't have (a browser tab's gc, zt): its name and detail, for the shells (toShells). */
+  readonly onPageKey?: (targetId: string, name: string, detail: Record<string, unknown>) => void;
 }
 
 interface PageSession {
@@ -254,6 +256,7 @@ export class VimInjector {
       else if (message.op === "set") await store.set(message.name, message.value, message.scope, place);
       else if (message.op === "mark.set") this.options.onMarkSet?.(target, message.name, Number((message as { offset?: unknown }).offset));
       else if (message.op === "mark.jump") this.options.onMarkJump?.(message.name);
+      else if (message.op === "page.key") this.options.onPageKey?.(target, message.name, ((message as { detail?: unknown }).detail ?? {}) as Record<string, unknown>);
     } catch (error) {
       this.log(`pluto vim: register store: ${(error as Error).message}`);
     }
@@ -262,6 +265,29 @@ export class VimInjector {
       contextId: call.executionContextId,
       expression: `globalThis.${REPLY}?.(${id}, ${JSON.stringify(result ?? null)})`,
     }, sessionId).catch(() => {});
+  }
+
+  /**
+   * A page key for the shells (HYDRA_KEYBOARD.md): plutonium:page-key on each
+   * shell page we hold, in its own world, with { name, …detail, from }. A
+   * shell that has the action runs it (Hydra), the rest ignore it.
+   */
+  async toShells(from: string, name: string, detail: Record<string, unknown>): Promise<void> {
+    const origins = this.options.shellOrigins?.() ?? {};
+    const payload = JSON.stringify({ ...detail, name, from });
+    for (const [targetId, page] of this.sessions) {
+      if (targetId === from) continue;
+      let origin = "";
+      try {
+        origin = new URL(page.url).origin;
+      } catch {
+        continue;
+      }
+      if (!(origin in origins)) continue;
+      await this.cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("plutonium:page-key", { detail: ${payload} }))`,
+      }, page.sessionId).catch(() => {});
+    }
   }
 
   /** Uppercase mark `name` in page `targetId`: its field takes focus and the cursor goes to the mark. */

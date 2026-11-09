@@ -264,6 +264,21 @@ export const MOTIONS = [
   { keys: ",", fn: repeatFind(true), kind: findKind(true) },
   { keys: "}", fn: repeatMotion(T.paragraphForward), kind: "exclusive", jump: true },
   { keys: "{", fn: repeatMotion(T.paragraphBack), kind: "exclusive", jump: true },
+  // A labeled jump to any word in the field (HYDRA_KEYBOARD.md): after an operator or in visual mode,
+  // a remote motion (y gw: yank from here through the word labelled). Alone, the page's jump.word,
+  // where it has one (every word on screen), else the field's words. The engine sets jumpTarget.
+  {
+    keys: "gw",
+    fn: (c) => {
+      const at = c.session.jumpTarget;
+      if (at == null) return null;
+      // Forward, an operator takes the whole word it lands on.
+      return c.op && at > c.pos ? T.wordEnd(c.text, at, false, true) : at;
+    },
+    kind: "inclusive",
+    jump: true,
+    labelJump: true,
+  },
   // Sentences, and Markdown's structure (HYDRA_KEYBOARD.md): headings, list items, code blocks.
   { keys: ")", fn: repeatMotion(P.sentenceForward), kind: "exclusive", jump: true },
   { keys: "(", fn: repeatMotion(P.sentenceBack), kind: "exclusive", jump: true },
@@ -504,7 +519,6 @@ export const PAGE_KEYS = [
   { keys: "L", page: "item.next" },
   { keys: "K", page: "details", text: "word" },
   { keys: "S", page: "jump.significant" },
-  { keys: "gw", page: "jump.word" },
   { keys: "gx", page: "open", text: "target" },
   { keys: "gc", page: "place.composer" },
   { keys: "gm", page: "place.latest" },

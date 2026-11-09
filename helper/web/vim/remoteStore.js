@@ -85,4 +85,6 @@ export function connectHost(vim, store) {
   vim.remoteMarks = true;
   vim.on("MarkSet", ({ name, offset }) => void store.call("mark.set", { name, offset }));
   vim.on("MarkJump", ({ name }) => void store.call("mark.jump", { name }));
+  // A page key this page doesn't have (a place, a show, a jump): the shell's (HYDRA_KEYBOARD.md).
+  vim.on("PageKey", ({ name, detail }) => void store.call("page.key", { name, detail }));
 }
