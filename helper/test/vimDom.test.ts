@@ -316,6 +316,42 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     await page.evaluate(() => document.getElementById("scrollbox")!.remove());
   });
 
+  test("held j glides until it's let go; Ctrl+D in a field pages what's around it, not the field", async () => {
+    await page.evaluate(() => {
+      const box = document.createElement("div");
+      box.id = "glidebox";
+      box.style.cssText = "height:100px;overflow:auto";
+      box.innerHTML = "<div style='height:20000px'>x</div>";
+      box.tabIndex = 0;
+      document.body.append(box);
+      box.focus();
+      (window as any).pvim.vim.setMode("normal");
+    });
+    const top = () => page.evaluate(() => document.getElementById("glidebox")!.scrollTop);
+    await page.keyboard.down("j");
+    await page.waitForTimeout(600);
+    await page.keyboard.up("j");
+    const held = await top();
+    assert.ok(held > 300, `held j glided (to ${held})`);
+    await page.waitForTimeout(200);
+    assert.equal(await top(), held, "and stopped when let go");
+    await page.evaluate(() => {
+      const box = document.getElementById("glidebox")!;
+      box.scrollTop = 0;
+      const ta = document.createElement("textarea");
+      ta.id = "inbox";
+      ta.value = "a\n".repeat(200);
+      box.prepend(ta);
+      ta.focus();
+      ta.setSelectionRange(0, 0);
+      ta.scrollTop = 0;
+    });
+    await page.keyboard.press("Control+d");
+    const r = await page.evaluate(() => ({ box: document.getElementById("glidebox")!.scrollTop, ta: (document.getElementById("inbox") as HTMLTextAreaElement).scrollTop }));
+    assert.deepEqual(r, { box: 50, ta: 0 });
+    await page.evaluate(() => document.getElementById("glidebox")!.remove());
+  });
+
   test("a click into a field is insert mode; a single-line input is insert while it has the keyboard, and gives the mode back", async () => {
     await page.evaluate(() => {
       (window as any).pvim.vim.setMode("normal");

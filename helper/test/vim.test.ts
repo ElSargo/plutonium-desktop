@@ -894,6 +894,18 @@ describe("normal mode by default, read-only fields, gw, pages' modes and relayed
     assert.equal(buffer.cursor, 4);
   });
 
+  test("gw alone, where the page has no jump.word, is the desktop's (PageKey): the shell labels the whole screen", async () => {
+    const vim = new Vim({ opt: { startInInsert: false } });
+    const relayed: string[] = [];
+    vim.on("PageKey", ({ name }: any) => relayed.push(name));
+    const buffer = field("|a b");
+    const session = vim.attach(buffer);
+    await session.idle();
+    await type(session, buffer, "gw");
+    assert.deepEqual(relayed, ["jump.word"]);
+    assert.equal(session.jump, null, "no labels of the field's own");
+  });
+
   test("gw alone is the page's jump.word where it has one", async () => {
     const vim = new Vim({ opt: { startInInsert: false } });
     const buffer = field("|a b");
