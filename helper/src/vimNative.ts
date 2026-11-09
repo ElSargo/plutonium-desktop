@@ -648,7 +648,7 @@ export class NativeVim {
     const s = session as Session & { recording?: { register?: string } | null };
     this.options.onState({
       mode: this.vim?.mode ?? "normal",
-      sub: session.readonly ? (session.jump ? "jump" : "normal") : session.displayMode,
+      sub: session.jump ? "jump" : session.page ? "normal" : session.displayMode,
       place: session.page ? "app" : "field",
       label: this.options.appOf?.(windowId) ?? "",
       site: "",

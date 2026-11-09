@@ -546,6 +546,43 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     await page.evaluate(() => document.getElementById("hintbox")!.remove());
   });
 
+  test("a page's text: gw's label puts the cursor there to read; gv's selects the word and never clicks; Escape goes back to the page", async () => {
+    const r = await page.evaluate(async () => {
+      const w = window as any;
+      w.vim = w.pvim.vim;
+      w.pvim.vim.setMode("normal");
+      const art = document.createElement("article");
+      art.id = "art";
+      art.innerHTML = "<p>alpha bravo charlie</p><p>delta <a href='#x' id='lnk'>echo</a> foxtrot</p>";
+      document.body.prepend(art);
+      w.linkClicks = 0;
+      document.getElementById("lnk")!.addEventListener("click", (e) => { e.preventDefault(); w.linkClicks++; });
+      const items = w.pvim.hintTargets("word").items;
+      const wordAt = (word: string) => items.find((it: any) => {
+        const range = document.caretRangeFromPoint(it.x + 1, it.y + it.h / 2);
+        const text = range?.startContainer.textContent ?? "";
+        return text.slice(range!.startOffset).startsWith(word);
+      })?.id;
+      const out: any = {};
+      w.pvim.hintGo(wordAt("bravo"));
+      await new Promise((res) => setTimeout(res, 30));
+      out.read = { region: art.getAttribute("data-pvim-readonly"), active: document.activeElement?.id, mode: w.pvim.sessionOf(art).mode };
+      w.pvim.hintGo(wordAt("echo"), "select");
+      await w.pvim.sessionOf(art).idle();
+      out.select = { mode: w.pvim.sessionOf(art).mode, text: getSelection()!.toString(), clicks: w.linkClicks };
+      return out;
+    });
+    assert.deepEqual(r.read, { region: "page", active: "art", mode: "normal" });
+    assert.deepEqual(r.select, { mode: "visual", text: "echo", clicks: 0 });
+    await page.keyboard.press("y");
+    await page.waitForTimeout(50);
+    assert.equal(await page.evaluate(async () => (await (window as any).pvim.vim.registers.get('"')).text), "echo");
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(30);
+    assert.deepEqual(await page.evaluate(() => [document.getElementById("art")!.hasAttribute("data-pvim-readonly"), document.activeElement === document.getElementById("art")]), [false, false], "y left visual mode; Escape left the text");
+    await page.evaluate(() => document.getElementById("art")!.remove());
+  });
+
   test("a password field is never vim's", async () => {
     await page.evaluate(() => { const el = document.getElementById("pw") as HTMLInputElement; el.value = ""; el.focus(); });
     await page.keyboard.press("Control+BracketLeft");

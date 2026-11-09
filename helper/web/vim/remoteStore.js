@@ -91,8 +91,8 @@ export function connectHost(vim, store, doc = globalThis.document) {
     });
   });
   doc?.addEventListener("pvim:hint-go", (event) => {
-    const { targetId, id } = event.detail ?? {};
-    void store.call("hints.go", { targetId, id });
+    const { targetId, id, how } = event.detail ?? {};
+    void store.call("hints.go", { targetId, id, how });
   });
   vim.remoteMarks = true;
   vim.on("MarkSet", ({ name, offset }) => void store.call("mark.set", { name, offset }));

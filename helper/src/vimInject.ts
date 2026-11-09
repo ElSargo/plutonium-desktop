@@ -275,8 +275,8 @@ export class VimInjector {
       }
       else if (message.op === "hints.collect") result = await this.collectHints(target, String((message as { kind?: unknown }).kind ?? ""));
       else if (message.op === "hints.go") {
-        const { targetId: to, id: which } = message as { targetId?: unknown; id?: unknown };
-        if (typeof to === "string") result = await this.hintGo(to, Number(which));
+        const { targetId: to, id: which, how } = message as { targetId?: unknown; id?: unknown; how?: unknown };
+        if (typeof to === "string") result = await this.hintGo(to, Number(which), how === "select" ? "select" : "go");
       }
     } catch (error) {
       this.log(`pluto vim: register store: ${(error as Error).message}`);
@@ -384,9 +384,9 @@ export class VimInjector {
   }
 
   /** Goes to target `id` of page `targetId`'s last hints. */
-  private async hintGo(targetId: string, id: number): Promise<boolean> {
+  private async hintGo(targetId: string, id: number, how: "go" | "select" = "go"): Promise<boolean> {
     if (!Number.isSafeInteger(id)) return false;
-    return (await this.inWorld(targetId, `!!globalThis.plutoVimPage?.hintGo(${id})`)) === true;
+    return (await this.inWorld(targetId, `!!globalThis.plutoVimPage?.hintGo(${id}, ${JSON.stringify(how)})`)) === true;
   }
 
   /** Uppercase mark `name` in page `targetId`: its field takes focus and the cursor goes to the mark. */
