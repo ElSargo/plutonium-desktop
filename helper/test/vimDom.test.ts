@@ -165,6 +165,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
   /** Focuses a field with its text set and the cursor at the end, in insert mode (a fresh session). */
   async function fresh(sel: string, text: string) {
     await page.evaluate(({ sel, text }) => {
+      (window as any).pvim.vim.setMode("insert");
       const el = document.querySelector(sel) as HTMLTextAreaElement;
       const clone = el.cloneNode(true) as HTMLTextAreaElement;
       el.replaceWith(clone); // a new element: a new session
@@ -186,7 +187,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
 
   test("a textarea: insert, Escape, motions and operators", async () => {
     await fresh("#ta", "");
-    await keys("#ta", "hello world", "Escape");
+    await keys("#ta", "hello world", "Control+BracketLeft");
     let s = await state("#ta");
     assert.equal(s.mode, "normal");
     assert.equal(s.cursor, 10, "Escape moves onto the last character");
@@ -198,23 +199,23 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal((await state("#ta")).text, "hello world");
   });
 
-  test("Escape that leaves insert mode is vim's alone; one vim has no use for is the page's", async () => {
+  test("Escape is the page's: it never leaves insert mode; in normal mode it cancels what's in progress, else the page has it", async () => {
     await fresh("#ta", "");
     await page.evaluate(() => { (window as any).escapes.length = 0; });
     await keys("#ta", "hello", "Escape");
+    assert.equal((await state("#ta")).mode, "insert");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [false], "the page had it");
+    await keys("#ta", "Control+BracketLeft", "v", "Escape");
     assert.equal((await state("#ta")).mode, "normal");
-    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [], "the page never saw the first Escape");
-    await keys("#ta", "v", "Escape");
-    assert.equal((await state("#ta")).mode, "normal");
-    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [], "nor the one leaving visual mode");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [false], "leaving visual mode: vim's");
     await keys("#ta", "Escape");
-    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [false], "in normal mode it's the page's, untouched");
+    assert.deepEqual(await page.evaluate(() => (window as any).escapes), [false, false], "in normal mode it's the page's, untouched");
   });
 
   test("a wrapping textarea: j and k move by display lines, gj and gk by real ones, dj takes real lines", async () => {
     const long = "word ".repeat(24).trim(); // 119 characters: three lines or more at 40 columns
     await fresh("#ta", `${long}\nsecond\nthird`);
-    await keys("#ta", "Escape", "g", "g");
+    await keys("#ta", "Control+BracketLeft", "g", "g");
     assert.equal((await state("#ta")).cursor, 0);
     await keys("#ta", "j");
     let s = await state("#ta");
@@ -237,7 +238,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     try {
       const long = "word ".repeat(24).trim();
       await fresh("#ta", `${long}\nsecond`);
-      await keys("#ta", "Escape", "g", "g", "j");
+      await keys("#ta", "Control+BracketLeft", "g", "g", "j");
       assert.equal((await state("#ta")).cursor, long.length + 1);
       await keys("#ta", "g", "g", "g", "j");
       const s = await state("#ta");
@@ -250,7 +251,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
   test("a textarea: cw then u undoes the whole change; edits are real input events", async () => {
     await fresh("#ta", "one two");
     await page.evaluate(() => { (window as any).inputs.length = 0; });
-    await keys("#ta", "Escape", "0", "c", "w", "uno", "Escape");
+    await keys("#ta", "Control+BracketLeft", "0", "c", "w", "uno", "Control+BracketLeft");
     assert.equal((await state("#ta")).text, "uno two");
     const inputs: string[] = await page.evaluate(() => (window as any).inputs);
     assert.ok(inputs.includes("deleteContent") || inputs.includes("deleteContentBackward") || inputs.includes("insertText"), inputs.join(","));
@@ -262,7 +263,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
 
   test("a textarea: lines, visual mode, yank and put", async () => {
     await fresh("#ta", "");
-    await keys("#ta", "a", "Enter", "b", "Enter", "c", "Escape", "g", "g", "y", "y", "G", "p");
+    await keys("#ta", "a", "Enter", "b", "Enter", "c", "Control+BracketLeft", "g", "g", "y", "y", "G", "p");
     assert.equal((await state("#ta")).text, "a\nb\nc\na");
     await keys("#ta", "g", "g", "V", "j", "d");
     assert.equal((await state("#ta")).text, "c\na");
@@ -270,18 +271,63 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     assert.equal((await state("#ta")).text, "cc\na");
   });
 
-  test("a page's own key handler on the field wins", async () => {
+  test("in insert mode a page's own key handler on the field wins; in normal mode Pluto Vim is first", async () => {
     await page.evaluate(() => {
+      (window as any).pvim.vim.setMode("insert");
       const el = document.getElementById("guarded") as HTMLTextAreaElement;
       el.value = "a\nb";
       el.focus();
       el.setSelectionRange(0, 0);
     });
-    await keys("#guarded", "Escape", "j");
-    const s = await state("#guarded");
-    assert.equal(s.cursor, 0, "j was the page's");
-    await keys("#guarded", "l");
-    assert.equal((await state("#guarded")).cursor, 0, "a one-character line: l can't move");
+    await keys("#guarded", "j");
+    assert.equal((await state("#guarded")).text, "a\nb", "insert mode: the page took j");
+    await keys("#guarded", "Control+BracketLeft", "g", "g", "j");
+    assert.equal((await state("#guarded")).cursor, 2, "normal mode: j is vim's");
+  });
+
+  test("off a field: the page session scrolls in normal mode, and the page has every key in insert mode", async () => {
+    const r = await page.evaluate(async () => {
+      const w = window as any;
+      const box = document.createElement("div");
+      box.id = "scrollbox";
+      box.style.cssText = "height:100px;overflow:auto";
+      box.innerHTML = "<div style='height:2000px'>x</div>";
+      box.tabIndex = 0;
+      document.body.append(box);
+      const seen: string[] = [];
+      const listen = (e: KeyboardEvent) => seen.push(`${e.key}:${e.defaultPrevented}`);
+      window.addEventListener("keydown", listen);
+      box.focus();
+      w.pvim.vim.setMode("normal");
+      return true;
+    });
+    assert.ok(r);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    assert.equal(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop), 120);
+    await page.keyboard.press("G");
+    assert.ok(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop > 1000));
+    await page.keyboard.press("i");
+    assert.equal(await page.evaluate(() => (window as any).pvim.vim.mode), "insert");
+    await page.keyboard.press("k");
+    assert.ok(await page.evaluate(() => document.getElementById("scrollbox")!.scrollTop > 1000), "insert: k is the page's");
+    await page.keyboard.press("Control+BracketLeft");
+    assert.equal(await page.evaluate(() => (window as any).pvim.vim.mode), "normal");
+    await page.evaluate(() => document.getElementById("scrollbox")!.remove());
+  });
+
+  test("a click into a field is insert mode; a single-line input is insert while it has the keyboard, and gives the mode back", async () => {
+    await page.evaluate(() => {
+      (window as any).pvim.vim.setMode("normal");
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    await page.locator("#ta").click();
+    assert.equal(await page.evaluate(() => (window as any).pvim.vim.mode), "insert");
+    await page.keyboard.press("Control+BracketLeft");
+    await page.evaluate(() => document.getElementById("in")!.focus());
+    assert.equal(await page.evaluate(() => (window as any).pvim.vim.mode), "insert");
+    await page.evaluate(() => document.getElementById("ta")!.focus());
+    assert.equal(await page.evaluate(() => (window as any).pvim.vim.mode), "normal", "the mode before the input");
   });
 
   test("a single-line input: Escape is the page's, Ctrl+[ enters normal mode, Enter submits", async () => {
@@ -322,7 +368,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
       const el = document.createElement("textarea");
       el.id = "integ";
       el.value = "one\ntwo";
-      el.dataset.pvimStart = "normal";
+      w.pvim.vim.setMode("normal");
       el.dataset.pvimActions = "submit history.prev history.next";
       el.dataset.pvimYield = "x";
       // The page's own x: vim's while the page gives it up.
@@ -334,7 +380,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
       el.setSelectionRange(0, 0);
     });
     await page.evaluate(() => (window as any).idle("#integ"));
-    assert.equal((await state("#integ")).mode, "normal", "data-pvim-start");
+    assert.equal((await state("#integ")).mode, "normal", "the desktop's mode");
     await keys("#integ", "k", "j", "j", "Enter");
     assert.deepEqual(await page.evaluate(() => (window as any).actions), ["history.prev", "history.next", "submit"],
       "k on the first line, j on the second (a motion), j on the last, Enter");
@@ -369,7 +415,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
 
   test("the : line is drawn under the field as it's typed, and runs on Enter", async () => {
     await fresh("#ta", "a a");
-    await keys("#ta", "Escape", ":", "s/a/b/g");
+    await keys("#ta", "Control+BracketLeft", ":", "s/a/b/g");
     assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-line").length), 1);
     await keys("#ta", "Enter");
     assert.equal((await state("#ta")).text, "b b");
@@ -378,7 +424,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
 
   test("s: the jump's labels are drawn over the field while it's typed, and the label goes there", async () => {
     await fresh("#ta", "one two one three one");
-    await keys("#ta", "Escape", "0", "s", "o");
+    await keys("#ta", "Control+BracketLeft", "0", "s", "o");
     assert.equal(await page.evaluate(() => document.querySelectorAll("pvim-labels").length), 1);
     // Where the labels go: each character's own place, in the field's layout.
     const placed = await page.evaluate(() => {
@@ -481,7 +527,7 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
       getSelection()!.collapse(el.querySelector("p")!.firstChild, 0);
     }, long);
     try {
-      await keys("#ce", "Escape");
+      await keys("#ce", "Control+BracketLeft");
       await keys("#ce", "j");
       const s = await state("#ce");
       assert.ok(s.cursor > 5 && s.cursor < long.length, `j stayed in the wrapped paragraph (at ${s.cursor})`);
@@ -504,14 +550,14 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     });
     let s = await state("#ce");
     assert.equal(s.text, "one two\nthree");
-    await keys("#ce", "Escape");
+    await keys("#ce", "Control+BracketLeft");
     s = await state("#ce");
     assert.equal(s.mode, "normal");
     await keys("#ce", "w", "j");
     assert.equal((await state("#ce")).cursor, 12, "j keeps the column");
     await keys("#ce", "k", "d", "i", "w");
     assert.equal((await state("#ce")).text, "one \nthree");
-    await keys("#ce", "o", "new", "Escape");
+    await keys("#ce", "o", "new", "Control+BracketLeft");
     assert.equal((await state("#ce")).text, "one \nnew\nthree");
     await keys("#ce", "j", "d", "d");
     assert.equal((await state("#ce")).text, "one \nnew");
@@ -528,8 +574,8 @@ describe("Pluto Vim in a browser", { skip: chromium ? false : "no Chromium (PLUT
     const pmText = () => page.evaluate(() => (window as any).pmText());
     assert.equal(await pmText(), "alpha beta\ngamma");
     const host = "#pm > .ProseMirror";
-    // ProseMirror's base keymap takes Escape (select the parent node): vim claims it first, in insert mode.
-    await keys(host, "Escape");
+    // ProseMirror's base keymap takes Escape (select the parent node): Caps Lock (Ctrl+[) is vim's first, in insert mode.
+    await keys(host, "Control+BracketLeft");
     assert.equal((await state(host)).mode, "normal");
     await keys(host, "i", "Control+BracketLeft");
     assert.equal((await state(host)).mode, "normal");

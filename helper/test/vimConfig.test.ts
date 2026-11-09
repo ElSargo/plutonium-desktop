@@ -110,7 +110,7 @@ describe("the watched folder", () => {
       assert.equal(git(dir, "log", "--format=%s"), "pluto vim: init.js");
       assert.equal(changes.length, 1, "the first load");
 
-      writeFileSync(join(dir, "init.js"), 'export default function (vim) { vim.keymap.set("i", "jk", "<Esc>"); }\n');
+      writeFileSync(join(dir, "init.js"), 'export default function (vim) { vim.keymap.set("i", "jk", "<C-[>"); }\n');
       await waitFor(() => changes.length === 2);
       assert.match(config.expression, /jk/);
       assert.equal(git(dir, "rev-list", "--count", "HEAD"), "2");
@@ -213,7 +213,7 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
   }
 
   test("a page's world runs init.js, and a new version reaches the open page", async () => {
-    let expression = configExpression(folder({ "init.js": 'export default function (vim) { vim.keymap.set("i", "jk", "<Esc>"); }\n' }));
+    let expression = configExpression(folder({ "init.js": 'export default function (vim) { vim.keymap.set("i", "jk", "<C-[>"); }\n' }));
     const injector = new VimInjector(cdp, () => vimBundle(ENGINE), () => {}, { config: () => expression });
     await injector.start();
     const { targetId } = (await cdp.send("Target.createTarget", { url: `${origin}/` })) as { targetId: string };
@@ -245,7 +245,7 @@ describe("init.js in a real browser's pages", { skip: chromium ? false : "no Chr
     assert.equal(await value("typeof plutoVim"), "undefined", "the engine stays in its own world");
 
     // A new init.js: kj instead, into the page as it is.
-    expression = configExpression(folder({ "init.js": 'export default function (vim) { vim.keymap.set("i", "kj", "<Esc>"); }\n' }));
+    expression = configExpression(folder({ "init.js": 'export default function (vim) { vim.keymap.set("i", "kj", "<C-[>"); }\n' }));
     await injector.reconfigure();
     await press(sessionId, "a");
     assert.equal(await value("document.getElementById('ta').dataset.pvimMode"), "insert");

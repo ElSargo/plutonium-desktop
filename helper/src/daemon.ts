@@ -625,6 +625,15 @@ export class Daemon {
       const registers = new RegisterStore({ clipboard: wlClipboard(options.waylandDisplay, findExecutable), history });
       this.vimRegisters = registers;
       const desktop = this.desktop;
+      // The desktop's one mode (HYDRA_KEYBOARD.md, "One input model"): set where it changed (a page, or
+      // "native"), told to every other page and the native engine.
+      let desktopMode = "normal";
+      const setDesktopMode = (mode: string, from: string) => {
+        if ((mode !== "normal" && mode !== "insert") || mode === desktopMode) return;
+        desktopMode = mode;
+        injector?.setDesktopMode(mode, from === "native" ? null : from);
+        if (from !== "native") native?.setDesktopMode(mode);
+      };
       // Uppercase marks (vimMarks.ts): a jump shows the tab or window through its shell, then moves its field's cursor.
       const marks = new VimMarks();
       const jumpToMark = async (name: string) => {
@@ -649,6 +658,10 @@ export class Daemon {
         onMarkJump: (name) => void jumpToMark(name),
         onPageKey: (targetId, name, detail) => void injector?.toShells(targetId, name, detail),
         tabIdOf: (targetId) => desktop?.tabs().find((tab) => tab.targetId === targetId)?.id ?? null,
+        // One mode for the desktop (HYDRA_KEYBOARD.md, "One input model"), and the mode pill's state.
+        desktopMode: () => desktopMode,
+        onDesktopMode: (targetId, mode) => setDesktopMode(mode, targetId),
+        onState: (targetId, state) => void injector?.stateToShells(targetId, state),
         // A tab's thread is its first tag. Shell pages and untagged tabs use global, for now (step 6).
         placeOf: (targetId) => ({ thread: desktop?.tabs().find((tab) => tab.targetId === targetId)?.tags[0] ?? null }),
         shellOrigins: () => {
@@ -671,9 +684,20 @@ export class Daemon {
         onMarkSet: (windowId, name, offset) => marks.set(name, { kind: "native", windowId }, offset),
         onMarkJump: (name) => void jumpToMark(name),
         onOptions: (opt) => history.setOn(opt.clipboardHistory === true),
+        onDesktopMode: (mode) => setDesktopMode(mode, "native"),
+        onState: (state) => void injector?.stateToShells(null, state),
+        onPageKey: (name, detail) => void injector?.toShells("", name, detail),
+        appOf: (windowId) => {
+          const window = desktop?.windows().find((entry) => entry.id === windowId);
+          return window?.title || window?.appId || "";
+        },
         log,
       });
       this.vimNative = native;
+      // A native window with the keyboard and no field gets a page session (normal mode's page keys).
+      desktop?.windowListeners.add((window, previous) => {
+        if (window.focused && window.embedded && !previous?.focused) void native?.windowFocused(window.id);
+      });
       const nativeVim = native;
       // Apps without text-input-v3 (vimAtspi.ts): their editable text over the accessibility bus.
       const atspi = new AtspiVim(cdp, {
@@ -681,6 +705,7 @@ export class Daemon {
         hasNativeField: (windowId) => nativeVim.hasNativeField(windowId),
         addField: (fieldId, buffer) => nativeVim.addField(fieldId, buffer),
         removeField: (fieldId) => nativeVim.removeField(fieldId),
+        releaseWindowField: (windowId) => nativeVim.releaseWindowField(windowId),
         host: nativeVim.fieldHost,
         log,
       });

@@ -44,6 +44,7 @@ class FakeExo {
 
   async send(method: string, params: any = {}) {
     this.sent.push({ method, params });
+    if (method === "Plutonium.setVimWindowField") return { fieldId: params.enabled ? 50 : 0 };
     if (method === "Plutonium.setVimHold") this.hold = { all: params.all, keys: params.keys };
     if (method === "Plutonium.answerVimKey") this.answers.get(params.keyId)?.(params.consumed);
     if (method === "Plutonium.editVimField") {
@@ -80,13 +81,13 @@ class FakeExo {
   }
 
   /** A key pressed in the app: held for the engine if the field wants it, else typed. */
-  async press(key: string, modifiers = 0) {
+  async press(key: string, modifiers = 0, code = "") {
     const held = this.hold.all || this.hold.keys.some((k) => k.key === key && (k.modifiers ?? 0) === (modifiers & 3));
     if (!held || key === "Shift") return this.type(key);
     const id = this.nextKey++;
     const consumed = await new Promise<boolean>((resolve) => {
       this.answers.set(id, resolve);
-      this.emit("Plutonium.vimKey", { id, fieldId: 1, key, code: "", modifiers, repeat: false });
+      this.emit("Plutonium.vimKey", { id, fieldId: 1, key, code, modifiers, repeat: false });
     });
     if (!consumed) this.type(key);
   }
@@ -100,7 +101,8 @@ class FakeExo {
 
   async keys(...keys: string[]) {
     for (const k of keys) {
-      if (k === "<Esc>") await this.press("Escape");
+      // Caps Lock: an Escape whose code says so (Ash's), which leaves insert mode; the Escape key is the app's.
+      if (k === "<C-[>") await this.press("Escape", 0, "CapsLock");
       else for (const c of k) await this.press(c);
       await sleep(5);
     }
@@ -113,6 +115,8 @@ async function setup(text: string, cursor: number, config = "null", options: { m
   const shown: any[] = [];
   const native = new NativeVim(exo as any, { bundle: () => vimBundle(ENGINE), config: () => config, budget: 60, quiet: 10, registers: options.registers, showMode: (s) => shown.push(s) });
   await native.start();
+  // Typing into an app: the desktop is in insert mode, which a field takes when it comes.
+  native.setDesktopMode("insert");
   exo.report();
   await sleep(10);
   return { exo, native, shown };
@@ -124,7 +128,7 @@ describe("Pluto Vim in a native field", () => {
     assert.equal(native.fields, 1);
     assert.equal(exo.hold.all, false);
     assert.deepEqual(exo.hold.keys.map((k) => k.key), ["Escape", "["]);
-    await exo.keys("!", "<Esc>");
+    await exo.keys("!", "<C-[>");
     assert.equal(exo.text, "hello world!", "typing goes to the app as it is");
     assert.equal(native.session(1)!.mode, "normal");
     assert.equal(exo.hold.all, true);
@@ -133,7 +137,7 @@ describe("Pluto Vim in a native field", () => {
 
   test("operators edit with one delete and commit; motions are arrow presses, reported one by one", async () => {
     const { exo } = await setup("hello big world", 15);
-    await exo.keys("<Esc>", "b", "dw");
+    await exo.keys("<C-[>", "b", "dw");
     assert.equal(exo.text, "hello big ", "b's four presses aren't corrected while they arrive");
     await exo.keys("0", "w", "dw");
     assert.equal(exo.text, "hello ");
@@ -146,14 +150,14 @@ describe("Pluto Vim in a native field", () => {
 
   test("cw then typing: the typed keys reach the app after the edit", async () => {
     const { exo, native } = await setup("one two", 7);
-    await exo.keys("<Esc>", "0", "cw");
+    await exo.keys("<C-[>", "0", "cw");
     assert.equal(native.session(1)!.mode, "insert");
     await exo.keys("uno");
     assert.equal(exo.text, "uno two");
   });
 
   test("insert mappings hold their first key; jk leaves insert mode", async () => {
-    const { exo, native } = await setup("", 0, '(vim) => vim.keymap.set("i", "jk", "<Esc>")');
+    const { exo, native } = await setup("", 0, '(vim) => vim.keymap.set("i", "jk", "<C-[>")');
     assert.ok(exo.hold.keys.some((k) => k.key === "j"));
     await exo.keys("ajx");
     assert.equal(exo.text, "ajx", "j then x types both, in order");
@@ -164,14 +168,14 @@ describe("Pluto Vim in a native field", () => {
 
   test("a field without the MULTILINE hint (GTK's text views): Escape is still vim's", async () => {
     const { exo, native } = await setup("abc", 3, "null", { multiline: false });
-    await exo.keys("<Esc>");
+    await exo.keys("<C-[>");
     assert.equal(native.session(1)!.mode, "normal");
   });
 
   test("registers are the helper's store; the mode is shown outside insert mode", async () => {
     const registers = new RegisterStore();
     const { exo, shown } = await setup("word", 4, "null", { registers });
-    await exo.keys("<Esc>", "0", "yw");
+    await exo.keys("<C-[>", "0", "yw");
     assert.deepEqual(await registers.get('"', "global"), { text: "word", linewise: false });
     assert.deepEqual(shown.at(-1), { windowId: 7, mode: "normal", caret: [10, 20, 1, 16], line: null });
     await exo.keys("i");
@@ -190,15 +194,16 @@ describe("the : line, macros and marks in a native field", () => {
       showMode: (s) => shown.push(s), onMarkSet: (w, n, o) => marks.push([w, n, o]), onMarkJump: (n) => jumps.push(n),
     });
     await native.start();
+    native.setDesktopMode("insert");
     exo.report();
     await sleep(10);
-    await exo.keys("<Esc>", ":s/a/b/g");
+    await exo.keys("<C-[>", ":s/a/b/g");
     assert.equal(shown.at(-1).line, ":s/a/b/g");
     await exo.press("Enter");
     await sleep(60);
     assert.equal(exo.text, "b b");
     assert.equal(shown.at(-1).line, null);
-    await exo.keys("0qqA!", "<Esc>", "q", "@q");
+    await exo.keys("0qqA!", "<C-[>", "q", "@q");
     assert.equal(exo.text, "b b!!", "the typed ! was recorded, and replayed");
     await exo.keys("0mA", "`B");
     assert.deepEqual(marks, [[7, "A", 0]]);
@@ -206,10 +211,66 @@ describe("the : line, macros and marks in a native field", () => {
   });
 });
 
+describe("a native window with no field", () => {
+  test("a page session: page keys and scrolling in normal mode, relayed to the shells; insert mode holds only Escape, and Caps Lock is normal mode", async () => {
+    const exo = new FakeExo("", 0);
+    const relayed: string[] = [];
+    const modes: string[] = [];
+    const states: any[] = [];
+    const native = new NativeVim(exo as any, {
+      bundle: () => vimBundle(ENGINE), config: () => "null",
+      onPageKey: (name) => relayed.push(name), onDesktopMode: (mode) => modes.push(mode), onState: (state) => states.push(state), appOf: () => "Files",
+    });
+    await native.start();
+    await native.windowFocused(7);
+    await sleep(10);
+    assert.equal(exo.hold.all, true, "normal mode: every key is held");
+    const vimKey = async (key: string, code = "") => {
+      const id = exo.nextKey++;
+      const consumed = await new Promise<boolean>((resolve) => {
+        exo.answers.set(id, resolve);
+        exo.emit("Plutonium.vimKey", { id, fieldId: 50, key, code, modifiers: 0, repeat: false });
+      });
+      await sleep(5);
+      return consumed;
+    };
+    assert.equal(await vimKey("j"), true);
+    const arrows = exo.sent.filter((s) => s.method === "Plutonium.dispatchWindowKeyEvents").at(-1)!.params.events;
+    assert.deepEqual(arrows.map((e: any) => `${e.type} ${e.code}`), ["keyDown ArrowDown", "keyUp ArrowDown"], "j is the app's own Down");
+    assert.equal(await vimKey("g"), true);
+    assert.equal(await vimKey("c"), true);
+    assert.deepEqual(relayed, ["place.composer"]);
+    assert.equal(await vimKey("q"), false, "a key with no use here is the app's");
+    assert.equal(await vimKey("i"), true);
+    assert.deepEqual(modes, ["insert"]);
+    await sleep(10);
+    assert.deepEqual(exo.hold, { all: false, keys: [{ key: "Escape" }] });
+    assert.equal(await vimKey("Escape", "Escape"), false, "the Escape key is the app's");
+    assert.equal(await vimKey("Escape", "CapsLock"), true);
+    assert.deepEqual(modes, ["insert", "normal"]);
+    assert.equal(states.at(-1).place, "app");
+    assert.equal(states.at(-1).label, "Files");
+  });
+
+  test("the desktop's mode from a page: a field that comes takes it", async () => {
+    const exo = new FakeExo("abc", 3);
+    const native = new NativeVim(exo as any, { bundle: () => vimBundle(ENGINE), config: () => "null" });
+    await native.start();
+    native.setDesktopMode("normal");
+    exo.report();
+    await sleep(10);
+    assert.equal(native.session(1)!.mode, "normal");
+    native.setDesktopMode("insert");
+    await sleep(10);
+    assert.equal(native.session(1)!.mode, "insert");
+    assert.equal(exo.hold.all, false);
+  });
+});
+
 describe("a field that comes back", () => {
   test("focus left the window and returned (a new field): it's in the mode it was; a mark jump lands in normal mode", async () => {
     const { exo, native } = await setup("abc", 3);
-    await exo.keys("<Esc>");
+    await exo.keys("<C-[>");
     assert.equal(native.session(1)!.mode, "normal");
     exo.emit("Plutonium.vimFieldGone", { id: 1 });
     exo.emit("Plutonium.vimFieldChanged", { field: { id: 2, windowId: 7, text: "abc", cursor: 2, anchor: 2, hint: 0, purpose: 0 } });
@@ -223,7 +284,7 @@ describe("a field that comes back", () => {
 describe("an app that reports nothing after its undo (GTK)", () => {
   test("u then yy p: the helper asks the app where it is before going on", async () => {
     const { exo } = await setup("one two", 7);
-    await exo.keys("<Esc>", "0", "dw");
+    await exo.keys("<C-[>", "0", "dw");
     assert.equal(exo.text, "two");
     await exo.keys("u");
     assert.equal(exo.text, "one two");
@@ -236,7 +297,7 @@ describe("helpers", () => {
   test("keys in vim's notation become what Exo matches", () => {
     assert.deepEqual(keySpec("j"), { key: "j" });
     assert.deepEqual(keySpec("<C-w>"), { key: "w", modifiers: 2 });
-    assert.deepEqual(keySpec("<Esc>"), { key: "Escape" });
+    assert.deepEqual(keySpec("<C-[>"), { key: "Escape" });
     assert.deepEqual(keySpec("<A-CR>"), { key: "Enter", modifiers: 1 });
   });
 

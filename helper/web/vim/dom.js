@@ -16,7 +16,6 @@
 // page's own world).
 
 import { Vim } from "./engine.js";
-import { PAGE_KEYS } from "./commands.js";
 import { collect, go } from "./hints.js";
 import { keyFromEvent, normalizeKey } from "./keys.js";
 
@@ -26,12 +25,11 @@ const TEXT_INPUTS = new Set(["text", "search", "url", "tel"]);
 /** Fields with key handling of their own, which keep it. */
 const OWN_KEYS = '[data-pvim="off"], .monaco-editor, .cm-editor, .xterm';
 
-/** Off a field: the desktop's keys a page passes on (its places, shows and jumps), as typed → action. */
-const OFF_FIELD_KEYS = new Map([
-  ...PAGE_KEYS.filter((e) => /^(place|show|jump)\./.test(e.page) && !e.keys.includes(" ")).map((e) => [e.keys, e.page]),
-  ["gw", "jump.word"],
-  ["gi", "place.composerInsert"],
-]);
+/** Editors and terminals that read keys themselves: places to type, insert mode while they have the keyboard. */
+const OWN_EDITORS = ".monaco-editor, .cm-editor, .xterm";
+
+/** <input> types you type into: insert mode while they have the keyboard (HYDRA_KEYBOARD.md, "One input model"). */
+const TYPED_INPUTS = new Set([...TEXT_INPUTS, "email", "password", "number"]);
 
 const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|SUMMARY|TABLE|TR|UL)$/;
 
@@ -71,9 +69,16 @@ function secret(el) {
  * up (in vim's notation: "<C-n> <Esc> <Space>"), for as long as it declares them.
  */
 function integration(el) {
-  const words = (name) => new Set((el.getAttribute(name) ?? "").split(/\s+/).filter(Boolean));
+  const words = (name, at = el) => new Set((at.getAttribute(name) ?? "").split(/\s+/).filter(Boolean));
   return {
-    actions: () => words("data-pvim-actions"),
+    // The field's own, and the page's around it (Hydra declares its places on the document).
+    actions: () => {
+      const out = new Set();
+      for (let at = el; at; at = at.parentElement) for (const name of words("data-pvim-actions", at)) out.add(name);
+      return out;
+    },
+    /** Off a field, normal mode takes every key, not only its own (data-pvim-page="all" on the document). */
+    takesAll: () => el.ownerDocument.documentElement.getAttribute("data-pvim-page") === "all",
     commands: () => words("data-pvim-commands"),
     yields: () => new Set([...words("data-pvim-yield")].map(normalizeKey)),
     action: (name, detail) => el.dispatchEvent(new el.ownerDocument.defaultView.CustomEvent("pvim:action", { detail: { ...detail, name }, bubbles: true })),
@@ -620,6 +625,72 @@ export class ReadOnlyBuffer extends EditableBuffer {
   }
 }
 
+// ── Off a field ──────────────────────────────────────────────────────────
+
+/** The box `doc`'s page keys scroll: around the keyboard's element, else under the middle of the window, else the document. */
+function scrollerOf(doc) {
+  const view = doc.defaultView;
+  const scrolls = (el) => {
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) return false;
+    const style = view.getComputedStyle(el);
+    return /(auto|scroll|overlay)/.test(style.overflowY + style.overflowX);
+  };
+  const up = (el) => {
+    for (; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) if (scrolls(el)) return el;
+    return null;
+  };
+  const active = doc.activeElement && doc.activeElement !== doc.body ? up(doc.activeElement) : null;
+  return active ?? up(doc.elementFromPoint(view.innerWidth / 2, view.innerHeight / 2)) ?? doc.scrollingElement ?? doc.documentElement;
+}
+
+/**
+ * The page itself, off a field (a page session: HYDRA_KEYBOARD.md, "One
+ * input model"): no text, the page's actions (data-pvim-actions on the
+ * document), and what the page keys do where the page doesn't take them:
+ * scrolling, and back and forward.
+ */
+export class PageBuffer {
+  constructor(doc) {
+    this.doc = doc;
+    this.root = doc.documentElement;
+    this.kind = "web";
+    this.field = { singleLine: true, site: doc.location?.host, ...integration(doc.documentElement) };
+    this.caps = { page: true, readonly: true, exactMotions: true, wholeText: true, selection: false, undo: "none" };
+  }
+
+  text() {
+    return { text: "", start: 0, cursor: 0, anchor: 0 };
+  }
+
+  move() {}
+  async edit() {}
+  undo() {}
+  redo() {}
+  setCaret() {}
+
+  pageAction(name, detail) {
+    const view = this.doc.defaultView;
+    const count = detail?.count ?? 1;
+    const box = () => scrollerOf(this.doc);
+    const by = (top, left = 0) => box().scrollBy({ top, left, behavior: "instant" });
+    const line = 60;
+    switch (name) {
+      case "scroll.down": return by(line * count), true;
+      case "scroll.up": return by(-line * count), true;
+      case "scroll.left": return by(0, -line * count), true;
+      case "scroll.right": return by(0, line * count), true;
+      case "scroll.top": return box().scrollTo({ top: 0, behavior: "instant" }), true;
+      case "scroll.bottom": { const el = box(); el.scrollTo({ top: el.scrollHeight, behavior: "instant" }); return true; }
+      case "context.pageDown": { const el = box(); el.scrollBy({ top: (el.clientHeight || view.innerHeight) * 0.5 * count, behavior: "instant" }); return true; }
+      case "context.pageUp": { const el = box(); el.scrollBy({ top: -(el.clientHeight || view.innerHeight) * 0.5 * count, behavior: "instant" }); return true; }
+      // In a tab, H and L are back and forward (Hydra's are threads: it declares them).
+      case "item.previous": return view.history.back(), true;
+      case "item.next": return view.history.forward(), true;
+      default: return false;
+    }
+  }
+}
+
 // ── A document ───────────────────────────────────────────────────────────
 
 /**
@@ -636,12 +707,8 @@ export function attach(doc = globalThis.document, options = {}) {
   const sessionOf = (field) => {
     let session = sessions.get(field);
     if (!session) {
-      const buffer = bufferFor(field);
-      // vim.enable({ …, start }) for this field, else the page's own (data-pvim-start) unless
-      // init.js chose one for every field (vim.opt.startInInsert).
-      const start = vim.startFor({ site: doc.location?.hostname, shell: options.shell, el: field })
-        ?? (vim.userOpts.has("startInInsert") ? null : field.dataset.pvimStart);
-      session = vim.attach(buffer, start ? { startInInsert: start !== "normal" } : {});
+      // A field starts in the desktop's mode (Vim.mode), and takes it again whenever it gets the keyboard.
+      session = vim.attach(bufferFor(field));
       sessions.set(field, session);
     }
     return session;
@@ -655,68 +722,131 @@ export function attach(doc = globalThis.document, options = {}) {
     return field && vim.enabledFor({ site: doc.location?.hostname, shell: options.shell, el: field }) ? field : null;
   };
 
+  // Off a field: one session for the page itself (PageBuffer), unless Pluto Vim is off for the page.
+  let page = null;
+  const pageSession = () => {
+    if (!vim.enabledFor({ site: doc.location?.hostname, shell: options.shell, el: doc.documentElement })) return null;
+    page ??= vim.attach(new PageBuffer(doc));
+    return page;
+  };
+  /** The session a key at `el` is for: its field's, else the page's. */
+  const sessionAt = (el) => {
+    const field = vimField(el);
+    return field ? sessionOf(field) : pageSession();
+  };
+
+  /** A field takes the desktop's mode (Vim.mode) when it has the keyboard, unless it's in the middle of something. */
+  const sync = (session) => {
+    if (!session || session.readonly || session.off || session.jump || session.cmd) return;
+    const inserting = session.mode === "insert" || session.mode === "replace";
+    if (inserting !== (vim.mode === "insert")) session.enterMode(vim.mode);
+  };
+
+  /**
+   * Where you type and nothing else (HYDRA_KEYBOARD.md, "One input model"): a
+   * single-line input, a password, an editor or a terminal with keys of its
+   * own. While one has the keyboard the mode is insert; when it goes, the
+   * mode it was before comes back, unless you changed it meanwhile.
+   */
+  const typingPlace = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.closest(OWN_EDITORS)) return true;
+    return el instanceof view.HTMLInputElement && TYPED_INPUTS.has(el.type) && !el.readOnly;
+  };
+  let restore = null;
+  let restoring = false;
+  const setMode = (mode) => {
+    restoring = true;
+    try { vim.setMode(mode); } finally { restoring = false; }
+  };
+  const placeChanged = (el) => {
+    if (typingPlace(el)) {
+      if (!restore && vim.mode !== "insert") {
+        restore = vim.mode;
+        setMode("insert");
+      }
+    } else if (restore) {
+      const before = restore;
+      restore = null;
+      setMode(before);
+    }
+  };
+
   const onFocus = (event) => {
-    const field = vimField(target(event));
-    if (!field) return;
-    const session = sessionOf(field);
-    session.buffer.showCursor?.();
-    vim.emit("FieldEnter", { session });
+    const el = target(event);
+    placeChanged(el);
+    const field = vimField(el);
+    if (field) {
+      const session = sessionOf(field);
+      sync(session);
+      session.buffer.showCursor?.();
+      vim.emit("FieldEnter", { session });
+    }
+    stateChanged();
   };
 
   const onBlur = (event) => {
     const field = vimField(target(event));
     const session = field && sessions.get(field);
-    if (!session) return;
-    // Keys held for a mapping would land wherever focus went: they're dropped.
-    session.cancelPending();
-    vim.emit("FieldLeave", { session });
-  };
-
-  // Off a field, in a page that doesn't take them itself (a browser tab in Hydra's panel): the
-  // desktop's places, shows and jumps go to the shell (PageKey; HYDRA_KEYBOARD.md).
-  let offPending = "";
-  let offTimer = null;
-  const offField = (event) => {
-    if (event.ctrlKey || event.altKey || event.metaKey || !vim.listeners.get("PageKey")?.size) return;
-    const el = target(event);
-    if (el?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]') || el?.closest?.(OWN_KEYS)) return;
-    const key = keyFromEvent(event);
-    if (!key || [...key].length !== 1) return;
-    const keys = offPending + key;
-    const exact = OFF_FIELD_KEYS.get(keys);
-    clearTimeout(offTimer);
-    offPending = "";
-    if (exact) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      vim.emit("PageKey", { session: null, name: exact, detail: { count: null } });
-    } else if ([...OFF_FIELD_KEYS.keys()].some((lhs) => lhs.length > keys.length && lhs.startsWith(keys))) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      offPending = keys;
-      offTimer = setTimeout(() => { offPending = ""; }, 1000);
+    if (session) {
+      // Keys held for a mapping would land wherever focus went: they're dropped.
+      session.cancelPending();
+      vim.emit("FieldLeave", { session });
     }
+    stateChanged();
   };
 
+  // The window: leaving it, a typing place gives back the mode it took (another page or app has the
+  // keyboard now); coming back, it takes it again.
+  const onWindowBlur = () => {
+    page?.cancelPending();
+    if (restore) placeChanged(null);
+    stateChanged();
+  };
+  const onWindowFocus = () => {
+    placeChanged(doc.activeElement);
+    sync(sessionAt(doc.activeElement));
+    stateChanged();
+  };
+
+  // A click into a field, an editor or a terminal is for typing: insert mode.
+  const onPointerDown = (event) => {
+    if (!event.isTrusted && !options.untrusted) return;
+    const el = target(event);
+    if (!el || el.nodeType !== 1) return;
+    const field = vimField(el);
+    const typed = el.closest(OWN_EDITORS) || (field && !field.hasAttribute("data-pvim-readonly"));
+    if (typed) vim.setMode("insert");
+  };
+
+  /**
+   * One router for every key (HYDRA_KEYBOARD.md, "One input model"): in
+   * normal mode Pluto Vim sees each key first, in the field's session or the
+   * page's, and a key it has no use for goes on to the page; in insert mode
+   * the page sees it first (Principle 1), but for Caps Lock (Ctrl+[), the
+   * keys a page gives up (data-pvim-yield) and vim.opt.claim.
+   */
   const handle = (event, claimed) => {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (!event.isTrusted && !options.untrusted) return;
-    const field = vimField(target(event));
-    if (!field) {
-      if (!claimed) offField(event);
-      return;
-    }
+    // The page has every key for now (data-pvim-paused: Hydra's labels are showing).
+    if (doc.documentElement.hasAttribute("data-pvim-paused")) return;
+    const el = target(event);
+    const field = vimField(el);
+    const session = field ? sessionOf(field) : pageSession();
+    if (!session) return;
+    // Off a field, keys are decided before the page or not at all.
+    if (!field && !claimed) return;
     const key = keyFromEvent(event);
     if (!key) return;
-    const session = sessionOf(field);
-    // Claimed: vim.opt.claim, every key while a jump or the : line is typed, and the keys the page
-    // gives up while it says so (data-pvim-yield, in vim's notation).
-    const claim = vim.opt.claim.includes(key) || session.claimsAll || session.buffer.field.yields().has(key);
-    if (claim !== claimed) return;
+    sync(session);
+    const claim = vim.opt.claim.includes(key) || session.claimsAll || (field && session.buffer.field.yields().has(key));
+    if (Boolean(claim) !== claimed) return;
     if (session.feed(key)) {
       event.preventDefault();
       event.stopImmediatePropagation();
     }
+    stateChanged();
   };
   // The claimed keys, before anything of the page's (the window's capture phase is the first to see a key).
   const onClaimed = (event) => handle(event, true);
@@ -724,12 +854,54 @@ export function attach(doc = globalThis.document, options = {}) {
   // (Plutonium's key hook), from its plutoniumvimkey instead, after every handler of the page's.
   let hooked = false;
   const onKey = (event) => {
-    if (!hooked) return handle(event, false);
-    // Blink's hook offers only keys a field would edit with: off a field, keys come as keydown only.
-    if (!vimField(target(event)) && !event.defaultPrevented && event.isTrusted) offField(event);
+    if (!hooked) handle(event, false);
   };
   const onOffer = (event) => handle(event, false);
   const onReady = (event) => { if (event.isTrusted) hooked = true; };
+
+  /**
+   * What the desktop shows of the keyboard (HYDRA_KEYBOARD.md, the mode pill):
+   * pvim:state on the document, with the desktop's mode, the session's own
+   * (visual, pending), where the keyboard is, the keys typed so far and what
+   * they can go on to. Once per task, however many keys came.
+   */
+  let stateQueued = false;
+  let lastState = "";
+  const placeOf = (el) => {
+    if (!el || el === doc.body || el === doc.documentElement) return { place: "page", label: "" };
+    const named = el.closest("[data-pvim-place]")?.getAttribute("data-pvim-place");
+    if (el.closest(".xterm")) return { place: "terminal", label: named ?? "" };
+    if (el.closest(".monaco-editor, .cm-editor")) return { place: "editor", label: named ?? "" };
+    if (el instanceof view.HTMLInputElement && el.type === "password") return { place: "password", label: named ?? "" };
+    const field = vimField(el);
+    if (field?.hasAttribute("data-pvim-readonly")) return { place: "text", label: named ?? "" };
+    if (field) return { place: field.tagName === "INPUT" ? "input" : "field", label: named ?? "" };
+    return { place: "page", label: named ?? "" };
+  };
+  const stateChanged = () => {
+    if (stateQueued) return;
+    stateQueued = true;
+    queueMicrotask(() => {
+      stateQueued = false;
+      const el = doc.activeElement;
+      const session = sessionAt(el);
+      const detail = {
+        mode: vim.mode,
+        sub: session && !session.readonly ? session.displayMode : session?.jump ? "jump" : "normal",
+        ...placeOf(el),
+        site: doc.location?.host ?? "",
+        pending: session ? [...session.pending, ...session.typeahead.map((t) => t.key)].join("") : "",
+        continuations: session?.continuations ?? [],
+        recording: session?.recording?.register ?? null,
+        cmdline: Boolean(session?.cmd),
+        focused: doc.hasFocus(),
+      };
+      const json = JSON.stringify(detail);
+      if (json === lastState) return;
+      lastState = json;
+      doc.dispatchEvent(new view.CustomEvent("pvim:state", { detail }));
+    });
+  };
 
   // The command line (:, /, ?, "=), messages (:registers) and "recording @a", under the field,
   // in a closed shadow root so the page's styles leave it alone.
@@ -806,17 +978,35 @@ export function attach(doc = globalThis.document, options = {}) {
     const el = session.buffer.el ?? session.buffer.root;
     if (!el || el.ownerDocument !== doc) return;
     el.dispatchEvent(new view.CustomEvent("pvim:mode", { detail: { mode: to }, bubbles: true }));
+    stateChanged();
   };
 
-  // A page that integrates sets the mode: pvim:set-mode with { mode } on the field.
+  // The desktop's mode changed: here (Caps Lock, i, a click), or in another page or app (remote: the
+  // helper says so), when the field with the keyboard takes it. You changing it in a typing place
+  // keeps it when the place goes.
+  const onDesktopMode = ({ remote }) => {
+    if (!restoring) restore = null;
+    if (remote) sync(sessionAt(doc.activeElement));
+    doc.documentElement.setAttribute("data-pvim-desktop-mode", vim.mode);
+    stateChanged();
+  };
+  doc.documentElement?.setAttribute("data-pvim-desktop-mode", vim.mode);
+
+  // A page that integrates sets the mode: pvim:set-mode with { mode } on a field (that field's), or
+  // anywhere else (the desktop's).
   const onSetMode = (event) => {
     const field = vimField(target(event));
     const mode = event.detail?.mode;
-    if (field && (mode === "normal" || mode === "insert")) sessionOf(field).enterMode(mode);
+    if (mode !== "normal" && mode !== "insert") return;
+    if (field) sessionOf(field).enterMode(mode);
+    else vim.setMode(mode);
   };
   doc.addEventListener("pvim:set-mode", onSetMode);
   doc.addEventListener("focusin", onFocus, true);
   doc.addEventListener("focusout", onBlur, true);
+  doc.addEventListener("pointerdown", onPointerDown, true);
+  view.addEventListener("focus", onWindowFocus);
+  view.addEventListener("blur", onWindowBlur);
   view.addEventListener("keydown", onClaimed, true);
   view.addEventListener("keydown", onKey);
   view.addEventListener("plutoniumvimready", onReady);
@@ -827,9 +1017,11 @@ export function attach(doc = globalThis.document, options = {}) {
     vim.on("Message", onMessage),
     vim.on("RecordingChanged", onRecording),
     vim.on("JumpLabels", onJumpLabels),
+    vim.on("DesktopMode", onDesktopMode),
   ];
   const active = vimField(doc.activeElement);
   if (active) sessionOf(active);
+  placeChanged(doc.activeElement);
 
   let hintKept = [];
   return {
@@ -854,12 +1046,19 @@ export function attach(doc = globalThis.document, options = {}) {
       mark.session.moveTo(mark.offset ?? offset);
       return true;
     },
+    /** The desktop's mode, changed in another page or app (the helper says so). */
+    setDesktopMode(mode) {
+      vim.setMode(mode, { remote: true });
+    },
     /** Whether keys come from Blink's hook (plutoniumvimkey), not keydown. */
     get hooked() { return hooked; },
     detach() {
       doc.removeEventListener("focusin", onFocus, true);
       doc.removeEventListener("pvim:set-mode", onSetMode);
       doc.removeEventListener("focusout", onBlur, true);
+      doc.removeEventListener("pointerdown", onPointerDown, true);
+      view.removeEventListener("focus", onWindowFocus);
+      view.removeEventListener("blur", onWindowBlur);
       view.removeEventListener("keydown", onClaimed, true);
       view.removeEventListener("keydown", onKey);
       view.removeEventListener("plutoniumvimkey", onOffer);

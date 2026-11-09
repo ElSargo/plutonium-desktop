@@ -154,13 +154,13 @@ describe("operators", () => {
   });
 
   test("c enters insert mode, and cw is ce", async () => {
-    const r = await run("|foo bar", "cwbaz<Esc>");
+    const r = await run("|foo bar", "cwbaz<C-[>");
     assert.equal(r.text, "ba|z bar");
     assert.equal(r.mode, "normal");
-    await expectKeys("foo b|ar", "ciwx<Esc>", "foo |x");
-    await expectKeys("a|bc\nd", "ccx<Esc>", "|x\nd");
-    await expectKeys("a|bc", "Cx<Esc>", "a|x");
-    await expectKeys("a|bc", "clx<Esc>", "a|xc");
+    await expectKeys("foo b|ar", "ciwx<C-[>", "foo |x");
+    await expectKeys("a|bc\nd", "ccx<C-[>", "|x\nd");
+    await expectKeys("a|bc", "Cx<C-[>", "a|x");
+    await expectKeys("a|bc", "clx<C-[>", "a|xc");
   });
 
   test("c with a motion that fails stays in normal mode", async () => {
@@ -214,7 +214,7 @@ describe("text objects", () => {
   test("quotes", async () => {
     await expectKeys('x = "a|b c" + 1', 'di"', 'x = "|" + 1');
     await expectKeys('x = "a|b c" + 1', 'da"', "x = |+ 1");
-    await expectKeys('|x = "ab"', 'ci"z<Esc>', 'x = "|z"');
+    await expectKeys('|x = "ab"', 'ci"z<C-[>', 'x = "|z"');
     await expectKeys("say 'n|o'", "di'", "say '|'");
   });
 
@@ -260,7 +260,7 @@ describe("visual mode", () => {
   });
 
   test("o swaps the ends, Escape leaves", async () => {
-    const r = await run("a|bcd", "vlloh<Esc>");
+    const r = await run("a|bcd", "vlloh<C-[>");
     assert.equal(r.mode, "normal");
     assert.equal(r.text, "|abcd");
   });
@@ -270,23 +270,23 @@ describe("visual mode", () => {
   });
 
   test("c changes the selection", async () => {
-    await expectKeys("|foo bar", "vecx<Esc>", "|x bar");
+    await expectKeys("|foo bar", "vecx<C-[>", "|x bar");
   });
 });
 
 describe("insert mode", () => {
   test("i, a, I, A, o, O", async () => {
-    await expectKeys("a|b", "ix<Esc>", "a|xb");
-    await expectKeys("a|b", "ax<Esc>", "ab|x");
-    await expectKeys("  a|b", "Ix<Esc>", "  |xab");
-    await expectKeys("a|b", "Ax<Esc>", "ab|x");
-    await expectKeys("a|b\nc", "ox<Esc>", "ab\n|x\nc");
-    await expectKeys("a\n|b", "Ox<Esc>", "a\n|x\nb");
+    await expectKeys("a|b", "ix<C-[>", "a|xb");
+    await expectKeys("a|b", "ax<C-[>", "ab|x");
+    await expectKeys("  a|b", "Ix<C-[>", "  |xab");
+    await expectKeys("a|b", "Ax<C-[>", "ab|x");
+    await expectKeys("a|b\nc", "ox<C-[>", "ab\n|x\nc");
+    await expectKeys("a\n|b", "Ox<C-[>", "a\n|x\nb");
   });
 
   test("a count repeats what was inserted", async () => {
-    await expectKeys("|", "3ix<Esc>", "xx|x");
-    await expectKeys("|a", "2ox<Esc>", "a\nx\n|x");
+    await expectKeys("|", "3ix<C-[>", "xx|x");
+    await expectKeys("|a", "2ox<C-[>", "a\nx\n|x");
   });
 
   test("fields start in insert mode, and typing is the field's", async () => {
@@ -294,7 +294,7 @@ describe("insert mode", () => {
     assert.deepEqual(r.taken, [false, false, false, false, false]);
     assert.equal(r.text, "hello|");
     assert.equal(r.buffer.caret, "bar");
-    const n = await run("|", "hi<Esc>", { insert: true });
+    const n = await run("|", "hi<C-[>", { insert: true });
     assert.equal(n.text, "h|i");
     assert.equal(n.mode, "normal");
     assert.equal(n.buffer.caret, "block");
@@ -306,8 +306,8 @@ describe("insert mode", () => {
   });
 
   test("Ctrl+R puts a register", async () => {
-    await expectKeys("|foo ", "yiwA<C-r>\"<Esc>", "foo fo|o");
-    await expectKeys("|foo ", "\"ayiwA<C-r>a!<Esc>", "foo foo|!");
+    await expectKeys("|foo ", "yiwA<C-r>\"<C-[>", "foo fo|o");
+    await expectKeys("|foo ", "\"ayiwA<C-r>a!<C-[>", "foo foo|!");
   });
 
   test("Ctrl+O runs one normal command", async () => {
@@ -317,8 +317,8 @@ describe("insert mode", () => {
   });
 
   test("Ctrl+W and Ctrl+U", async () => {
-    await expectKeys("foo bar|", "<C-w><Esc>", "foo| ", { insert: true });
-    await expectKeys("  foo bar|", "<C-u><Esc>", " | ", { insert: true });
+    await expectKeys("foo bar|", "<C-w><C-[>", "foo| ", { insert: true });
+    await expectKeys("  foo bar|", "<C-u><C-[>", " | ", { insert: true });
   });
 
   test("Ctrl+[ leaves insert mode, as Escape does", async () => {
@@ -333,8 +333,8 @@ describe("insert mode", () => {
 });
 
 describe("single-line inputs", () => {
-  test("manual: insert mode, Escape is the page's, Ctrl+[ enters normal mode", async () => {
-    const r = await run("ab|", "<Esc>", { singleLine: true, opt: { startInInsert: false } });
+  test("the desktop's mode, as any field; Escape is the page's, Ctrl+[ enters normal mode", async () => {
+    const r = await run("ab|", "<Esc>", { singleLine: true, insert: true });
     assert.equal(r.mode, "insert");
     assert.deepEqual(r.taken, [false]);
     const n = await run("ab c|", "<C-[>D", { singleLine: true });
@@ -351,6 +351,7 @@ describe("single-line inputs", () => {
   test("insert mode extras work there too", async () => {
     const vim = new Vim();
     await vim.registers.yank("a", { text: "x", linewise: false });
+    vim.setMode("insert");
     await expectKeys("|", "<C-r>a", "x|", { singleLine: true, vim });
   });
 
@@ -361,7 +362,7 @@ describe("single-line inputs", () => {
   });
 
   test("o and O don't make lines in a single-line field", async () => {
-    await expectKeys("a|b", "<C-[>ox<Esc>", "ab|x", { singleLine: true, opt: { inputs: "on" } });
+    await expectKeys("a|b", "<C-[>ox<C-[>", "ab|x", { singleLine: true, opt: { inputs: "on" } });
   });
 });
 
@@ -385,22 +386,22 @@ describe("repeat and undo", () => {
     await expectKeys("|a b c d", "dw.", "|c d");
     await expectKeys("|a b c d", "dw2.", "|d");
     await expectKeys("|a\nb\nc", "ddj.", "|b");
-    await expectKeys("|foo foo", "cwbar<Esc>w.", "bar ba|r");
-    await expectKeys("|a\nb", "Ax<Esc>j.", "ax\nb|x");
-    await expectKeys("|a\nb", "ox<Esc>.", "a\nx\n|x\nb");
+    await expectKeys("|foo foo", "cwbar<C-[>w.", "bar ba|r");
+    await expectKeys("|a\nb", "Ax<C-[>j.", "ax\nb|x");
+    await expectKeys("|a\nb", "ox<C-[>.", "a\nx\n|x\nb");
     await expectKeys("|a b c", "x.", "|b c");
     await expectKeys("|abcdefg", "vlld.", "|g");
   });
 
   test("u undoes a whole change, Ctrl+R redoes it", async () => {
-    await expectKeys("|foo bar", "cwbaz<Esc>u", "|foo bar");
-    await expectKeys("|foo bar", "cwbaz<Esc>u<C-r>", "ba|z bar");
+    await expectKeys("|foo bar", "cwbaz<C-[>u", "|foo bar");
+    await expectKeys("|foo bar", "cwbaz<C-[>u<C-r>", "ba|z bar");
     await expectKeys("|a b c", "dwdwuu", "|a b c");
-    await expectKeys("|a", "3ix<Esc>u", "|a");
+    await expectKeys("|a", "3ix<C-[>u", "|a");
   });
 
   test("insert typed at focus is one change", async () => {
-    await expectKeys("|", "hello<Esc>u", "|", { insert: true });
+    await expectKeys("|", "hello<C-[>u", "|", { insert: true });
   });
 });
 
@@ -459,11 +460,11 @@ describe("events and the caret", () => {
     const session = vim.attach(buffer);
     session.feed("d");
     assert.equal(buffer.caret, "underline", "an operator waiting for its motion");
-    session.feed("<Esc>");
+    session.feed("<C-[>");
     assert.equal(buffer.caret, "block");
     session.feedKeys("i");
     assert.equal(buffer.caret, "bar");
-    session.feed("<Esc>");
+    session.feed("<C-[>");
     session.feed("v");
     await session.idle();
     assert.deepEqual(seen, ["normal>insert", "insert>normal", "normal>visual"]);
@@ -544,11 +545,11 @@ describe("the expression register", () => {
   test('"= evaluates JavaScript into a register to put', async () => {
     await expectKeys("|ab", '"=1+2<CR>p', "a|3b");
     await expectKeys("|ab", '"=["x","y"]<CR>p', "ab\n|x\ny");
-    await expectKeys("|ab", "i<C-r>='hi'.toUpperCase()<CR>!<Esc>", "HI|!ab");
+    await expectKeys("|ab", "i<C-r>='hi'.toUpperCase()<CR>!<C-[>", "HI|!ab");
   });
 
   test("Escape or deleting it all cancels; mappings don't apply while it's typed; an error puts nothing", async () => {
-    await expectKeys("|ab", '"=1<Esc>x', "|b");
+    await expectKeys("|ab", '"=1<C-[>x', "|b");
     await expectKeys("|ab", '"=1<BS><BS>x', "|b");
     const vim = new Vim({ opt: { startInInsert: false } });
     vim.keymaps.n.set("1", { lhs: ["1"], rhs: "x", opts: {} });
@@ -615,13 +616,13 @@ describe("the : line", () => {
 
 describe("macros", () => {
   test("q records, @ plays, with a count; @@ again", async () => {
-    await expectKeys("|a\nb\nc\nd", "qaA!<Esc>jq2@a", "a!\nb!\nc!\n|d");
-    await expectKeys("|a\nb\nc", "qqI-<Esc>jq@q@@", "-a\n-b\n|-c");
+    await expectKeys("|a\nb\nc\nd", "qaA!<C-[>jq2@a", "a!\nb!\nc!\n|d");
+    await expectKeys("|a\nb\nc", "qqI-<C-[>jq@q@@", "-a\n-b\n|-c");
   });
 
   test("a macro is a register of keys: \"ap puts it, and a capital appends", async () => {
-    const { vim } = await run("|x", "qaix<Esc>qqAa<Esc>q");
-    assert.equal((await vim.registers.get("a")).text, "ix<Esc>a<Esc>");
+    const { vim } = await run("|x", "qaix<C-[>qqAa<C-[>q");
+    assert.equal((await vim.registers.get("a")).text, "ix<C-[>a<C-[>");
     assert.equal((await vim.registers.get('"')), null, "recording leaves the unnamed register alone");
   });
 });
@@ -630,7 +631,7 @@ describe("marks and jumps", () => {
   test("m and ' and `; marks move with edits", async () => {
     await expectKeys("ab\ncd |ef", "mxgg`x", "ab\ncd |ef");
     await expectKeys("ab\ncd |ef", "mxgg'x", "ab\n|cd ef");
-    await expectKeys("ab\ncd |ef", "mxggiZZ<Esc>`x", "ZZab\ncd |ef");
+    await expectKeys("ab\ncd |ef", "mxggiZZ<C-[>`x", "ZZab\ncd |ef");
   });
 
   test("Ctrl+O and Ctrl+I go back and forth over jumps; '' to the last", async () => {
@@ -699,7 +700,7 @@ describe("the base map", () => {
     await expectKeys("a\n```js\nx|\ny\n```\nb", "dic", "a\n```js\n|```\nb");
     await expectKeys("a\n```js\nx|\ny\n```\nb", "dac", "a\n|b");
     await expectKeys("- one\n- t|wo\n  more\n- three", "dal", "- one\n|- three");
-    await expectKeys("- one\n- t|wo\n- three", "cilX<Esc>", "- one\n- |X\n- three");
+    await expectKeys("- one\n- t|wo\n- three", "cilX<C-[>", "- one\n- |X\n- three");
     await expectKeys("# A\na|\n\n# B\nb", "dih", "# A\n|\n# B\nb");
     await expectKeys("# A\na|\n## A1\nx\n# B\nb", "dah", "|# B\nb");
     await expectKeys("see https://x.io/a(b)|c. ok", "diu", "see |. ok");
@@ -723,8 +724,8 @@ describe("the base map", () => {
   });
 
   test("gi goes back to where insert mode ended; gA appends at the end", async () => {
-    await expectKeys("|abc\ndef", "lix<Esc>jgiy<Esc>", "ax|ybc\ndef");
-    await expectKeys("a|bc\ndef", "gA!<Esc>", "abc\ndef|!");
+    await expectKeys("|abc\ndef", "lix<C-[>jgiy<C-[>", "ax|ybc\ndef");
+    await expectKeys("a|bc\ndef", "gA!<C-[>", "abc\ndef|!");
   });
 
   test("s: a labeled jump, nearest first, and Enter goes to the nearest", async () => {
@@ -752,7 +753,7 @@ describe("the base map", () => {
 
   test("s: more characters narrow it; Enter takes the nearest; Escape and no match cancel", async () => {
     await expectKeys("|ab ac ad ac", "sac<CR>", "ab |ac ad ac");
-    await expectKeys("|ab ac ad", "sa<Esc>x", "|b ac ad");
+    await expectKeys("|ab ac ad", "sa<C-[>x", "|b ac ad");
     await expectKeys("|ab ac", "szx", "|b ac");
     await expectKeys("|ab AB", "sA<CR>", "ab |AB");
   });
@@ -794,13 +795,82 @@ describe("pages fill keys", () => {
 
 // HYDRA_KEYBOARD.md: what came of trying the first version.
 describe("normal mode by default, read-only fields, gw, pages' modes and relayed keys", () => {
-  test("fields start in normal mode by default; single-line inputs in insert mode", async () => {
+  test("one mode for the desktop: fields start in it, and a field that enters or leaves insert mode sets it", async () => {
     const vim = new Vim();
+    assert.equal(vim.mode, "normal");
+    const seen: any[] = [];
+    vim.on("DesktopMode", (event: any) => seen.push(event));
     const a = vim.attach(field("|abc"));
     const b = vim.attach(field("|abc", { singleLine: true }));
     await a.idle();
     assert.equal(a.mode, "normal");
-    assert.equal(b.mode, "insert");
+    assert.equal(b.mode, "normal");
+    a.feed("i");
+    assert.equal(vim.mode, "insert");
+    const c = vim.attach(field("|abc"));
+    await c.idle();
+    assert.equal(c.mode, "insert", "a field that comes later takes the mode");
+    c.feed("<C-[>");
+    assert.equal(vim.mode, "normal");
+    vim.setMode("insert", { remote: true });
+    assert.deepEqual(seen, [{ mode: "insert", remote: false }, { mode: "normal", remote: false }, { mode: "insert", remote: true }]);
+  });
+
+  test("Escape never leaves insert mode (the page's); Caps Lock (Ctrl+[) does; Escape cancels what's in progress", async () => {
+    const r = await run("ab|", "<Esc>", { insert: true });
+    assert.equal(r.mode, "insert");
+    assert.deepEqual(r.taken, [false]);
+    const v = await run("a|bc", "vl<Esc>");
+    assert.equal(v.mode, "normal");
+    assert.deepEqual(v.taken, [true, true, true]);
+    const d = await run("a|bc", "d<Esc>x");
+    assert.equal(d.text, "a|c");
+  });
+
+  test("a page session (off a field): page keys and scrolling, i to the page's insert or to insert mode; other keys are the page's", async () => {
+    const vim = new Vim();
+    const ran: string[] = [];
+    const did: string[] = [];
+    const relayed: string[] = [];
+    vim.on("PageKey", ({ name }: any) => relayed.push(name));
+    const buffer: any = {
+      kind: "web",
+      caps: { page: true, readonly: true },
+      field: { singleLine: true, actions: () => new Set(["item.next"]), commands: () => new Set(), yields: () => new Set(), action: (name: string) => ran.push(name), takesAll: () => false },
+      text: () => ({ text: "", start: 0, cursor: 0, anchor: 0 }),
+      move() {}, async edit() {}, setCaret() {},
+      pageAction: (name: string, detail: any) => name.startsWith("scroll.") && did.push(`${name}:${detail.count ?? 1}`) > 0,
+    };
+    const page = vim.attach(buffer);
+    const taken = ["3", "j", "g", "g", "L", "g", "c", "t", "/", "x", "z", "t"].map((key) => page.feed(key));
+    assert.deepEqual(taken, [true, true, true, true, true, true, true, false, false, false, true, true]);
+    assert.deepEqual(did, ["scroll.down:3", "scroll.top:1"]);
+    assert.deepEqual(ran, ["item.next"]);
+    assert.deepEqual(relayed, ["place.composer", "show.terminal"]);
+    // i: no insert action here, so insert mode, where every key but Caps Lock is the page's.
+    assert.equal(page.feed("i"), true);
+    assert.equal(vim.mode, "insert");
+    assert.deepEqual(["j", "<Esc>", "S"].map((key) => page.feed(key)), [false, false, false]);
+    assert.equal(page.claimsAll, false);
+    assert.equal(page.feed("<C-[>"), true);
+    assert.equal(vim.mode, "normal");
+    assert.equal(page.claimsAll, true);
+  });
+
+  test("which-key: what a prefix can go on to", async () => {
+    const vim = new Vim();
+    const session = vim.attach(field("|abc"));
+    await session.idle();
+    session.feed("z");
+    const next = session.continuations.map((c: any) => `${c.keys}=${c.name}`);
+    assert.ok(next.includes("zt=show.terminal"), next.join(" "));
+    session.feed("<C-[>");
+    session.feed("g");
+    assert.ok(session.continuations.some((c: any) => c.keys === "gc"), "g is a prefix, though gu is an operator");
+    assert.equal(session.displayMode, "normal");
+    session.feed("<C-[>");
+    session.feed("d");
+    assert.deepEqual(session.continuations, [], "not after an operator");
   });
 
   test("gw: labels every word of the field, and as an operator's motion takes the word it lands on", async () => {
@@ -836,7 +906,7 @@ describe("normal mode by default, read-only fields, gw, pages' modes and relayed
   });
 
   test("a read-only field: motions, visual mode and yanks; changes do nothing; i is the page's insert", async () => {
-    const vim = new Vim({ opt: { startInInsert: true } });
+    const vim = new Vim({ opt: { startInInsert: false } });
     const buffer = field("one |two three");
     buffer.caps = { ...buffer.caps, readonly: true };
     const ran: string[] = [];

@@ -80,6 +80,14 @@ export interface VimInjectorOptions {
   readonly onPageKey?: (targetId: string, name: string, detail: Record<string, unknown>) => void;
   /** The browser's own id of the tab a page is (a shell finds the element showing it by that). */
   readonly tabIdOf?: (targetId: string) => number | null;
+  /**
+   * The desktop's one mode (HYDRA_KEYBOARD.md, "One input model"): what it
+   * is now, for a page that starts, and a page that changed it.
+   */
+  readonly desktopMode?: () => string;
+  readonly onDesktopMode?: (targetId: string, mode: string) => void;
+  /** What the page with the keyboard shows of it (pvim:state), for the shells' mode pill. */
+  readonly onState?: (targetId: string, state: Record<string, unknown>) => void;
 }
 
 interface PageSession {
@@ -259,6 +267,12 @@ export class VimInjector {
       else if (message.op === "mark.set") this.options.onMarkSet?.(target, message.name, Number((message as { offset?: unknown }).offset));
       else if (message.op === "mark.jump") this.options.onMarkJump?.(message.name);
       else if (message.op === "page.key") this.options.onPageKey?.(target, message.name, ((message as { detail?: unknown }).detail ?? {}) as Record<string, unknown>);
+      else if (message.op === "mode.get") result = this.options.desktopMode?.() ?? null;
+      else if (message.op === "mode.set") this.options.onDesktopMode?.(target, String((message as { mode?: unknown }).mode));
+      else if (message.op === "state") {
+        const state = (message as { state?: unknown }).state;
+        if (state && typeof state === "object") this.options.onState?.(target, state as Record<string, unknown>);
+      }
       else if (message.op === "hints.collect") result = await this.collectHints(target, String((message as { kind?: unknown }).kind ?? ""));
       else if (message.op === "hints.go") {
         const { targetId: to, id: which } = message as { targetId?: unknown; id?: unknown };
@@ -295,6 +309,42 @@ export class VimInjector {
         expression: `window.dispatchEvent(new CustomEvent("plutonium:page-key", { detail: ${payload} }))`,
       }, page.sessionId).catch(() => {});
     }
+  }
+
+  /**
+   * The desktop's mode changed somewhere other than these pages, or in one of
+   * them (`from`): every other page's engine takes it, at once, without
+   * waiting for each other.
+   */
+  setDesktopMode(mode: string, from: string | null = null): void {
+    if (mode !== "normal" && mode !== "insert") return;
+    const expression = `globalThis.plutoVimPage?.setDesktopMode?.(${JSON.stringify(mode)}), true`;
+    for (const [targetId, page] of this.sessions) {
+      if (targetId === from || !wantsVim(page.url)) continue;
+      void this.inWorld(targetId, expression);
+    }
+  }
+
+  /**
+   * What the page or app with the keyboard shows of it, for the shells (the
+   * mode pill): plutonium:pvim-state on each shell page but `from`'s, with
+   * the state and where it's from (tabId, or windowId for an app).
+   */
+  async stateToShells(from: string | null, state: Record<string, unknown>): Promise<void> {
+    const origins = this.options.shellOrigins?.() ?? {};
+    const tabId = from ? this.options.tabIdOf?.(from) ?? null : null;
+    const payload = JSON.stringify({ ...state, ...(from ? { from, tabId } : {}) });
+    await Promise.all([...this.sessions].map(async ([targetId, page]) => {
+      if (targetId === from) return;
+      try {
+        if (!(new URL(page.url).origin in origins)) return;
+      } catch {
+        return;
+      }
+      await this.cdp.send("Runtime.evaluate", {
+        expression: `window.dispatchEvent(new CustomEvent("plutonium:pvim-state", { detail: ${payload} }))`,
+      }, page.sessionId).catch(() => {});
+    }));
   }
 
   /** Evaluates `expression` in the engine's world of page `targetId`; its value, or null. */

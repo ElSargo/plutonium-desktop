@@ -99,4 +99,16 @@ export function connectHost(vim, store, doc = globalThis.document) {
   vim.on("MarkJump", ({ name }) => void store.call("mark.jump", { name }));
   // A page key this page doesn't have (a place, a show, a jump): the shell's (HYDRA_KEYBOARD.md).
   vim.on("PageKey", ({ name, detail }) => void store.call("page.key", { name, detail }));
+  // One mode for the desktop (HYDRA_KEYBOARD.md, "One input model"): a change here goes to the helper,
+  // which tells every other page and app (page.setDesktopMode).
+  void store.call("mode.get").then((mode) => {
+    if (mode === "normal" || mode === "insert") vim.setMode(mode, { remote: true });
+  });
+  vim.on("DesktopMode", ({ mode, remote }) => {
+    if (!remote) void store.call("mode.set", { mode });
+  });
+  // What the shells show of the keyboard (the mode pill), from the page that has it.
+  doc?.addEventListener("pvim:state", (event) => {
+    if (event.detail?.focused) void store.call("state", { state: event.detail });
+  });
 }

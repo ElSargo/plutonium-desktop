@@ -15,33 +15,41 @@
 import * as T from "./text.js";
 import { isPrintable, parseKeys } from "./keys.js";
 import { Registers, REGISTER_NAMES } from "./registers.js";
-import { ACTIONS, MOTIONS, OBJECTS, OPERATORS, VISUAL_ACTIONS, compile } from "./commands.js";
+import { ACTIONS, MOTIONS, OBJECTS, OPERATORS, PAGE_ACTIONS, VISUAL_ACTIONS, compile } from "./commands.js";
 import * as P from "./prose.js";
 import { UserBuffer } from "./userBuffer.js";
 
 export const DEFAULT_OPTIONS = {
   /**
-   * Fields start in normal mode, and stay in it until a key enters insert
-   * mode (HYDRA_KEYBOARD.md). Single-line inputs follow `inputs` instead.
+   * The desktop's mode when it starts: normal (HYDRA_KEYBOARD.md, "One input
+   * model"). There is one mode for the whole desktop (Vim.mode), which fields
+   * take as they get the keyboard; only keys and the actions that say so
+   * change it.
    */
   startInInsert: false,
-  /** Single-line inputs: "manual" (Ctrl+[ enters normal mode), "on" (as a textarea), "off". */
-  inputs: "manual",
+  /** Single-line inputs: "on" (insert while they have the keyboard; "manual" is the same), "off" (vim stays out). */
+  inputs: "on",
+  /**
+   * What the Escape key does: "page" (the default) gives it to the page or
+   * the app always, except to cancel what's in progress in normal mode (a
+   * pending command, visual mode, a jump, the : line); it never leaves insert
+   * mode, which is Caps Lock's (Ctrl+[). "vim": vim's Escape.
+   */
+  escape: "page",
   /** "unnamedplus": the unnamed register is the system clipboard. */
   clipboard: "",
   shiftwidth: 2,
   /** > and <: "quote" puts or takes away a Markdown quote (`> `), for prose; "indent" shifts by shiftwidth, as vim does. */
   shift: "quote",
   /**
-   * Keys Pluto Vim takes before the page's own handlers in a field it's on
-   * in: Ctrl+[ and Escape, so normal mode is always one key away, and the
-   * Escape that leaves insert or visual mode (or cancels a pending command)
-   * never reaches the page too: ProseMirror's keymap, Hydra's composer and
-   * chat pages (stop, blur) take it. An Escape vim has no use for (normal
-   * mode, nothing pending; a single-line input) still goes on to the page
-   * (Principle 3). Every other key is the page's first (Principle 1).
+   * Keys Pluto Vim takes before the page's own handlers in insert mode:
+   * Ctrl+[ (and Caps Lock, which is Ctrl+[ to the engine), so normal mode is
+   * always one key away. In normal mode every key is Pluto Vim's first, and a
+   * key it has no use for goes on to the page (Escape with nothing in
+   * progress, Ctrl's keys it doesn't map); in insert mode every other key is
+   * the page's first (Principle 1).
    */
-  claim: ["<C-[>", "<Esc>"],
+  claim: ["<C-[>"],
   /**
    * j and k move by display lines (gj and gk by real ones) where the field
    * can say where its lines wrap: web pages' fields. With an operator (dj,
@@ -98,6 +106,25 @@ export class Vim {
     /** The session a mapping's function runs for (api.js's vim.selection(), vim.feedkeys()). */
     this.current = null;
     this.reset();
+    /**
+     * The desktop's mode, "normal" or "insert" (HYDRA_KEYBOARD.md, "One input
+     * model"): one for every field, page and app. A field takes it when it
+     * gets the keyboard; a session that moves between insert and the rest
+     * sets it (DesktopMode), and so does the host when another page or app
+     * changed it (setMode with remote).
+     */
+    this.mode = this.opt.startInInsert ? "insert" : "normal";
+  }
+
+  /**
+   * Sets the desktop's mode. `remote`: another page or app changed it (the
+   * helper says so), so the backend puts the field with the keyboard in it,
+   * and doesn't tell the helper back. DesktopMode { mode, remote } either way.
+   */
+  setMode(mode, { remote = false } = {}) {
+    if ((mode !== "normal" && mode !== "insert") || mode === this.mode) return;
+    this.mode = mode;
+    this.emit("DesktopMode", { mode, remote });
   }
 
   /**
@@ -136,6 +163,8 @@ export class Vim {
         ...compile(VISUAL_ACTIONS).map((e) => ({ ...e, type: e.op ? "visualOp" : "action" })),
       ],
       motions,
+      /** Off a field (a page session): the page keys, what moves the page, and the keys that start typing. */
+      page: [...this.user.pageKeys ?? [], ...compile(PAGE_ACTIONS)].map((e) => ({ ...e, type: "action" })),
     };
     /** The keys an operator starts with: the caret shows "pending" after one. */
     this.operatorKeys = new Set(operators.map((e) => e.keys[0]));
@@ -237,7 +266,7 @@ function argOf(key, allowNewline) {
 }
 
 /** A command from the keys typed so far in normal or visual mode, or MORE, or BAD. */
-export function parseCommand(vim, tokens, visual) {
+export function parseCommand(vim, tokens, visual, page = false) {
   let i = 0;
   let register = null;
   if (tokens[0] === '"') {
@@ -266,7 +295,7 @@ export function parseCommand(vim, tokens, visual) {
     return { status: "done", cmd: { ...base, type: "object", object, around: tokens[i] === "a" } };
   }
 
-  const found = match(visual ? vim.tables.visual : vim.tables.normal, tokens, i);
+  const found = match(visual ? vim.tables.visual : page ? vim.tables.page : vim.tables.normal, tokens, i);
   if (found.status) return found;
   const { entry } = found;
   let at = found.end;
@@ -274,7 +303,7 @@ export function parseCommand(vim, tokens, visual) {
   if (entry.alias) {
     if (at !== tokens.length) return BAD;
     const prefix = [...(register ? ['"', register] : []), ...(count1 != null ? String(count1).split("") : [])];
-    return parseCommand(vim, [...prefix, ...parseKeys(entry.alias)], visual);
+    return parseCommand(vim, [...prefix, ...parseKeys(entry.alias)], visual, page);
   }
 
   if (entry.type === "operator") {
@@ -373,12 +402,18 @@ export class Session {
     this.vim = vim;
     this.buffer = buffer;
     const single = Boolean(buffer.field?.singleLine);
+    /**
+     * Off a field: the page itself, or a native window without one (a page
+     * session). Normal mode has the page keys there, and what moves the page;
+     * insert mode is the page's or the app's own keys.
+     */
+    this.page = Boolean(buffer.caps?.page);
     /** Pluto Vim stays out of this field entirely. */
-    this.off = single && vim.opt.inputs === "off";
-    const startInInsert = options.startInInsert ?? (single && vim.opt.inputs === "manual" ? true : vim.opt.startInInsert);
+    this.off = single && !this.page && vim.opt.inputs === "off";
+    const startInInsert = options.startInInsert ?? vim.mode === "insert";
     /** "normal", "insert", "visual", "vline" or "replace". */
     /** A field the page shows but can't be edited (data-pvim-readonly: Hydra's timeline): motions, visual mode and yanks only. */
-    this.readonly = Boolean(buffer.caps?.readonly);
+    this.readonly = Boolean(buffer.caps?.readonly || this.page);
     this.mode = startInInsert && !this.readonly ? "insert" : "normal";
     this.pending = [];
     /** The column j and k keep (Infinity after $); null until a motion sets it. */
@@ -425,6 +460,7 @@ export class Session {
     this.lastInsertAt = null;
     if (this.off) return;
     this.#caret();
+    if (this.page) return;
     if (this.mode === "insert") this.#enqueue(() => this.#beginInsert(null));
     else this.#enqueue(async () => { const s = this.#read(); await this.#move(T.clampNormal(s.text, s.cursor)); });
   }
@@ -443,7 +479,7 @@ export class Session {
   get displayMode() {
     if ((this.mode === "normal" || this.mode === "visual" || this.mode === "vline") && this.pending.length) {
       return parseCommand(this.vim, this.pending, this.mode !== "normal").status === "more" &&
-        this.pending.some((k) => this.vim.operatorKeys.has(k)) ? "pending" : this.mode;
+        this.#operatorWaits() ? "pending" : this.mode;
     }
     return this.mode;
   }
@@ -454,6 +490,14 @@ export class Session {
    */
   feed(key) {
     if (this.off || key == null) return false;
+    // Off a field and in read-only text, insert mode is the page's or the app's: every key goes on
+    // but Caps Lock (Ctrl+[), which is normal mode.
+    if (this.readonly && this.vim.mode === "insert" && !this.jump && !this.cmd) {
+      if (key !== "<C-[>") return false;
+      this.vim.setMode("normal");
+      this.#caret();
+      return true;
+    }
     // A macro is the keys as typed, before mappings.
     if (this.recording) this.recording.keys.push(key);
     clearTimeout(this.mapTimer);
@@ -735,7 +779,9 @@ export class Session {
     }
     // A page's actions (data-pvim-actions): Enter submits or picks the open menu's item; j and k
     // move in an open menu, and past the last or first line go through the page's history.
-    if (!this.pending.length && !visual) {
+    // Off a field, a register's " and a search's / are the page's (sites search on /).
+    if (this.page && !this.pending.length && (key === '"' || key === "/" || key === "?")) return false;
+    if (!this.pending.length && !visual && !this.page) {
       if (key === "<CR>" && (this.runAction("menu.select") || this.runAction("submit"))) return true;
       if ((key === "j" || key === "k") && this.#edgeAction(key)) return true;
     }
@@ -758,7 +804,7 @@ export class Session {
       return true;
     }
     // / and ? are motions: wherever n would be one (after an operator too).
-    if ((key === "/" || key === "?") && parseCommand(this.vim, [...this.pending, "n"], visual).status === "done") {
+    if (!this.page && (key === "/" || key === "?") && parseCommand(this.vim, [...this.pending, "n"], visual).status === "done") {
       this.#startCmdline(key);
       return true;
     }
@@ -768,7 +814,7 @@ export class Session {
       return true;
     }
     if (key === "#" && this.pending.length === 2 && this.pending[0] === '"') return true;
-    const parsed = parseCommand(this.vim, this.pending, visual);
+    const parsed = parseCommand(this.vim, this.pending, visual, this.page);
     if (parsed === MORE) {
       this.#caret();
       return true;
@@ -776,10 +822,16 @@ export class Session {
     const keys = this.pending;
     this.pending = [];
     this.#caret();
-    if (parsed === BAD) return keys.length > 1 || isPrintable(key);
-    // A read-only field: what would change it does nothing; what would type goes to the page's insert.
+    // Off a field, a key with no use here is the page's, unless the page takes every key in normal mode
+    // (data-pvim-page="all": Hydra, whose typing goes to the composer otherwise).
+    if (parsed === BAD) return keys.length > 1 || (isPrintable(key) && (!this.page || Boolean(this.buffer.field?.takesAll?.())));
+    // A read-only field: what would change it does nothing; what would type goes to the page's insert
+    // (Hydra's: the composer), else to insert mode, where the page has the keys.
     if (this.readonly && changes(parsed.cmd)) {
-      if (entersInsert(parsed.cmd)) this.runAction("insert");
+      if (entersInsert(parsed.cmd) && !this.runAction("insert", { key: keys.join("") })) {
+        this.vim.setMode("insert");
+        this.#caret();
+      }
       return true;
     }
     // A page's key (data-pvim-actions), and the jumps: they act at once, not on the queue.
@@ -818,7 +870,9 @@ export class Session {
       detail.text = url && pos >= url.from && pos < url.to ? text.slice(url.from, url.to) : bigWordAt(text, pos);
     }
     if (this.runAction(entry.page, detail)) return true;
-    if (entry.fallback) {
+    // What the backend does itself off a field: scroll the page, go back and forward.
+    if (this.buffer.pageAction?.(entry.page, detail)) return true;
+    if (entry.fallback && !this.page) {
       const count = cmd.hasCount ? String(cmd.count).split("") : [];
       for (const key of [...count, ...parseKeys(entry.fallback)]) this.#feedRaw(key);
       return true;
@@ -838,6 +892,11 @@ export class Session {
   enterMode(mode) {
     if (this.off || this.jump || this.cmd) return;
     this.pending = [];
+    if (this.readonly) {
+      this.vim.setMode(mode);
+      this.#caret();
+      return;
+    }
     if (mode === "normal") {
       if (this.mode === "insert") this.#leaveInsert({ keepCursor: true });
       else if (this.mode === "visual" || this.mode === "vline") {
@@ -994,7 +1053,8 @@ export class Session {
     }
     switch (key) {
       case "<Esc>":
-        if (this.buffer.field?.singleLine && this.vim.opt.inputs === "manual") return false;
+        // The Escape key is the page's (vim.opt.escape): Caps Lock leaves insert mode.
+        if (this.vim.opt.escape !== "vim") return false;
         this.#leaveInsert();
         return true;
       case "<C-[>":
@@ -1034,9 +1094,47 @@ export class Session {
    * would otherwise send on Enter).
    */
   get claimsAll() {
-    // A read-only field has no editor of its own to give keys to first; the page's other handlers
-    // (Hydra's type-to-focus) would take them.
-    return Boolean(this.jump || this.cmd || this.readonly);
+    // Normal mode is Pluto Vim's first (HYDRA_KEYBOARD.md, "One input model"): a key it has no use
+    // for goes on to the page. Off a field and in read-only text, the desktop's mode decides.
+    if (this.jump || this.cmd) return true;
+    return this.readonly ? this.vim.mode !== "insert" : this.mode !== "insert" && this.mode !== "replace";
+  }
+
+  /**
+   * What the keys typed so far can go on to, for the which-key list
+   * (HYDRA_KEYBOARD.md, "One input model"): [{ keys, name }], after a prefix
+   * (g, z, ], gw…), not after an operator, whose motions are vim's own.
+   */
+  get continuations() {
+    if (!this.pending.length || this.jump || this.cmd) return [];
+    let i = 0;
+    if (this.pending[0] === '"') i = this.pending[1] === "#" ? 3 : 2;
+    while (i < this.pending.length && /^[0-9]$/.test(this.pending[i]) && !(this.pending[i] === "0" && i === 0)) i++;
+    const typed = this.pending.slice(i);
+    if (!typed.length || this.#operatorWaits()) return [];
+    const visual = this.mode === "visual" || this.mode === "vline";
+    const table = visual ? this.vim.tables.visual : this.page ? this.vim.tables.page : this.vim.tables.normal;
+    const out = [];
+    const seen = new Set();
+    for (const entry of table) {
+      if (entry.keys.length <= typed.length || !typed.every((k, j) => entry.keys[j] === k)) continue;
+      const keys = entry.keys.join("");
+      if (seen.has(keys)) continue;
+      seen.add(keys);
+      out.push({ keys, name: entry.page ?? entry.action ?? (entry.alias ? `alias ${entry.alias}` : entry.motion ?? "") });
+    }
+    return out;
+  }
+
+  /** Whether an operator (d, c, gu…) is typed and waits for its motion: g alone is a prefix, not one. */
+  #operatorWaits() {
+    const table = this.page ? [] : this.vim.tables.normal;
+    for (let at = 0; at < this.pending.length; at++) {
+      for (const entry of table) {
+        if (entry.type === "operator" && entry.keys.length <= this.pending.length - at && entry.keys.every((k, j) => k === this.pending[at + j])) return true;
+      }
+    }
+    return false;
   }
 
   /** The command line as it's typed (":s/a/b/", "/foo", "=1+2"), or null. */
@@ -1278,6 +1376,7 @@ export class Session {
   }
 
   #feedReplace(key) {
+    if (key === "<Esc>" && this.vim.opt.escape !== "vim") return false;
     if (key === "<Esc>" || key === "<C-[>") {
       this.#setMode("normal");
       this.#enqueue(() => this.#endReplace());
@@ -1299,6 +1398,8 @@ export class Session {
     if (mode === this.mode) return this.#caret();
     const from = this.mode;
     this.mode = mode;
+    // Insert mode or not is the desktop's (Vim.mode): this field has the keyboard.
+    if (!this.readonly) this.vim.setMode(mode === "insert" || mode === "replace" ? "insert" : "normal");
     this.#caret();
     this.vim.emit("ModeChanged", { session: this, from, to: mode });
   }
